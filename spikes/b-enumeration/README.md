@@ -115,8 +115,11 @@ that has stopped answering, and unlike sshfs it is controllable, needs no networ
 and no root.
 
 The test: start a frame loop that does Spike A's work at 8 ms, begin a walk of the
-hung mount on the job pool mid-listing, and record every frame interval until the
-walk is cancelled.
+hung mount on the job pool, and record every frame interval until the walk is
+cancelled.
+
+**As built, the mount hangs from its first request rather than halfway through a
+listing**, which is weaker than the roadmap asks for — see the verdict.
 
 > **Pass:** no frame exceeds 8 ms, the walk is cancellable, and the UI thread
 > issues zero filesystem syscalls throughout — the last asserted by construction,
@@ -522,20 +525,36 @@ faster than the `getdents64+statx` these conditions were first measured against 
 see [Making it faster](#making-it-faster--and-retracting-a-finding), which also
 retracts this document's earlier claim about pool width.
 
-`getdents64` plus batched `statx` earns its place, and the number that justifies
-it is 2.25× on the comparable pair — enough to move the design from missing the
-bar to meeting it with room. It is worth being precise about where the 2.25×
-comes from, because the architecture document is not: **the batching is the win,
-`getdents64` is the trim.** Deferring `statx` to the pool accounts for 0.614 s of
-the 0.665 s difference; replacing `read_dir` with `getdents64` accounts for
-0.051 s.
+`getdents64` earns its place, and the ordering of *why* moved twice while this
+spike was running, so it is worth stating in its final form. Against
+`read_dir+meta` on the machine that matters — a four-core Pi 5, 3.882 s — the
+three changes are worth, largest first:
+
+| Change | Effect |
+| --- | --- |
+| Parallel tree walk, and a store that does not serialise the jobs | the largest, and the one this spike originally missed entirely |
+| Deferring `statx` off the walking thread | the next largest |
+| `getdents64` over `read_dir`, and `statx` through the directory fd | the smallest, ~1.1–1.24× |
+
+Together: **3.882 s → 0.966 s, a 4.0× improvement, and the difference between
+missing the bar by 3.9× and meeting it by 3.4%.**
+
+An earlier version of this verdict said "the batching is the win, `getdents64` is
+the trim" and put a 2.25× on it. That was true of the design as it stood before
+the traversal was parallelised, and it is left recorded in the sections above
+rather than quietly restated, because the sequence of being wrong twice about
+which part mattered is the useful part of this spike's history.
 
 Three things this spike does **not** license:
 
-1. **Cold cache is unmeasured**, and it is the arm that decides whether the
-   30 ms condition is real. Everything above is a measurement of the dentry
-   cache and of our own code; cold, the storage device dominates and our code
-   becomes a rounding error. Commands below.
+1. **Cold cache is measured only partially and only by accident.** One
+   contributed run exists, and its table is dentries-warm/inodes-cold because
+   the harness ran its warming walk first; the genuinely cold number is the line
+   that run discarded. A `--cold` flag now skips that warming walk and has been
+   exercised, but **no proper cold sweep has been run on any machine**, and
+   dropping the page cache needs root. Commands below. Cold is also the arm that
+   decides whether the 30 ms condition is real, since warm it measures a memcpy
+   out of the dentry cache.
 2. **One filesystem.** ext4 throughout, on four different devices. The roadmap's matrix — btrfs,
    xfs, NFS — belongs to [Spike E](../../docs/08-roadmap.md#spike-e--operation-engine-correctness),
    but enumeration on a network mount is a different shape of problem from
@@ -549,9 +568,21 @@ Three things this spike does **not** license:
    `statx` — spends a margin that is three hundredths of a second wide. Treat
    this row as met, not as safe.
 
-What lands as a permanent gate: the four-arm comparison as a regression test on
+4. **The hung mount was dead before the walk started, not "halfway through".**
+   [08-roadmap.md](../../docs/08-roadmap.md#spike-b--enumeration-throughput) asks
+   for "an sshfs mount that stops responding halfway through", and rule 1's
+   wording is "unplugged mid-listing". This spike mounts a filesystem that hangs
+   from its first request. The distinction is not cosmetic: the mid-listing case
+   is the one where entries are already in the store and a snapshot is already on
+   screen, so it tests whether partial results survive and whether cancellation
+   leaves the listing coherent — and none of that is exercised by a mount that
+   was never alive. The method section above overstates this and is corrected
+   here rather than in place.
+
+What lands as a permanent gate: the six-arm comparison as a regression test on
 the enumeration path, and the hung-mount test **with its control arm**, which
-belongs in CI as rule 1's executable form.
+belongs in CI as rule 1's executable form — once it hangs halfway through rather
+than from the start.
 
 ## Running the cold-cache arm
 
