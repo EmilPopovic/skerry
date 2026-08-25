@@ -119,21 +119,19 @@ them:
   0.614 s and replacing `read_dir` with `getdents64` accounts for 0.051 s. The
   thing to get right in `sk-fs` is the batching.
 
-A third finding, about the pool rather than the filesystem: **pool width has an
-optimum well below `ncpu - 2`, and `ncpu - 2` overshoots it.** Measured on two
-machines — 0.436 s at three workers against 0.539 s at twenty-two on a 24-thread
-part, and 0.637 s at five against 0.745 s at ten on a 12-thread part. The penalty
-for the default is 17–23%.
+A third finding, about the pool rather than the filesystem: **a parallel tree
+walk is worth more than either syscall choice.** Making directories jobs, taking
+`statx` through the directory's own file descriptor, and giving each job its own
+store chunk instead of a shared locked arena brings the full walk to **0.170 s on
+a 24-thread machine and 0.532 s on a 12-thread one** — 2.7× and 1.4× faster than
+the `getdents64+statx` in the row above, and 6.6× faster than `read_dir+meta` on
+both.
 
-The optimum is machine-dependent and cannot be a constant: three workers on one
-machine, five on the other, and two workers is comfortable on the faster machine
-while missing the bar by 34% on the slower one. Width wants a short probe at
-first use, not a formula over `ncpu`.
-
-Measured on a 6-core Ryzen 5600X, the full walk is **0.726 s** at the default
-width and **0.637 s** at its best, so the bar holds there. Extrapolating to the
-four-core reference machine gives 0.9–1.3 s, which straddles the bar — this is
-the Phase 0 number least likely to survive that measurement.
+That also **retracts** what this section said in an earlier revision: that pool
+width has an optimum well below `ncpu - 2`. It does not. Both machines now scale
+monotonically to `ncpu`; the apparent optimum was a single-threaded traversal
+putting a floor under the total and a store mutex serialising the jobs, and both
+were the spike's own defects rather than the kernel's behaviour.
 
 The hung-mount row is measured **with a control**: the same listing on the frame
 loop instead of the pool. Without it the row can only pass, because a frame loop

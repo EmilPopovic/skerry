@@ -1,0 +1,32 @@
+Spike B — enumeration throughput
+  tree         1000000 files under /var/tmp/skerry-spike-b
+  pool         10 workers (ncpu - 2)
+  load         0.57
+
+  warming      21338 directories, 1021338 entries in 0.56 s — discarded
+full recursive walk, warm cache, seconds
+  arm                   min     med     max        files/s   stat calls
+  read_dir            0.681   0.682   0.685        1498111   none
+  read_dir+meta       3.570   3.572   3.577         285951   1021338
+  getdents64          0.557   0.557   0.560        1833567   none
+  getdents64+statx    0.775   0.803   0.806        1272650   1000001
+  dirfd-statx         2.861   2.864   2.869         356657   1000001
+  parallel            0.541   0.557   0.564        1834474   1000001
+
+  bar: warm-cache full walk under 1 s
+  peak RSS omitted: VmHWM only rises, so in one process the first arm's peak
+is every arm's peak. Run --only <arm> for a figure that means something.
+
+time to first 200 rows, milliseconds
+  arm                100000-entry   10000-entry    1000-entry     100-entry
+  read_dir                  0.094         0.112         0.113   0.060 (100)
+  read_dir+meta             0.643         0.662         0.655   0.317 (100)
+  getdents64                0.197         0.199         0.194   0.042 (100)
+  getdents64+statx          0.197         0.196         0.197   0.042 (100)
+  dirfd-statx               0.203         0.202         0.195   0.043 (100)
+  parallel                  0.197         0.197         0.193   0.042 (100)
+
+  bar: first 200 visible rows within 30 ms of opening any directory
+
+hung mount
+  NOT BUILT — this binary was compiled without the `hang` feature

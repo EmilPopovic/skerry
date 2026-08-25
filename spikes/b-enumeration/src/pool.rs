@@ -33,6 +33,22 @@ impl Cancel {
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
+/// A cheap, cloneable handle for submitting work from inside a job. Needed
+/// because a parallel tree walk is jobs that spawn jobs, and a `&Pool` cannot
+/// cross into a `'static` closure.
+#[derive(Clone)]
+pub struct Submitter {
+    sender: mpsc::Sender<Job>,
+    queued: Arc<AtomicU64>,
+}
+
+impl Submitter {
+    pub fn submit(&self, job: impl FnOnce() + Send + 'static) {
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        let _ = self.sender.send(Box::new(job));
+    }
+}
+
 pub struct Pool {
     sender: Option<mpsc::Sender<Job>>,
     workers: Vec<JoinHandle<()>>,
@@ -90,6 +106,16 @@ impl Pool {
 
     pub fn width(&self) -> usize {
         self.workers.len()
+    }
+
+    /// A handle jobs can carry. Cloning it does not extend the pool's lifetime;
+    /// the workers stop when `drain` drops the pool's own sender and every
+    /// submitter has gone with the jobs that held it.
+    pub fn submitter(&self) -> Option<Submitter> {
+        self.sender.as_ref().map(|sender| Submitter {
+            sender: sender.clone(),
+            queued: self.queued.clone(),
+        })
     }
 
     pub fn submit(&self, job: impl FnOnce() + Send + 'static) {

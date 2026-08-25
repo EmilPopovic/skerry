@@ -19,7 +19,7 @@ use std::sync::Arc;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawDir, StatxFlags};
 
 use crate::pool::{Cancel, Pool};
-use crate::store::{Store, FLAG_DIR, FLAG_LINK, FLAG_STATTED};
+use crate::store::{Chunk, Store, FLAG_DIR, FLAG_LINK, FLAG_STATTED};
 
 /// 32 KiB. Large enough that a 100,000-entry directory takes tens of
 /// `getdents64` calls rather than thousands, small enough to stay in L2.
@@ -35,6 +35,8 @@ pub enum Arm {
     ReadDirMeta,
     Getdents,
     GetdentsStatx,
+    DirfdStatx,
+    Parallel,
 }
 
 impl Arm {
@@ -44,17 +46,29 @@ impl Arm {
             Arm::ReadDirMeta => "read_dir+meta",
             Arm::Getdents => "getdents64",
             Arm::GetdentsStatx => "getdents64+statx",
+            Arm::DirfdStatx => "dirfd-statx",
+            Arm::Parallel => "parallel",
         }
     }
 
-    pub fn all() -> [Arm; 4] {
-        [Arm::ReadDir, Arm::ReadDirMeta, Arm::Getdents, Arm::GetdentsStatx]
+    pub fn all() -> [Arm; 6] {
+        [
+            Arm::ReadDir,
+            Arm::ReadDirMeta,
+            Arm::Getdents,
+            Arm::GetdentsStatx,
+            Arm::DirfdStatx,
+            Arm::Parallel,
+        ]
     }
 
     /// Whether the arm fills the size and mtime columns. Only the two that do
     /// are comparable to each other; the other two are the floors they sit on.
     pub fn stats(self) -> bool {
-        matches!(self, Arm::ReadDirMeta | Arm::GetdentsStatx)
+        matches!(
+            self,
+            Arm::ReadDirMeta | Arm::GetdentsStatx | Arm::DirfdStatx | Arm::Parallel
+        )
     }
 }
 
@@ -64,6 +78,8 @@ pub fn walk(arm: Arm, root: &Path, store: &Arc<Store>, pool: &Pool, cancel: &Can
         Arm::ReadDirMeta => walk_read_dir(root, store, cancel, true),
         Arm::Getdents => walk_getdents(root, store, cancel, None),
         Arm::GetdentsStatx => walk_getdents(root, store, cancel, Some((pool, store))),
+        Arm::DirfdStatx => walk_dirfd(root, store, cancel, pool, false),
+        Arm::Parallel => walk_dirfd(root, store, cancel, pool, true),
     }
 }
 
@@ -73,7 +89,7 @@ pub fn walk(arm: Arm, root: &Path, store: &Arc<Store>, pool: &Pool, cancel: &Can
 fn walk_read_dir(root: &Path, store: &Arc<Store>, cancel: &Cancel, with_meta: bool) -> u64 {
     let mut directories = vec![root.to_path_buf()];
     let mut visited = 0u64;
-    let mut batch: Vec<(String, u16, u64, i64)> = Vec::with_capacity(1024);
+    let mut chunk = Chunk::with_capacity(1024);
 
     while let Some(directory) = directories.pop() {
         if cancel.is_cancelled() {
@@ -84,7 +100,7 @@ fn walk_read_dir(root: &Path, store: &Arc<Store>, cancel: &Cancel, with_meta: bo
             continue;
         };
         visited += 1;
-        batch.clear();
+        chunk.clear();
 
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -112,9 +128,9 @@ fn walk_read_dir(root: &Path, store: &Arc<Store>, cancel: &Cancel, with_meta: bo
                     store.statx_calls.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            batch.push((name, flags, size, mtime));
+            chunk.push(&name, flags, size, mtime);
         }
-        store.extend(&batch);
+        store.push_chunk(std::mem::take(&mut chunk));
     }
     visited
 }
@@ -132,7 +148,7 @@ fn walk_getdents(
     let mut directories = vec![root.to_path_buf()];
     let mut visited = 0u64;
     let mut buffer = vec![MaybeUninit::<u8>::uninit(); DIRENT_BUFFER];
-    let mut batch: Vec<(String, u16, u64, i64)> = Vec::with_capacity(1024);
+    let mut chunk = Chunk::with_capacity(1024);
     let mut pending: Vec<PathBuf> = Vec::with_capacity(STATX_BATCH);
 
     while let Some(directory) = directories.pop() {
@@ -143,7 +159,7 @@ fn walk_getdents(
             continue;
         };
         visited += 1;
-        batch.clear();
+        chunk.clear();
 
         let mut iter = RawDir::new(&fd, buffer.as_mut_slice());
         while let Some(entry) = iter.next() {
@@ -169,9 +185,9 @@ fn walk_getdents(
                     submit_statx(&mut pending, statx_to, cancel);
                 }
             }
-            batch.push((name, flags, 0, 0));
+            chunk.push(&name, flags, 0, 0);
         }
-        store.extend(&batch);
+        store.push_chunk(std::mem::take(&mut chunk));
     }
 
     if !pending.is_empty() {
@@ -234,7 +250,7 @@ fn open_directory(path: &Path) -> rustix::io::Result<OwnedFd> {
 /// purpose: a user who has seen the top of the list does not care that the
 /// bottom is still arriving.
 pub fn first_rows(arm: Arm, directory: &Path, store: &Arc<Store>, target: u64) -> u64 {
-    let mut batch: Vec<(String, u16, u64, i64)> = Vec::with_capacity(target as usize);
+    let mut chunk = Chunk::with_capacity(target as usize);
 
     match arm {
         Arm::ReadDir | Arm::ReadDirMeta => {
@@ -256,13 +272,13 @@ pub fn first_rows(arm: Arm, directory: &Path, store: &Arc<Store>, target: u64) -
                         flags |= FLAG_STATTED;
                     }
                 }
-                batch.push((name, flags, size, mtime));
-                if batch.len() as u64 >= target {
+                chunk.push(&name, flags, size, mtime);
+                if chunk.len() as u64 >= target {
                     break;
                 }
             }
         }
-        Arm::Getdents | Arm::GetdentsStatx => {
+        Arm::Getdents | Arm::GetdentsStatx | Arm::DirfdStatx | Arm::Parallel => {
             let Ok(fd) = open_directory(directory) else {
                 return 0;
             };
@@ -279,14 +295,142 @@ pub fn first_rows(arm: Arm, directory: &Path, store: &Arc<Store>, target: u64) -
                     FileType::Symlink => FLAG_LINK,
                     _ => 0,
                 };
-                batch.push((String::from_utf8_lossy(raw).into_owned(), flags, 0, 0));
-                if batch.len() as u64 >= target {
+                chunk.push(&String::from_utf8_lossy(raw), flags, 0, 0);
+                if chunk.len() as u64 >= target {
                     break 'outer;
                 }
             }
         }
     }
 
-    store.extend(&batch);
-    batch.len() as u64
+    let produced = chunk.len() as u64;
+    store.push_chunk(chunk);
+    produced
+}
+
+// ── the two arms that came out of asking whether this could be faster ─────────
+
+/// Arm 5. Same as `getdents64+statx`, with two changes that are invisible in the
+/// syscall count and large in the time:
+///
+/// - `statx` is issued **relative to the directory's file descriptor** rather
+///   than against a path from the root. `statx(CWD, "/var/tmp/.../d3/d1/name")`
+///   makes the kernel walk five path components and check permissions on each,
+///   once per file, a million times. `statx(dirfd, "name")` walks one.
+/// - No `PathBuf` per entry. The name goes to `statx` as the `CStr` that
+///   `getdents64` already returned, so the million allocations disappear with
+///   the million path walks.
+fn walk_dirfd(
+    root: &Path,
+    store: &Arc<Store>,
+    cancel: &Cancel,
+    pool: &Pool,
+    parallel: bool,
+) -> u64 {
+    let visited = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    match (parallel, pool.submitter()) {
+        // Arm 6: directories are jobs, and a job that finds a subdirectory
+        // submits it. A tree walk is embarrassingly parallel and this one was
+        // not parallel at all, which is why it was the floor under every other
+        // number in this spike.
+        (true, Some(submitter)) => {
+            read_directory_job(
+                root.to_path_buf(),
+                store.clone(),
+                cancel.clone(),
+                Some(submitter),
+                visited.clone(),
+            );
+            // The walk is done when nothing is queued and nothing is running.
+            // Yielding rather than spinning: a busy wait here holds a whole core
+            // against the pool, which costs nothing on a 24-thread machine and
+            // measurably distorts a 12-thread one — the first version of this
+            // arm spun, and was slower than the arm it replaced on the smaller
+            // machine because of it.
+            while pool.outstanding() > 0 && !cancel.is_cancelled() {
+                std::thread::yield_now();
+            }
+        }
+        _ => read_directory_job(
+            root.to_path_buf(),
+            store.clone(),
+            cancel.clone(),
+            None,
+            visited.clone(),
+        ),
+    }
+    visited.load(Ordering::Relaxed)
+}
+
+/// Reads one directory. With a submitter, each subdirectory becomes another job;
+/// without one, subdirectories are drained on this thread.
+fn read_directory_job(
+    directory: PathBuf,
+    store: Arc<Store>,
+    cancel: Cancel,
+    submitter: Option<crate::pool::Submitter>,
+    visited: Arc<std::sync::atomic::AtomicU64>,
+) {
+    let mut stack = vec![directory];
+    let mut buffer = vec![MaybeUninit::<u8>::uninit(); DIRENT_BUFFER];
+    let mut chunk = Chunk::with_capacity(1024);
+
+    while let Some(directory) = stack.pop() {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let Ok(fd) = open_directory(&directory) else {
+            continue;
+        };
+        visited.fetch_add(1, Ordering::Relaxed);
+        chunk.clear();
+
+        let mut iter = RawDir::new(&fd, buffer.as_mut_slice());
+        while let Some(entry) = iter.next() {
+            let Ok(entry) = entry else { break };
+            let raw_name = entry.file_name();
+            let raw = raw_name.to_bytes();
+            if raw == b"." || raw == b".." {
+                continue;
+            }
+
+            let mut flags = 0;
+            let (mut size, mut mtime) = (0u64, 0i64);
+            match entry.file_type() {
+                FileType::Directory => {
+                    flags |= FLAG_DIR;
+                    let child = directory.join(String::from_utf8_lossy(raw).as_ref());
+                    match &submitter {
+                        Some(submitter) => {
+                            let (store, cancel, visited) =
+                                (store.clone(), cancel.clone(), visited.clone());
+                            let onward = submitter.clone();
+                            submitter.submit(move || {
+                                read_directory_job(child, store, cancel, Some(onward), visited);
+                            });
+                        }
+                        None => stack.push(child),
+                    }
+                }
+                FileType::Symlink => flags |= FLAG_LINK,
+                _ => {
+                    // Relative to this directory's fd, using the name getdents64
+                    // already gave us. No path walk, no allocation.
+                    if let Ok(stat) = rustix::fs::statx(
+                        &fd,
+                        raw_name,
+                        AtFlags::SYMLINK_NOFOLLOW,
+                        StatxFlags::SIZE | StatxFlags::MTIME,
+                    ) {
+                        size = stat.stx_size;
+                        mtime = stat.stx_mtime.tv_sec;
+                        flags |= FLAG_STATTED;
+                        store.statx_calls.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            chunk.push(&String::from_utf8_lossy(raw), flags, size, mtime);
+        }
+        store.push_chunk(std::mem::take(&mut chunk));
+    }
 }

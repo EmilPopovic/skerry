@@ -352,6 +352,83 @@ Three things this says:
 A `--cold` flag now skips the warming walk, so a future run measures a cold tree
 in the table rather than in a line the harness discards. These numbers predate it.
 
+## Making it faster — and retracting a finding
+
+The question "can this be faster" turned out to be a question about the harness.
+Two of the three things slowing it down were mine.
+
+### What was wrong
+
+1. **The tree walk was single-threaded.** `getdents64+statx` parallelised only
+   the `statx` calls; the directory traversal was one thread popping a stack.
+   With 0.248 s of serial `getdents64` under a 0.452 s total, no number of
+   `statx` workers could get below the traversal, which is Amdahl's law and not
+   a property of the filesystem.
+2. **The store serialised every job.** `Store::extend` copied names and columns
+   into one global arena **while holding a mutex** — roughly 34 MB of memcpy,
+   serialised across all 21,338 directory jobs.
+3. **`statx` walked a full path per file.** `statx(CWD, "/var/tmp/…/d3/d1/name")`
+   resolves five components and checks permissions on each, a million times, and
+   allocates a `PathBuf` to say so.
+
+### What fixed them
+
+- **`parallel` arm**: directories are jobs, and a job that finds a subdirectory
+  submits it. `statx` goes through the directory's own file descriptor —
+  `statx(dirfd, name)` walks one component, not five, and takes the `CStr`
+  `getdents64` already returned, so the million `PathBuf`s go too.
+- **Chunked store**: each job builds its own columnar chunk and the locked region
+  becomes a `Vec::push`. This is also closer to the product, where enumeration
+  streams in and the UI reads a snapshot of the chunks that have arrived.
+
+### Result
+
+Median seconds, five repeats, both machines idle:
+
+| Arm | here (24 threads) | leto (12 threads) |
+| --- | --- | --- |
+| `read_dir` | 0.291 | 0.683 |
+| `read_dir+meta` | 1.118 | 3.552 |
+| `getdents64` | 0.248 | 0.557 |
+| `getdents64+statx` | 0.452 | 0.755 |
+| `dirfd-statx` (serial, for isolating the `dirfd` effect) | 1.023 | 2.857 |
+| **`parallel`** | **0.170** | **0.532** |
+
+**2.7× faster than the design this spike originally recommended on the fast
+machine, 1.4× on the slower one, and 6.6× faster than `read_dir+meta` on both.**
+The `dirfd-statx` row is serial on purpose: against serial `read_dir+meta` it
+isolates the `dirfd` and allocation change at 1.09× here and 1.24× on leto — real,
+and the smallest of the three effects. **The parallel traversal is the win.**
+
+### The retraction
+
+This document previously reported, and
+[04-architecture.md](../../docs/04-architecture.md#threading) and
+[09-performance-budgets.md](../../docs/09-performance-budgets.md) previously
+recorded, that pool width has an optimum well below `ncpu - 2` and that
+`ncpu - 2` overshoots it by 17–23%. The stated reason was that "the work is
+kernel-bound on inode locks rather than CPU-bound".
+
+**That was measuring my own two bugs.** With the traversal parallel and the store
+unlocked, both machines scale monotonically all the way to `ncpu`:
+
+| workers | 2 | 4 | 6 | 8 | 10 | 12 | 16 | 22 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| here | 0.657 | 0.387 | — | 0.256 | — | 0.199 | 0.180 | **0.170** |
+| leto | 1.554 | 0.836 | 0.665 | 0.590 | 0.565 | **0.532** | — | — |
+
+No knee, no degradation, no penalty for the default width. The earlier curve's
+optimum at three workers was the serial traversal putting a floor under the
+total, and the decline past it was contention on the store mutex — both mine.
+The "kernel-bound on inode locks" explanation was invented to fit a shape that
+had a much more ordinary cause, and it should not have been written down as a
+property of the kernel on the strength of one arm's numbers.
+
+`ncpu - 2` is now supported by measurement rather than contradicted by it. That
+is a better outcome than the finding it replaces, and a worse process: a design
+document carried a wrong claim about the kernel for two commits because a spike
+measured its own defect and did not suspect itself.
+
 ## Verdict
 
 **Go, with the cold-cache arm owed.**
@@ -362,11 +439,10 @@ in the table rather than in a line the harness discards. These numbers predate i
 | First 200 rows within 30 ms | **PASS** at 0.143 ms worst case, on a warm cache only |
 | A hung mount never blocks the UI thread | **PASS** at 4.001 ms, against 28,000 ms for the same call on the frame loop |
 
-Best measured width is well below the `ncpu - 2` the harness defaults to, on both
-machines tested: **0.436 s at three workers here** (23% better than the default)
-and **0.637 s at five on leto** (17% better). The optimum itself is
-machine-dependent — see [the second machine](#a-second-machine--and-a-correction),
-which also corrects a claim this document made from one machine's numbers.
+The best arm is `parallel` at **0.170 s here and 0.532 s on leto**, 2.7× and 1.4×
+faster than the `getdents64+statx` these conditions were first measured against —
+see [Making it faster](#making-it-faster--and-retracting-a-finding), which also
+retracts this document's earlier claim about pool width.
 
 `getdents64` plus batched `statx` earns its place, and the number that justifies
 it is 2.25× on the comparable pair — enough to move the design from missing the

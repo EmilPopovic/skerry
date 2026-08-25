@@ -239,19 +239,17 @@ two: a second thread pool (a `rayon` global, an async runtime's blocking pool) m
 uncoordinated oversubscription, which is a latency bug that only appears under load.
 See [ADR 0005](adr/0005-no-async-runtime.md).
 
-**Width is per-workload and probed, not one number.** The `ncpu - 2` in the diagram above
-is a ceiling, not a target. [Spike B](../spikes/b-enumeration/README.md#pool-width--ncpu---2-is-the-wrong-number-for-this-work)
-measured a million `statx` calls saturating well below it and degrading past the knee, on
-both machines tested: 0.436 s at three workers against 0.539 s at twenty-two on a 24-thread
-part, and 0.637 s at five against 0.745 s at ten on a 12-thread one. The work is
-kernel-bound on inode locks rather than CPU-bound, so past the knee the pool buys contention.
+**Width.** `ncpu - 2` is supported by measurement.
+[Spike B](../spikes/b-enumeration/README.md#making-it-faster--and-retracting-a-finding)
+walked a million files in 0.170 s on a 24-thread machine and 0.532 s on a 12-thread one,
+scaling monotonically to `ncpu` on both with no knee and no penalty at the default width.
 
-The knee is **machine-dependent** — three workers on one, five on the other — so it cannot be
-a constant or a formula over `ncpu`: two workers is comfortable on the faster machine and
-misses the bar by 34% on the slower. Both machines land within 5% of their best somewhere
-between three and six workers, which is what a short probe at first use would find. A copy
-engine or a thumbnail decoder may well want the full width; metadata does not, and a pool
-that offers only one number will be wrong for one of them.
+An earlier revision of this section said the opposite — that metadata work saturates at
+three workers because it is "kernel-bound on inode locks" — on the strength of a spike arm
+that had a single-threaded tree walk and a store that held a mutex across 34 MB of copying.
+Both defects were the spike's. The claim is retracted; the episode is kept here because a
+design document carried a wrong statement about the kernel for two commits, and the reason
+was a measurement that did not suspect itself.
 
 ### Data layout
 

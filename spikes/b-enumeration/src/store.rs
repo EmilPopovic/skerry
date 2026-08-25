@@ -15,8 +15,18 @@ pub const FLAG_DIR: u16 = 1 << 0;
 pub const FLAG_LINK: u16 = 1 << 1;
 pub const FLAG_STATTED: u16 = 1 << 2;
 
+/// One directory's worth of entries, built by the job that read it.
+///
+/// The store is a list of these rather than one arena written under a lock. The
+/// first version of this file appended into a single global arena while holding
+/// a mutex, which serialised roughly 34 MB of name copying across every job and
+/// put a hard ceiling on the parallel arm — 0.93 s on a 12-thread machine, worse
+/// than the serial arm it was meant to beat. Chunks make the locked region O(1).
+///
+/// It is also closer to what the product does: enumeration streams in, and the
+/// UI thread reads a snapshot made of the chunks that have arrived.
 #[derive(Default)]
-struct Columns {
+pub struct Chunk {
     names: String,
     name_ref: Vec<(u32, u32)>,
     size: Vec<u64>,
@@ -24,9 +34,54 @@ struct Columns {
     flags: Vec<u16>,
 }
 
+impl Chunk {
+    pub fn with_capacity(entries: usize) -> Self {
+        Self {
+            names: String::with_capacity(entries * 34),
+            name_ref: Vec::with_capacity(entries),
+            size: Vec::with_capacity(entries),
+            mtime: Vec::with_capacity(entries),
+            flags: Vec::with_capacity(entries),
+        }
+    }
+
+    pub fn push(&mut self, name: &str, flags: u16, size: u64, mtime: i64) {
+        let offset = self.names.len() as u32;
+        self.names.push_str(name);
+        self.name_ref.push((offset, name.len() as u32));
+        self.size.push(size);
+        self.mtime.push(mtime);
+        self.flags.push(flags);
+    }
+
+    pub fn len(&self) -> usize {
+        self.name_ref.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.name_ref.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.names.clear();
+        self.name_ref.clear();
+        self.size.clear();
+        self.mtime.clear();
+        self.flags.clear();
+    }
+
+    fn footprint(&self) -> usize {
+        self.names.capacity()
+            + self.name_ref.capacity() * 8
+            + self.size.capacity() * 8
+            + self.mtime.capacity() * 8
+            + self.flags.capacity() * 2
+    }
+}
+
 #[derive(Default)]
 pub struct Store {
-    columns: Mutex<Columns>,
+    chunks: Mutex<Vec<Chunk>>,
     /// Read without the lock so a progress check never contends with a writer —
     /// this is what the "first 200 rows" measurement polls.
     count: AtomicU64,
@@ -35,14 +90,10 @@ pub struct Store {
 
 impl Store {
     pub fn with_capacity(entries: usize) -> Self {
+        // Chunk count, not entry count: one per directory, plus slack.
+        let _ = entries;
         Self {
-            columns: Mutex::new(Columns {
-                names: String::with_capacity(entries * 34),
-                name_ref: Vec::with_capacity(entries),
-                size: Vec::with_capacity(entries),
-                mtime: Vec::with_capacity(entries),
-                flags: Vec::with_capacity(entries),
-            }),
+            chunks: Mutex::new(Vec::with_capacity(32 * 1024)),
             ..Default::default()
         }
     }
@@ -51,32 +102,20 @@ impl Store {
         self.count.load(Ordering::Relaxed)
     }
 
-    /// Appends a whole directory's worth under one lock acquisition. A per-entry
-    /// lock is a measurable tax of its own at a million entries, and every arm
-    /// pays this one equally, so it cancels out of the comparison.
-    pub fn extend(&self, batch: &[(String, u16, u64, i64)]) {
-        if let Ok(mut columns) = self.columns.lock() {
-            for (name, flags, size, mtime) in batch {
-                let offset = columns.names.len() as u32;
-                columns.names.push_str(name);
-                columns.name_ref.push((offset, name.len() as u32));
-                columns.size.push(*size);
-                columns.mtime.push(*mtime);
-                columns.flags.push(*flags);
-            }
+    /// Hands a finished chunk to the store. The locked region is a `Vec::push`,
+    /// so a job's copying happens on the job's own thread and no arm serialises
+    /// on the store. Every arm uses this, so it cancels out of the comparison.
+    pub fn push_chunk(&self, chunk: Chunk) {
+        let entries = chunk.len() as u64;
+        if let Ok(mut chunks) = self.chunks.lock() {
+            chunks.push(chunk);
         }
-        self.count.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        self.count.fetch_add(entries, Ordering::Relaxed);
     }
 
     pub fn footprint(&self) -> usize {
-        match self.columns.lock() {
-            Ok(columns) => {
-                columns.names.capacity()
-                    + columns.name_ref.capacity() * 8
-                    + columns.size.capacity() * 8
-                    + columns.mtime.capacity() * 8
-                    + columns.flags.capacity() * 2
-            }
+        match self.chunks.lock() {
+            Ok(chunks) => chunks.iter().map(Chunk::footprint).sum(),
             Err(_) => 0,
         }
     }
