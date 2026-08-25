@@ -352,6 +352,44 @@ The 30 ms first-rows condition survives cold as well: worst cell 0.455 ms on a
 document carried for several revisions, that the condition had only ever been
 measured against a warm dentry cache.
 
+### Cold on four cores
+
+Two four-core machines, two sets each, same protocol. Raw output in
+[runs/cold-cache.txt](runs/cold-cache.txt).
+
+| | pi (aarch64) | homelab (x86_64) |
+| --- | --- | --- |
+| `parallel`, `ncpu - 2` = 2 workers | 6.439 / 6.450 | 4.897 / 4.910 |
+| `parallel`, 6 workers | **3.704 / 3.726** | **2.416 / 2.260** |
+| warm, same width | 0.948 | 0.860 |
+| cold ÷ warm | 3.9× | 2.7× |
+
+**Cold, nothing comes near one second on four cores.** The best case is 2.3 s on
+the x86 machine and 3.7 s on the Pi — 2.3× and 3.7× outside. The roadmap's bar
+says *warm-cache* explicitly, so this is not a bar miss; it is the number a user
+meets on the first recursive walk after a boot, and it is several seconds.
+
+**Pool width matters more cold than warm.** On the Pi, going from `ncpu - 2` to
+six workers is 6.44 s → 3.70 s, a 1.74× improvement, against roughly 1.7× warm.
+Cold work is latency-bound, so the threads are waiting rather than competing, and
+the case for not choosing `ncpu - 2` gets stronger rather than weaker.
+
+**The interactive condition holds cold, everywhere.** Worst first-200-rows cell
+across both machines is **0.744 ms** against a 30 ms bar, and 0.461 ms on the Pi.
+Forty times inside the bar on cold four-core hardware is the strongest single
+result in this spike: opening a directory stays instant even when the recursive
+walk behind it takes seconds, which is exactly the split
+[rule 1](../../docs/03-principles.md) is built around.
+
+**Two arms are missing from this table, and that is a defect in the harness, not
+the measurement.** The run script filtered each arm's output with its name
+interpolated into a regex, and `read_dir+meta` and `getdents64+statx` both
+contain a `+` — an ERE metacharacter. `read_dir+meta` matches "read_di" followed
+by one or more "r" followed by "meta", which is nothing. Both arms ran, both were
+timed, and both timings were discarded by the filter; only their peak RSS
+survived, because that line does not carry the arm's name. The script now escapes
+the pattern, and a targeted re-run for the two arms is deployed beside it.
+
 ### The memory regression the cold run exposed
 
 The cold output carried a number nothing else was reporting: **`peak RSS 454.2 MB`

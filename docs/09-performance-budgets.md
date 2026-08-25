@@ -134,12 +134,17 @@ them:
   and giving each job its own store chunk instead of a shared locked arena is
   3.4× on the fast machine and 1.6× on the Pi. Deferring `statx` is the next
   largest effect; replacing `read_dir` with `getdents64` is the smallest.
-- **It holds the bar cold, and it is the only arm that does.** With the page,
-  dentry and inode caches dropped, the full walk is **0.80–0.85 s** against
-  3.3–3.9 s for `getdents64+statx` and 5.6 s for `read_dir+meta`. The advantage
-  *widens* cold, from 3.4× to 4.3×, because cold work is latency-bound and
-  parallelism hides latency. Spike B predicted the arms would converge cold, and
-  predicted it twice; they diverged both times.
+- **Cold, the bar holds only on the 24-thread machine.** With the page, dentry
+  and inode caches dropped, the full walk is **0.80–0.85 s** there, against
+  3.3–3.9 s for `getdents64+statx` and 5.6 s for `read_dir+meta`. On four cores
+  it is **2.3 s (x86) and 3.7 s (aarch64)** at a sensible width, and 4.9 s and
+  6.4 s at `ncpu - 2`. The roadmap's bar says warm cache, so this is not a miss —
+  but a first recursive walk after a boot takes seconds on reference hardware,
+  and that should be designed for rather than discovered.
+- **The interactive condition holds cold on every machine.** Worst first-200-rows
+  cell anywhere, cold, on four cores, is **0.744 ms** against a 30 ms bar. Opening
+  a directory stays instant while the recursive walk behind it takes seconds,
+  which is the split rule 1 exists to create.
 - **The parallel walk costs 137 MB against 84 MB**, and briefly cost 522 MB — a
   chunk over-reservation that cleared Spike A's 300 MB bar and was caught only
   because a cold run happened to print peak RSS. The `RSS at 1M entries` row
