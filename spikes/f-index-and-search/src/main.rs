@@ -9,6 +9,7 @@ mod index;
 mod matcher;
 mod pool;
 mod shape;
+mod sort;
 mod stats;
 mod walk;
 
@@ -246,18 +247,97 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         }
     }
 
+    // The comparison ADR 0008 turns on: a *cold* index load. fadvise evicts the
+    // file from the page cache without root, so this is a real device read.
+    let mut cold = Samples::new("load cold");
+    for _ in 0..options.repeats {
+        index::evict(&path).map_err(|e| format!("evict: {e}"))?;
+        let started = Instant::now();
+        let loaded = index::read(&path).map_err(|e| format!("index read: {e}"))?;
+        cold.push(started.elapsed().as_secs_f32() * 1000.0);
+        if loaded.len() != flat.len() {
+            return Err("cold round-trip lost entries".into());
+        }
+    }
+
     println!("\n  persistent index");
     println!("  {}", build.row());
     println!("  {}", load.row());
+    println!("  {}", cold.row());
     println!(
         "  on disk {:.1} MB, {:.0} bytes per entry",
         bytes as f64 / 1e6,
         bytes as f64 / flat.len().max(1) as f64
     );
     println!(
-        "  load vs walk: {:.2}x the warm walk on this machine",
-        load.percentile(50.0) / walk_ms.percentile(50.0).max(0.001)
+        "  cold load is {:.2}x the warm walk, and {:.0}x faster than a 2.3 s cold walk",
+        cold.percentile(50.0) / walk_ms.percentile(50.0).max(0.001),
+        2300.0 / cold.percentile(50.0).max(0.001)
     );
+
+    // ── sorting ───────────────────────────────────────────────────────────────
+    println!("\n  sorting {} entries, milliseconds — bar: 120 ms, hard fail 300 ms", flat.len());
+    let mut keys_ms = Samples::new("build keys");
+    let mut keys = Vec::new();
+    for _ in 0..options.repeats {
+        let started = Instant::now();
+        keys = sort::keys(&flat);
+        keys_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    let base: Vec<u32> = (0..flat.len() as u32).collect();
+    let mut runs: Vec<(&str, Samples)> = vec![
+        ("by size", Samples::new("by size")),
+        ("by mtime", Samples::new("by mtime")),
+        ("by name, arena", Samples::new("by name, arena")),
+        ("by name, keyed", Samples::new("by name, keyed")),
+    ];
+    for _ in 0..options.repeats {
+        for (which, samples) in runs.iter_mut().enumerate() {
+            let mut order = base.clone();
+            let started = Instant::now();
+            match which {
+                0 => sort::by_size(&flat, &mut order),
+                1 => sort::by_mtime(&flat, &mut order),
+                2 => sort::by_name_arena(&flat, &mut order),
+                _ => sort::by_precomputed(&flat, &keys, &mut order),
+            }
+            samples.1.push(started.elapsed().as_secs_f32() * 1000.0);
+        }
+    }
+    println!("  {}", keys_ms.row());
+    for (_, samples) in &runs {
+        println!("  {}", samples.row());
+    }
+
+    // ── as you type ───────────────────────────────────────────────────────────
+    // Typing `report` is six searches, not one, and each is over the whole set
+    // because a fuzzy match is not a prefix match — a later keystroke cannot
+    // narrow the previous result set without dropping matches it should keep.
+    println!("\n  as-you-type, one full scan per keystroke, milliseconds");
+    let word = "report";
+    let mut total = 0.0f32;
+    print!("  ");
+    for length in 1..=word.len() {
+        let query = Query::new(&word[..length]);
+        let mut samples = Samples::new("k");
+        for _ in 0..options.repeats {
+            let started = Instant::now();
+            let mut count = 0usize;
+            for index in 0..flat.len() {
+                if query.score(flat.name(index)).is_some() {
+                    count += 1;
+                }
+            }
+            samples.push(started.elapsed().as_secs_f32() * 1000.0);
+            let _ = count;
+        }
+        let ms = samples.percentile(50.0);
+        total += ms;
+        print!("{:?}={:.1} ", &word[..length], ms);
+    }
+    println!("\n  worst single keystroke {:.1} ms, whole word {:.1} ms",
+        total / word.len() as f32, total);
+
     println!();
     Ok(())
 }

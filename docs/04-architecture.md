@@ -275,9 +275,16 @@ selected:  bitset
 
 This is what makes sorting and filtering a million entries a memory-bandwidth problem
 instead of a pointer-chasing one, and it is the most important decision after "don't block
-the UI thread". Sort keys are derived once at listing time so a re-sort never recomputes a
-natural-order collation. Selection as a bitset makes "select all, then deselect 200"
-instant and makes the selection cheap to snapshot.
+the UI thread". Selection as a bitset makes "select all, then deselect 200" instant and
+makes the selection cheap to snapshot.
+
+**Sort keys are derived once at listing time — and [Spike F](../spikes/f-index-and-search/README.md#sorting-misses-its-target-and-the-architectures-stated-reason-is-wrong)
+measured that this is worth 3%, not the order of magnitude an earlier revision of this
+paragraph implied.** Sorting a million entries by name takes 152 ms whether the comparison
+reads the arena or a precomputed `u64`, against a 120 ms budget; sorting by a metadata
+column takes 0.93 ms. The cost is the random access pattern of sorting a *permutation*, not
+the comparison function, so making the comparison cheaper cannot fix it. What is needed is
+a sort that reads sequentially — a radix pass over the keys — and that is unmeasured.
 
 Enumeration goes through raw `getdents64` (via `rustix`) rather than `std::fs::read_dir`,
 because `d_type` yields file-versus-directory for free and lets `statx` be deferred to a

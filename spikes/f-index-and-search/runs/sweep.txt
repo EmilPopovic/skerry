@@ -1,0 +1,100 @@
+Spike F — index and flattened search
+  pool         24 workers
+  load         1.29
+
+═══ flat-100k — 100000 files ═══
+  1 directories, 100001 entries, arena 2.7 MB, store 4.9 MB
+  walk       p50 100.417  p99 105.656  max 105.656  mean 101.455   n=5
+  flatten    p50  0.560  p99  1.480  max   1.480  mean  0.754   n=5
+  peak RSS 18.0 MB
+
+  flattened search, milliseconds — bar: first result within 50 ms
+  query                       first        all      matches  what it is
+  (empty)                     0.000      0.117       100001  everything — the floor, no matching at all
+  zzqx                        1.853      1.789            0  almost nothing — the rejection path
+  snapshot-render-70          0.204      2.167            7  a handful — the realistic case
+  e                           0.000      1.302        62041  a large fraction — where the result set is the cost
+  rpt                         0.000      2.390        15178  scattered subsequence — no contiguous run to find
+
+  persistent index
+  build      p50  4.166  p99  5.763  max   5.763  mean  4.597   n=5
+  load       p50  2.230  p99  2.523  max   2.523  mean  2.298   n=5
+  load cold  p50  4.778  p99  4.836  max   4.836  mean  4.770   n=5
+  on disk 4.9 MB, 49 bytes per entry
+  cold load is 0.05x the warm walk, and 481x faster than a 2.3 s cold walk
+
+  sorting 100001 entries, milliseconds — bar: 120 ms, hard fail 300 ms
+  build keys p50  0.126  p99  0.173  max   0.173  mean  0.136   n=5
+  by size    p50  0.105  p99  0.119  max   0.119  mean  0.109   n=5
+  by mtime   p50  0.106  p99  0.125  max   0.125  mean  0.110   n=5
+  by name, arena p50  5.903  p99  6.185  max   6.185  mean  5.963   n=5
+  by name, keyed p50  5.952  p99  6.243  max   6.243  mean  6.050   n=5
+
+  as-you-type, one full scan per keystroke, milliseconds
+  "r"=1.4 "re"=1.9 "rep"=2.5 "repo"=2.6 "repor"=2.6 "report"=2.8 
+  worst single keystroke 2.3 ms, whole word 13.7 ms
+
+═══ flat-1m — 1000000 files ═══
+  1 directories, 1000001 entries, arena 28.4 MB, store 50.4 MB
+  walk       p50 1012.598  p99 1035.622  max 1035.622  mean 1016.925   n=5
+  flatten    p50  8.518  p99 11.722  max  11.722  mean  8.914   n=5
+  peak RSS 189.3 MB
+
+  flattened search, milliseconds — bar: first result within 50 ms
+  query                       first        all      matches  what it is
+  (empty)                     0.000      1.172      1000001  everything — the floor, no matching at all
+  zzqx                       17.932     17.738            0  almost nothing — the rejection path
+  snapshot-render-70          0.014     22.873          118  a handful — the realistic case
+  e                           0.000     13.229       620934  a large fraction — where the result set is the cost
+  rpt                         0.000     25.328       154331  scattered subsequence — no contiguous run to find
+
+  persistent index
+  build      p50 43.671  p99 47.653  max  47.653  mean 44.012   n=5
+  load       p50 27.774  p99 27.938  max  27.938  mean 27.600   n=5
+  load cold  p50 40.167  p99 40.931  max  40.931  mean 40.020   n=5
+  on disk 50.4 MB, 50 bytes per entry
+  cold load is 0.04x the warm walk, and 57x faster than a 2.3 s cold walk
+
+  sorting 1000001 entries, milliseconds — bar: 120 ms, hard fail 300 ms
+  build keys p50  1.570  p99  2.330  max   2.330  mean  1.754   n=5
+  by size    p50  1.116  p99  1.161  max   1.161  mean  1.132   n=5
+  by mtime   p50  2.309  p99  2.477  max   2.477  mean  2.288   n=5
+  by name, arena p50 156.176  p99 159.663  max 159.663  mean 155.232   n=5
+  by name, keyed p50 150.526  p99 155.171  max 155.171  mean 152.023   n=5
+
+  as-you-type, one full scan per keystroke, milliseconds
+  "r"=13.9 "re"=19.1 "rep"=27.7 "repo"=28.6 "repor"=28.7 "report"=27.5 
+  worst single keystroke 24.2 ms, whole word 145.5 ms
+
+═══ realistic — 1000000 files ═══
+  21338 directories, 1021338 entries, arena 28.5 MB, store 51.0 MB
+  walk       p50 120.109  p99 143.059  max 143.059  mean 123.251   n=5
+  flatten    p50 14.080  p99 17.854  max  17.854  mean 13.991   n=5
+  peak RSS 208.7 MB
+
+  flattened search, milliseconds — bar: first result within 50 ms
+  query                       first        all      matches  what it is
+  (empty)                     0.000      1.372      1021338  everything — the floor, no matching at all
+  zzqx                       18.143     17.838            0  almost nothing — the rejection path
+  snapshot-render-70          0.145     23.020          118  a handful — the realistic case
+  e                           0.000     13.275       620938  a large fraction — where the result set is the cost
+  rpt                         0.002     25.096       154331  scattered subsequence — no contiguous run to find
+
+  persistent index
+  build      p50 43.203  p99 49.555  max  49.555  mean 43.524   n=5
+  load       p50 27.696  p99 27.998  max  27.998  mean 27.661   n=5
+  load cold  p50 40.509  p99 41.856  max  41.856  mean 40.958   n=5
+  on disk 51.0 MB, 50 bytes per entry
+  cold load is 0.34x the warm walk, and 57x faster than a 2.3 s cold walk
+
+  sorting 1021338 entries, milliseconds — bar: 120 ms, hard fail 300 ms
+  build keys p50  1.742  p99  2.061  max   2.061  mean  1.784   n=5
+  by size    p50  0.932  p99  0.933  max   0.933  mean  0.927   n=5
+  by mtime   p50  1.822  p99  1.861  max   1.861  mean  1.826   n=5
+  by name, arena p50 152.544  p99 157.474  max 157.474  mean 153.314   n=5
+  by name, keyed p50 148.301  p99 149.706  max 149.706  mean 148.024   n=5
+
+  as-you-type, one full scan per keystroke, milliseconds
+  "r"=14.5 "re"=19.2 "rep"=25.6 "repo"=26.7 "repor"=27.4 "report"=27.4 
+  worst single keystroke 23.5 ms, whole word 140.8 ms
+

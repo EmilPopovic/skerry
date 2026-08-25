@@ -167,6 +167,56 @@ loop instead of the pool. Without it the row can only pass, because a frame loop
 with no path to a filesystem syscall cannot be blocked by one. Any future version
 of this gate keeps the control or it is not a gate.
 
+## What Spike F measured
+
+[Spike F](../spikes/f-index-and-search/README.md) measured flattened search, the
+persistent index and sorting, on the 24-thread laptop only — the most favourable
+hardware in this project, and the caveat that governs every row below.
+
+| Row | Target | Measured | Verdict |
+| --- | --- | --- | --- |
+| First search result | < 50 ms | 28.7 ms per keystroke, full scan of 1M names | **met here, projected to miss on reference hardware** |
+| Sort 1M entries | < 120 ms | **152 ms** by name; 0.93 ms by a metadata column | **missed** |
+| RSS at 1M entries | < 250 MB | 209 MB with the flattened store resident | met |
+| — | — | index: 43 ms to build, **40 ms to load cold**, 50 bytes per entry | — |
+
+### Two rows this breaks
+
+**`Sort 1M entries < 120 ms` is missed at 152 ms**, on the fastest machine
+available, and the mechanism [04-architecture.md](04-architecture.md#data-layout)
+names for meeting it does not work. Precomputing sort keys is worth **3%** —
+152.5 ms against 148.3 ms — because the cost is the random access pattern of
+sorting a permutation of a million indices into an 8 MB key array and a 28 MB
+arena, not the comparison function. Sorting by a metadata column, which reads one
+contiguous array with no indirection, is **0.93 ms**: 160× faster, and the whole
+difference is memory access pattern. A radix sort over the keys is the obvious
+direction and is unmeasured.
+
+**`First search result < 50 ms` is met at 28.7 ms and should not be expected to
+hold.** That is one keystroke on a 24-thread laptop; Spike B measured a Raspberry
+Pi 5 at roughly 3× slower per core on comparable work, which puts a keystroke at
+60–90 ms — over target, approaching the 120 ms hard fail. A fuzzy match cannot
+narrow incrementally the way a prefix match can, so every keystroke is a full
+scan, and the scan is already near memory bandwidth at 28 MB in 28 ms.
+
+### One row it adds
+
+The index earns its own row once `sk-index` exists, because it is now the thing
+standing between a user and a multi-second wait:
+
+| Measure | Target | Hard fail | Method |
+| --- | --- | --- | --- |
+| Load the index for 1M entries | < 100 ms | 250 ms | Cold, page cache evicted for the index file; measured at 40 ms |
+
+### One shape that is not in any row yet
+
+A single directory holding a million entries takes **8.4× a realistic tree of the
+same file count** — 1.013 s against 0.120 s — because a directory is the unit of
+parallel work and there is only one of them. `node_modules`, Maildir, `/nix/store`
+and dataset dumps all produce that shape, and it is a directory a user opens.
+`getdents64` returns a resumable cookie, so a large directory can be split across
+jobs; `sk-fs` has to be built for that rather than retrofitted.
+
 ## On measuring frame time honestly
 
 p99 over a realistic input trace, not an average over an idle window. The interesting

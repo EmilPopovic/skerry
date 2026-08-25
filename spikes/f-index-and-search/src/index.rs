@@ -58,6 +58,28 @@ pub fn write(flat: &Flat, path: &Path) -> io::Result<u64> {
     Ok(std::fs::metadata(path)?.len())
 }
 
+/// Evicts the index from the page cache, so the next read comes off the device.
+///
+/// `POSIX_FADV_DONTNEED` on one file, rather than `drop_caches` on the whole
+/// machine, which needs root. It measures exactly the thing ADR 0008 turns on —
+/// a cold index load against a cold walk — without asking anyone for a password
+/// and without disturbing anything else running.
+///
+/// It is advisory: the kernel drops clean pages it can, and pages still dirty or
+/// still referenced elsewhere may survive. So this is a *floor* on cold cost, and
+/// a real cold read can only be slower. The `sync` first is what makes the pages
+/// clean enough for the advice to bite.
+pub fn evict(path: &Path) -> io::Result<()> {
+    let file = std::fs::File::open(path)?;
+    file.sync_all().ok();
+    let len = file.metadata()?.len();
+    if let Some(len) = std::num::NonZeroU64::new(len) {
+        rustix::fs::fadvise(&file, 0, Some(len), rustix::fs::Advice::DontNeed)
+            .map_err(|e| io::Error::from_raw_os_error(e.raw_os_error()))?;
+    }
+    Ok(())
+}
+
 pub fn read(path: &Path) -> io::Result<Flat> {
     let mut file = std::fs::File::open(path)?;
     let mut header = [0u8; HEADER];
