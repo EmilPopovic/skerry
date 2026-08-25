@@ -106,14 +106,20 @@ repository's first aarch64 measurement.
 | Row | Target | Measured on the Pi 5 | On a 24-thread laptop |
 | --- | --- | --- | --- |
 | Open a 10k-entry directory | < 30 ms | **0.365 ms** to the first 200 rows | 0.072 ms |
-| Full 1M-file walk with size and mtime | < 1 s (roadmap) | **0.966 s** at six workers, 1.592 s at `ncpu - 2` | 0.170 s |
+| Full 1M-file walk with size and mtime | < 1 s (roadmap) | **0.91–1.07 s** median depending on pool width, every width with runs over a second; 1.626 s at `ncpu - 2` | 0.130 s |
 | Frame during a hung mount | < 8 ms | not run — no `/dev/fuse` in the container | **4.001 ms**, against 28,000 ms for the same call on the frame loop |
 
-**The full-walk row passes with 3.4% of margin on reference-class hardware, and
-only at a pool width the current default does not choose.** For scale on the same
-machine: `read_dir` plus `metadata()` takes 3.882 s, and `getdents64` with no
-stat at all takes 0.971 s. This bar is not comfortably reachable by any design
-and is unreachable by the obvious one.
+**The full-walk row is marginal on reference-class hardware: the Pi sits on the
+bar rather than inside it.** For scale on the same machine, `read_dir` plus
+`metadata()` takes 3.854 s and `getdents64` with no stat at all takes 0.974 s —
+so this bar is not comfortably reachable by any design, is unreachable by the
+obvious one, and is reachable by ours only on a good run.
+
+**This row is not settled.** It wants either a bar revised against measured
+hardware or another factor of two in the enumeration path, and that is a decision
+rather than a measurement. Spike B reported it as 0.7–0.9 s, then 0.9–1.3 s, then
+0.966 s with "3.4% of margin" — the last from a single median quoted as a result,
+before the width curve was taken.
 
 Four findings that change what the other documents say rather than confirming
 them:
@@ -143,8 +149,8 @@ them:
   four-core machine it is two workers and leaves half the machine idle: 1.592 s
   against 0.966 s on the Pi, 1.119 s against 0.716 s on a four-core VM. Every
   machine measured has its optimum at or above `ncpu` — 22 of 24, 12 of 12, 8 of
-  4, 6 of 4. `max(6, ncpu)` fits all four, as a fit to four points rather than a
-  law; a probe at first use would be better.
+  4, 6 of 4. Beyond `ncpu` the curve is flat and the exact value is inside the
+  noise, so the supportable rule is "at least `ncpu`" rather than any formula.
 - **An earlier revision of this section claimed the opposite** — that width
   saturates at three workers because metadata work is "kernel-bound on inode
   locks". That was the spike measuring its own single-threaded traversal and its

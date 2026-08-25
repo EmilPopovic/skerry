@@ -21,6 +21,20 @@ use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawDir, StatxFlags};
 use crate::pool::{Cancel, Pool};
 use crate::store::{Chunk, Store, FLAG_DIR, FLAG_LINK, FLAG_STATTED};
 
+/// Whether a chunk is shrunk to fit before it is parked in the store. A global
+/// because the walkers are reached through a `'static` job boundary, and
+/// threading one flag through all of them would be more code than the flag is
+/// worth in a spike. Set once before a walk, read many times.
+static SHRINK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_shrink(on: bool) {
+    SHRINK.store(on, Ordering::Relaxed);
+}
+
+fn shrink_enabled() -> bool {
+    SHRINK.load(Ordering::Relaxed)
+}
+
 /// 32 KiB. Large enough that a 100,000-entry directory takes tens of
 /// `getdents64` calls rather than thousands, small enough to stay in L2.
 const DIRENT_BUFFER: usize = 32 * 1024;
@@ -436,7 +450,9 @@ fn read_directory_job(
             }
             chunk.push(&String::from_utf8_lossy(raw), flags, size, mtime);
         }
-        chunk.shrink_to_fit();
+        if shrink_enabled() {
+            chunk.shrink_to_fit();
+        }
         store.push_chunk(std::mem::take(&mut chunk));
     }
 }

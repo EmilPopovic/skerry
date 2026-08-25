@@ -239,18 +239,18 @@ two: a second thread pool (a `rayon` global, an async runtime's blocking pool) m
 uncoordinated oversubscription, which is a latency bug that only appears under load.
 See [ADR 0005](adr/0005-no-async-runtime.md).
 
-**Width is `max(6, ncpu)`, and wants a probe rather than a formula.** The `ncpu - 2` in
-the diagram above is wrong on small machines, where subtracting two is most of the machine:
+**Width is at least `ncpu`, and the exact value matters less than not going below it.**
+The `ncpu - 2` in the diagram above is wrong on small machines, where subtracting two is
+most of the machine:
 [Spike B](../spikes/b-enumeration/README.md#ncpu---2-is-wrong-again-for-a-second-and-unrelated-reason)
-measured a million-file walk at 1.592 s with `ncpu - 2` on a four-core Raspberry Pi 5 and
-0.966 s at six workers — the difference between missing the one-second bar and meeting it.
-Every machine measured has its optimum **at or above `ncpu`**: 22 of 24, 12 of 12, 8 of 4,
-6 of 4. The two four-core machines want more threads than they have cores, which fits work
-that waits on inode fetches rather than computing.
+measured a million-file walk at **1.626 s** with `ncpu - 2` on a four-core Raspberry Pi 5
+against **0.91–1.01 s** anywhere from four workers upward. Every machine measured has its
+optimum at or above `ncpu`, and past that point the curve is flat enough that the choice is
+inside the run-to-run noise. The four-core machines are content with more threads than they
+have cores, which fits work that waits on inode fetches rather than computing.
 
-`max(6, ncpu)` fits all four measurements and is a fit to four points, not a law. A short
-probe at first use would be better, and per-device queues remain necessary regardless —
-these numbers are all NVMe.
+A short probe at first use would beat any formula, and per-device queues remain necessary
+regardless — every one of these numbers is NVMe.
 
 An earlier revision of this section said the opposite, that metadata work saturates at three
 workers because it is "kernel-bound on inode locks", on the strength of a spike arm that had

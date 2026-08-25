@@ -50,6 +50,11 @@ struct Options {
     /// Skip the warming walk, so a run after `drop_caches` measures a cold tree
     /// in the table rather than in the discarded warm-up line.
     cold: bool,
+    /// Leave each chunk's growth slack in place instead of shrinking it before
+    /// parking it in the store. Trades memory for one fewer realloc per
+    /// directory — free on a machine with memory bandwidth to spare, and perhaps
+    /// not on one without.
+    no_shrink: bool,
 }
 
 const USAGE: &str = "\
@@ -62,7 +67,8 @@ spike-b-enumeration — Spike B, getdents64 + statx against read_dir
   --only ARM      one arm only: read_dir, read_dir+meta, getdents64, getdents64+statx
   --hang-at PATH  where to mount the hung filesystem (default under ~/.cache)
   --workers N     job pool width (default ncpu - 2)
-  --cold          skip the warming walk — for a run straight after drop_caches";
+  --cold          skip the warming walk — for a run straight after drop_caches
+  --no-shrink     keep chunk growth slack instead of shrinking before storing";
 
 fn main() {
     if let Err(message) = run() {
@@ -81,6 +87,7 @@ fn parse() -> Result<Options, String> {
         hang_at: None,
         workers: None,
         cold: false,
+        no_shrink: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -94,6 +101,7 @@ fn parse() -> Result<Options, String> {
             "--hang-at" => options.hang_at = Some(PathBuf::from(value()?)),
             "--workers" => options.workers = Some(value()?.parse().map_err(|_| "bad --workers")?),
             "--cold" => options.cold = true,
+            "--no-shrink" => options.no_shrink = true,
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument `{other}`\n\n{USAGE}")),
         }
@@ -219,6 +227,7 @@ fn full_walk(options: &Options, arms: &[Arm]) {
             let store = Arc::new(Store::with_capacity(tree::total_files()));
 
             let started = Instant::now();
+            walk::set_shrink(!options.no_shrink);
             walk::walk(*arm, &options.root, &store, &pool, &cancel);
             pool.drain();
             samples.push(started.elapsed().as_secs_f32() * 1000.0);

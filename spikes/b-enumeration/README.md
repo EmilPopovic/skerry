@@ -515,6 +515,37 @@ cannot enumerate a million files in a second on this class of hardware, and one
 that does not stat at all barely can.** That is the whole case for the design in
 one row.
 
+### Correction: the Pi straddles the bar rather than meeting it
+
+The 0.966 s recorded above came from **one five-repeat sweep**. Re-measured after
+the memory fix, across six widths with five repeats each and the machine idle:
+
+| workers | 4 | 5 | 6 | 8 | 10 | 12 |
+| --- | --- | --- | --- | --- | --- | --- |
+| min | 0.899 | 0.901 | 0.942 | 0.948 | 0.927 | 0.976 |
+| **median** | **0.912** | 1.072 | 0.948 | 0.999 | 0.997 | 1.010 |
+| max | 1.070 | 1.210 | 1.028 | 1.093 | 1.200 | 1.184 |
+
+**Every width has runs over one second.** The medians sit between 0.91 and 1.07,
+the minima between 0.90 and 0.98, and the maxima are all outside. The honest
+statement is that a Raspberry Pi 5 **sits on** the one-second bar, not that it
+meets it with 3.4% to spare — that figure was a single median that happened to
+land low, quoted as though it were the result.
+
+Two things follow:
+
+- **`max(6, ncpu)` is not supported by this data either.** On four cores the
+  curve is flat from 4 to 12 and the differences inside that range are inside the
+  noise; 4 workers has the best median and 6 the tightest spread. What the data
+  does support, unambiguously, is that `ncpu - 2` — two workers, 1.626 s — is
+  wrong. "At least `ncpu`, and the exact value does not matter much" is as far as
+  four machines will carry.
+- **`shrink_to_fit` is not the cause and not a cost.** Suspecting the realloc it
+  adds per directory, it was put behind `--no-shrink` and measured on the Pi:
+  1.021 s against 1.030 s, and 82.1 MB against 82.2 MB. Neither difference is
+  real. It is kept because it is worth a few MB on the 24-thread machine, where
+  the arena effect is larger.
+
 ### `ncpu - 2` is wrong again, for a second and unrelated reason
 
 | workers | 1 | 2 | 3 | 4 | 6 | 8 | 10 | 12 | 16 | 22 |
@@ -554,15 +585,22 @@ full-walk condition on the same machine has 3.4%.
 
 | Condition | Result | Worst machine |
 | --- | --- | --- |
-| Warm-cache full walk under 1 s | **PASS, barely** — 0.966 s on a Raspberry Pi 5 at six workers, and 1.592 s at the pool's default width | pi |
+| Warm-cache full walk under 1 s | **MARGINAL** — a Raspberry Pi 5 sits on the bar: medians 0.91–1.07 s across widths, every width with runs over a second, and 1.626 s at the pool's default width | pi |
 | First 200 rows within 30 ms | **PASS** at 0.384 ms, 78× of margin | pi |
 | A hung mount never blocks the UI thread | **PASS** at 4.001 ms, against 28,000 ms for the same call on the frame loop | here |
 
-The first row is the one to watch. It passes on four-core hardware with **3.4%
-of margin**, and only with a pool width the current default does not choose.
-`read_dir` plus `metadata()` misses it by 3.9× on the same machine, and
-`getdents64` with no stat at all takes 0.971 s — so this bar is not comfortably
-reachable by any design, and is unreachable by the obvious one.
+The first row is the one to watch, and it is the one this spike has been most
+wrong about. It has been reported at 0.7–0.9 s (projected), 0.9–1.3 s
+(projected), 0.966 s (one sweep) and now **0.91–1.07 s median depending on width,
+with every width producing runs over a second**. On four-core hardware this
+design sits on the bar rather than inside it.
+
+For scale on the same machine: `read_dir` plus `metadata()` takes 3.854 s, and
+`getdents64` with no stat at all takes 0.974 s. **The bar is not comfortably
+reachable by any design, is unreachable by the obvious one, and is reachable by
+ours only on a good run.** Either the roadmap's one-second figure wants
+revisiting against measured hardware, or the enumeration path needs another
+factor of two — and that is a decision, not a measurement.
 
 The best arm is `parallel` at **0.170 s here and 0.532 s on leto**, 2.7× and 1.4×
 faster than the `getdents64+statx` these conditions were first measured against —
@@ -608,13 +646,13 @@ Three things this spike does **not** license:
    but enumeration on a network mount is a different shape of problem from
    enumeration on a local one, and this spike did not touch it. The hung-mount
    arm is a stand-in for sshfs, not a measurement of sshfs.
-3. **Reference-class hardware has now been measured, and the margin is 3.4%.**
-   A Raspberry Pi 5 reaches 0.966 s at six workers. Earlier revisions of this
-   document projected 0.7–0.9 s and then 0.9–1.3 s from faster machines; the
-   measured answer sits at the top of the second range. The bar holds, but any
-   regression — a deeper tree, a slower device, a filesystem with costlier
-   `statx` — spends a margin that is three hundredths of a second wide. Treat
-   this row as met, not as safe.
+3. **Reference-class hardware has been measured, and the bar is marginal there.**
+   A Raspberry Pi 5 sits on one second: medians 0.91–1.07 s across six widths,
+   with every width producing individual runs above it. This document reported
+   3.4% of margin from a single sweep before the curve was taken; that was one
+   median quoted as a result. Treat the row as **not settled** — it needs either
+   a revised bar or another factor of two, and the choice between those is
+   someone's to make rather than this spike's.
 
 4. **The hung mount was dead before the walk started, not "halfway through".**
    [08-roadmap.md](../../docs/08-roadmap.md#spike-b--enumeration-throughput) asks
