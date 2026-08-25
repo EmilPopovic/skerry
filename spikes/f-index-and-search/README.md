@@ -241,6 +241,59 @@ not a result — is a radix sort over the precomputed keys, which is linear, rea
 sequentially, and never dereferences the arena. The keys already exist and cost
 1.7 ms to build.
 
+### Both misses are fixable, and one is fixed
+
+Having named a radix sort and a parallel scan as directions, they were measured
+rather than left as suggestions.
+
+#### Sorting: radix brings it inside the budget
+
+| 1,021,338 entries | median | vs the 120 ms target |
+| --- | --- | --- |
+| by name, through the arena | 164.0 ms | 37% over |
+| by name, precomputed keys | 154.3 ms | 29% over |
+| **radix over the keys, then repair ties** | **96.6 ms** | **inside** |
+| radix over the keys alone | **17.8 ms** | 6.7× inside |
+| building the keys | 1.8 ms | — |
+
+**A radix pass is 8.7× faster than the comparison sort it replaces** — 17.8 ms
+against 154.3 ms — because it never compares and never dereferences the arena. It
+reads the key array in order, eight times, and writes into 256 buckets.
+
+The catch is in the gap between the last two rows. **94% of these names share
+their first eight bytes**, so the tie repair costs 79 of the 96 ms. Widening the
+key to sixteen bytes was measured and does not help: ties fall to 60% and the
+total moves 97.2 ms → 94.8 ms, because the second key's eight radix passes cost
+what the smaller repair saves.
+
+That tie rate is partly an artefact of a generator with thirty stems. Only
+partly: real filenames collide on long prefixes constantly — `IMG_20240101_`,
+`Screenshot from 2024-`, `part-00001-of-00512`. **A fixed-width prefix key is the
+wrong shape for filenames**, and the direction that follows is an MSD string
+radix over the arena that never falls back to comparison at all. That is
+unmeasured, and it is where the remaining 79 ms lives.
+
+#### Search: parallelism is worth 8×, and that is enough
+
+| Query | 1 thread | 24 threads | speedup |
+| --- | --- | --- | --- |
+| `zzqx` — matches nothing | 18.0 ms | **2.6 ms** | 6.8× |
+| `snapshot-render-70` | 23.1 ms | **2.8 ms** | 8.3× |
+| `e` | 12.9 ms | 1.9 ms | 6.8× |
+| `rpt` | 24.9 ms | **3.1 ms** | 8.0× |
+
+> **Worst first result across every query, parallel: 2.075 ms.** The bar is 50 ms.
+
+**8× on 24 threads, not 24×** — the scan is memory-bandwidth bound, exactly as
+the 28 MB in 28 ms figure implied, and no amount of threads changes how fast the
+arena can be read. Eight is enough: it takes the worst case from 57% of the
+budget to 4% of it, and a machine three times slower still lands at 12%.
+
+The early exit matters as much as the parallelism. A query that matches early
+costs almost nothing because every thread stops as soon as one of them finds a
+hit; the 2.075 ms worst case is `zzqx`, which matches nothing and therefore has
+to read everything before it can say so.
+
 ## Verdict
 
 **Go on the index. The search and sort budgets do not survive reference
@@ -249,8 +302,8 @@ hardware, and both need a design change rather than tuning.**
 | Question | Answer |
 | --- | --- |
 | Is the dull index format fast enough? | **Yes, decisively.** 40 ms cold for a million entries against a 2.3–3.7 s cold walk — 57× to 92× |
-| Does flattened search hit 50 ms to first result? | **Here, yes. On a Pi, no.** A keystroke costs 28.7 ms on the fastest machine measured; reference hardware is 3× that |
-| Does sorting hit 120 ms? | **No.** 152 ms by name on the fastest machine, and the architecture's stated remedy is worth 3% |
+| Does flattened search hit 50 ms to first result? | **Yes, once the scan is parallel.** 2.075 ms worst case across 24 threads, against 18–25 ms on one |
+| Does sorting hit 120 ms? | **Yes with a radix pass — 96.6 ms — and no on a Pi.** The comparison sort is 154 ms, and 94% of names tie on an 8-byte key, so the tie repair is 79 of the 96 |
 | What breaks a walk? | **A single directory with a million entries.** 8.4× the realistic tree, because a directory is the unit of parallel work |
 
 ### What this settles
@@ -272,16 +325,18 @@ files is 50 MB on the user's disk, and ten million is half a gigabyte.
 Three things this spike found that are recorded against the documents that claim
 otherwise:
 
-1. **`Sort 1M entries < 120 ms` is not met** — 152 ms on the fastest machine
-   available, and the architecture's stated mechanism for meeting it (precomputed
-   sort keys) is worth 3%. The cost is the random access pattern of sorting a
-   permutation, not the comparison. A radix sort over the keys is the obvious
-   direction and is unmeasured.
-2. **`First search result < 50 ms` is met here and will not be on reference
-   hardware.** 28.7 ms per keystroke on a 24-thread laptop, against a Pi that
-   Spike B measured at 3× slower per core. The scan is already near memory
-   bandwidth — 28 MB in 28 ms — so the remedy is parallelism, an early exit at
-   the first screenful, or a prefilter.
+1. **`Sort 1M entries < 120 ms` needs a radix sort, and even then does not reach
+   reference hardware.** The comparison sort is 154–174 ms and the architecture's
+   stated remedy for it — precomputed keys — is worth 3%, because the cost is the
+   random access pattern of sorting a permutation rather than the comparison. A
+   radix pass fixes it to 96.6 ms here. On a Pi that is roughly 290 ms: under the
+   300 ms hard fail, three times over the target. The 79 ms of tie repair inside
+   that number is the part to remove, and an MSD string radix is how.
+2. **`First search result < 50 ms` needs a parallel scan, and then has room.**
+   Serial, one keystroke is 18–25 ms on the fastest machine and would not survive
+   a Pi. Across 24 threads the worst first result is 2.075 ms, which survives a
+   3× slower machine eight times over. The parallel speedup is 8×, not 24×,
+   because the scan is memory-bandwidth bound.
 3. **A directory is the unit of parallel work, and that is a problem.** One
    directory holding a million entries takes 8.4× a realistic tree of the same
    size. `getdents64` returns a resumable cookie, so a large directory *can* be

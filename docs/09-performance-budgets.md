@@ -175,29 +175,38 @@ hardware in this project, and the caveat that governs every row below.
 
 | Row | Target | Measured | Verdict |
 | --- | --- | --- | --- |
-| First search result | < 50 ms | 28.7 ms per keystroke, full scan of 1M names | **met here, projected to miss on reference hardware** |
-| Sort 1M entries | < 120 ms | **152 ms** by name; 0.93 ms by a metadata column | **missed** |
+| First search result | < 50 ms | **2.075 ms** worst case, scan parallel across 24 threads; 18–25 ms serial | met, and needs the scan to be parallel |
+| Sort 1M entries | < 120 ms | **96.6 ms** with a radix pass; 154–164 ms comparison-sorted; 0.9 ms by a metadata column | met here, ~290 ms projected on a Pi |
 | RSS at 1M entries | < 250 MB | 209 MB with the flattened store resident | met |
 | — | — | index: 43 ms to build, **40 ms to load cold**, 50 bytes per entry | — |
 
 ### Two rows this breaks
 
-**`Sort 1M entries < 120 ms` is missed at 152 ms**, on the fastest machine
-available, and the mechanism [04-architecture.md](04-architecture.md#data-layout)
-names for meeting it does not work. Precomputing sort keys is worth **3%** —
-152.5 ms against 148.3 ms — because the cost is the random access pattern of
-sorting a permutation of a million indices into an 8 MB key array and a 28 MB
-arena, not the comparison function. Sorting by a metadata column, which reads one
-contiguous array with no indirection, is **0.93 ms**: 160× faster, and the whole
-difference is memory access pattern. A radix sort over the keys is the obvious
-direction and is unmeasured.
+**`Sort 1M entries < 120 ms` needs a radix sort, and the mechanism
+[04-architecture.md](04-architecture.md#data-layout) names does not work.**
+Precomputing sort keys is worth **3%** — 154 ms against 164 ms — because the cost
+is the random access pattern of sorting a permutation of a million indices into
+an 8 MB key array and a 28 MB arena, not the comparison function. Sorting by a
+metadata column, one contiguous array with no indirection, is **0.9 ms**: 180×
+faster, and the whole difference is access pattern.
 
-**`First search result < 50 ms` is met at 28.7 ms and should not be expected to
-hold.** That is one keystroke on a 24-thread laptop; Spike B measured a Raspberry
-Pi 5 at roughly 3× slower per core on comparable work, which puts a keystroke at
-60–90 ms — over target, approaching the 120 ms hard fail. A fuzzy match cannot
-narrow incrementally the way a prefix match can, so every keystroke is a full
-scan, and the scan is already near memory bandwidth at 28 MB in 28 ms.
+A radix pass over the same keys is **17.8 ms** and brings the full name sort to
+**96.6 ms**, inside the target. The remaining 79 ms is tie repair: **94% of these
+names share their first eight bytes**, and widening the key to sixteen was
+measured and does not help — ties fall to 60%, the total moves 97 ms to 95 ms.
+A fixed-width prefix key is the wrong shape for filenames, which collide on long
+prefixes constantly. An MSD string radix that never falls back to comparison is
+the direction, and is unmeasured. On a Pi the 96.6 ms is roughly 290 ms: inside
+the hard fail, three times over the target.
+
+**`First search result < 50 ms` needs a parallel scan.** Serial, one keystroke is
+18–25 ms on a 24-thread laptop and would not survive a Pi at 3× slower per core.
+Across 24 threads the worst first result is **2.075 ms**, which survives that
+machine eight times over. The speedup is **8×, not 24×** — the scan is
+memory-bandwidth bound at 28 MB in 28 ms and no number of threads changes how
+fast an arena can be read. A fuzzy match cannot narrow incrementally the way a
+prefix match can, so every keystroke really is a full scan; what makes it cheap
+is that every thread stops as soon as any of them finds a hit.
 
 ### One row it adds
 

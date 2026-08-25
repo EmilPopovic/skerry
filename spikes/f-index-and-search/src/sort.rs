@@ -59,3 +59,125 @@ pub fn by_size(flat: &Flat, order: &mut [u32]) {
 pub fn by_mtime(flat: &Flat, order: &mut [u32]) {
     order.sort_unstable_by_key(|index| flat.mtime[*index as usize]);
 }
+
+/// Least-significant-digit radix sort over the precomputed keys.
+///
+/// The measured problem with the comparison sorts is not the comparison, it is
+/// that sorting a permutation dereferences a random index into an 8 MB array on
+/// every step. Radix never compares and never dereferences: it reads the key
+/// array in order, eight times, and writes into buckets.
+///
+/// Eight passes of eight bits, because a 256-entry histogram stays in L1 where a
+/// 65,536-entry one for 16-bit digits does not.
+pub fn radix(keys: &[u64], order: &mut Vec<u32>, scratch: &mut Vec<u32>) {
+    scratch.resize(order.len(), 0);
+    let mut counts = [0u32; 256];
+
+    for shift in (0..64).step_by(8) {
+        counts.fill(0);
+        for &index in order.iter() {
+            counts[((keys[index as usize] >> shift) & 0xFF) as usize] += 1;
+        }
+        // A pass whose digit is constant changes nothing; skipping it is worth
+        // real time on keys that do not use their high bytes, which is every key
+        // derived from a short ASCII name.
+        if counts.iter().any(|&c| c as usize == order.len()) {
+            continue;
+        }
+        let mut running = 0u32;
+        for count in counts.iter_mut() {
+            let start = running;
+            running += *count;
+            *count = start;
+        }
+        for &index in order.iter() {
+            let digit = ((keys[index as usize] >> shift) & 0xFF) as usize;
+            scratch[counts[digit] as usize] = index;
+            counts[digit] += 1;
+        }
+        std::mem::swap(order, scratch);
+    }
+}
+
+/// Radix by key, then repair the runs the key could not separate.
+///
+/// An eight-byte key is a prefix, and a prefix leaves ties. On this workload the
+/// ties are enormous — names are drawn from thirty stems, so `report-b` is the
+/// first eight bytes of a great many of them — which makes this the honest
+/// version and the pure radix above an optimistic floor.
+pub fn radix_with_ties(flat: &Flat, keys: &[u64], order: &mut Vec<u32>, scratch: &mut Vec<u32>) -> usize {
+    radix(keys, order, scratch);
+
+    let mut repaired = 0usize;
+    let mut start = 0usize;
+    while start < order.len() {
+        let key = keys[order[start] as usize];
+        let mut end = start + 1;
+        while end < order.len() && keys[order[end] as usize] == key {
+            end += 1;
+        }
+        if end - start > 1 {
+            order[start..end].sort_unstable_by(|a, b| {
+                flat.name(*a as usize).cmp(flat.name(*b as usize))
+            });
+            repaired += end - start;
+        }
+        start = end;
+    }
+    repaired
+}
+
+/// A sixteen-byte key, as two `u64`s.
+///
+/// Eight bytes leaves 94% of this workload tied, and the tie repair is 79 of the
+/// 96 ms a radix sort costs. That tie rate is partly an artefact of a generator
+/// with thirty stems — but only partly. Real filenames collide on long prefixes
+/// constantly: `IMG_20240101_`, `Screenshot from 2024-`, `part-00001-of-`. If
+/// widening the key collapses the repair, the sort budget is a key-width
+/// decision rather than an algorithm one.
+pub fn keys16(flat: &Flat) -> (Vec<u64>, Vec<u64>) {
+    let mut high = Vec::with_capacity(flat.len());
+    let mut low = Vec::with_capacity(flat.len());
+    for index in 0..flat.len() {
+        let name = flat.name(index);
+        let mut buffer = [0u8; 16];
+        let take = name.len().min(16);
+        buffer[..take].copy_from_slice(&name[..take]);
+        high.push(u64::from_be_bytes(buffer[..8].try_into().expect("8 bytes")));
+        low.push(u64::from_be_bytes(buffer[8..].try_into().expect("8 bytes")));
+    }
+    (high, low)
+}
+
+/// Radix over the low half then the high half — least significant digit order,
+/// so the stable passes leave the pair correctly ordered.
+pub fn radix16_with_ties(
+    flat: &Flat,
+    high: &[u64],
+    low: &[u64],
+    order: &mut Vec<u32>,
+    scratch: &mut Vec<u32>,
+) -> usize {
+    radix(low, order, scratch);
+    radix(high, order, scratch);
+
+    let mut repaired = 0usize;
+    let mut start = 0usize;
+    while start < order.len() {
+        let (h, l) = (high[order[start] as usize], low[order[start] as usize]);
+        let mut end = start + 1;
+        while end < order.len()
+            && high[order[end] as usize] == h
+            && low[order[end] as usize] == l
+        {
+            end += 1;
+        }
+        if end - start > 1 {
+            order[start..end]
+                .sort_unstable_by(|a, b| flat.name(*a as usize).cmp(flat.name(*b as usize)));
+            repaired += end - start;
+        }
+        start = end;
+    }
+    repaired
+}

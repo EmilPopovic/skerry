@@ -309,10 +309,106 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         println!("  {}", samples.row());
     }
 
+    let mut radix_ms = Samples::new("radix, keys");
+    let mut radix_ties_ms = Samples::new("radix + ties");
+    let mut scratch = Vec::new();
+    let mut repaired = 0usize;
+    for _ in 0..options.repeats {
+        let mut order = base.clone();
+        let started = Instant::now();
+        sort::radix(&keys, &mut order, &mut scratch);
+        radix_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+
+        let mut order = base.clone();
+        let started = Instant::now();
+        repaired = sort::radix_with_ties(&flat, &keys, &mut order, &mut scratch);
+        radix_ties_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", radix_ms.row());
+    println!("  {}", radix_ties_ms.row());
+    println!(
+        "  {} of {} entries ({:.0}%) share an 8-byte key prefix and need the arena to separate",
+        repaired,
+        flat.len(),
+        100.0 * repaired as f64 / flat.len().max(1) as f64
+    );
+
+    let mut keys16_ms = Samples::new("build keys16");
+    let mut radix16_ms = Samples::new("radix16 + ties");
+    let mut pair;
+    let mut repaired16 = 0usize;
+    for _ in 0..options.repeats {
+        let started = Instant::now();
+        pair = sort::keys16(&flat);
+        keys16_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+
+        let mut order = base.clone();
+        let started = Instant::now();
+        repaired16 = sort::radix16_with_ties(&flat, &pair.0, &pair.1, &mut order, &mut scratch);
+        radix16_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", keys16_ms.row());
+    println!("  {}", radix16_ms.row());
+    println!(
+        "  {} of {} entries ({:.0}%) still tied at 16 bytes",
+        repaired16,
+        flat.len(),
+        100.0 * repaired16 as f64 / flat.len().max(1) as f64
+    );
+
     // ── as you type ───────────────────────────────────────────────────────────
     // Typing `report` is six searches, not one, and each is over the whole set
     // because a fuzzy match is not a prefix match — a later keystroke cannot
     // narrow the previous result set without dropping matches it should keep.
+    // Parallel scan: the only lever that does not change what the search means.
+    let threads = pool_width(options);
+    println!("\n  parallel scan across {threads} threads, milliseconds");
+    println!("  {:<22} {:>12} {:>12} {:>10}", "query", "1 thread", "parallel", "speedup");
+    for (text, _) in QUERIES {
+        let query = Query::new(text);
+        let (mut one, mut many) = (Samples::new("1"), Samples::new("n"));
+        for _ in 0..options.repeats {
+            let started = Instant::now();
+            let a = matcher::count_parallel(&flat, &query, 1);
+            one.push(started.elapsed().as_secs_f32() * 1000.0);
+            let started = Instant::now();
+            let b = matcher::count_parallel(&flat, &query, threads);
+            many.push(started.elapsed().as_secs_f32() * 1000.0);
+            assert_eq!(a, b, "parallel scan disagreed with serial on `{text}`");
+        }
+        let (s1, sn) = (one.percentile(50.0), many.percentile(50.0));
+        println!(
+            "  {:<22} {:>12.3} {:>12.3} {:>9.1}x",
+            if text.is_empty() { "(empty)" } else { text },
+            s1,
+            sn,
+            s1 / sn.max(0.001)
+        );
+    }
+
+    // The bar's own measurement: first result, with every thread stopping as
+    // soon as any of them finds one.
+    let worst = QUERIES
+        .iter()
+        .map(|(text, _)| {
+            let query = Query::new(text);
+            let mut samples = Samples::new("first");
+            for _ in 0..options.repeats {
+                let started = Instant::now();
+                let hit = matcher::first_parallel(&flat, &query, threads);
+                samples.push(started.elapsed().as_secs_f32() * 1000.0);
+                let _ = hit;
+            }
+            (*text, samples.percentile(50.0))
+        })
+        .fold(("", 0.0f32), |acc, next| if next.1 > acc.1 { next } else { acc });
+    println!(
+        "  worst first-result across every query, parallel: {:.3} ms on `{}` ({})",
+        worst.1,
+        if worst.0.is_empty() { "(empty)" } else { worst.0 },
+        if worst.1 < 50.0 { "inside the 50 ms bar" } else { "OVER the 50 ms bar" }
+    );
+
     println!("\n  as-you-type, one full scan per keystroke, milliseconds");
     let word = "report";
     let mut total = 0.0f32;

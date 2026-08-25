@@ -93,3 +93,77 @@ impl Query {
 fn is_boundary(byte: u8) -> bool {
     matches!(byte, b'-' | b'_' | b'.' | b' ' | b'/')
 }
+
+/// Scan the arena across several threads.
+///
+/// A keystroke is a full scan — a fuzzy match cannot narrow the previous result
+/// set, because a longer query can match at an offset the shorter one did not —
+/// and the scan is already close to memory bandwidth. Splitting it is the only
+/// lever that does not change what the search means.
+///
+/// `std::thread::scope` rather than the job pool: the pool is measured elsewhere
+/// and what matters here is whether the *work* divides, not how it is dispatched.
+/// A real implementation submits ranges to the one pool the process owns.
+pub fn count_parallel(flat: &crate::flat::Flat, query: &Query, threads: usize) -> usize {
+    let total = flat.len();
+    if threads <= 1 || total < threads {
+        return (0..total).filter(|i| query.score(flat.name(*i)).is_some()).count();
+    }
+    let per = total.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|slot| {
+                let (flat, query) = (&flat, &query);
+                scope.spawn(move || {
+                    let start = slot * per;
+                    let end = ((slot + 1) * per).min(total);
+                    (start..end).filter(|i| query.score(flat.name(*i)).is_some()).count()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+    })
+}
+
+/// The first match, stopping every thread as soon as any of them finds one.
+///
+/// This is the measurement the 50 ms bar actually describes: a user needs the top
+/// of the list, not all of it. The early exit is what makes a query that matches
+/// early cost nothing, and a query that matches nothing cost a full scan.
+pub fn first_parallel(
+    flat: &crate::flat::Flat,
+    query: &Query,
+    threads: usize,
+) -> Option<usize> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let total = flat.len();
+    if threads <= 1 {
+        return (0..total).find(|i| query.score(flat.name(*i)).is_some());
+    }
+    let found = AtomicBool::new(false);
+    let per = total.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|slot| {
+                let (flat, query, found) = (&flat, &query, &found);
+                scope.spawn(move || {
+                    let start = slot * per;
+                    let end = ((slot + 1) * per).min(total);
+                    for index in start..end {
+                        // Checked per chunk rather than per name: an atomic load
+                        // on every entry costs more than the scan it guards.
+                        if index % 4096 == 0 && found.load(Ordering::Relaxed) {
+                            return None;
+                        }
+                        if query.score(flat.name(index)).is_some() {
+                            found.store(true, Ordering::Relaxed);
+                            return Some(index);
+                        }
+                    }
+                    None
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok().flatten()).min()
+    })
+}

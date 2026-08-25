@@ -284,7 +284,12 @@ paragraph implied.** Sorting a million entries by name takes 152 ms whether the 
 reads the arena or a precomputed `u64`, against a 120 ms budget; sorting by a metadata
 column takes 0.93 ms. The cost is the random access pattern of sorting a *permutation*, not
 the comparison function, so making the comparison cheaper cannot fix it. What is needed is
-a sort that reads sequentially — a radix pass over the keys — and that is unmeasured.
+a sort that reads sequentially: a radix pass over the keys is **17.8 ms** and brings the
+full name sort to **96.6 ms**, inside the budget. The remaining 79 ms is repairing ties,
+because 94% of filenames share their first eight bytes and widening the key to sixteen was
+measured and does not help. A fixed-width prefix key is the wrong shape for names that
+collide on long prefixes; an MSD string radix over the arena is the direction, and is
+unmeasured.
 
 Enumeration goes through raw `getdents64` (via `rustix`) rather than `std::fs::read_dir`,
 because `d_type` yields file-versus-directory for free and lets `statx` be deferred to a
