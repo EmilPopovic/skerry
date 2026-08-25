@@ -240,7 +240,7 @@ uncoordinated oversubscription, which is a latency bug that only appears under l
 See [ADR 0005](adr/0005-no-async-runtime.md).
 
 **Width is per-workload, not one number.** The `ncpu - 2` in the diagram above is a
-ceiling, not a target. [Spike B](../spikes/b-enumeration/README.md#pool-width--ncpu--2-is-the-wrong-number-for-this-work)
+ceiling, not a target. [Spike B](../spikes/b-enumeration/README.md#pool-width--ncpu---2-is-the-wrong-number-for-this-work)
 measured a million `statx` calls saturating at **three** workers and degrading past it —
 0.436 s at three against 0.539 s at twenty-two, a 23% penalty for nineteen extra threads,
 because the work is kernel-bound on inode locks rather than CPU-bound. A copy engine or a
