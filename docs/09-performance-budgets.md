@@ -126,8 +126,19 @@ them:
 - **A parallel tree walk is worth more than either syscall choice.** Making
   directories jobs, taking `statx` through the directory's own file descriptor,
   and giving each job its own store chunk instead of a shared locked arena is
-  2.7× on the fast machine and 1.6× on the Pi. Deferring `statx` is the next
+  3.4× on the fast machine and 1.6× on the Pi. Deferring `statx` is the next
   largest effect; replacing `read_dir` with `getdents64` is the smallest.
+- **It holds the bar cold, and it is the only arm that does.** With the page,
+  dentry and inode caches dropped, the full walk is **0.80–0.85 s** against
+  3.3–3.9 s for `getdents64+statx` and 5.6 s for `read_dir+meta`. The advantage
+  *widens* cold, from 3.4× to 4.3×, because cold work is latency-bound and
+  parallelism hides latency. Spike B predicted the arms would converge cold, and
+  predicted it twice; they diverged both times.
+- **The parallel walk costs 137 MB against 84 MB**, and briefly cost 522 MB — a
+  chunk over-reservation that cleared Spike A's 300 MB bar and was caught only
+  because a cold run happened to print peak RSS. The `RSS at 1M entries` row
+  above is enumeration *plus* a GPU stack; neither spike has measured them in
+  one process.
 - **`ncpu - 2` is the wrong pool width, and worst where it matters most.** On a
   four-core machine it is two workers and leaves half the machine idle: 1.592 s
   against 0.966 s on the Pi, 1.119 s against 0.716 s on a four-core VM. Every

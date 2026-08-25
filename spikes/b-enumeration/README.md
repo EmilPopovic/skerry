@@ -324,36 +324,71 @@ two machines. What the curve suggests instead is a short probe at first use:
 the optimum is the knee, it is shallow either side of it, and both machines reach
 within 5% of their best somewhere between 3 and 6 workers.
 
-### Cold cache — partial, from a run on the reference tree
+### Cold cache
 
-Contributed after the fact, one sample per arm, each preceded by
-`sync; echo 3 > /proc/sys/vm/drop_caches`. **Read with care: the harness ran its
-warming walk before the table, so the table is dentries-warm and inodes-cold, and
-the genuinely cold number is the `warming` line.**
+Two independent sets, each arm preceded by `sync; echo 3 > /proc/sys/vm/drop_caches`,
+with `--cold` skipping the harness's warming walk so the table *is* the cold
+measurement. One sample per drop, because the second repeat of a cold run is a
+warm run. Raw output in [runs/cold-cache.txt](runs/cold-cache.txt).
 
-| What | Measurement |
-| --- | --- |
-| Truly cold, names only (the `warming` walk) | **2.64–2.81 s** for 1M files |
-| `read_dir` — dentries warm, inodes cold | 0.526 s |
-| `read_dir+meta` — dentries warm, inodes cold | 2.342 s |
-| `getdents64` — dentries warm, inodes cold | 0.445 s |
-| `getdents64+statx` — dentries warm, inodes cold | **1.010 s** |
+| Arm | cold set 1 | cold set 2 | warm | cold / warm |
+| --- | --- | --- | --- | --- |
+| `read_dir+meta` | 5.600 | 5.627 | 1.092 | 5.1× |
+| `getdents64+statx` | 3.295 | 3.861 | 0.442 | 8.1× |
+| **`parallel`** | **0.845** | **0.802** | 0.130 | 6.3× |
 
-Three things this says:
+**`parallel` holds the one-second bar cold, at 0.802–0.845 s.** Neither other arm
+is close: `getdents64+statx` is 3.5–3.9× over it and `read_dir+meta` is 5.6× over.
 
-- **A cold walk is roughly 5× a warm one** and is dominated by the device, which
-  is what was predicted. 2.7 s to enumerate a million cold files on NVMe.
-- **The arms did not converge cold.** `getdents64+statx` at 1.010 s against
-  `read_dir+meta` at 2.342 s is a 2.3× gap — *wider* than the warm 2.25×. The
-  prediction in the warm section was that cold would flatten the difference; it
-  did not. The win survives the case a user actually notices, which is a better
-  result than the warm number alone.
-- **1.010 s is over the 1 s bar**, and the bar says warm cache, so this is not a
-  miss. It is a warning: on a slower device, with inodes cold, the full walk is
-  not comfortably inside a second.
+**This spike predicted convergence twice and was wrong twice.** The reasoning was
+that a cold walk is dominated by the storage device, so our syscall choices would
+wash out. They do the opposite: `parallel`'s lead over `getdents64+statx` **widens
+from 3.4× warm to 4.3× cold.** Cold work is latency-bound rather than
+throughput-bound, and parallelism hides latency — so the design's advantage is
+largest exactly where a user notices it, on the first open after a boot.
 
-A `--cold` flag now skips the warming walk, so a future run measures a cold tree
-in the table rather than in a line the harness discards. These numbers predate it.
+The 30 ms first-rows condition survives cold as well: worst cell 0.455 ms on a
+100,000-entry directory, still 66× inside the bar. That retires a caveat this
+document carried for several revisions, that the condition had only ever been
+measured against a warm dentry cache.
+
+### The memory regression the cold run exposed
+
+The cold output carried a number nothing else was reporting: **`peak RSS 454.2 MB`
+on the `parallel` arm**, against 78 MB for the others. Warm it was worse — 521.6 MB.
+
+That is over [Spike A's 300 MB bar](../a-million-rows/README.md#rss-peak-1000000-entries)
+and over the 250 MB target in
+[09-performance-budgets.md](../../docs/09-performance-budgets.md), and it was
+introduced by the change that made this spike fast, two commits before anything
+looked at it.
+
+The cause was `Chunk::with_capacity(1024)`, which reserves about 61 KB. In the
+serial arms one chunk is created and `take`n repeatedly, so every chunk after the
+first grows to the size it actually needs. In the parallel arm **one job is one
+directory**, so all 21,338 chunks took the full reservation while most hold a
+hundred entries. Not pre-reserving, and shrinking each chunk before parking it in
+the store, fixes it:
+
+| | before | after |
+| --- | --- | --- |
+| peak RSS | 521.6 MB | **136.9 MB** |
+| median walk | 0.170 s | **0.130 s** |
+
+Cheaper *and* faster, because the reservation was allocator work nobody wanted.
+
+The remaining gap — 137 MB against 84 MB for the serial arms — is not the data,
+which is identical. The likely cause is glibc's per-thread malloc arenas across 22
+workers; that is a hypothesis rather than a measurement, it was not isolated, and
+it is inside every budget, so it was left alone.
+
+**How it went unnoticed is the part worth keeping.** An earlier revision removed
+peak RSS from the results table for a good reason — `VmHWM` only rises, so inside
+one process the first arm's peak is every arm's peak and the column was
+meaningless. The replacement was a `--only` run per arm, which existed, was
+correct, and was never run against the new arm. Removing a misleading metric
+without keeping its replacement on the default path is how a dimension stops
+being watched.
 
 ## Making it faster — and retracting a finding
 
@@ -388,17 +423,20 @@ Two of the three things slowing it down were mine.
 
 Median seconds, five repeats, both machines idle:
 
-| Arm | here (24 threads) | leto (12 threads) |
-| --- | --- | --- |
-| `read_dir` | 0.291 | 0.683 |
-| `read_dir+meta` | 1.118 | 3.552 |
-| `getdents64` | 0.248 | 0.557 |
-| `getdents64+statx` | 0.452 | 0.755 |
-| `dirfd-statx` (serial, for isolating the `dirfd` effect) | 1.023 | 2.857 |
-| **`parallel`** | **0.170** | **0.532** |
+| Arm | here (24 threads) | leto (12 threads) | peak RSS |
+| --- | --- | --- | --- |
+| `read_dir` | 0.295 | 0.683 | 85.1 MB |
+| `read_dir+meta` | 1.092 | 3.552 | 85.1 MB |
+| `getdents64` | 0.249 | 0.557 | 83.9 MB |
+| `getdents64+statx` | 0.442 | 0.755 | 83.9 MB |
+| `dirfd-statx` (serial, for isolating the `dirfd` effect) | 1.019 | 2.857 | 78.2 MB |
+| **`parallel`** | **0.130** | **0.532** | 136.9 MB |
 
-**2.7× faster than the design this spike originally recommended on the fast
-machine, 1.4× on the slower one, and 6.6× faster than `read_dir+meta` on both.**
+**3.4× faster than the design this spike originally recommended on the fast
+machine, 1.4× on the slower one, and 8.4× faster than `read_dir+meta` here.** It
+costs memory — 137 MB against 84 MB — after a regression that reached 522 MB and
+was caught only by a contributed cold run; see
+[the memory regression](#the-memory-regression-the-cold-run-exposed).
 The `dirfd-statx` row is serial on purpose: against serial `read_dir+meta` it
 isolates the `dirfd` and allocation change at 1.09× here and 1.24× on leto — real,
 and the smallest of the three effects. **The parallel traversal is the win.**
@@ -453,13 +491,19 @@ first-class, and until now nothing had been run on it.
 
 | Arm | here | leto | homelab | **pi** |
 | --- | --- | --- | --- | --- |
-| `read_dir` | 0.291 | 0.683 | 0.761 | 1.229 |
-| `read_dir+meta` | 1.118 | 3.552 | 2.862 | **3.882** |
-| `getdents64` | 0.248 | 0.557 | 0.624 | 0.971 |
-| `getdents64+statx` | 0.452 | 0.755 | 0.954 | **1.241** |
-| `dirfd-statx` (serial) | 1.023 | 2.857 | 1.918 | 2.714 |
-| `parallel`, `ncpu - 2` default | 0.170 | 0.532 | 1.119 | **1.592** |
-| `parallel`, best width | 0.170 | 0.532 | **0.716** | **0.966** |
+| `read_dir` | 0.295 | 0.683 | 0.761 | 1.229 |
+| `read_dir+meta` | 1.092 | 3.552 | 2.862 | **3.882** |
+| `getdents64` | 0.249 | 0.557 | 0.624 | 0.971 |
+| `getdents64+statx` | 0.442 | 0.755 | 0.954 | **1.241** |
+| `dirfd-statx` (serial) | 1.019 | 2.857 | 1.918 | 2.714 |
+| `parallel`, `ncpu - 2` default | **0.130** | 0.532 | 1.119 | **1.592** |
+| `parallel`, best width | **0.130** | 0.532 | **0.716** | **0.966** |
+
+Only the `here` column is post-fix. `leto`, `homelab` and `pi` were measured
+before the chunk over-reservation was found, so their `parallel` figures are if
+anything slightly pessimistic and their peak RSS was never captured. The fix only
+reduces memory and marginally improves speed, so nothing below turns on it — but
+the Pi's 3.4% margin is thin enough that its number is worth re-taking.
 
 **On the Pi the bar is met, and only just: 0.966 s against 1 s, a 3.4% margin,
 and only at six workers.** At the pool's default width it is 1.592 s and a clear
@@ -537,7 +581,13 @@ three changes are worth, largest first:
 | `getdents64` over `read_dir`, and `statx` through the directory fd | the smallest, ~1.1–1.24× |
 
 Together: **3.882 s → 0.966 s, a 4.0× improvement, and the difference between
-missing the bar by 3.9× and meeting it by 3.4%.**
+missing the bar by 3.9× and meeting it by 3.4%.** Cold, on the fastest machine,
+the same comparison is 5.6 s → 0.8 s, and the design is the only one of the three
+that holds the bar with the cache dropped.
+
+It costs memory: 137 MB peak against 84 MB for the serial arms, after a
+regression that reached 522 MB and was caught only by a contributed cold run.
+Inside every budget, and worth saying in the same breath as the speed.
 
 An earlier version of this verdict said "the batching is the win, `getdents64` is
 the trim" and put a 2.25× on it. That was true of the design as it stood before
@@ -547,14 +597,12 @@ which part mattered is the useful part of this spike's history.
 
 Three things this spike does **not** license:
 
-1. **Cold cache is measured only partially and only by accident.** One
-   contributed run exists, and its table is dentries-warm/inodes-cold because
-   the harness ran its warming walk first; the genuinely cold number is the line
-   that run discarded. A `--cold` flag now skips that warming walk and has been
-   exercised, but **no proper cold sweep has been run on any machine**, and
-   dropping the page cache needs root. Commands below. Cold is also the arm that
-   decides whether the 30 ms condition is real, since warm it measures a memcpy
-   out of the dentry cache.
+1. **Cold cache is measured, on one machine.** Two sets on the 24-thread laptop,
+   and none on the Pi, the VM or leto — where the cold penalty would land on
+   slower cores and, on the Pi, a different storage stack. The warm numbers vary
+   by 7× across those machines; there is no reason to assume the cold ones vary
+   less.
+
 2. **One filesystem.** ext4 throughout, on four different devices. The roadmap's matrix — btrfs,
    xfs, NFS — belongs to [Spike E](../../docs/08-roadmap.md#spike-e--operation-engine-correctness),
    but enumeration on a network mount is a different shape of problem from

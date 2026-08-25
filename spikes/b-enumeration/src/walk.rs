@@ -373,7 +373,12 @@ fn read_directory_job(
 ) {
     let mut stack = vec![directory];
     let mut buffer = vec![MaybeUninit::<u8>::uninit(); DIRENT_BUFFER];
-    let mut chunk = Chunk::with_capacity(1024);
+    // Deliberately *not* pre-reserved. In the parallel arm one job is one
+    // directory, so a `with_capacity(1024)` here reserves ~61 KB for every one
+    // of 21,338 chunks while most hold a hundred entries — measured at 521 MB
+    // peak RSS against 83 MB for the other arms, over Spike A's 300 MB bar.
+    // Growing from empty costs a few reallocations and bounds the waste at 2x.
+    let mut chunk = Chunk::default();
 
     while let Some(directory) = stack.pop() {
         if cancel.is_cancelled() {
@@ -431,6 +436,7 @@ fn read_directory_job(
             }
             chunk.push(&String::from_utf8_lossy(raw), flags, size, mtime);
         }
+        chunk.shrink_to_fit();
         store.push_chunk(std::mem::take(&mut chunk));
     }
 }

@@ -70,6 +70,17 @@ impl Chunk {
         self.flags.clear();
     }
 
+    /// Hands back the slack that growth-by-doubling left, before the chunk is
+    /// parked in the store for the rest of the run. One realloc per directory
+    /// against 2x the resident footprint of the whole listing.
+    pub fn shrink_to_fit(&mut self) {
+        self.names.shrink_to_fit();
+        self.name_ref.shrink_to_fit();
+        self.size.shrink_to_fit();
+        self.mtime.shrink_to_fit();
+        self.flags.shrink_to_fit();
+    }
+
     fn footprint(&self) -> usize {
         self.names.capacity()
             + self.name_ref.capacity() * 8

@@ -1,0 +1,22 @@
+# Cold-cache runs, contributed. This machine (Ryzen AI 9 HX 370, 24 threads),
+# ext4 on NVMe, 1M files. Each arm preceded by:
+#     sync; echo 3 | sudo tee /proc/sys/vm/drop_caches
+# --cold skips the harness's warming walk, so the table is the cold measurement.
+# One sample per drop: the second repeat of a cold run is a warm run.
+#
+# NOTE: measured against the binary BEFORE the chunk over-reservation fix, so the
+# parallel arm's 454 MB peak RSS here is the regression, not the current figure.
+#
+# set 1                          median s   peak RSS
+  read_dir+meta                    5.600     77.8 MB
+  getdents64+statx                 3.295     78.0 MB
+  parallel                         0.845    454.2 MB
+# set 2
+  read_dir+meta                    5.627     77.6 MB
+  getdents64+statx                 3.861     77.7 MB
+  parallel                         0.802    454.2 MB
+#
+# time to first 200 rows, cold, 100000-entry directory, milliseconds
+  read_dir+meta                    0.355 / 0.368
+  getdents64+statx                 0.169 / 0.242
+  parallel                         0.189 / 0.455
