@@ -40,6 +40,12 @@ struct Options {
     skip_hang: bool,
     only: Option<String>,
     hang_at: Option<PathBuf>,
+    /// Pool width, for measuring how the batching win scales down to machines
+    /// with fewer cores than this one.
+    workers: Option<usize>,
+    /// Skip the warming walk, so a run after `drop_caches` measures a cold tree
+    /// in the table rather than in the discarded warm-up line.
+    cold: bool,
 }
 
 const USAGE: &str = "\
@@ -50,7 +56,9 @@ spike-b-enumeration — Spike B, getdents64 + statx against read_dir
   --repeats N     runs per arm (default 3)
   --skip-hang     leave out the hung-mount condition
   --only ARM      one arm only: read_dir, read_dir+meta, getdents64, getdents64+statx
-  --hang-at PATH  where to mount the hung filesystem (default beside the tree)";
+  --hang-at PATH  where to mount the hung filesystem (default under ~/.cache)
+  --workers N     job pool width (default ncpu - 2)
+  --cold          skip the warming walk — for a run straight after drop_caches";
 
 fn main() {
     if let Err(message) = run() {
@@ -67,6 +75,8 @@ fn parse() -> Result<Options, String> {
         skip_hang: false,
         only: None,
         hang_at: None,
+        workers: None,
+        cold: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -78,6 +88,8 @@ fn parse() -> Result<Options, String> {
             "--skip-hang" => options.skip_hang = true,
             "--only" => options.only = Some(value()?),
             "--hang-at" => options.hang_at = Some(PathBuf::from(value()?)),
+            "--workers" => options.workers = Some(value()?.parse().map_err(|_| "bad --workers")?),
+            "--cold" => options.cold = true,
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument `{other}`\n\n{USAGE}")),
         }
@@ -109,8 +121,12 @@ fn run() -> Result<(), String> {
     println!("Spike B — enumeration throughput");
     println!("  tree         {} files under {}", present, options.root.display());
     println!(
-        "  pool         {} workers (ncpu - 2)",
-        Pool::new(Cancel::new()).width()
+        "  pool         {} workers{}",
+        pool_width(&options),
+        match options.workers {
+            Some(_) => " (--workers)",
+            None => " (ncpu - 2)",
+        }
     );
     println!("  load         {}", load_average());
     println!();
@@ -126,7 +142,11 @@ fn run() -> Result<(), String> {
         return Err(format!("no arm matches `{}`", options.only.unwrap_or_default()));
     }
 
-    warm_the_cache(&options.root);
+    if options.cold {
+        println!("  warming      SKIPPED — --cold, so the table below is a cold-cache run");
+    } else {
+        warm_the_cache(&options.root);
+    }
     full_walk(&options, &arms);
     first_rows(&options, &arms);
     if !options.skip_hang {
@@ -184,7 +204,7 @@ fn full_walk(options: &Options, arms: &[Arm]) {
 
         for _ in 0..options.repeats {
             let cancel = Cancel::new();
-            let mut pool = Pool::new(cancel.clone());
+            let mut pool = Pool::with_width(pool_width(options), cancel.clone());
             let store = Arc::new(Store::with_capacity(tree::total_files()));
 
             let started = Instant::now();
@@ -383,6 +403,14 @@ fn spin(duration: Duration) {
     while Instant::now() < until {
         std::hint::spin_loop();
     }
+}
+
+fn pool_width(options: &Options) -> usize {
+    options.workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get().saturating_sub(2).max(1))
+            .unwrap_or(2)
+    })
 }
 
 fn default_hang_mount() -> PathBuf {

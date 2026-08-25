@@ -236,6 +236,68 @@ with no path to a filesystem syscall cannot be blocked by one. "No frame exceede
 8 ms" would have been a restatement of the design rather than a measurement of
 it.
 
+### Pool width — `ncpu - 2` is the wrong number for this work
+
+`getdents64+statx`, five repeats per width, median seconds, machine idle:
+
+| workers | 1 | 2 | **3** | 4 | 6 | 8 | 12 | 16 | 22 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| median | 0.942 | 0.505 | **0.436** | 0.438 | 0.452 | 0.460 | 0.489 | 0.521 | 0.539 |
+
+The win saturates at **three workers** and then degrades monotonically. At the
+`ncpu - 2` width this machine actually uses — 22 — the walk takes **0.539 s
+against 0.436 s at three, a 23% penalty for 19 extra threads.** The ranges do not
+overlap (3 workers: 0.384–0.462; 22 workers: 0.521–0.550), so this is not noise.
+
+Two consequences, and the second is the one that matters:
+
+- **The batching win is not a parallelism win.** Two workers get 0.505 s where 22
+  get 0.539 s. That was the single biggest risk this spike carried into the
+  reference-machine question, and it is not a risk: a four-core machine running
+  two pool workers loses nothing to thread count.
+- **The threading diagram in [04-architecture.md](../../docs/04-architecture.md#threading)
+  says `ncpu - 2`, and for metadata syscalls that is actively harmful.** A million
+  `statx` calls are kernel-bound on inode locks and page-cache lookups, not
+  CPU-bound, so past a handful of threads the pool is paying contention for
+  throughput it cannot get. The pool needs a **per-workload width**, not one
+  global number — a copy engine or a thumbnail decoder may well want `ncpu - 2`,
+  and this does not.
+
+That is a finding about `sk-util`'s design, not about `rustix`, and it is the
+kind that is cheap now and expensive after twelve crates depend on the pool's
+shape.
+
+### Cold cache — partial, from a run on the reference tree
+
+Contributed after the fact, one sample per arm, each preceded by
+`sync; echo 3 > /proc/sys/vm/drop_caches`. **Read with care: the harness ran its
+warming walk before the table, so the table is dentries-warm and inodes-cold, and
+the genuinely cold number is the `warming` line.**
+
+| What | Measurement |
+| --- | --- |
+| Truly cold, names only (the `warming` walk) | **2.64–2.81 s** for 1M files |
+| `read_dir` — dentries warm, inodes cold | 0.526 s |
+| `read_dir+meta` — dentries warm, inodes cold | 2.342 s |
+| `getdents64` — dentries warm, inodes cold | 0.445 s |
+| `getdents64+statx` — dentries warm, inodes cold | **1.010 s** |
+
+Three things this says:
+
+- **A cold walk is roughly 5× a warm one** and is dominated by the device, which
+  is what was predicted. 2.7 s to enumerate a million cold files on NVMe.
+- **The arms did not converge cold.** `getdents64+statx` at 1.010 s against
+  `read_dir+meta` at 2.342 s is a 2.3× gap — *wider* than the warm 2.25×. The
+  prediction in the warm section was that cold would flatten the difference; it
+  did not. The win survives the case a user actually notices, which is a better
+  result than the warm number alone.
+- **1.010 s is over the 1 s bar**, and the bar says warm cache, so this is not a
+  miss. It is a warning: on a slower device, with inodes cold, the full walk is
+  not comfortably inside a second.
+
+A `--cold` flag now skips the warming walk, so a future run measures a cold tree
+in the table rather than in a line the harness discards. These numbers predate it.
+
 ## Verdict
 
 **Go, with the cold-cache arm owed.**
@@ -245,6 +307,9 @@ it.
 | Warm-cache full walk under 1 s | **PASS** at 0.530 s — and `read_dir+meta` **misses** at 1.195 s |
 | First 200 rows within 30 ms | **PASS** at 0.143 ms worst case, on a warm cache only |
 | A hung mount never blocks the UI thread | **PASS** at 4.001 ms, against 28,000 ms for the same call on the frame loop |
+
+Best measured width is three workers, not the `ncpu - 2` the harness defaults to:
+**0.436 s**, and the numbers above would all improve by 23% with it.
 
 `getdents64` plus batched `statx` earns its place, and the number that justifies
 it is 2.25× on the comparable pair — enough to move the design from missing the
@@ -265,11 +330,13 @@ Three things this spike does **not** license:
    but enumeration on a network mount is a different shape of problem from
    enumeration on a local one, and this spike did not touch it. The hung-mount
    arm is a stand-in for sshfs, not a measurement of sshfs.
-3. **22 pool workers.** The reference machine has four cores and would run two.
-   The batching win is a parallelism win, so it is the number in this spike most
-   likely to shrink on the machine the budgets are written against. That makes
-   the reference-machine run more important here than it was for Spike A, not
-   less.
+3. **The reference machine is still owed, but not for the reason expected.**
+   The worry going in was thread count — 22 workers here against two there. The
+   width sweep above retires that worry: two workers get 0.505 s where 22 get
+   0.539 s. What is left is per-core speed and memory bandwidth, and the honest
+   projection for a 2021 four-core part is 0.7–0.9 s against a 1 s bar. That
+   passes with 10–30% margin rather than Spike A's 3×, so it is a real number to
+   go and get rather than a formality.
 
 What lands as a permanent gate: the four-arm comparison as a regression test on
 the enumeration path, and the hung-mount test **with its control arm**, which

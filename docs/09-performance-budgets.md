@@ -119,6 +119,13 @@ them:
   0.614 s and replacing `read_dir` with `getdents64` accounts for 0.051 s. The
   thing to get right in `sk-fs` is the batching.
 
+A third finding, about the pool rather than the filesystem: the enumeration work
+saturates at **three** pool workers and degrades beyond it — 0.436 s at three
+against 0.539 s at `ncpu - 2` on a 24-thread machine. Pool width is a
+per-workload ceiling, not a global target. It also retires the main worry about
+the reference machine: two workers get 0.505 s, so a four-core part loses
+nothing to thread count and the remaining gap is per-core speed.
+
 The hung-mount row is measured **with a control**: the same listing on the frame
 loop instead of the pool. Without it the row can only pass, because a frame loop
 with no path to a filesystem syscall cannot be blocked by one. Any future version
