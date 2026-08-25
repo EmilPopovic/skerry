@@ -359,6 +359,59 @@ Sorting by a metadata column is 6.1 ms, 123× faster than by name. The entire
 difference remains memory access pattern, and on the Pi it is starker, not
 milder.
 
+#### Sorting, chased down from 916 ms to 240 ms
+
+Having found that no approach met the sort budget on a Pi, four more were tried.
+Every row below was verified to produce a correctly ordered result, because a
+sort that is fast and wrong is not a result.
+
+| Approach, 1,021,338 entries | Pi 5 | laptop | vs 120 ms target | vs 300 ms fail |
+| --- | --- | --- | --- | --- |
+| comparison, through the arena | 929.5 | 156.7 | 7.7× over | 3.1× over |
+| comparison, precomputed keys | 842.1 | 153.0 | 7.0× over | 2.8× over |
+| radix over keys, then repair ties | 740.5 | 99.4 | 6.2× over | 2.5× over |
+| radix over 16-byte keys, then ties | 882.8 | 93.8 | 7.4× over | 2.9× over |
+| **radix over `(key, index)` pairs, no ties** | **137.9** | 16.3 | 1.1× over | inside |
+| recursive radix, never compares | 374.3 | 70.0 | 3.1× over | 1.2× over |
+| **recursive radix, buckets across threads** | **239.9** | **23.7** | **2.0× over** | **inside** |
+
+**916 ms to 240 ms, a 3.9× improvement, and the row moves from 2.5× outside the
+hard fail to inside it.** It is still 2× over the target, so the budget is not
+met — but it is no longer catastrophically missed, and the remaining distance is
+identified rather than mysterious.
+
+Three things did the work, and one of them is the opposite of what the
+architecture document suggested:
+
+- **Pack the key beside the index.** Sorting a permutation reads `keys[order[i]]`
+  — a random probe into 8 MB, once per element per pass. Packing them into
+  `(u64, u32)` pairs makes every read sequential and costs 8 MB of footprint.
+  On the Pi that is **257 ms → 138 ms**; on the laptop only 19 ms → 16 ms. The
+  memory-bound machine shows the effect the cache-rich one hides, which is the
+  second time in this spike that the Pi disagreed with the laptop about *why*
+  something was slow.
+- **Never fall back to comparison.** Repairing ties by string comparison costs
+  more than the radix that preceded it — 600 of the 741 ms. Recursing onto the
+  *next* eight bytes instead, down to runs of 24 where a comparison sort is
+  genuinely cheaper than a histogram, is **741 ms → 374 ms**. Filenames share
+  long prefixes, so a fixed-width key was always going to leave the work
+  undone.
+- **Sort the buckets in parallel.** After the first pass the 256 runs share
+  nothing: each owns a disjoint slice of the order array and reads an immutable
+  arena, so they are independent by construction rather than by locking. Longest
+  run first, or one bucket of 100,000 decides the wall clock. **374 ms → 240 ms.**
+
+The budget says this sort is "off-thread; the UI stays interactive throughout",
+which is a statement about the UI thread and not a promise that the sort is
+serial. Parallelising it is inside the rule.
+
+**Where the remaining 240 ms sits, and the next lever.** The first pass alone —
+one packed radix over a million names, still serial — is 138 ms of it. The
+recursion and the threading account for the other 102 ms. So **57% of the time is
+now in the one part that was left serial**, and parallelising the first histogram
+and scatter is the obvious next step. That is unmeasured, and if it scales like
+the buckets did it would land near the 120 ms target.
+
 #### Warm is not reliably warm on 8 GB
 
 | | p50 | p99 | mean |
@@ -388,7 +441,7 @@ Measured on both machines, with the Pi 5 as the one that decides:
 | --- | --- | --- |
 | Is the dull index format fast enough? | 48 ms cold | **195 ms cold — yes, 12–19× faster than the walk it replaces** |
 | Does flattened search hit 50 ms to first result? | 2.1 ms | **13.3 ms — yes, and only because the scan is parallel** |
-| Does sorting hit 120 ms? | 96.6 ms with radix | **752 ms — no, by any route measured, and 2.5× outside the hard fail** |
+| Does sorting hit 120 ms? | 23.7 ms parallel radix | **240 ms — no, but inside the 300 ms hard fail, down from 916 ms** |
 | What breaks a walk? | one directory of a million entries, 8.4× a realistic tree | the same, plus a warm cache that does not stay warm in 8 GB |
 
 ### What this settles
@@ -416,15 +469,13 @@ files is 50 MB on the user's disk, and ten million is half a gigabyte.
 Three things this spike found that are recorded against the documents that claim
 otherwise:
 
-1. **`Sort 1M entries` is not achievable on reference hardware by anything
-   measured.** On a Pi 5: 916 ms comparison-sorted, 837 ms with precomputed keys,
-   753 ms with a radix pass and tie repair, 876 ms with 16-byte keys. The target
-   is 120 ms and the hard fail is 300 ms; the best route is **2.5× outside the
-   hard fail**. Pure radix without ties is 213 ms, which is over the target but
-   inside the fail — so the whole budget hinges on never falling back to
-   comparison, and an MSD string radix over the arena is the only unmeasured
-   route left. Sorting by a metadata column is 6.1 ms, so this is specifically a
-   *filename* sorting problem.
+1. **`Sort 1M entries < 120 ms` is not met on reference hardware, at 240 ms** —
+   though it is inside the 300 ms hard fail, down from 916 ms, after packing keys
+   beside indices, recursing instead of repairing ties, and sorting the buckets
+   in parallel. 57% of what remains is the first radix pass, which is still
+   serial; parallelising it is the identified next lever and is unmeasured.
+   Sorting by a metadata column is 8 ms, so this is specifically a *filename*
+   sorting problem and not a sorting problem.
 2. **`First search result < 50 ms` is met on a Pi at 13.3 ms, and only with a
    parallel scan.** Serial on the same machine the worst case is 47.4 ms, inside
    the bar by 5%, which is not inside it; and as-you-type is 72.3 ms per

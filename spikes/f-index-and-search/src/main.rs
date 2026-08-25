@@ -275,6 +275,8 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         2300.0 / cold.percentile(50.0).max(0.001)
     );
 
+    let threads = pool_width(options);
+
     // ── sorting ───────────────────────────────────────────────────────────────
     println!("\n  sorting {} entries, milliseconds — bar: 120 ms, hard fail 300 ms", flat.len());
     let mut keys_ms = Samples::new("build keys");
@@ -333,6 +335,60 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         100.0 * repaired as f64 / flat.len().max(1) as f64
     );
 
+    let mut packed_ms = Samples::new("radix packed");
+    let mut packed_ties_ms = Samples::new("packed + ties");
+    for _ in 0..options.repeats {
+        let mut order = Vec::new();
+        let started = Instant::now();
+        sort::radix_packed(&keys, &mut order);
+        packed_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+
+        let mut order = Vec::new();
+        let started = Instant::now();
+        sort::radix_packed_with_ties(&flat, &keys, &mut order);
+        packed_ties_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", packed_ms.row());
+    println!("  {}", packed_ties_ms.row());
+
+    let mut recursive_ms = Samples::new("radix recursive");
+    for _ in 0..options.repeats {
+        let mut order = base.clone();
+        let started = Instant::now();
+        sort::radix_recursive(&flat, &mut order, 0, &mut scratch);
+        recursive_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+        // A sort that is fast and wrong is not a result.
+        debug_assert!(order.windows(2).all(|w| {
+            flat.name(w[0] as usize) <= flat.name(w[1] as usize)
+        }));
+    }
+    println!("  {}", recursive_ms.row());
+    {
+        let mut order = base.clone();
+        sort::radix_recursive(&flat, &mut order, 0, &mut scratch);
+        let sorted = order
+            .windows(2)
+            .all(|w| flat.name(w[0] as usize) <= flat.name(w[1] as usize));
+        println!("  recursive radix produces a correctly ordered result: {sorted}");
+    }
+
+    let mut parallel_sort_ms = Samples::new("radix parallel");
+    for _ in 0..options.repeats {
+        let mut order = base.clone();
+        let started = Instant::now();
+        sort::radix_parallel(&flat, &mut order, threads);
+        parallel_sort_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", parallel_sort_ms.row());
+    {
+        let mut order = base.clone();
+        sort::radix_parallel(&flat, &mut order, threads);
+        let sorted = order
+            .windows(2)
+            .all(|w| flat.name(w[0] as usize) <= flat.name(w[1] as usize));
+        println!("  parallel radix produces a correctly ordered result: {sorted}");
+    }
+
     let mut keys16_ms = Samples::new("build keys16");
     let mut radix16_ms = Samples::new("radix16 + ties");
     let mut pair;
@@ -361,7 +417,6 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
     // because a fuzzy match is not a prefix match — a later keystroke cannot
     // narrow the previous result set without dropping matches it should keep.
     // Parallel scan: the only lever that does not change what the search means.
-    let threads = pool_width(options);
     println!("\n  parallel scan across {threads} threads, milliseconds");
     println!("  {:<22} {:>12} {:>12} {:>10}", "query", "1 thread", "parallel", "speedup");
     for (text, _) in QUERIES {
