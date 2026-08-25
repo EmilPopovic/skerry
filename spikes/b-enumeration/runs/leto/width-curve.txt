@@ -1,0 +1,19 @@
+leto — AMD Ryzen 5 5600X, 6 cores / 12 threads, Ubuntu 24.04 in an LXC container
+pool width curve, getdents64+statx, 5 repeats per width, min/med/max seconds
+workers 1    2.594 2.602 2.619
+0.225 0.237 0.231
+workers 2    1.336 1.338 1.340
+0.228 0.223 0.223
+workers 3    0.913 0.917 0.918
+0.231 0.227 0.219
+workers 4    0.695 0.696 0.697
+0.224 0.222 0.220
+workers 5    0.635 0.637 0.646
+0.224 0.229 0.224
+workers 6    0.644 0.651 0.652
+0.231 0.231 0.224
+workers 8    0.661 0.717 0.759
+0.223 0.222 0.220
+workers 10   0.722 0.745 0.759
+0.223 0.229 0.225
+final load 2.39

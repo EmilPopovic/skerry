@@ -267,6 +267,60 @@ That is a finding about `sk-util`'s design, not about `rustix`, and it is the
 kind that is cheap now and expensive after twelve crates depend on the pool's
 shape.
 
+### A second machine — and a correction
+
+Run on `leto`: AMD Ryzen 5 5600X, 6 cores and 12 threads, Ubuntu 24.04 in an LXC
+container, idle at load 0.23. Same tree, same seed, same binary — built for musl
+and statically linked, because leto's glibc is 2.39 against this machine's 2.43.
+No `/dev/fuse` in a container, so the hung-mount arm did not run there. Raw output
+in [runs/leto/](runs/leto/).
+
+| Arm | leto (12 threads) | this machine (24 threads) | ratio |
+| --- | --- | --- | --- |
+| `read_dir` | 0.636 | 0.314 | 2.03× |
+| `read_dir+meta` | **3.481** | 1.195 | 2.91× |
+| `getdents64` | 0.519 | 0.263 | 1.97× |
+| `getdents64+statx` | **0.726** | 0.530 | 1.37× |
+
+**The bar is met on leto: 0.726 s at the pool's default width, 0.637 s at its
+best.** And `read_dir+meta` misses it by 3.5×, where on this machine it missed by
+1.2×. The gap between the two comparable arms **widens from 2.25× to 4.79× on the
+slower machine** — the design gets *more* valuable as the hardware gets worse,
+which is the opposite of what a parallelism-dependent win would do.
+
+#### The correction
+
+An earlier version of this document said, from this machine's numbers alone:
+
+> The batching win is not a parallelism win. Two workers get 0.505 s where 22 get
+> 0.539 s. That was the single biggest risk this spike carried into the
+> reference-machine question, and it is not a risk.
+
+**That was wrong, and it was wrong because it generalised from one machine.** On
+leto, two workers take **1.338 s** and miss the bar by 34%. Parallelism matters
+there; this machine's per-core speed was hiding it. The single-worker figures are
+the clearest statement of the difference — 2.602 s on leto against 0.942 s here,
+a **2.8× per-core gap** for `statx`-heavy work, far larger than the 1.4–1.8× that
+was projected from clock speeds.
+
+#### What survives on both machines
+
+| workers | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 10 | 12 | 16 | 22 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| leto, 12 threads | 2.602 | 1.338 | 0.917 | 0.696 | **0.637** | 0.651 | 0.717 | 0.745 | — | — | — |
+| here, 24 threads | 0.942 | 0.505 | **0.436** | 0.438 | — | 0.452 | 0.460 | — | 0.489 | 0.521 | 0.539 |
+
+The shape is the same on both and the position is not: **there is an optimum well
+below `ncpu - 2`, and `ncpu - 2` overshoots it every time.** Here the optimum is 3
+of 24 threads and the default costs 23%; on leto it is 5 of 12 and the default
+costs 17%. So the design finding holds — pool width is a per-workload ceiling, not
+`ncpu - 2` — while the *number* is machine-dependent and cannot be a constant.
+
+A width picked at build time or from `ncpu` alone will be wrong on one of these
+two machines. What the curve suggests instead is a short probe at first use:
+the optimum is the knee, it is shallow either side of it, and both machines reach
+within 5% of their best somewhere between 3 and 6 workers.
+
 ### Cold cache — partial, from a run on the reference tree
 
 Contributed after the fact, one sample per arm, each preceded by
@@ -308,8 +362,11 @@ in the table rather than in a line the harness discards. These numbers predate i
 | First 200 rows within 30 ms | **PASS** at 0.143 ms worst case, on a warm cache only |
 | A hung mount never blocks the UI thread | **PASS** at 4.001 ms, against 28,000 ms for the same call on the frame loop |
 
-Best measured width is three workers, not the `ncpu - 2` the harness defaults to:
-**0.436 s**, and the numbers above would all improve by 23% with it.
+Best measured width is well below the `ncpu - 2` the harness defaults to, on both
+machines tested: **0.436 s at three workers here** (23% better than the default)
+and **0.637 s at five on leto** (17% better). The optimum itself is
+machine-dependent — see [the second machine](#a-second-machine--and-a-correction),
+which also corrects a claim this document made from one machine's numbers.
 
 `getdents64` plus batched `statx` earns its place, and the number that justifies
 it is 2.25× on the comparable pair — enough to move the design from missing the
@@ -330,13 +387,16 @@ Three things this spike does **not** license:
    but enumeration on a network mount is a different shape of problem from
    enumeration on a local one, and this spike did not touch it. The hung-mount
    arm is a stand-in for sshfs, not a measurement of sshfs.
-3. **The reference machine is still owed, but not for the reason expected.**
-   The worry going in was thread count — 22 workers here against two there. The
-   width sweep above retires that worry: two workers get 0.505 s where 22 get
-   0.539 s. What is left is per-core speed and memory bandwidth, and the honest
-   projection for a 2021 four-core part is 0.7–0.9 s against a 1 s bar. That
-   passes with 10–30% margin rather than Spike A's 3×, so it is a real number to
-   go and get rather than a formality.
+3. **The reference machine is still owed, and leto makes the projection worse
+   rather than better.** leto is a 6-core Zen 3 desktop, not the "2021-era
+   four-core laptop" the budgets name — it sits between this machine and that
+   one. It reaches 0.637 s at its best width and 0.726 s at its default. A
+   four-core laptop part has fewer cores to reach the knee with *and* slower
+   cores to reach it on, and the per-core gap between these two machines is
+   already 2.8×. The honest projection is **0.9–1.3 s against a 1 s bar**, which
+   straddles it. This is the one Phase 0 number that may not survive contact
+   with the machine the budgets are written against, and it should be measured
+   rather than argued.
 
 What lands as a permanent gate: the four-arm comparison as a regression test on
 the enumeration path, and the hung-mount test **with its control arm**, which

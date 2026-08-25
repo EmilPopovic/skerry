@@ -119,12 +119,21 @@ them:
   0.614 s and replacing `read_dir` with `getdents64` accounts for 0.051 s. The
   thing to get right in `sk-fs` is the batching.
 
-A third finding, about the pool rather than the filesystem: the enumeration work
-saturates at **three** pool workers and degrades beyond it — 0.436 s at three
-against 0.539 s at `ncpu - 2` on a 24-thread machine. Pool width is a
-per-workload ceiling, not a global target. It also retires the main worry about
-the reference machine: two workers get 0.505 s, so a four-core part loses
-nothing to thread count and the remaining gap is per-core speed.
+A third finding, about the pool rather than the filesystem: **pool width has an
+optimum well below `ncpu - 2`, and `ncpu - 2` overshoots it.** Measured on two
+machines — 0.436 s at three workers against 0.539 s at twenty-two on a 24-thread
+part, and 0.637 s at five against 0.745 s at ten on a 12-thread part. The penalty
+for the default is 17–23%.
+
+The optimum is machine-dependent and cannot be a constant: three workers on one
+machine, five on the other, and two workers is comfortable on the faster machine
+while missing the bar by 34% on the slower one. Width wants a short probe at
+first use, not a formula over `ncpu`.
+
+Measured on a 6-core Ryzen 5600X, the full walk is **0.726 s** at the default
+width and **0.637 s** at its best, so the bar holds there. Extrapolating to the
+four-core reference machine gives 0.9–1.3 s, which straddles the bar — this is
+the Phase 0 number least likely to survive that measurement.
 
 The hung-mount row is measured **with a control**: the same listing on the frame
 loop instead of the pool. Without it the row can only pass, because a frame loop

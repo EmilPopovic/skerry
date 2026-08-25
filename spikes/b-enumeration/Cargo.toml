@@ -12,7 +12,14 @@ publish = false
 
 [dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
-fuser = { version = "0.18", default-features = false }
+# Optional so the walk arms can be built for a statically linked musl target and
+# run on a machine with an older glibc. The hung-mount arm needs /dev/fuse, which
+# a container does not have, so excluding it there costs nothing.
+fuser = { version = "0.18", default-features = false, optional = true }
+
+[features]
+default = ["hang"]
+hang = ["dep:fuser"]
 
 [profile.release]
 opt-level = 3

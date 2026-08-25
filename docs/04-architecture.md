@@ -239,13 +239,19 @@ two: a second thread pool (a `rayon` global, an async runtime's blocking pool) m
 uncoordinated oversubscription, which is a latency bug that only appears under load.
 See [ADR 0005](adr/0005-no-async-runtime.md).
 
-**Width is per-workload, not one number.** The `ncpu - 2` in the diagram above is a
-ceiling, not a target. [Spike B](../spikes/b-enumeration/README.md#pool-width--ncpu---2-is-the-wrong-number-for-this-work)
-measured a million `statx` calls saturating at **three** workers and degrading past it —
-0.436 s at three against 0.539 s at twenty-two, a 23% penalty for nineteen extra threads,
-because the work is kernel-bound on inode locks rather than CPU-bound. A copy engine or a
-thumbnail decoder may well want the full width; metadata does not, and a pool that offers
-only one number will be wrong for one of them.
+**Width is per-workload and probed, not one number.** The `ncpu - 2` in the diagram above
+is a ceiling, not a target. [Spike B](../spikes/b-enumeration/README.md#pool-width--ncpu---2-is-the-wrong-number-for-this-work)
+measured a million `statx` calls saturating well below it and degrading past the knee, on
+both machines tested: 0.436 s at three workers against 0.539 s at twenty-two on a 24-thread
+part, and 0.637 s at five against 0.745 s at ten on a 12-thread one. The work is
+kernel-bound on inode locks rather than CPU-bound, so past the knee the pool buys contention.
+
+The knee is **machine-dependent** — three workers on one, five on the other — so it cannot be
+a constant or a formula over `ncpu`: two workers is comfortable on the faster machine and
+misses the bar by 34% on the slower. Both machines land within 5% of their best somewhere
+between three and six workers, which is what a short probe at first use would find. A copy
+engine or a thumbnail decoder may well want the full width; metadata does not, and a pool
+that offers only one number will be wrong for one of them.
 
 ### Data layout
 

@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 mod data;
+#[cfg(feature = "hang")]
 mod hang;
 mod pool;
 mod stats;
@@ -21,9 +22,12 @@ mod tree;
 mod walk;
 
 use std::path::{Path, PathBuf};
+#[cfg(feature = "hang")]
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(feature = "hang")]
+use std::time::Duration;
+use std::time::Instant;
 
 use pool::{Cancel, Pool};
 use stats::Samples;
@@ -149,11 +153,18 @@ fn run() -> Result<(), String> {
     }
     full_walk(&options, &arms);
     first_rows(&options, &arms);
+    #[cfg(feature = "hang")]
     if !options.skip_hang {
         hung_mount(&options)?;
     } else {
         println!("\nhung mount");
         println!("  SKIPPED — --skip-hang");
+    }
+    #[cfg(not(feature = "hang"))]
+    {
+        let _ = options.skip_hang;
+        println!("\nhung mount");
+        println!("  NOT BUILT — this binary was compiled without the `hang` feature");
     }
     Ok(())
 }
@@ -291,6 +302,7 @@ fn first_rows(options: &Options, arms: &[Arm]) {
     println!("\n  bar: first 200 visible rows within 30 ms of opening any directory");
 }
 
+#[cfg(feature = "hang")]
 /// Rule 1's canonical test. A frame loop runs while a walk of a dead mount is in
 /// flight on the pool; the question is only ever whether the frame loop notices.
 fn hung_mount(options: &Options) -> Result<(), String> {
@@ -395,6 +407,7 @@ fn hung_mount(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "hang")]
 /// A busy wait rather than a sleep. Rule 1 says the UI thread sleeps on the
 /// event queue and never on a timer, so a `sleep` here would both violate the
 /// rule being tested and hide a stall inside the sleep.
@@ -413,6 +426,7 @@ fn pool_width(options: &Options) -> usize {
     })
 }
 
+#[cfg(feature = "hang")]
 fn default_hang_mount() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     home.map_or_else(
