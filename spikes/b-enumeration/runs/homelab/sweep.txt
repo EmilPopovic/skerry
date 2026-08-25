@@ -1,0 +1,26 @@
+# homelab — 4 vCPU of an AMD Ryzen 5 5600X, 7 GB, Ubuntu 24.04 VM on Proxmox, x86_64
+# 1M files on ext4. Idle at load 0.02 before the run.
+  wrote 1000000 files in 16.3 s (61368 files/s)
+=== six arms, load 0.45 ===
+  pool         2 workers (ncpu - 2)
+  read_dir            0.749   0.761   0.765        1342803   none
+  read_dir+meta       2.850   2.862   3.530         356911   1021338
+  getdents64          0.623   0.624   0.628        1636505   none
+  getdents64+statx    0.951   0.954   0.965        1070848   1000001
+  dirfd-statx         1.911   1.918   1.926         532520   1000001
+  parallel            1.116   1.119   1.128         912363   1000001
+=== time to first 200 rows, ms (100000/10000/1000/100-entry) ===
+  read_dir                  0.127         0.127         0.132   0.070 (100)
+  read_dir+meta             0.514         0.521         0.529   0.254 (100)
+  getdents64                0.241         0.231         0.230   0.049 (100)
+  getdents64+statx          0.239         0.230         0.232   0.048 (100)
+  dirfd-statx               0.237         0.233         0.231   0.049 (100)
+  parallel                  0.240         0.233         0.230   0.051 (100)
+=== parallel width curve, min/med/max seconds ===
+workers 1   2.070 2.097 2.101
+workers 2   1.109 1.114 1.138
+workers 3   0.840 0.842 0.844
+workers 4   0.725 0.729 0.733
+workers 6   0.710 0.729 0.729
+workers 8   0.715 0.716 0.725
+=== done, load 2.19 ===

@@ -429,15 +429,93 @@ is a better outcome than the finding it replaces, and a worse process: a design
 document carried a wrong claim about the kernel for two commits because a spike
 measured its own defect and did not suspect itself.
 
+## Four machines, including one the budgets actually describe
+
+The reference-machine run this spike kept saying it owed. Two more machines, both
+four-core, one of them aarch64:
+
+| | cores | arch | notes |
+| --- | --- | --- | --- |
+| **here** | 24 threads | x86_64 | Ryzen AI 9 HX 370, 2024 laptop |
+| **leto** | 12 threads | x86_64 | Ryzen 5 5600X, bare metal |
+| **homelab** | 4 vCPU | x86_64 | 5600X, VM on Proxmox |
+| **pi** | 4 cores | **aarch64** | Raspberry Pi 5, Cortex-A76 at 2.4 GHz, Ubuntu Server, NVMe |
+
+The Pi is the closest thing available to the "2021-era four-core laptop" the
+budgets are written against, and it is the **first aarch64 measurement in this
+repository** — [06-portability.md](../../docs/06-portability.md) makes aarch64
+first-class, and until now nothing had been run on it.
+
+### Median seconds, five repeats, every machine idle
+
+| Arm | here | leto | homelab | **pi** |
+| --- | --- | --- | --- | --- |
+| `read_dir` | 0.291 | 0.683 | 0.761 | 1.229 |
+| `read_dir+meta` | 1.118 | 3.552 | 2.862 | **3.882** |
+| `getdents64` | 0.248 | 0.557 | 0.624 | 0.971 |
+| `getdents64+statx` | 0.452 | 0.755 | 0.954 | **1.241** |
+| `dirfd-statx` (serial) | 1.023 | 2.857 | 1.918 | 2.714 |
+| `parallel`, `ncpu - 2` default | 0.170 | 0.532 | 1.119 | **1.592** |
+| `parallel`, best width | 0.170 | 0.532 | **0.716** | **0.966** |
+
+**On the Pi the bar is met, and only just: 0.966 s against 1 s, a 3.4% margin,
+and only at six workers.** At the pool's default width it is 1.592 s and a clear
+miss. `read_dir+meta` — the ergonomic path this spike exists to argue against —
+misses by 3.9× there, and misses on every machine except the fastest.
+
+Names-only `getdents64` is 0.971 s on the Pi. **A file manager that stats inline
+cannot enumerate a million files in a second on this class of hardware, and one
+that does not stat at all barely can.** That is the whole case for the design in
+one row.
+
+### `ncpu - 2` is wrong again, for a second and unrelated reason
+
+| workers | 1 | 2 | 3 | 4 | 6 | 8 | 10 | 12 | 16 | 22 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| pi (4 cores) | 3.033 | 1.603 | 1.145 | 1.033 | **0.966** | 1.055 | — | — | — | — |
+| homelab (4 vCPU) | 2.097 | 1.114 | 0.842 | 0.729 | 0.729 | **0.716** | — | — | — | — |
+| leto (12) | — | 1.554 | — | 0.836 | 0.665 | 0.590 | 0.565 | **0.532** | — | — |
+| here (24) | — | 0.657 | — | 0.387 | — | 0.256 | — | 0.199 | 0.180 | **0.170** |
+
+On a four-core machine `ncpu - 2` is **two workers**, which leaves half the
+machine idle: 1.592 s against 0.966 s on the Pi, and 1.119 s against 0.716 s on
+homelab. A 40–65% penalty, and on the Pi it is the difference between missing the
+bar and meeting it.
+
+This is a *second* problem with `ncpu - 2`, unrelated to the one
+[retracted above](#making-it-faster--and-retracting-a-finding). That one was
+imaginary and caused by this spike's own defects. This one is real, and it only
+appears on hardware small enough that subtracting two matters.
+
+**Every machine's optimum is at or above `ncpu`** — 22 of 24, 12 of 12, 8 of 4,
+6 of 4. The two small machines want *more* threads than they have cores, which
+fits work that spends its time waiting on inode fetches rather than computing.
+`max(6, ncpu)` fits all four measurements, and is offered as what the data
+supports rather than as a law: it is one parameter fitted to four points, and a
+short probe at first use would be better than any formula.
+
+### First 200 rows holds up everywhere
+
+Worst cell on the Pi is **0.384 ms** against a 30 ms bar — 78× of margin on the
+slowest machine tested, with `read_dir+meta` at 0.665 ms. This condition is not
+close to being a problem on any hardware, which is worth stating because the
+full-walk condition on the same machine has 3.4%.
+
 ## Verdict
 
 **Go, with the cold-cache arm owed.**
 
-| Condition | Result |
-| --- | --- |
-| Warm-cache full walk under 1 s | **PASS** at 0.530 s — and `read_dir+meta` **misses** at 1.195 s |
-| First 200 rows within 30 ms | **PASS** at 0.143 ms worst case, on a warm cache only |
-| A hung mount never blocks the UI thread | **PASS** at 4.001 ms, against 28,000 ms for the same call on the frame loop |
+| Condition | Result | Worst machine |
+| --- | --- | --- |
+| Warm-cache full walk under 1 s | **PASS, barely** — 0.966 s on a Raspberry Pi 5 at six workers, and 1.592 s at the pool's default width | pi |
+| First 200 rows within 30 ms | **PASS** at 0.384 ms, 78× of margin | pi |
+| A hung mount never blocks the UI thread | **PASS** at 4.001 ms, against 28,000 ms for the same call on the frame loop | here |
+
+The first row is the one to watch. It passes on four-core hardware with **3.4%
+of margin**, and only with a pool width the current default does not choose.
+`read_dir` plus `metadata()` misses it by 3.9× on the same machine, and
+`getdents64` with no stat at all takes 0.971 s — so this bar is not comfortably
+reachable by any design, and is unreachable by the obvious one.
 
 The best arm is `parallel` at **0.170 s here and 0.532 s on leto**, 2.7× and 1.4×
 faster than the `getdents64+statx` these conditions were first measured against —
@@ -458,21 +536,18 @@ Three things this spike does **not** license:
    30 ms condition is real. Everything above is a measurement of the dentry
    cache and of our own code; cold, the storage device dominates and our code
    becomes a rounding error. Commands below.
-2. **One filesystem, one device.** ext4 on NVMe. The roadmap's matrix — btrfs,
+2. **One filesystem.** ext4 throughout, on four different devices. The roadmap's matrix — btrfs,
    xfs, NFS — belongs to [Spike E](../../docs/08-roadmap.md#spike-e--operation-engine-correctness),
    but enumeration on a network mount is a different shape of problem from
    enumeration on a local one, and this spike did not touch it. The hung-mount
    arm is a stand-in for sshfs, not a measurement of sshfs.
-3. **The reference machine is still owed, and leto makes the projection worse
-   rather than better.** leto is a 6-core Zen 3 desktop, not the "2021-era
-   four-core laptop" the budgets name — it sits between this machine and that
-   one. It reaches 0.637 s at its best width and 0.726 s at its default. A
-   four-core laptop part has fewer cores to reach the knee with *and* slower
-   cores to reach it on, and the per-core gap between these two machines is
-   already 2.8×. The honest projection is **0.9–1.3 s against a 1 s bar**, which
-   straddles it. This is the one Phase 0 number that may not survive contact
-   with the machine the budgets are written against, and it should be measured
-   rather than argued.
+3. **Reference-class hardware has now been measured, and the margin is 3.4%.**
+   A Raspberry Pi 5 reaches 0.966 s at six workers. Earlier revisions of this
+   document projected 0.7–0.9 s and then 0.9–1.3 s from faster machines; the
+   measured answer sits at the top of the second range. The bar holds, but any
+   regression — a deeper tree, a slower device, a filesystem with costlier
+   `statx` — spends a margin that is three hundredths of a second wide. Treat
+   this row as met, not as safe.
 
 What lands as a permanent gate: the four-arm comparison as a regression test on
 the enumeration path, and the hung-mount test **with its control arm**, which

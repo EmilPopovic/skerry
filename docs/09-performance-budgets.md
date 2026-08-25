@@ -97,41 +97,48 @@ fonts into memory rather than mapping them, 19.5 MB of it `NotoSansCJK`.
 ## What Spike B measured
 
 [Spike B](../spikes/b-enumeration/README.md) is resolved except for its
-cold-cache arm. Warm cache, 1,000,000 files on ext4, same machine and same
-caveats as Spike A:
+cold-cache arm. Warm cache, 1,000,000 files on ext4, measured on four machines
+including a **Raspberry Pi 5** — four Cortex-A76 cores, aarch64, NVMe — which is
+the closest thing available to the machine this document describes, and the
+repository's first aarch64 measurement.
+[06-portability.md](06-portability.md) requires aarch64 to be first-class.
 
-| Row | Target | Measured | Note |
+| Row | Target | Measured on the Pi 5 | On a 24-thread laptop |
 | --- | --- | --- | --- |
-| Open a 10k-entry directory | < 30 ms | **0.132 ms** to the first 200 rows | warm cache only — cold is the arm that makes this row real |
-| — | — | **0.530 s** for a full 1M-file walk with size and mtime | `std::fs::read_dir` plus `metadata()` takes 1.195 s and misses the roadmap's 1 s bar |
-| Frame during a hung mount | < 8 ms | **4.001 ms** with the walk on the job pool | the same listing issued from the frame loop blocked it for **28 s** |
+| Open a 10k-entry directory | < 30 ms | **0.365 ms** to the first 200 rows | 0.072 ms |
+| Full 1M-file walk with size and mtime | < 1 s (roadmap) | **0.966 s** at six workers, 1.592 s at `ncpu - 2` | 0.170 s |
+| Frame during a hung mount | < 8 ms | not run — no `/dev/fuse` in the container | **4.001 ms**, against 28,000 ms for the same call on the frame loop |
 
-Two findings that change what the other documents say rather than confirming
+**The full-walk row passes with 3.4% of margin on reference-class hardware, and
+only at a pool width the current default does not choose.** For scale on the same
+machine: `read_dir` plus `metadata()` takes 3.882 s, and `getdents64` with no
+stat at all takes 0.971 s. This bar is not comfortably reachable by any design
+and is unreachable by the obvious one.
+
+Four findings that change what the other documents say rather than confirming
 them:
 
-- **The `read_dir` tax is CPU time, not memory.** Peak RSS is flat across all
-  four arms at 82–85 MB. Its per-entry allocations are churn the allocator hands
+- **The `read_dir` tax is CPU time, not memory.** Peak RSS is flat across every
+  arm at 82–85 MB. Its per-entry allocations are churn the allocator hands
   straight back, so the phrase "per-entry allocation and implicit stat" in
   [04-architecture.md](04-architecture.md#data-layout) names two costs of
   different kinds, and only one of them is a cost.
-- **Batching `statx` is the win; `getdents64` is the trim.** Of the 0.665 s
-  between the two comparable arms, deferring `statx` to the job pool accounts for
-  0.614 s and replacing `read_dir` with `getdents64` accounts for 0.051 s. The
-  thing to get right in `sk-fs` is the batching.
-
-A third finding, about the pool rather than the filesystem: **a parallel tree
-walk is worth more than either syscall choice.** Making directories jobs, taking
-`statx` through the directory's own file descriptor, and giving each job its own
-store chunk instead of a shared locked arena brings the full walk to **0.170 s on
-a 24-thread machine and 0.532 s on a 12-thread one** — 2.7× and 1.4× faster than
-the `getdents64+statx` in the row above, and 6.6× faster than `read_dir+meta` on
-both.
-
-That also **retracts** what this section said in an earlier revision: that pool
-width has an optimum well below `ncpu - 2`. It does not. Both machines now scale
-monotonically to `ncpu`; the apparent optimum was a single-threaded traversal
-putting a floor under the total and a store mutex serialising the jobs, and both
-were the spike's own defects rather than the kernel's behaviour.
+- **A parallel tree walk is worth more than either syscall choice.** Making
+  directories jobs, taking `statx` through the directory's own file descriptor,
+  and giving each job its own store chunk instead of a shared locked arena is
+  2.7× on the fast machine and 1.6× on the Pi. Deferring `statx` is the next
+  largest effect; replacing `read_dir` with `getdents64` is the smallest.
+- **`ncpu - 2` is the wrong pool width, and worst where it matters most.** On a
+  four-core machine it is two workers and leaves half the machine idle: 1.592 s
+  against 0.966 s on the Pi, 1.119 s against 0.716 s on a four-core VM. Every
+  machine measured has its optimum at or above `ncpu` — 22 of 24, 12 of 12, 8 of
+  4, 6 of 4. `max(6, ncpu)` fits all four, as a fit to four points rather than a
+  law; a probe at first use would be better.
+- **An earlier revision of this section claimed the opposite** — that width
+  saturates at three workers because metadata work is "kernel-bound on inode
+  locks". That was the spike measuring its own single-threaded traversal and its
+  own store mutex. Retracted, and kept visible, because the claim reached two
+  design documents before anything caught it.
 
 The hung-mount row is measured **with a control**: the same listing on the frame
 loop instead of the pool. Without it the row can only pass, because a frame loop

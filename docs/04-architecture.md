@@ -239,17 +239,25 @@ two: a second thread pool (a `rayon` global, an async runtime's blocking pool) m
 uncoordinated oversubscription, which is a latency bug that only appears under load.
 See [ADR 0005](adr/0005-no-async-runtime.md).
 
-**Width.** `ncpu - 2` is supported by measurement.
-[Spike B](../spikes/b-enumeration/README.md#making-it-faster--and-retracting-a-finding)
-walked a million files in 0.170 s on a 24-thread machine and 0.532 s on a 12-thread one,
-scaling monotonically to `ncpu` on both with no knee and no penalty at the default width.
+**Width is `max(6, ncpu)`, and wants a probe rather than a formula.** The `ncpu - 2` in
+the diagram above is wrong on small machines, where subtracting two is most of the machine:
+[Spike B](../spikes/b-enumeration/README.md#ncpu---2-is-wrong-again-for-a-second-and-unrelated-reason)
+measured a million-file walk at 1.592 s with `ncpu - 2` on a four-core Raspberry Pi 5 and
+0.966 s at six workers — the difference between missing the one-second bar and meeting it.
+Every machine measured has its optimum **at or above `ncpu`**: 22 of 24, 12 of 12, 8 of 4,
+6 of 4. The two four-core machines want more threads than they have cores, which fits work
+that waits on inode fetches rather than computing.
 
-An earlier revision of this section said the opposite — that metadata work saturates at
-three workers because it is "kernel-bound on inode locks" — on the strength of a spike arm
-that had a single-threaded tree walk and a store that held a mutex across 34 MB of copying.
-Both defects were the spike's. The claim is retracted; the episode is kept here because a
-design document carried a wrong statement about the kernel for two commits, and the reason
-was a measurement that did not suspect itself.
+`max(6, ncpu)` fits all four measurements and is a fit to four points, not a law. A short
+probe at first use would be better, and per-device queues remain necessary regardless —
+these numbers are all NVMe.
+
+An earlier revision of this section said the opposite, that metadata work saturates at three
+workers because it is "kernel-bound on inode locks", on the strength of a spike arm that had
+a single-threaded tree walk and a store that held a mutex across 34 MB of copying. Both
+defects were the spike's. That claim is retracted; the episode is kept because a design
+document carried a wrong statement about the kernel for two commits, and the reason was a
+measurement that did not suspect itself.
 
 ### Data layout
 
