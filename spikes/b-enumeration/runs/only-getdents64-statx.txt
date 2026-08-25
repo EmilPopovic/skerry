@@ -1,0 +1,21 @@
+Spike B — enumeration throughput
+  tree         1000000 files under /var/tmp/skerry-spike-b
+  pool         22 workers (ncpu - 2)
+  load         1.86
+
+  warming      21338 directories, 1021338 entries in 0.38 s — discarded
+full recursive walk, warm cache, seconds
+  arm                   min     med     max        files/s   stat calls
+  getdents64+statx    0.519   0.541   0.544        1889603   1000001
+
+  bar: warm-cache full walk under 1 s
+  peak RSS 84.5 MB for this arm alone
+
+time to first 200 rows, milliseconds
+  arm                100000-entry   10000-entry    1000-entry     100-entry
+  getdents64+statx          0.083         0.078         0.080   0.016 (100)
+
+  bar: first 200 visible rows within 30 ms of opening any directory
+
+hung mount
+  SKIPPED — --skip-hang

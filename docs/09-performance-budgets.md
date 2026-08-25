@@ -94,6 +94,36 @@ Two consequences, stated rather than absorbed into a revised target:
 31.8 MB of the floor *is* ours and is fixable: the spike reads all six fallback
 fonts into memory rather than mapping them, 19.5 MB of it `NotoSansCJK`.
 
+## What Spike B measured
+
+[Spike B](../spikes/b-enumeration/README.md) is resolved except for its
+cold-cache arm. Warm cache, 1,000,000 files on ext4, same machine and same
+caveats as Spike A:
+
+| Row | Target | Measured | Note |
+| --- | --- | --- | --- |
+| Open a 10k-entry directory | < 30 ms | **0.132 ms** to the first 200 rows | warm cache only — cold is the arm that makes this row real |
+| — | — | **0.530 s** for a full 1M-file walk with size and mtime | `std::fs::read_dir` plus `metadata()` takes 1.195 s and misses the roadmap's 1 s bar |
+| Frame during a hung mount | < 8 ms | **4.001 ms** with the walk on the job pool | the same listing issued from the frame loop blocked it for **28 s** |
+
+Two findings that change what the other documents say rather than confirming
+them:
+
+- **The `read_dir` tax is CPU time, not memory.** Peak RSS is flat across all
+  four arms at 82–85 MB. Its per-entry allocations are churn the allocator hands
+  straight back, so the phrase "per-entry allocation and implicit stat" in
+  [04-architecture.md](04-architecture.md#data-layout) names two costs of
+  different kinds, and only one of them is a cost.
+- **Batching `statx` is the win; `getdents64` is the trim.** Of the 0.665 s
+  between the two comparable arms, deferring `statx` to the job pool accounts for
+  0.614 s and replacing `read_dir` with `getdents64` accounts for 0.051 s. The
+  thing to get right in `sk-fs` is the batching.
+
+The hung-mount row is measured **with a control**: the same listing on the frame
+loop instead of the pool. Without it the row can only pass, because a frame loop
+with no path to a filesystem syscall cannot be blocked by one. Any future version
+of this gate keeps the control or it is not a gate.
+
 ## On measuring frame time honestly
 
 p99 over a realistic input trace, not an average over an idle window. The interesting

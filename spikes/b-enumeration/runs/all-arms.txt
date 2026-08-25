@@ -1,0 +1,35 @@
+Spike B — enumeration throughput
+  tree         1000000 files under /var/tmp/skerry-spike-b
+  pool         22 workers (ncpu - 2)
+  load         1.28
+
+  warming      21338 directories, 1021338 entries in 0.47 s — discarded
+full recursive walk, warm cache, seconds
+  arm                   min     med     max        files/s   stat calls
+  read_dir            0.309   0.314   0.542        3248859   none
+  read_dir+meta       1.149   1.195   1.204         854367   1021338
+  getdents64          0.263   0.263   0.264        3882945   none
+  getdents64+statx    0.526   0.530   0.537        1927700   1000001
+
+  bar: warm-cache full walk under 1 s
+  peak RSS omitted: VmHWM only rises, so in one process the first arm's peak
+is every arm's peak. Run --only <arm> for a figure that means something.
+
+time to first 200 rows, milliseconds
+  arm                100000-entry   10000-entry    1000-entry     100-entry
+  read_dir                  0.092         0.087         0.089   0.018 (100)
+  read_dir+meta             0.143         0.132         0.134   0.042 (100)
+  getdents64                0.081         0.077         0.078   0.014 (100)
+  getdents64+statx          0.081         0.076         0.083   0.014 (100)
+
+  bar: first 200 visible rows within 30 ms of opening any directory
+
+hung mount — rule 1's canonical test
+  on the pool p50  4.000  p99  4.000  max   4.001  mean  4.000   n=500
+  on the UI thread p50 28000.303  p99 28000.303  max 28000.303  mean 28000.303   n=1
+  requests that reached the hung filesystem: 1 — the mount was genuinely entered and did not answer
+  bar: no frame exceeds 8 ms while a mount is hung — p99 4.000 ms, max 4.001 ms (PASS)
+  control: the same listing from the frame loop blocked it for 28.0 s — 3500x the
+budget, which is what the pool is buying
+           4 requests stalled in total at 10 s each: a dead mount
+serialises, so the control also waited behind what the pool arm left outstanding

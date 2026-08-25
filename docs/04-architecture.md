@@ -261,9 +261,16 @@ instant and makes the selection cheap to snapshot.
 
 Enumeration goes through raw `getdents64` (via `rustix`) rather than `std::fs::read_dir`,
 because `d_type` yields file-versus-directory for free and lets `statx` be deferred to a
-background pass that fills columns in as they arrive. `read_dir`'s per-entry allocation and
-implicit stat is a measurable tax at a million entries — Spike B exists to quantify it
-before we commit.
+background pass that fills columns in as they arrive.
+[Spike B](../spikes/b-enumeration/README.md) measured the tax at a million entries: a warm
+walk producing size and mtime takes **0.530 s** this way and **1.195 s** through `read_dir`
+plus `metadata()`, which misses the 1 s bar.
+
+The spike also corrected the shape of that claim. Deferring `statx` to the job pool is worth
+0.614 s of the 0.665 s difference and `getdents64` itself is worth 0.051 s, so **the batching
+is the decision and the syscall is the trim**. And the per-entry allocation is not a
+footprint cost at all — peak RSS is flat across every arm, because the allocator hands the
+same pages back. It is CPU time.
 
 ### The frame loop, precisely
 
