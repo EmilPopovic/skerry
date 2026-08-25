@@ -15,3 +15,4 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0005](0005-no-async-runtime.md) | One owned job pool; no async runtime in the core | Accepted |
 | [0006](0006-out-of-process-decoders.md) | Decoders in sandboxed helper processes | Accepted |
 | [0007](0007-runtime-capability-detection.md) | Runtime capability probing, never build-time features | Accepted |
+| [0008](0008-persistent-index-is-required.md) | A persistent filename index in `sk-index`, not an optional extra | Accepted |
