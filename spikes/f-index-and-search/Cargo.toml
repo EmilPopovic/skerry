@@ -1,0 +1,19 @@
+# Spike F. Standalone by design: not a workspace member, exempt from the
+# layering, lint and dependency rules (spikes/README.md).
+#
+# `rustix` only. A fuzzy matcher and a flat-file index are exactly the two places
+# a spike is tempted to reach for a crate, and measuring the design in
+# 04-architecture means writing both — see the README.
+[package]
+name = "spike-f-index-and-search"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = 1
