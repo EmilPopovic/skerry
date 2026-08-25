@@ -170,61 +170,77 @@ of this gate keeps the control or it is not a gate.
 ## What Spike F measured
 
 [Spike F](../spikes/f-index-and-search/README.md) measured flattened search, the
-persistent index and sorting, on the 24-thread laptop only — the most favourable
-hardware in this project, and the caveat that governs every row below.
+persistent index and sorting, on a 24-thread laptop and on a **Raspberry Pi 5**.
+The Pi is the row that counts.
 
-| Row | Target | Measured | Verdict |
-| --- | --- | --- | --- |
-| First search result | < 50 ms | **2.075 ms** worst case, scan parallel across 24 threads; 18–25 ms serial | met, and needs the scan to be parallel |
-| Sort 1M entries | < 120 ms | **96.6 ms** with a radix pass; 154–164 ms comparison-sorted; 0.9 ms by a metadata column | met here, ~290 ms projected on a Pi |
-| RSS at 1M entries | < 250 MB | 209 MB with the flattened store resident | met |
-| — | — | index: 43 ms to build, **40 ms to load cold**, 50 bytes per entry | — |
+| Row | Target | Hard fail | Pi 5 | Verdict |
+| --- | --- | --- | --- | --- |
+| First search result | < 50 ms | 120 ms | **13.3 ms** parallel, 47.4 ms serial | met, and only with a parallel scan |
+| Sort 1M entries | < 120 ms | 300 ms | **752 ms** best of five approaches | **missed by 2.5× outside the hard fail** |
+| RSS at 1M entries | < 250 MB | 450 MB | 152 MB with the flattened store resident | met |
 
-### Two rows this breaks
+### The row that fails
 
-**`Sort 1M entries < 120 ms` needs a radix sort, and the mechanism
-[04-architecture.md](04-architecture.md#data-layout) names does not work.**
-Precomputing sort keys is worth **3%** — 154 ms against 164 ms — because the cost
-is the random access pattern of sorting a permutation of a million indices into
-an 8 MB key array and a 28 MB arena, not the comparison function. Sorting by a
-metadata column, one contiguous array with no indirection, is **0.9 ms**: 180×
-faster, and the whole difference is access pattern.
+**Sorting a million filenames is not achievable on reference hardware by anything
+this spike measured.** On the Pi: 916 ms comparison-sorted through the arena,
+837 ms with precomputed keys, **752 ms** with a radix pass plus tie repair, 876 ms
+with 16-byte keys. The best route is 2.5× outside the *hard fail*.
 
-A radix pass over the same keys is **17.8 ms** and brings the full name sort to
-**96.6 ms**, inside the target. The remaining 79 ms is tie repair: **94% of these
-names share their first eight bytes**, and widening the key to sixteen was
-measured and does not help — ties fall to 60%, the total moves 97 ms to 95 ms.
-A fixed-width prefix key is the wrong shape for filenames, which collide on long
-prefixes constantly. An MSD string radix that never falls back to comparison is
-the direction, and is unmeasured. On a Pi the 96.6 ms is roughly 290 ms: inside
-the hard fail, three times over the target.
+Two things narrow the problem. A radix pass with no tie repair is **213 ms** —
+over target, inside the fail — so the budget hinges entirely on never falling
+back to comparison, and 94% of filenames share their first eight bytes. And
+sorting by a metadata column is **6.1 ms**, 123× faster, so this is specifically
+a filename problem and not a sorting problem. The only unmeasured route left is
+an MSD string radix over the arena that never compares.
 
-**`First search result < 50 ms` needs a parallel scan.** Serial, one keystroke is
-18–25 ms on a 24-thread laptop and would not survive a Pi at 3× slower per core.
-Across 24 threads the worst first result is **2.075 ms**, which survives that
-machine eight times over. The speedup is **8×, not 24×** — the scan is
-memory-bandwidth bound at 28 MB in 28 ms and no number of threads changes how
-fast an arena can be read. A fuzzy match cannot narrow incrementally the way a
-prefix match can, so every keystroke really is a full scan; what makes it cheap
-is that every thread stops as soon as any of them finds a hit.
+Until that exists, `Sort 1M entries` should be read as **known-unmet**, not as a
+target awaiting an implementation.
 
-### One row it adds
+### The row that needs a mechanism, not a number
 
-The index earns its own row once `sk-index` exists, because it is now the thing
-standing between a user and a multi-second wait:
+`First search result` is met at 13.3 ms — but serial on the same machine it is
+47.4 ms, inside a 50 ms bar by 5%, and as-you-type is 72.3 ms per keystroke,
+outside it. **The parallel scan is the feature, not an optimisation**, and the
+budget row is only meaningful alongside it. The speedup is 3.4–3.7× on four cores
+and 8× on twenty-four — far below core count either way, because a scan over a
+28 MB arena is memory-bandwidth bound.
+
+### A row to add once `sk-index` exists
 
 | Measure | Target | Hard fail | Method |
 | --- | --- | --- | --- |
-| Load the index for 1M entries | < 100 ms | 250 ms | Cold, page cache evicted for the index file; measured at 40 ms |
+| Load the index for 1M entries | < 250 ms | 500 ms | Cold, page cache evicted for the index file; measured at 195 ms on a Pi 5, 48 ms on a laptop |
+
+An earlier revision of this section proposed 100 ms, taken from the laptop's
+48 ms. The Pi measures 195 ms. The number above is set from the slow machine,
+which is the only way a budget row means anything.
+
+### On extrapolating between machines
+
+This section previously projected reference hardware from the laptop using a
+single "3× slower per core" factor from Spike B. **Measured, the factor runs from
+2.6× to 12× on the same pair of machines** — 2.6× for a linear scan, 5.6× for a
+comparison sort, 12× for a radix scatter. It tracks how much memory an operation
+moves per unit of work, not clock speed, because cache size and memory bandwidth
+differ independently of it.
+
+Every projection in this document should be treated as a hypothesis until a slow
+machine has run it. This project has now guessed wrong about that twice.
 
 ### One shape that is not in any row yet
 
 A single directory holding a million entries takes **8.4× a realistic tree of the
-same file count** — 1.013 s against 0.120 s — because a directory is the unit of
-parallel work and there is only one of them. `node_modules`, Maildir, `/nix/store`
-and dataset dumps all produce that shape, and it is a directory a user opens.
-`getdents64` returns a resumable cookie, so a large directory can be split across
-jobs; `sk-fs` has to be built for that rather than retrofitted.
+same file count** — 1.013 s against 0.120 s on the laptop — because a directory is
+the unit of parallel work and there is only one of them. `node_modules`, Maildir,
+`/nix/store` and dataset dumps all produce that shape, and it is a directory a
+user opens. `getdents64` returns a resumable cookie, so a large directory can be
+split across jobs; `sk-fs` has to be built for that rather than have it
+retrofitted.
+
+**And on 8 GB, a warm cache does not stay warm.** Five repeats of the same walk
+on the Pi gave a p50 of 1,136 ms and a p99 of 6,332 ms, the signature of runs
+going back to the device. Every "warm cache" number elsewhere in this document was
+taken on a machine with 60 GB of RAM.
 
 ## On measuring frame time honestly
 

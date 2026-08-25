@@ -1,0 +1,153 @@
+  flat-100k  100000 files in 2.5 s
+  flat-1m    1000000 files in 37.1 s
+  realistic  1000000 files in 24.4 s
+############################################################
+# pi — aarch64, 4 cpus, 2026-08-26T01:25:31+02:00
+# load 0.95
+############################################################
+Spike F — index and flattened search
+  pool         4 workers
+  load         0.95
+
+═══ flat-100k — 100000 files ═══
+  1 directories, 100001 entries, arena 2.7 MB, store 4.9 MB
+  walk       p50 216.235  p99 1134.547  max 1134.547  mean 401.357   n=5
+  flatten    p50  4.861  p99  5.454  max   5.454  mean  4.916   n=5
+  peak RSS 14.9 MB
+
+  flattened search, milliseconds — bar: first result within 50 ms
+  query                       first        all      matches  what it is
+  (empty)                     0.000      0.381       100001  everything — the floor, no matching at all
+  zzqx                        4.573      4.582            0  almost nothing — the rejection path
+  snapshot-render-70          0.547      5.973            7  a handful — the realistic case
+  e                           0.000      3.073        62041  a large fraction — where the result set is the cost
+  rpt                         0.000      6.394        15178  scattered subsequence — no contiguous run to find
+
+  persistent index
+  build      p50 28.013  p99 29.988  max  29.988  mean 25.267   n=5
+  load       p50 10.582  p99 12.291  max  12.291  mean 10.929   n=5
+  load cold  p50 19.809  p99 21.325  max  21.325  mean 20.059   n=5
+  on disk 4.9 MB, 49 bytes per entry
+  cold load is 0.09x the warm walk, and 116x faster than a 2.3 s cold walk
+
+  sorting 100001 entries, milliseconds — bar: 120 ms, hard fail 300 ms
+  build keys p50  1.150  p99  1.345  max   1.345  mean  1.178   n=5
+  by size    p50  0.501  p99  0.710  max   0.710  mean  0.541   n=5
+  by mtime   p50  0.525  p99  0.623  max   0.623  mean  0.544   n=5
+  by name, arena p50 40.305  p99 40.986  max  40.986  mean 40.447   n=5
+  by name, keyed p50 36.578  p99 36.987  max  36.987  mean 36.687   n=5
+  radix, keys p50  5.180  p99  5.523  max   5.523  mean  5.231   n=5
+  radix + ties p50 33.321  p99 33.909  max  33.909  mean 33.443   n=5
+  93481 of 100001 entries (93%) share an 8-byte key prefix and need the arena to separate
+  build keys16 p50  1.885  p99  1.903  max   1.903  mean  1.849   n=5
+  radix16 + ties p50 24.881  p99 25.166  max  25.166  mean 24.908   n=5
+  45153 of 100001 entries (45%) still tied at 16 bytes
+
+  parallel scan across 4 threads, milliseconds
+  query                      1 thread     parallel    speedup
+  (empty)                       0.292        0.391       0.7x
+  zzqx                          4.781        2.338       2.0x
+  snapshot-render-70            5.963        2.159       2.8x
+  e                             3.408        1.806       1.9x
+  rpt                           6.646        2.871       2.3x
+  worst first-result across every query, parallel: 2.905 ms on `zzqx` (inside the 50 ms bar)
+
+  as-you-type, one full scan per keystroke, milliseconds
+  "r"=3.3 "re"=4.8 "rep"=6.4 "repo"=6.7 "repor"=6.8 "report"=6.9 
+  worst single keystroke 5.8 ms, whole word 35.0 ms
+
+═══ flat-1m — 1000000 files ═══
+  1 directories, 1000001 entries, arena 28.4 MB, store 50.4 MB
+  walk       p50 2367.763  p99 10484.927  max 10484.927  mean 4015.525   n=5
+  flatten    p50 46.583  p99 52.032  max  52.032  mean 48.289   n=5
+  peak RSS 151.7 MB
+
+  flattened search, milliseconds — bar: first result within 50 ms
+  query                       first        all      matches  what it is
+  (empty)                     0.000      3.402      1000001  everything — the floor, no matching at all
+  zzqx                       47.737     47.922            0  almost nothing — the rejection path
+  snapshot-render-70          0.789     62.508          118  a handful — the realistic case
+  e                           0.001     31.264       620934  a large fraction — where the result set is the cost
+  rpt                         0.002     65.889       154331  scattered subsequence — no contiguous run to find
+
+  persistent index
+  build      p50 282.759  p99 285.587  max 285.587  mean 248.647   n=5
+  load       p50 115.330  p99 118.567  max 118.567  mean 115.956   n=5
+  load cold  p50 196.078  p99 196.959  max 196.959  mean 195.976   n=5
+  on disk 50.4 MB, 50 bytes per entry
+  cold load is 0.08x the warm walk, and 12x faster than a 2.3 s cold walk
+
+  sorting 1000001 entries, milliseconds — bar: 120 ms, hard fail 300 ms
+  build keys p50 10.959  p99 11.839  max  11.839  mean 11.140   n=5
+  by size    p50  6.519  p99  6.554  max   6.554  mean  6.357   n=5
+  by mtime   p50 51.802  p99 52.071  max  52.071  mean 51.867   n=5
+  by name, arena p50 901.064  p99 923.058  max 923.058  mean 905.953   n=5
+  by name, keyed p50 824.089  p99 850.836  max 850.836  mean 829.513   n=5
+  radix, keys p50 213.663  p99 244.552  max 244.552  mean 220.086   n=5
+  radix + ties p50 753.396  p99 835.832  max 835.832  mean 771.136   n=5
+  936866 of 1000001 entries (94%) share an 8-byte key prefix and need the arena to separate
+  build keys16 p50 20.402  p99 21.507  max  21.507  mean 20.329   n=5
+  radix16 + ties p50 1069.515  p99 1364.639  max 1364.639  mean 1093.372   n=5
+  600225 of 1000001 entries (60%) still tied at 16 bytes
+
+  parallel scan across 4 threads, milliseconds
+  query                      1 thread     parallel    speedup
+  (empty)                       3.163        2.100       1.5x
+  zzqx                         46.932       13.522       3.5x
+  snapshot-render-70           61.400       16.627       3.7x
+  e                            29.953        8.342       3.6x
+  rpt                          65.408       17.910       3.7x
+  worst first-result across every query, parallel: 13.125 ms on `zzqx` (inside the 50 ms bar)
+
+  as-you-type, one full scan per keystroke, milliseconds
+  "r"=32.6 "re"=46.9 "rep"=65.9 "repo"=69.6 "repor"=71.1 "report"=71.8 
+  worst single keystroke 59.6 ms, whole word 357.8 ms
+
+═══ realistic — 1000000 files ═══
+  21338 directories, 1021338 entries, arena 28.5 MB, store 51.0 MB
+  walk       p50 1136.484  p99 6332.043  max 6332.043  mean 2290.051   n=5
+  flatten    p50 77.382  p99 82.444  max  82.444  mean 76.004   n=5
+  peak RSS 151.7 MB
+
+  flattened search, milliseconds — bar: first result within 50 ms
+  query                       first        all      matches  what it is
+  (empty)                     0.000      3.704      1021338  everything — the floor, no matching at all
+  zzqx                       47.868     48.074            0  almost nothing — the rejection path
+  snapshot-render-70          0.096     62.649          118  a handful — the realistic case
+  e                           0.000     31.490       620938  a large fraction — where the result set is the cost
+  rpt                         0.168     66.174       154331  scattered subsequence — no contiguous run to find
+
+  persistent index
+  build      p50 273.361  p99 302.198  max 302.198  mean 251.174   n=5
+  load       p50 120.639  p99 125.026  max 125.026  mean 121.808   n=5
+  load cold  p50 195.007  p99 195.641  max 195.641  mean 194.899   n=5
+  on disk 51.0 MB, 50 bytes per entry
+  cold load is 0.17x the warm walk, and 12x faster than a 2.3 s cold walk
+
+  sorting 1021338 entries, milliseconds — bar: 120 ms, hard fail 300 ms
+  build keys p50 12.067  p99 12.864  max  12.864  mean 12.306   n=5
+  by size    p50  6.117  p99  6.220  max   6.220  mean  5.992   n=5
+  by mtime   p50 19.865  p99 20.207  max  20.207  mean 19.694   n=5
+  by name, arena p50 916.246  p99 917.260  max 917.260  mean 915.985   n=5
+  by name, keyed p50 837.201  p99 856.407  max 856.407  mean 839.698   n=5
+  radix, keys p50 213.336  p99 220.948  max 220.948  mean 214.691   n=5
+  radix + ties p50 752.818  p99 762.796  max 762.796  mean 755.878   n=5
+  958203 of 1021338 entries (94%) share an 8-byte key prefix and need the arena to separate
+  build keys16 p50 20.485  p99 21.014  max  21.014  mean 20.358   n=5
+  radix16 + ties p50 875.635  p99 889.208  max 889.208  mean 878.711   n=5
+  614658 of 1021338 entries (60%) still tied at 16 bytes
+
+  parallel scan across 4 threads, milliseconds
+  query                      1 thread     parallel    speedup
+  (empty)                       3.014        1.978       1.5x
+  zzqx                         47.364       13.774       3.4x
+  snapshot-render-70           61.701       16.813       3.7x
+  e                            30.540        8.856       3.4x
+  rpt                          65.757       18.624       3.5x
+  worst first-result across every query, parallel: 13.323 ms on `zzqx` (inside the 50 ms bar)
+
+  as-you-type, one full scan per keystroke, milliseconds
+  "r"=32.8 "re"=47.2 "rep"=66.1 "repo"=69.8 "repor"=71.5 "report"=72.3 
+  worst single keystroke 59.9 ms, whole word 359.7 ms
+
+spike-f done at load 1.57

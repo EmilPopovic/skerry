@@ -294,28 +294,119 @@ costs almost nothing because every thread stops as soon as one of them finds a
 hit; the 2.075 ms worst case is `zzqx`, which matches nothing and therefore has
 to read everything before it can say so.
 
+### Measured on a Raspberry Pi 5 — and the extrapolation was wrong
+
+Everything above is the 24-thread laptop, with conclusions projected to reference
+hardware by Spike B's "roughly 3× slower per core". That projection was measured
+and it is wrong, in both directions, by up to 4×.
+
+| Operation, 1M entries | laptop | Pi 5 | real factor | I predicted |
+| --- | --- | --- | --- | --- |
+| search scan, serial (`rpt`) | 24.9 ms | 65.8 ms | **2.6×** | 3× |
+| index, cold load | 48.1 ms | 195.0 ms | **4.1×** | — |
+| flatten | 14.1 ms | 77.4 ms | 5.5× | — |
+| sort by name, comparison | 164.0 ms | 916.2 ms | **5.6×** | 3× |
+| sort by name, radix + ties | 96.6 ms | 752.8 ms | **7.8×** | 3× |
+| radix over keys alone | 17.8 ms | 213.3 ms | **12.0×** | 3× |
+
+**A single per-core multiplier is not a model.** The factor runs from 2.6× to 12×
+on the same pair of machines, and it tracks how much memory the operation moves
+per unit of work, not how fast the cores are. The scan — which streams 28 MB
+linearly — is the *cheapest* to port at 2.6×. The radix sort — which scatters a
+million writes into 256 buckets — is the most expensive at 12×. Cache size and
+memory bandwidth differ from clock speed independently, and this project has now
+guessed wrong about that twice.
+
+#### Search passes on the Pi, and only because the scan is parallel
+
+| Query | 1 thread | 4 threads | speedup |
+| --- | --- | --- | --- |
+| `zzqx` — matches nothing | 47.4 ms | **13.8 ms** | 3.4× |
+| `snapshot-render-70` | 61.7 ms | 16.8 ms | 3.7× |
+| `rpt` | 65.8 ms | 18.6 ms | 3.5× |
+
+> **Worst first result across every query, parallel: 13.3 ms.** The bar is 50 ms.
+
+Serial, the same worst case is 47.4 ms — inside the bar by 5%, which is not
+inside it at all. **The parallel scan is not an optimisation here, it is the
+feature.** As-you-type serial is worse still: 72.3 ms for the sixth keystroke of
+`report`, against a 50 ms budget, and 360 ms to type the word.
+
+The speedup is 3.4–3.7× on four cores, against 8× on twenty-four. Both are far
+below the core count and both are enough, which is what a bandwidth-bound scan
+looks like.
+
+#### Sorting fails on the Pi by every route measured
+
+| Sort, 1,021,338 entries | Pi 5 | vs 120 ms target | vs 300 ms hard fail |
+| --- | --- | --- | --- |
+| by size (`u64` column) | **6.1 ms** | 20× inside | — |
+| by mtime | 19.9 ms | 6× inside | — |
+| radix over keys alone | 213.3 ms | **1.8× over** | inside |
+| radix + tie repair | **752.8 ms** | 6.3× over | **2.5× over** |
+| radix, 16-byte keys | 875.6 ms | 7.3× over | 2.9× over |
+| by name, precomputed keys | 837.2 ms | 7× over | 2.8× over |
+| by name, through the arena | 916.2 ms | 7.6× over | 3.1× over |
+
+**Nothing measured sorts a million filenames inside the hard fail on reference
+hardware.** The radix pass that fixed this on the laptop is 213 ms on the Pi
+before any ties are repaired — already over the target — and the repair takes it
+to 753 ms. The 16-byte key is *worse* here than the 8-byte one, because on a
+machine this memory-bound the extra eight radix passes cost more than the halved
+tie count saves.
+
+Sorting by a metadata column is 6.1 ms, 123× faster than by name. The entire
+difference remains memory access pattern, and on the Pi it is starker, not
+milder.
+
+#### Warm is not reliably warm on 8 GB
+
+| | p50 | p99 | mean |
+| --- | --- | --- | --- |
+| walk, realistic | 1,136 ms | **6,332 ms** | 2,290 ms |
+| walk, flat-1M | 2,368 ms | **10,485 ms** | 4,016 ms |
+
+Five repeats, machine idle, page cache supposedly warm from the repeat before.
+The p99 is five times the median and the mean sits between them, which is the
+signature of a couple of runs having to go back to the device.
+
+The likely cause is that three trees and their indices — 2.1M inodes and 105 MB
+of index — do not stay resident in 8 GB alongside everything else, so the dentry
+cache is partly evicted between repeats. That is a hypothesis; what is measured
+is that **on a memory-constrained machine, a "warm cache" benchmark is not
+reliably measuring a warm cache**, and every warm number in this project's spikes
+was taken on a machine with 60 GB.
+
 ## Verdict
 
 **Go on the index. The search and sort budgets do not survive reference
 hardware, and both need a design change rather than tuning.**
 
-| Question | Answer |
-| --- | --- |
-| Is the dull index format fast enough? | **Yes, decisively.** 40 ms cold for a million entries against a 2.3–3.7 s cold walk — 57× to 92× |
-| Does flattened search hit 50 ms to first result? | **Yes, once the scan is parallel.** 2.075 ms worst case across 24 threads, against 18–25 ms on one |
-| Does sorting hit 120 ms? | **Yes with a radix pass — 96.6 ms — and no on a Pi.** The comparison sort is 154 ms, and 94% of names tie on an 8-byte key, so the tie repair is 79 of the 96 |
-| What breaks a walk? | **A single directory with a million entries.** 8.4× the realistic tree, because a directory is the unit of parallel work |
+Measured on both machines, with the Pi 5 as the one that decides:
+
+| Question | Laptop | **Raspberry Pi 5** |
+| --- | --- | --- |
+| Is the dull index format fast enough? | 48 ms cold | **195 ms cold — yes, 12–19× faster than the walk it replaces** |
+| Does flattened search hit 50 ms to first result? | 2.1 ms | **13.3 ms — yes, and only because the scan is parallel** |
+| Does sorting hit 120 ms? | 96.6 ms with radix | **752 ms — no, by any route measured, and 2.5× outside the hard fail** |
+| What breaks a walk? | one directory of a million entries, 8.4× a realistic tree | the same, plus a warm cache that does not stay warm in 8 GB |
 
 ### What this settles
 
 [ADR 0008](../../docs/adr/0008-persistent-index-is-required.md) deliberately left
 the on-disk format undecided, on the grounds that a format is expensive to get
-wrong and no numbers existed. The numbers now exist and they are not close:
-a header, the arena, and the parallel arrays written as they sit in memory loads
-a million entries in 40 ms cold. **The format ADR can be written, and it can be
-short.** Nothing in mmap, compression or key ordering is needed to beat a walk by
-two orders of magnitude, and each would be complexity spent against a number that
-is already 57× ahead.
+wrong and no numbers existed. The numbers now exist on both machines and the
+answer holds on the one that matters: a header, the arena, and the parallel
+arrays written as they sit in memory load a million entries in **195 ms cold on a
+Pi 5**, against a cold walk of 2.3–3.7 s. **The format ADR can be written and it
+can be short** — mmap, compression and key ordering are each complexity spent
+against a number that is already 12–19× ahead.
+
+One correction to make while writing it: an earlier revision of this document
+proposed a budget row of "load the index for 1M entries, target 100 ms". That
+figure came from the laptop's 48 ms. The Pi measures **195 ms**, so the target as
+proposed is unmeetable on reference hardware and the row needs a number taken
+from the Pi rather than from the fastest machine to hand.
 
 50 bytes per entry is the figure for the conversation ADR 0008 flagged: a million
 files is 50 MB on the user's disk, and ten million is half a gigabyte.
@@ -325,18 +416,22 @@ files is 50 MB on the user's disk, and ten million is half a gigabyte.
 Three things this spike found that are recorded against the documents that claim
 otherwise:
 
-1. **`Sort 1M entries < 120 ms` needs a radix sort, and even then does not reach
-   reference hardware.** The comparison sort is 154–174 ms and the architecture's
-   stated remedy for it — precomputed keys — is worth 3%, because the cost is the
-   random access pattern of sorting a permutation rather than the comparison. A
-   radix pass fixes it to 96.6 ms here. On a Pi that is roughly 290 ms: under the
-   300 ms hard fail, three times over the target. The 79 ms of tie repair inside
-   that number is the part to remove, and an MSD string radix is how.
-2. **`First search result < 50 ms` needs a parallel scan, and then has room.**
-   Serial, one keystroke is 18–25 ms on the fastest machine and would not survive
-   a Pi. Across 24 threads the worst first result is 2.075 ms, which survives a
-   3× slower machine eight times over. The parallel speedup is 8×, not 24×,
-   because the scan is memory-bandwidth bound.
+1. **`Sort 1M entries` is not achievable on reference hardware by anything
+   measured.** On a Pi 5: 916 ms comparison-sorted, 837 ms with precomputed keys,
+   753 ms with a radix pass and tie repair, 876 ms with 16-byte keys. The target
+   is 120 ms and the hard fail is 300 ms; the best route is **2.5× outside the
+   hard fail**. Pure radix without ties is 213 ms, which is over the target but
+   inside the fail — so the whole budget hinges on never falling back to
+   comparison, and an MSD string radix over the arena is the only unmeasured
+   route left. Sorting by a metadata column is 6.1 ms, so this is specifically a
+   *filename* sorting problem.
+2. **`First search result < 50 ms` is met on a Pi at 13.3 ms, and only with a
+   parallel scan.** Serial on the same machine the worst case is 47.4 ms, inside
+   the bar by 5%, which is not inside it; and as-you-type is 72.3 ms per
+   keystroke, outside it. The speedup is 3.4–3.7× on four cores and 8× on
+   twenty-four — both far below the core count, because the scan is
+   memory-bandwidth bound. The parallel scan is the feature, not an optimisation
+   of it.
 3. **A directory is the unit of parallel work, and that is a problem.** One
    directory holding a million entries takes 8.4× a realistic tree of the same
    size. `getdents64` returns a resumable cookie, so a large directory *can* be
@@ -344,10 +439,14 @@ otherwise:
 
 ### What it does not license
 
-- **One machine.** Every number here is the 24-thread laptop. Spike B's four
-  machines varied by 7× on comparable work, and the two conclusions above that
-  depend on a 3× extrapolation to a Pi should be measured on one rather than
-  projected. The harness runs anywhere and the trees are seeded.
+- **Two machines, and the second one changed three answers.** The laptop-only
+  version of this document projected reference hardware with a single 3×
+  multiplier taken from Spike B. Measured, the factor runs **2.6× to 12×** on the
+  same pair of machines, tracking how much memory an operation moves rather than
+  how fast the cores are. Every projection in this project should now be treated
+  as a hypothesis until a slow machine has run it.
+- **`homelab` and `leto` are unmeasured for Spike F.** Two machines is enough to
+  disprove a single multiplier and not enough to characterise the curve.
 - **A cold floor, not a cold measurement.** `fadvise` evicts what the kernel is
   willing to drop. A genuinely cold index read — after a reboot, on a busy disk —
   can only be slower than 40 ms.
