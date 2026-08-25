@@ -171,10 +171,23 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         flatten_ms.push(started.elapsed().as_secs_f32() * 1000.0);
     }
 
+    // The flat-directory fix: getdents stays sequential, statx goes to the pool.
+    let mut deferred_ms = Samples::new("walk deferred");
+    for _ in 0..options.repeats {
+        let cancel = Cancel::new();
+        let mut pool = Pool::with_width(pool_width(options), cancel.clone());
+        let sink = Arc::new(Sink::default());
+        let started = Instant::now();
+        walk::walk_deferred_statx(&root, &sink, &pool, &cancel, 256);
+        deferred_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+        pool.drain();
+    }
+
     println!("  {} directories, {} entries, arena {:.1} MB, store {:.1} MB",
         directories, flat.len(), flat.names.len() as f64 / 1e6, flat.footprint() as f64 / 1e6);
     println!("  {}", walk_ms.row());
     println!("  {}", flatten_ms.row());
+    println!("  {}", deferred_ms.row());
     println!("  peak RSS {:.1} MB", stats::peak_rss().unwrap_or(0) as f64 / 1e6);
 
     // ── search ────────────────────────────────────────────────────────────────

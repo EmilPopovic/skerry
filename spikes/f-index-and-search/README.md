@@ -359,6 +359,48 @@ Sorting by a metadata column is 6.1 ms, 123× faster than by name. The entire
 difference remains memory access pattern, and on the Pi it is starker, not
 milder.
 
+#### Making the flat directory work
+
+A single directory of a million entries takes 8.4× a realistic tree, and the
+obvious fix is not available: `getdents64` returns a cookie that can be *resumed*
+from, but the cookies are only discoverable by reading forward, so there is no way
+to give thread two a starting point without thread one having already been there.
+**A directory's name stream cannot be split.**
+
+The other half can be. Reading names is one sequential stream; the million
+`statx` calls behind them are independent. Batching those onto the pool and
+letting the reader run ahead is also exactly what rule 1's progressive listing
+wants — names appear immediately, size and mtime fill in behind.
+
+| 1M entries | per-directory jobs, `statx` inline | `statx` deferred to the pool |
+| --- | --- | --- |
+| **flat, Pi 5** | 2,346 ms · p99 **11,896 ms** | **1,164 ms** · p99 **1,213 ms** |
+| **flat, laptop** | 1,036 ms | **305 ms** |
+| realistic, Pi 5 | **1,246 ms** | 1,374 ms |
+| realistic, laptop | **131 ms** | 399 ms |
+
+**Neither strategy wins on both shapes, and they are not close.** Deferring is
+3.4× faster on a flat directory and 3× slower on a realistic tree. The reason is
+symmetric: a flat directory has one job and needs the `statx` work taken off it,
+while a realistic tree has 21,338 jobs already and deferring only serialises the
+traversal that was parallel.
+
+The Pi shows something the laptop hides. **The p99 on the flat directory collapses
+from 11.9 s to 1.2 s** — a factor of ten in the tail, against two in the median.
+A million `statx` calls issued serially from one thread means any stall stops
+everything; overlapping them means a stall costs one worker. **The tail is the
+number a user feels**, and it is the stronger half of this result.
+
+So the implementation is a per-directory choice, not a global one: **defer when a
+directory is large enough to be its own bottleneck, keep `statx` inline when it is
+one of thousands.** Both measurements support that, and the threshold is a number
+`sk-fs` should carry rather than a constant anyone should guess.
+
+One caveat the numbers depend on: the deferred jobs issue the `statx` calls and
+discard the results rather than writing them back into the store, so this prices
+the syscalls and not the bookkeeping. Spike B's equivalent arm has the same
+caveat, and a real implementation writes into columns it already reserved.
+
 #### Sorting, chased down from 948 ms to 191 ms
 
 Having found that no approach met the sort budget on a Pi, six more were tried.
@@ -447,7 +489,7 @@ Measured on both machines, with the Pi 5 as the one that decides:
 | Is the dull index format fast enough? | 48 ms cold | **195 ms cold — yes, 12–19× faster than the walk it replaces** |
 | Does flattened search hit 50 ms to first result? | 2.1 ms | **13.3 ms — yes, and only because the scan is parallel** |
 | Does sorting hit 120 ms? | 23.8 ms | **191 ms — no, but comfortably inside the 300 ms hard fail, down from 948 ms** |
-| What breaks a walk? | one directory of a million entries, 8.4× a realistic tree | the same, plus a warm cache that does not stay warm in 8 GB |
+| What breaks a walk? | one directory of a million entries, 8.4× a realistic tree — **halved by deferring `statx`** | the same; deferring is 2× on the median and **10× on the p99**, plus a warm cache that does not stay warm in 8 GB |
 
 ### What this settles
 
@@ -488,10 +530,13 @@ otherwise:
    twenty-four — both far below the core count, because the scan is
    memory-bandwidth bound. The parallel scan is the feature, not an optimisation
    of it.
-3. **A directory is the unit of parallel work, and that is a problem.** One
-   directory holding a million entries takes 8.4× a realistic tree of the same
-   size. `getdents64` returns a resumable cookie, so a large directory *can* be
-   split across jobs; `sk-fs` has to be shaped for that from the start.
+3. **A directory is the unit of parallel work, and the fix is asymmetric.** One
+   directory holding a million entries takes 8.4× a realistic tree. Its name
+   stream cannot be split — `getdents64` cookies are only discoverable by reading
+   forward — but its `statx` calls can be deferred to the pool, which is 3.4×
+   faster on a flat directory and **3× slower on a realistic tree**. `sk-fs` needs
+   both strategies and a per-directory choice between them, which is a shape
+   decision rather than a tuning constant.
 
 ### What it does not license
 

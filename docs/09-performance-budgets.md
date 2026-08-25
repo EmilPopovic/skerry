@@ -249,9 +249,14 @@ A single directory holding a million entries takes **8.4× a realistic tree of t
 same file count** — 1.013 s against 0.120 s on the laptop — because a directory is
 the unit of parallel work and there is only one of them. `node_modules`, Maildir,
 `/nix/store` and dataset dumps all produce that shape, and it is a directory a
-user opens. `getdents64` returns a resumable cookie, so a large directory can be
-split across jobs; `sk-fs` has to be built for that rather than have it
-retrofitted.
+user opens.
+
+Its name stream **cannot** be split: `getdents64` cookies are discoverable only by
+reading forward. Its `statx` calls can be, and deferring them to the pool is
+**3.4× faster on a flat directory and 3× slower on a realistic tree** — and on a
+Pi it takes the p99 from **11.9 s to 1.2 s**, ten times better in the tail against
+two in the median. `sk-fs` therefore needs both strategies and a per-directory
+choice between them, which is a shape decision rather than a tuning constant.
 
 **And on 8 GB, a warm cache does not stay warm.** Five repeats of the same walk
 on the Pi gave a p50 of 1,136 ms and a p99 of 6,332 ms, the signature of runs
