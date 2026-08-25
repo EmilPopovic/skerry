@@ -1,0 +1,150 @@
+# Roadmap
+
+Estimates assume one experienced developer working steadily. They are ratios for ordering
+the work, not a schedule.
+
+---
+
+## Phase 0 — five spikes, ~3–4 weeks
+
+Throwaway binaries, each answering one question that could invalidate the plan, each with a
+number attached. They live in `spikes/` afterwards because their measurements are the
+evidence behind the ADRs. **If a spike misses its bar, the architecture changes before
+there is a codebase to rewrite.**
+
+### Spike A — a million rows at 120 fps
+Virtualized list of 1,000,000 synthetic entries with text, icon and three columns. Built
+twice: once on `wgpu` + `swash`, once on GPUI, so the comparison is measured rather than
+argued. Run on Wayland and X11; on Intel, AMD, NVIDIA proprietary and llvmpipe; at 100% and
+150% scaling.
+
+> **Bar:** p99 frame under 8 ms while scrolling · crisp glyphs at fractional scale · under
+> 300 MB RSS · zero CPU at idle.
+> **Decides:** the renderer, permanently. Also the first golden-frame harness.
+
+### Spike B — enumeration throughput
+Walk a 1M-file tree with `getdents64` plus batched `statx` on a job pool. Compare against
+`std::fs::read_dir` to quantify the tax rather than assume it. Cold cache, warm cache, and
+an sshfs mount that stops responding halfway through.
+
+> **Bar:** warm-cache full walk under 1 s · first 200 visible rows on screen within 30 ms of
+> opening any directory · a hung mount never blocks the UI thread.
+
+### Spike C — watching at scale
+inotify across thousands of directories against the per-user watch limit, with a deliberate
+`IN_Q_OVERFLOW` and a targeted rescan path. Decide whether `fanotify`'s privilege
+requirement is ever worth it (expected answer: no).
+
+> **Bar:** an external `rm -rf` or `git checkout` reflected within 100 ms · no lost entries
+> after a forced overflow · the watch budget documented as a number.
+
+### Spike D — platform layer and drag-and-drop
+The highest-uncertainty item in the plan, and the one that decides
+[ADR 0002](adr/0002-own-platform-layer.md). A minimal Wayland and X11 window that is a
+drag-and-drop **source and target**, handles clipboard including primary selection, and
+receives `text-input-v3`. Dragged both directions against Nautilus, Dolphin, Firefox,
+Chrome and Thunderbird, covering copy, move and link.
+
+> **Bar:** every pair works on both display servers, or the failure is documented as a
+> compositor limitation with a fallback · IME composes CJK text into a field.
+
+### Spike E — operation engine correctness
+Reflink, `copy_file_range` and fallback paths across ext4, btrfs, xfs, tmpfs, exFAT and NFS,
+with sparse files, hardlinks, symlinks, xattrs, ACLs and a full destination disk. Verify
+integrity after each. This spike becomes the permanent torture matrix.
+
+> **Bar:** zero data loss across the matrix · `ENOSPC` handled cleanly mid-copy with no
+> partial file left behind · reflink measurably instant on btrfs.
+
+---
+
+## Milestones
+
+Each ends in something a real person can use, because a file manager you cannot dogfood
+cannot be designed.
+
+### M0 · 6 wk — Platform layer
+`sk-plat`: Wayland and X11 windowing, keyboard mapping through xkbcommon, pointer and
+gesture input, monitors and fractional scaling, clipboard, drag-and-drop as source and
+target, IME, window lifecycle. Plus the CI scaffolding it needs: headless compositor
+fixture, input-trace replay, the layering check, the dependency budget.
+
+> The most expensive milestone and the one with the least to show. It is first because
+> every later milestone sits on it and because Spike D has already de-risked it.
+
+### M1 · 4 wk — Walking skeleton
+One window, one pane, Details view over the columnar store. Navigation, sorting, selection,
+rubber-band, scrolling, icons from the real theme, inotify refresh. Accessibility tree and
+`--script` headless mode wired in now, not later. No mutations yet — read-only, and already
+faster than everything installed.
+
+> **Dogfood test:** browse `/usr`, `~/Downloads` and a large git checkout for a day without
+> reaching for Nautilus.
+
+### M2 · 4 wk — Panes, tabs, views
+The split tree: nested horizontal and vertical panes, tabs, drag-to-rearrange with snap
+overlays, middle-click to split. Grid with thumbnails, inline Tree, List columns, Group By.
+Per-folder view settings with subtree inheritance. Full session persistence.
+
+> Ships the layout model, which is the hardest thing to retrofit later.
+
+### M3 · 5 wk — Operations and undo
+Copy, move, rename, create, trash, permanent delete on the Spike E engine, behind a queue
+with honest progress, conflict resolution, pause, cancel and crash resume. One undo stack
+across all of it with visible history. Clipboard interop with GTK and Qt applications.
+Interactive batch rename.
+
+> Ships rule 3 — the thing File Pilot still does not have.
+> **Gate:** M3 does not ship until the Spike E matrix is green in CI.
+
+### M4 · 3 wk — Search and flattened views
+Recursive flattening of a subtree or a whole filesystem, fuzzy filtering as you type,
+extension facets, ignore rules, sort by recursive size with live computation. Two scopes:
+global, and current-folder-with-subfolders.
+
+> **Bar:** first results within 50 ms of the first keystroke; results keep arriving without
+> ever stalling a frame.
+
+### M5 · 3 wk — Inspector and quick look
+`Space` quick look and a docked inspector: text with syntax highlighting, images with EXIF
+orientation and zoom, **folder listings that are clickable and navigable**, archive
+contents, media metadata, hex. Decoders sandboxed in helpers. Thumbnails to the XDG shared
+cache.
+
+> Includes the PDF preview File Pilot lacks, via `skerry-preview-doc`.
+
+### M6 · 3 wk — Command palette and keymap
+The registry made visible: fuzzy palette over every action and setting, inline hotkey
+binding, key sequences and chords, aliases, contextual shortcut hints, an optional vim
+layer, and a config file that is a serialization of the same registry with hot reload.
+Searchable and pinnable context menu, reading desktop-entry actions and KDE service menus so
+third-party integrations work without a plugin API.
+
+> Ships rule 4 — discoverability, the thing Dolphin never solved.
+
+### M7 · 4 wk — Desktop citizenship
+FileManager1, default-handler registration, single instance, udisks2 devices with mount and
+eject, the GoTo popup over bookmarks/recents/system paths, network mount behaviour, portal
+integration, the settings surface, theming and DPI, localization catalogues.
+
+> **Bar:** a fresh install feels native on GNOME, on KDE, and in a bare Sway session with no
+> systemd.
+
+### M8 · 4 wk — Hardening and 1.0
+Performance regression CI with the budgets as failing tests, fuzzing of every parser, the
+full filesystem matrix nightly, the forced-degradation matrix from
+[06-portability.md](06-portability.md), crash reporting that is off by default, packaging
+for both architectures.
+
+---
+
+## The first week
+
+**Spike A, and nothing else.** Not the architecture document — it is already written. Not
+the crate skeleton. One question: can a Rust process paint a million-row virtualized list
+with real shaped text at a hard 8 ms p99 on Wayland with fractional scaling, on an Intel
+integrated GPU and on llvmpipe?
+
+If yes, the plan above is sound and the rest is ordinary engineering. If no, the project's
+single differentiator is unreachable on the chosen stack, and the right response is to
+change the stack while there is nothing to throw away — which is exactly why it goes first.
