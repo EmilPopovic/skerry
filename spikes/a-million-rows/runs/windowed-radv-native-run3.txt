@@ -1,0 +1,36 @@
+Spike A arm 1 — wgpu 27 + swash 0.2, release build
+  store        1000000 entries, 60.0 MB, built in 77 ms
+  fonts        6 faces in the fallback chain
+  adapter      AMD Radeon 890M Graphics (RADV STRIX1) · radv · Vulkan
+  target       1146x1402 device px @ 1x scale · 60 rows visible · windowed
+  timing       cpu: Instant · gpu: timestamp queries
+  trace        1920 frames across 5 phases
+
+  scale        compositor says 1.25x — re-rasterizing glyphs for it
+  idle         holding 10 s on the event queue with no redraw requested
+
+frame time, milliseconds — CPU (immediate-mode pass, shaping, upload, submit)
+  slow       p50  0.184  p99  0.425  max   0.482  mean  0.199   n=600
+  fling      p50  0.559  p99  1.383  max   1.556  mean  0.629   n=600
+  jump       p50  0.757  p99  1.567  max   1.977  mean  0.822   n=300
+  arrival    p50  0.537  p99  1.290  max   1.319  mean  0.603   n=300
+
+frame time, milliseconds — GPU (render pass, timestamp queries)
+  slow       p50  0.134  p99  0.178  max   0.191  mean  0.135   n=599
+  fling      p50  0.155  p99  0.179  max   0.229  mean  0.155   n=601
+  jump       p50  0.157  p99  0.198  max   0.240  mean  0.158   n=300
+  arrival    p50  0.154  p99  0.172  max   0.179  mean  0.156   n=300
+
+against the bar
+  p99 frame < 8 ms          worst phase `jump`: cpu 1.567 ms, gpu 0.198 ms (PASS)
+  RSS < 300 MB              peak 210.7 MB, current 210.7 MB, store 60.0 MB (PASS)
+  crisp at fractional scale 0 glyph quads not 1:1 with their raster, 0 dropped (PASS)
+    └ surface matches screen      0 frames drawn at a scale or size the compositor had to resample (PASS)
+  zero CPU at idle          0 ms of CPU over 10 s = 0.000%, 0 redraws of which 0 unprompted, 0 input events (PASS)
+
+where the work went
+  layout cache  2000 runs resident, 53.5640% miss, 48 generations rotated
+  glyph atlas   2505 entries, mask 17.3% full, colour 0.4% full
+  atlas upload  2497 glyphs, 0.56 MB, 2 frames hit the 128-glyph bound (169 deferred)
+  per frame     60 rows, 2964 quads, 2874 glyphs
+  gpu sampling  0 frames without a free query slot, 0 unusable deltas

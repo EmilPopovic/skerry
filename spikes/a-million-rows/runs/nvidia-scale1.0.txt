@@ -1,0 +1,32 @@
+Spike A arm 1 — wgpu 27 + swash 0.2, release build
+  store        1000000 entries, 60.0 MB, built in 53 ms
+  fonts        6 faces in the fallback chain
+  adapter      NVIDIA GeForce RTX 5070 Laptop GPU · NVIDIA · Vulkan
+  target       1920x1080 device px @ 1x scale · 46 rows visible · headless
+  timing       cpu: Instant · gpu: timestamp queries
+  trace        1920 frames across 5 phases
+
+frame time, milliseconds — CPU (immediate-mode pass, shaping, upload, submit)
+  slow       p50  0.069  p99  0.087  max   2.978  mean  0.075   n=600
+  fling      p50  0.501  p99  0.620  max   3.401  mean  0.511   n=600
+  jump       p50  0.563  p99  0.714  max   3.448  mean  0.576   n=300
+  arrival    p50  0.505  p99  0.609  max   1.386  mean  0.517   n=300
+
+frame time, milliseconds — GPU (render pass, timestamp queries)
+  slow       p50  0.019  p99  0.020  max   0.020  mean  0.019   n=600
+  fling      p50  0.019  p99  0.020  max   0.020  mean  0.019   n=600
+  jump       p50  0.019  p99  0.020  max   0.021  mean  0.019   n=300
+  arrival    p50  0.019  p99  0.020  max   0.031  mean  0.019   n=300
+
+against the bar
+  p99 frame < 8 ms          worst phase `jump`: cpu 0.714 ms, gpu 0.020 ms (PASS)
+  RSS < 300 MB              peak 375.3 MB, current 375.3 MB, store 60.0 MB (MISS)
+  crisp at fractional scale 0 glyph quads not 1:1 with their raster, 0 dropped (PASS)
+  zero CPU at idle          NOT MEASURED — needs --window, an event loop is the test
+
+where the work went
+  layout cache  1944 runs resident, 62.7865% miss, 42 generations rotated
+  glyph atlas   773 entries, mask 3.5% full, colour 0.2% full
+  atlas upload  769 glyphs, 0.11 MB, 1 frames hit the 128-glyph bound (79 deferred)
+  per frame     46 rows, 2269 quads, 2200 glyphs
+  gpu sampling  0 frames without a free query slot, 0 unusable deltas

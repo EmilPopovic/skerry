@@ -1,0 +1,32 @@
+Spike A arm 1 — wgpu 27 + swash 0.2, release build
+  store        1000000 entries, 60.0 MB, built in 64 ms
+  fonts        6 faces in the fallback chain
+  adapter      llvmpipe (LLVM 21.1.8, 256 bits) · llvmpipe · Vulkan
+  target       1920x1080 device px @ 1x scale · 46 rows visible · headless
+  timing       cpu: Instant · gpu: timestamp queries
+  trace        1920 frames across 5 phases
+
+frame time, milliseconds — CPU (immediate-mode pass, shaping, upload, submit)
+  slow       p50  1.764  p99  2.557  max   2.970  mean  1.848   n=600
+  fling      p50  1.741  p99  2.501  max   2.711  mean  1.806   n=600
+  jump       p50  1.624  p99  1.970  max   1.999  mean  1.635   n=300
+  arrival    p50  1.556  p99  1.933  max   2.480  mean  1.561   n=300
+
+frame time, milliseconds — GPU (render pass, timestamp queries)
+  slow       p50  1.704  p99  2.434  max   2.552  mean  1.774   n=600
+  fling      p50  1.677  p99  2.370  max   2.598  mean  1.735   n=600
+  jump       p50  1.565  p99  1.893  max   1.948  mean  1.574   n=300
+  arrival    p50  1.511  p99  1.877  max   2.459  mean  1.513   n=300
+
+against the bar
+  p99 frame < 8 ms          worst phase `slow`: cpu 2.557 ms, gpu 2.434 ms (PASS)
+  RSS < 300 MB              peak 256.8 MB, current 256.8 MB, store 60.0 MB (PASS)
+  crisp at fractional scale 0 glyph quads not 1:1 with their raster, 0 dropped (PASS)
+  zero CPU at idle          NOT MEASURED — needs --window, an event loop is the test
+
+where the work went
+  layout cache  1944 runs resident, 62.7865% miss, 42 generations rotated
+  glyph atlas   773 entries, mask 3.5% full, colour 0.2% full
+  atlas upload  769 glyphs, 0.11 MB, 1 frames hit the 128-glyph bound (79 deferred)
+  per frame     46 rows, 2269 quads, 2200 glyphs
+  gpu sampling  0 frames without a free query slot, 0 unusable deltas

@@ -1,0 +1,24 @@
+# Spike A, arm 1. Standalone by design: not a workspace member, exempt from the
+# layering, lint and dependency rules (spikes/README.md). Every entry here is a
+# measurement instrument, not a shipping decision — except wgpu and swash, which
+# are exactly the choices under test.
+[package]
+name = "spike-a-million-rows"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+wgpu = "27"
+winit = "0.30.13"
+swash = "0.2.10"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "1.0"
+png = "0.18"
+
+# The measurement is meaningless in a debug build, and a spike has no reason to
+# ever be run in one.
+[profile.release]
+opt-level = 3
+lto = "thin"
+debug = 1

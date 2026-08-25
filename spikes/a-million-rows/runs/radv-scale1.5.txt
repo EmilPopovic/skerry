@@ -1,0 +1,32 @@
+Spike A arm 1 — wgpu 27 + swash 0.2, release build
+  store        1000000 entries, 60.0 MB, built in 81 ms
+  fonts        6 faces in the fallback chain
+  adapter      AMD Radeon 890M Graphics (RADV STRIX1) · radv · Vulkan
+  target       1920x1080 device px @ 1.5x scale · 31 rows visible · headless
+  timing       cpu: Instant · gpu: timestamp queries
+  trace        1920 frames across 5 phases
+
+frame time, milliseconds — CPU (immediate-mode pass, shaping, upload, submit)
+  slow       p50  0.128  p99  0.390  max   0.732  mean  0.142   n=600
+  fling      p50  0.399  p99  0.523  max   1.268  mean  0.408   n=600
+  jump       p50  0.388  p99  0.487  max   0.493  mean  0.391   n=300
+  arrival    p50  0.386  p99  0.421  max   0.468  mean  0.388   n=300
+
+frame time, milliseconds — GPU (render pass, timestamp queries)
+  slow       p50  0.110  p99  0.168  max   0.168  mean  0.122   n=159
+  fling      p50  0.116  p99  0.129  max   0.133  mean  0.109   n=600
+  jump       p50  0.121  p99  0.135  max   0.140  mean  0.121   n=300
+  arrival    p50  0.121  p99  0.134  max   0.138  mean  0.121   n=300
+
+against the bar
+  p99 frame < 8 ms          worst phase `fling`: cpu 0.523 ms, gpu 0.168 ms (PASS)
+  RSS < 300 MB              peak 231.4 MB, current 231.4 MB, store 60.0 MB (PASS)
+  crisp at fractional scale 0 glyph quads not 1:1 with their raster, 0 dropped (PASS)
+  zero CPU at idle          NOT MEASURED — needs --window, an event loop is the test
+
+where the work went
+  layout cache  1488 runs resident, 68.7366% miss, 30 generations rotated
+  glyph atlas   1283 entries, mask 12.0% full, colour 0.4% full
+  atlas upload  1279 glyphs, 0.41 MB, 1 frames hit the 128-glyph bound (56 deferred)
+  per frame     31 rows, 1522 quads, 1475 glyphs
+  gpu sampling  441 frames without a free query slot, 0 unusable deltas
