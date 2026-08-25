@@ -389,6 +389,67 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         println!("  parallel radix produces a correctly ordered result: {sorted}");
     }
 
+    let mut msd_ms = Samples::new("radix msd par");
+    for _ in 0..options.repeats {
+        let mut order = base.clone();
+        let started = Instant::now();
+        sort::radix_msd_parallel(&flat, &mut order, threads);
+        msd_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", msd_ms.row());
+    {
+        let mut order = base.clone();
+        sort::radix_msd_parallel(&flat, &mut order, threads);
+        let sorted = order
+            .windows(2)
+            .all(|w| flat.name(w[0] as usize) <= flat.name(w[1] as usize));
+        println!("  msd parallel radix produces a correctly ordered result: {sorted}");
+    }
+
+    let mut full_ms = Samples::new("radix msd full");
+    for _ in 0..options.repeats {
+        let mut order = base.clone();
+        let started = Instant::now();
+        sort::radix_msd_fully_parallel(&flat, &mut order, threads);
+        full_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", full_ms.row());
+    {
+        let mut order = base.clone();
+        sort::radix_msd_fully_parallel(&flat, &mut order, threads);
+        let sorted = order
+            .windows(2)
+            .all(|w| flat.name(w[0] as usize) <= flat.name(w[1] as usize));
+        println!("  fully parallel msd radix produces a correctly ordered result: {sorted}");
+    }
+
+    {
+        // Why the parallel sort stops improving: if one first-byte bucket holds a
+        // large share of the entries, it is a straggler no number of threads can
+        // divide. Data-dependent, so it is measured rather than assumed.
+        let mut buckets = [0usize; 257];
+        for index in 0..flat.len() {
+            let name = flat.name(index);
+            buckets[name.first().map_or(0, |b| *b as usize + 1)] += 1;
+        }
+        let mut ranked: Vec<(usize, usize)> = buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n > 0)
+            .map(|(b, n)| (*n, b))
+            .collect();
+        ranked.sort_unstable_by_key(|(n, _)| std::cmp::Reverse(*n));
+        let biggest = ranked.first().copied().unwrap_or((0, 0));
+        let top4: usize = ranked.iter().take(4).map(|(n, _)| n).sum();
+        println!(
+            "  first-byte buckets: {} non-empty, largest {:.1}% ('{}'), top 4 = {:.1}% of entries",
+            ranked.len(),
+            100.0 * biggest.0 as f64 / flat.len() as f64,
+            if biggest.1 > 0 { (biggest.1 as u8 - 1) as char } else { '?' },
+            100.0 * top4 as f64 / flat.len() as f64
+        );
+    }
+
     let mut keys16_ms = Samples::new("build keys16");
     let mut radix16_ms = Samples::new("radix16 + ties");
     let mut pair;

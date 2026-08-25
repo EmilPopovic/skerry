@@ -441,3 +441,194 @@ pub fn radix_parallel(flat: &Flat, order: &mut [u32], threads: usize) {
 struct SendPtr(*mut u32);
 unsafe impl Send for SendPtr {}
 unsafe impl Sync for SendPtr {}
+
+/// Most-significant-byte split, then whole buckets sorted in parallel.
+///
+/// `radix_parallel` left 57% of its time in a serial phase that ran a full
+/// eight-pass least-significant-digit sort just to find run boundaries. Only the
+/// *first* byte is needed to make buckets: everything after it can be settled
+/// inside the bucket, on a thread, in parallel.
+///
+/// So the serial phase becomes one histogram and one scatter over a 4 MB index
+/// array, instead of eight passes over 12 MB of pairs. The per-bucket recursion
+/// then skips its own first pass for free, because byte zero is constant within
+/// a bucket and the constant-digit check notices.
+pub fn radix_msd_parallel(flat: &Flat, order: &mut [u32], threads: usize) {
+    if order.len() <= SMALL || threads <= 1 {
+        let mut scratch = Vec::new();
+        radix_recursive(flat, order, 0, &mut scratch);
+        return;
+    }
+
+    // One pass on the first byte. The arena read is unavoidable — the byte lives
+    // there — but it happens once rather than once per pass.
+    let mut counts = [0u32; 257];
+    for index in order.iter() {
+        let name = flat.name(*index as usize);
+        counts[first_byte(name)] += 1;
+    }
+    let mut offsets = [0u32; 257];
+    let mut running = 0u32;
+    for (slot, count) in counts.iter().enumerate() {
+        offsets[slot] = running;
+        running += count;
+    }
+
+    let mut placed = vec![0u32; order.len()];
+    let mut cursor = offsets;
+    for index in order.iter() {
+        let bucket = first_byte(flat.name(*index as usize));
+        placed[cursor[bucket] as usize] = *index;
+        cursor[bucket] += 1;
+    }
+    order.copy_from_slice(&placed);
+
+    // Bucket 0 is the empty-name bucket and needs no ordering. Longest first, so
+    // the straggler starts earliest.
+    let mut bounds: Vec<(usize, usize)> = (1..257)
+        .filter_map(|bucket| {
+            let (start, end) = (offsets[bucket - 1] as usize, offsets[bucket].min(running) as usize);
+            let (start, end) = if bucket == 256 {
+                (offsets[256] as usize, order.len())
+            } else {
+                (start, end)
+            };
+            (end > start + 1).then_some((start, end))
+        })
+        .collect();
+    bounds.sort_unstable_by_key(|(start, end)| std::cmp::Reverse(end - start));
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let order_ptr = SendPtr(order.as_mut_ptr());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let (bounds, next, flat) = (&bounds, &next, &flat);
+            let order_ptr = &order_ptr;
+            scope.spawn(move || {
+                let mut scratch = Vec::new();
+                loop {
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(start, end)) = bounds.get(slot) else { return };
+                    // SAFETY: buckets are disjoint half-open ranges of the same
+                    // array, and `fetch_add` gives each to exactly one thread.
+                    let run = unsafe {
+                        std::slice::from_raw_parts_mut(order_ptr.0.add(start), end - start)
+                    };
+                    radix_recursive(flat, run, 0, &mut scratch);
+                }
+            });
+        }
+    });
+}
+
+/// Bucket 0 is reserved for the empty name, so a real byte maps to `byte + 1`
+/// and short names sort before long ones sharing their prefix.
+#[inline]
+fn first_byte(name: &[u8]) -> usize {
+    name.first().map_or(0, |b| *b as usize + 1)
+}
+
+/// Most-significant-byte split with the split itself parallel.
+///
+/// `radix_msd_parallel` still ran its one histogram and one scatter on a single
+/// thread, and the arithmetic said that was 76% of what remained: 372 ms serial
+/// against 217 ms with parallel buckets implies a serial phase near 165 ms. It is
+/// a million random reads into a 28 MB arena, and nothing about it needs to be
+/// serial.
+///
+/// Each thread histograms its own slice, the per-thread offsets are stacked so
+/// every thread owns a disjoint output range in every bucket, and the scatter
+/// runs with no coordination at all. Then the buckets are sorted as before.
+pub fn radix_msd_fully_parallel(flat: &Flat, order: &mut [u32], threads: usize) {
+    if order.len() <= SMALL || threads <= 1 {
+        return radix_msd_parallel(flat, order, threads);
+    }
+
+    let total = order.len();
+    let per = total.div_ceil(threads);
+    let slices = (total + per - 1) / per;
+
+    // Per-thread histograms: [thread][bucket].
+    let mut histograms = vec![[0u32; 257]; slices];
+    std::thread::scope(|scope| {
+        let mut rest: &mut [[u32; 257]] = &mut histograms;
+        let mut offset = 0usize;
+        while let Some((slot, tail)) = rest.split_first_mut() {
+            let chunk = &order[offset..(offset + per).min(total)];
+            scope.spawn(move || {
+                for index in chunk {
+                    slot[first_byte(flat.name(*index as usize))] += 1;
+                }
+            });
+            rest = tail;
+            offset += per;
+        }
+    });
+
+    // Stack them: bucket-major, then thread within bucket, so every thread has a
+    // disjoint destination range in every bucket.
+    let mut starts = vec![[0u32; 257]; slices];
+    let mut bucket_start = [0u32; 258];
+    let mut running = 0u32;
+    for bucket in 0..257 {
+        bucket_start[bucket] = running;
+        for (slice, histogram) in histograms.iter().enumerate() {
+            starts[slice][bucket] = running;
+            running += histogram[bucket];
+        }
+    }
+    bucket_start[257] = running;
+
+    let mut placed = vec![0u32; total];
+    let placed_ptr = SendPtr(placed.as_mut_ptr());
+    std::thread::scope(|scope| {
+        let mut rest: &mut [[u32; 257]] = &mut starts;
+        let mut offset = 0usize;
+        while let Some((cursor, tail)) = rest.split_first_mut() {
+            let chunk = &order[offset..(offset + per).min(total)];
+            let placed_ptr = &placed_ptr;
+            scope.spawn(move || {
+                for index in chunk {
+                    let bucket = first_byte(flat.name(*index as usize));
+                    // SAFETY: `cursor[bucket]` starts at this thread's reserved
+                    // offset for this bucket and advances only within the range
+                    // reserved for it, so no two threads ever write the same slot.
+                    unsafe { placed_ptr.0.add(cursor[bucket] as usize).write(*index) };
+                    cursor[bucket] += 1;
+                }
+            });
+            rest = tail;
+            offset += per;
+        }
+    });
+    order.copy_from_slice(&placed);
+
+    let mut bounds: Vec<(usize, usize)> = (1..257)
+        .filter_map(|bucket| {
+            let (start, end) = (bucket_start[bucket] as usize, bucket_start[bucket + 1] as usize);
+            (end > start + 1).then_some((start, end))
+        })
+        .collect();
+    bounds.sort_unstable_by_key(|(start, end)| std::cmp::Reverse(end - start));
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let order_ptr = SendPtr(order.as_mut_ptr());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let (bounds, next, flat) = (&bounds, &next, &flat);
+            let order_ptr = &order_ptr;
+            scope.spawn(move || {
+                let mut scratch = Vec::new();
+                loop {
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(start, end)) = bounds.get(slot) else { return };
+                    // SAFETY: disjoint half-open ranges, one claimant each.
+                    let run = unsafe {
+                        std::slice::from_raw_parts_mut(order_ptr.0.add(start), end - start)
+                    };
+                    radix_recursive(flat, run, 0, &mut scratch);
+                }
+            });
+        }
+    });
+}

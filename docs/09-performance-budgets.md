@@ -176,38 +176,41 @@ The Pi is the row that counts.
 | Row | Target | Hard fail | Pi 5 | Verdict |
 | --- | --- | --- | --- | --- |
 | First search result | < 50 ms | 120 ms | **13.3 ms** parallel, 47.4 ms serial | met, and only with a parallel scan |
-| Sort 1M entries | < 120 ms | 300 ms | **240 ms** best of seven approaches | missed on target, inside the hard fail |
+| Sort 1M entries | < 120 ms | 300 ms | **191 ms** best of eight approaches | missed on target, comfortably inside the hard fail |
 | RSS at 1M entries | < 250 MB | 450 MB | 152 MB with the flattened store resident | met |
 
 ### The row that fails
 
-**Sorting a million filenames is not met on reference hardware, at 240 ms** — but
-it is inside the 300 ms hard fail, having started at 916 ms. Seven approaches
-were measured on the Pi, each verified to produce a correctly ordered result:
+**Sorting a million filenames is not met on reference hardware, at 191 ms** — but
+comfortably inside the 300 ms hard fail, having started at 948 ms. Eight
+approaches were measured on the Pi, each verified to produce a correctly ordered
+result:
 
 | Approach | Pi 5 |
 | --- | --- |
-| comparison, through the arena | 929 ms |
-| comparison, precomputed keys | 842 ms |
-| radix over keys, then repair ties by comparison | 741 ms |
-| radix over 16-byte keys, then ties | 883 ms |
-| recursive radix, never compares | 374 ms |
-| **recursive radix, buckets across threads** | **240 ms** |
-| *(a single packed radix pass, ties left unsorted)* | *138 ms* |
+| comparison, through the arena | 948 ms |
+| radix over keys, then repair ties by comparison | 775 ms |
+| recursive radix, never compares | 367 ms |
+| recursive radix, buckets across threads | 216 ms |
+| **MSD split, split and buckets both parallel** | **191 ms** |
+| *(one packed radix pass, ties left unsorted)* | *131 ms* |
 
-Three changes did it, and the first contradicts this document's own earlier
-advice. **Packing the key beside the index** — so a pass reads sequentially
-instead of probing an 8 MB array at random — is 257 ms → 138 ms on the Pi and
-almost nothing on the laptop, which is why it went unnoticed. **Never falling
-back to comparison**, recursing onto the next eight bytes instead, is 741 ms →
-374 ms. **Sorting the 256 buckets in parallel**, which the "off-thread" wording
-permits since it constrains the UI thread rather than the sort, is 374 ms →
-240 ms.
+The changes that mattered, in order: **never fall back to comparison** (775 → 367,
+because 94% of filenames share their first eight bytes and repairing ties by
+string comparison costs more than the radix before it); **sort the buckets in
+parallel** (367 → 216, disjoint slices of the order array over an immutable
+arena); **pack the key beside the index** so passes read sequentially instead of
+probing 8 MB at random (232 → 131 for one pass on the Pi, and almost nothing on a
+cache-rich laptop, which is why it went unnoticed); and splitting on the most
+significant byte with that split parallel too (216 → 191).
 
-**57% of the remaining 240 ms is the first radix pass, which is still serial.**
-Parallelising that histogram and scatter is the identified next lever and is
-unmeasured. Sorting by a metadata column is 8 ms, so this remains specifically a
-*filename* sorting problem.
+**The remaining 1.6× is memory bandwidth, not parallelism.** Four cores buy 1.9×
+on a pattern that reads a 28 MB arena at random — the same shortfall the parallel
+search shows at 3.4× — and bucket skew is not the constraint, with 29 non-empty
+first-byte buckets and the largest at 13.4%. A single packed pass that does not
+even finish the job is already 131 ms. **Closing the gap means moving less
+memory, not adding threads**, and sorting by a metadata column is 8 ms, so this
+remains specifically a *filename* sorting problem.
 
 ### The row that needs a mechanism, not a number
 
