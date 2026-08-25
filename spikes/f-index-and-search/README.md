@@ -110,6 +110,12 @@ cold walk; the cost of *maintaining* one is Spike C's to find.
 
 ## Result
 
+**Read in order.** This spike measured, found two budget misses, fixed both,
+measured again on reference hardware, was contradicted, and chased one number
+through eight implementations. Sections that were later overturned are marked
+where they sit rather than deleted, because the sequence of being wrong is the
+part worth keeping. The [verdict](#verdict) is the current state.
+
 Five repeats per measurement, machine idle at load 1.26. This is the 24-thread
 laptop, which is the *most* favourable hardware measured in this project — Spike
 B found a Raspberry Pi 5 runs the same walk 7–8× slower, so every number below
@@ -169,6 +175,12 @@ disk is looking at half a gigabyte of index.
 
 ### Flattened search meets its bar here, and will not on a Pi
 
+> **Superseded.** This section is the laptop-only finding, kept because the
+> reasoning it contains is still correct and the conclusion is not.
+> [Measured on a Pi](#search-passes-on-the-pi-and-only-because-the-scan-is-parallel),
+> search *does* meet the bar — at 13.3 ms — once the scan is parallel, which this
+> section had not yet tried.
+
 | Query | first result | full scan | matches |
 | --- | --- | --- | --- |
 | `(empty)` | 0.000 ms | 1.4 ms | 1,021,338 |
@@ -203,6 +215,11 @@ n-gram prefilter — and that is a design decision this spike surfaces rather th
 settles.
 
 ### Sorting misses its target, and the architecture's stated reason is wrong
+
+> **Partly superseded.** The finding about the architecture's stated reason
+> stands. The numbers are the laptop's first attempt;
+> [eight approaches later](#sorting-chased-down-from-948-ms-to-191-ms) the sort is
+> 191 ms on a Pi, down from 948 ms.
 
 | Sort, 1,021,338 entries | median | against a 120 ms target |
 | --- | --- | --- |
@@ -337,6 +354,10 @@ below the core count and both are enough, which is what a bandwidth-bound scan
 looks like.
 
 #### Sorting fails on the Pi by every route measured
+
+> **Superseded by the four approaches tried afterwards** — see
+> [Sorting, chased down](#sorting-chased-down-from-948-ms-to-191-ms). It is still
+> not *met*, but 191 ms is inside the hard fail where 753 ms was not.
 
 | Sort, 1,021,338 entries | Pi 5 | vs 120 ms target | vs 300 ms hard fail |
 | --- | --- | --- | --- |
