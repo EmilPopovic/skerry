@@ -1,0 +1,113 @@
+# Skerry
+
+A file manager for Linux, written in Rust, built on the premise that a file manager
+is a **latency product and an interaction-design product** — not a feature checklist.
+
+Status: **planning.** No code yet. Everything in this repository is design work.
+The next artifact to exist is a throwaway spike, not a crate skeleton
+(see [docs/08-roadmap.md](docs/08-roadmap.md)).
+
+## The thesis in one paragraph
+
+Linux has no shortage of file managers. It has no file manager that is *simultaneously*
+GPU-composited with a real frame budget, non-blocking on every filesystem call,
+keyboard-first **and** excellent with a mouse, and discoverable rather than merely
+configurable. Nautilus is minimal by policy; Dolphin is powerful with no discovery
+surface; Thunar and Nemo carry a toolkit's scroll behaviour; Yazi and lf are the closest
+in spirit but terminal-bound and hostile to a pointer; Krusader is frozen in 1998.
+Skerry aims at exactly that gap. The prior art it learns from is
+[File Pilot](https://filepilot.tech/) on Windows — one developer, C, no dependencies,
+a hand-written renderer, and a reputation built entirely on the fact that every
+interaction resolves in one frame.
+
+## Two constraints that shape everything else
+
+**Distro-agnostic.** Skerry targets *Linux*, not a desktop environment and not a
+distribution. No GLib, GTK, Qt, KIO, or GVfs anywhere in the dependency graph. No
+build-time assumption that systemd, udisks2, xdg-desktop-portal, PipeWire, or any
+particular compositor exists — every such integration is probed at runtime and degrades
+to a documented fallback when absent. Interoperability comes from freedesktop *specs*
+(trash, thumbnails, icon themes, desktop entries, shared MIME info, base directories),
+which every desktop implements, rather than from any desktop's API. Wayland and X11 are
+both first-class. x86-64 and aarch64 are both first-class. See
+[docs/06-portability.md](docs/06-portability.md).
+
+**No unnecessary dependencies.** Every crate in the graph has to justify itself against
+the work of writing that code ourselves, and the justification is recorded. The
+dependency budget is a number in CI, not a vibe. Optional capabilities (PDF rendering,
+video thumbnails) live in separate helper executables so their dependency trees never
+enter the main binary, and so a missing helper degrades one feature instead of failing a
+build. See [docs/07-dependencies.md](docs/07-dependencies.md).
+
+Neither constraint is asceticism for its own sake. A file manager that pulls in a
+desktop's object system inherits that desktop's blocking-I/O conventions and its main
+loop, which is precisely the thing this project exists to avoid.
+
+## Documentation
+
+Read in order; each document is self-contained enough to review on its own.
+
+| Document | What it settles |
+| --- | --- |
+| [01-research-file-pilot.md](docs/01-research-file-pilot.md) | What File Pilot is, what it does, and which of its features actually carry its reputation |
+| [02-positioning.md](docs/02-positioning.md) | The Linux landscape and the specific gap Skerry occupies |
+| [03-principles.md](docs/03-principles.md) | Ten rules, each written so a violation is detectable |
+| [04-architecture.md](docs/04-architecture.md) | Workspace layout, layering rules, threading model, data layout, extension points |
+| [05-platform-integration.md](docs/05-platform-integration.md) | The Linux desktop integration work that has no Windows counterpart |
+| [06-portability.md](docs/06-portability.md) | Distro-agnostic policy: kernel floor, runtime probing, packaging |
+| [07-dependencies.md](docs/07-dependencies.md) | Dependency policy, the allowlist, and what we write ourselves |
+| [08-roadmap.md](docs/08-roadmap.md) | Phase 0 spikes with go/no-go bars, then milestones M0–M8 |
+| [09-performance-budgets.md](docs/09-performance-budgets.md) | The numbers that decide whether it worked, as CI gates |
+| [10-risks.md](docs/10-risks.md) | What is most likely to go wrong, and the mitigation for each |
+| [11-non-goals.md](docs/11-non-goals.md) | What Skerry deliberately will not do |
+| [adr/](docs/adr/) | Architecture decision records — the *why* behind each irreversible choice |
+
+## Planned repository layout
+
+```
+skerry/
+├── crates/
+│   ├── sk-model/         level 0  core types: paths, entries, ids, selection
+│   ├── sk-util/          level 0  arenas, small collections, string interning
+│   ├── sk-plat/          level 1  Wayland + X11, input, clipboard, DnD, IME, monitors
+│   ├── sk-fs/            level 1  enumeration, statx, watching, operations, trash
+│   ├── sk-text/          level 1  font discovery, shaping, layout cache, rasterization
+│   ├── sk-gpu/           level 2  device, glyph atlas, batching, damage tracking
+│   ├── sk-index/         level 2  recursive walk, flattening, fuzzy match, size aggregation
+│   ├── sk-desktop/       level 2  MIME, icon themes, launching, D-Bus, devices, portals
+│   ├── sk-preview/       level 2  preview host + child protocol
+│   ├── sk-cmd/           level 2  command registry, keymap, undo stack
+│   ├── sk-ui/            level 3  immediate-mode layer, layout, virtual lists, a11y
+│   └── sk-app/           level 4  panes, tabs, sessions, config, views
+├── bin/
+│   ├── skerry/                    the application
+│   ├── skerry-thumbnailer/        sandboxed image decode, own dependency tree
+│   └── skerry-preview-doc/        optional PDF/document rendering helper
+├── spikes/                        throwaway measurement binaries, kept for their numbers
+├── tools/                         CI scripts: layering check, dependency budget, budgets
+├── tests/                         cross-crate integration and filesystem torture matrix
+├── docs/
+└── .claude/                       agents, skills and hooks — see CLAUDE.md
+```
+
+Dependencies point strictly downward by level. A CI check parses the workspace manifests
+and fails the build on any upward or sideways edge — see
+[04-architecture.md](docs/04-architecture.md#layering-is-enforced-not-encouraged).
+
+## Working on it
+
+`spikes/` and `tools/` exist; nothing under `crates/` does yet, and
+[08-roadmap.md](docs/08-roadmap.md) says the next artifact is Spike A rather than a
+crate skeleton. [CLAUDE.md](CLAUDE.md) is the working brief — the craft bar, the
+invariants that are expensive to undo, and which document settles which question.
+
+```
+./tools/check     # links, layering, dependency budget, invariants
+```
+
+Each gate abstains where it has nothing to check, so it runs today and keeps running
+as the workspace fills in. See [tools/README.md](tools/README.md).
+
+## Name
+
+A skerry is a small rocky island — the kind you navigate around rather than into.
