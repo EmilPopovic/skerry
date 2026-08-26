@@ -125,9 +125,13 @@ pub fn visible_rows(offset: f32, height: f32, row_height: f32, rows: usize) -> R
     if rows == 0 || row_height <= 0.0 || height <= 0.0 {
         return 0..0;
     }
+    // Clamped to the last row rather than trusted: an offset past the end makes
+    // `first` larger than `rows`, and `first..rows` is then a range whose start
+    // is after its end. Both callers happen to iterate it, which is harmless;
+    // slicing with it panics, and that is one line of new code away.
     let first = (offset / row_height).floor().max(0.0) as usize;
+    let first = first.saturating_sub(1).min(rows - 1);
     let count = (height / row_height).ceil() as usize + 2;
-    let first = first.saturating_sub(1);
     first..(first + count).min(rows)
 }
 
@@ -136,6 +140,19 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Scroll, visible_rows};
+
+    /// A range whose start is past its end is a panic waiting for its first
+    /// caller that slices rather than iterates.
+    #[test]
+    fn an_offset_past_the_end_still_yields_a_range_that_can_be_sliced() {
+        for offset in [0.0, 1e9, f32::MAX] {
+            let rows = visible_rows(offset, 500.0, 26.0, 400);
+            assert!(rows.start <= rows.end, "{offset} gave {rows:?}");
+            assert!(rows.end <= 400);
+            let _ = &(0..400).collect::<Vec<_>>()[rows];
+        }
+        assert_eq!(visible_rows(1e9, 500.0, 26.0, 0), 0..0);
+    }
 
     #[test]
     fn a_touchpad_delta_lands_immediately_and_a_wheel_delta_eases() {

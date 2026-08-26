@@ -34,6 +34,10 @@ pub enum Update {
     Meta(Vec<MetaRow>),
     /// A display order computed on a job.
     Ordered {
+        /// Which sort produced it. Two sorts of the same generation can be in
+        /// flight — a header clicked twice — and without this the one that lands
+        /// last wins, which is not the one that was asked for last.
+        epoch: u64,
         /// The permutation.
         order: Vec<EntryId>,
         /// Microseconds it took.
@@ -123,6 +127,17 @@ pub struct Pane {
     reorder_owed: bool,
     /// Whether a sort job is in flight, so a second one is not queued behind it.
     sorting: bool,
+    /// Cancels the sort, and **only** the sort.
+    ///
+    /// Separate from `cancel` because they retire on different schedules. The
+    /// read's token is shared by the names job and every `statx` chunk; a second
+    /// header click used to cancel it to retire a stale sort, and take the
+    /// outstanding metadata with it. `sk_fs::metadata` stops early and still
+    /// reports, so `meta_done` reached `meta_expected`, `loading` went false, and
+    /// most of the directory kept a blank size and date until `F5`.
+    sort_cancel: Cancel,
+    /// Which sort is current. An `Ordered` from any earlier one is discarded.
+    sort_epoch: u64,
     /// A name to put the cursor on once the names land.
     ///
     /// Set by [`Pane::go_up`], because coming out of a folder should leave the
@@ -158,6 +173,8 @@ impl Pane {
             meta_started: None,
             reorder_owed: false,
             sorting: false,
+            sort_cancel: Cancel::new(),
+            sort_epoch: 0,
             select_after_load: None,
         }
     }
@@ -226,6 +243,14 @@ impl Pane {
     pub fn reload(&mut self, jobs: &Jobs) {
         self.cancel.cancel();
         self.cancel = Cancel::new();
+        // A sort of the listing that is being replaced has nothing to order.
+        // Clearing `sorting` here is not cosmetic: `apply` drops an `Ordered`
+        // from a retired generation, so the flag would otherwise stay true for
+        // the life of the pane and the next header click would cancel a live
+        // read.
+        self.sort_cancel.cancel();
+        self.sort_cancel = Cancel::new();
+        self.sorting = false;
         self.generation += 1;
         self.loading = true;
         self.names_us = 0;
@@ -325,6 +350,7 @@ impl Pane {
     /// not hold the process open after there is nothing to show it to.
     pub fn stop(&self) {
         self.cancel.cancel();
+        self.sort_cancel.cancel();
     }
 
     /// Re-reads the current path, keeping the selection and the scroll position.
@@ -338,9 +364,13 @@ impl Pane {
             .cursor()
             .map(|id| self.listing.name(id).to_owned())
             .or_else(|| self.select_after_load.take());
-        let offset = self.scroll.offset();
+        // The scroll is left exactly as it is. It used to be read and written
+        // back, which looks like a no-op and is not: `Scroll::to` sets the
+        // animation's *target*, so a refresh arriving mid-fling stopped the
+        // fling dead — and a folder being written into refreshes four times a
+        // second. `reload` does not touch the scroll, and `set_extent` clamps
+        // it on the next frame if the directory got shorter.
         self.reload(jobs);
-        self.scroll.to(offset);
     }
 
     /// Goes to the parent directory, keeping the child selected.
@@ -360,23 +390,35 @@ impl Pane {
         }
         match message.update {
             Update::Names { listing, names, elapsed_us, sort_us } => {
+                self.carry_selection(&listing);
                 self.listing = *listing;
                 self.names_us = elapsed_us;
                 self.sort_us = sort_us;
-                self.selection.fit(self.listing.len());
                 self.restore_cursor();
                 self.dispatch_metadata(&names, jobs);
             }
             Update::Meta(rows) => {
+                let mut kinds_changed = false;
                 for row in rows {
+                    let was = self.listing.flags(row.id).has(Flags::DIR);
                     self.listing.set_meta(row.id, row.size, row.mtime, row.extra);
+                    kinds_changed |= was != self.listing.flags(row.id).has(Flags::DIR);
                 }
                 // A name sort does not depend on metadata, so it is never
                 // redone; the other two are redone once, when the last slice
                 // lands. Reordering per slice would resort the whole listing
                 // every two thousand entries and the user would watch the rows
                 // churn.
-                self.reorder_owed |= self.sort.column != SortColumn::Name;
+                //
+                // **Grouping directories first does depend on it.** `getdents64`
+                // reports a symlink as a symlink, and only `statx` says whether
+                // it points at a directory — so a link to a folder drew a folder
+                // icon, opened on Enter, and sat down among the files. On a
+                // filesystem that answers `DT_UNKNOWN` at all — XFS without
+                // `ftype=1`, every 9p mount — nothing grouped first until the
+                // list was re-sorted by hand.
+                self.reorder_owed |=
+                    self.sort.column != SortColumn::Name || (self.sort.dirs_first && kinds_changed);
                 self.meta_done += 1;
                 if self.meta_done >= self.meta_expected {
                     self.loading = false;
@@ -388,7 +430,13 @@ impl Pane {
                     }
                 }
             }
-            Update::Ordered { order, elapsed_us } => {
+            Update::Ordered { epoch, order, elapsed_us } => {
+                // A sort that was overtaken still finishes and still sends. It
+                // carries the same generation as the one that overtook it, so
+                // only the epoch can tell them apart.
+                if epoch != self.sort_epoch {
+                    return false;
+                }
                 self.sorting = false;
                 self.sort_us = elapsed_us;
                 self.listing.set_order(order);
@@ -421,10 +469,11 @@ impl Pane {
             // A second request while one is in flight would race to publish. The
             // pending one is discarded and this one replaces it, because what the
             // user last asked for is what they want to see.
-            self.cancel.cancel();
-            self.cancel = Cancel::new();
+            self.sort_cancel.cancel();
+            self.sort_cancel = Cancel::new();
         }
         self.sorting = true;
+        self.sort_epoch += 1;
         // A clone rather than a borrow: the job cannot hold the pane's listing,
         // and metadata slices are still landing on it.
         let snapshot = self.listing.clone();
@@ -432,7 +481,8 @@ impl Pane {
         let sender = jobs.sender.clone();
         let wake = jobs.wake.clone();
         let generation = self.generation;
-        jobs.pool.spawn(self.lane, self.cancel.clone(), move |cancel| {
+        let epoch = self.sort_epoch;
+        jobs.pool.spawn(self.lane, self.sort_cancel.clone(), move |cancel| {
             let started = std::time::Instant::now();
             let order = snapshot.compute_order(sort, show_hidden);
             if cancel.is_cancelled() {
@@ -440,7 +490,7 @@ impl Pane {
             }
             let elapsed_us = started.elapsed().as_micros() as u64;
             if sender
-                .send(Message { generation, update: Update::Ordered { order, elapsed_us } })
+                .send(Message { generation, update: Update::Ordered { epoch, order, elapsed_us } })
                 .is_ok()
             {
                 wake.wake();
@@ -529,11 +579,14 @@ impl Pane {
         found.is_some()
     }
 
-    /// The entry to act on when there is one: the cursor, or the only selected
-    /// entry.
+    /// The entry to act on when there is one: the cursor, or the topmost
+    /// selected entry.
+    ///
+    /// Topmost on screen, not lowest `EntryId` — with no cursor to point at,
+    /// the only defensible answer is the one at the top of the list.
     #[must_use]
     pub fn focused(&self) -> Option<EntryId> {
-        self.selection.cursor().or_else(|| self.selection.iter().next())
+        self.selection.cursor().or_else(|| self.selection.in_order(self.listing.order()).next())
     }
 
     /// Opens the focused entry if it is a directory. Returns whether it did.
@@ -547,13 +600,52 @@ impl Pane {
         true
     }
 
+    /// Carries the selection across a re-read, by name.
+    ///
+    /// `EntryId` is an index into the listing it came from. A watcher-driven
+    /// refresh rebuilds that listing, so bit *n* afterwards is a different file:
+    /// with five files written into the folder underneath a `Ctrl+A`, the status
+    /// line went on saying three selected and the highlight had moved to three
+    /// rows nobody had touched. Anything acting on the selection acted on those.
+    ///
+    /// Costs nothing when nothing is selected, which is the ordinary case. When
+    /// something is, it is one hash set of the selected names and one pass over
+    /// the arriving listing — no strings are copied, because both listings are
+    /// alive at this point and one can be looked up in the other.
+    fn carry_selection(&mut self, arriving: &Listing) {
+        self.selection.set_cursor(None);
+        if self.selection.is_empty() {
+            self.selection.fit(arriving.len());
+            return;
+        }
+        let kept: std::collections::HashSet<&str> =
+            self.selection.iter().map(|id| self.listing.name(id)).collect();
+        let mut carried = Selection::default();
+        carried.fit(arriving.len());
+        for index in 0..arriving.len() {
+            let id = EntryId(index as u32);
+            if kept.contains(arriving.name(id)) {
+                carried.select(id);
+            }
+        }
+        self.selection = carried;
+    }
+
+    /// Puts the cursor back on a remembered name, leaving the selection alone.
     fn restore_cursor(&mut self) {
         let Some(wanted) = self.select_after_load.take() else { return };
-        for row in 0..self.listing.rows() {
-            if self.listing.at(row).is_some_and(|id| self.listing.name(id) == wanted) {
-                self.cursor_to(row, false);
-                return;
-            }
+        let found = (0..self.listing.rows())
+            .filter_map(|row| self.listing.at(row))
+            .find(|id| self.listing.name(*id) == wanted);
+        let Some(id) = found else { return };
+        if self.selection.is_empty() {
+            // Coming out of a folder leaves that folder focused *and* selected,
+            // which is what arriving anywhere else with the keyboard does.
+            self.selection.replace_with(id);
+        } else {
+            // A refresh, where the selection has just been carried across by
+            // name. `cursor_to` would be a click, and a click clears it.
+            self.selection.set_cursor(Some(id));
         }
     }
 }
@@ -567,7 +659,7 @@ fn leaf_of(path: Option<&PathBuf>) -> Option<String> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Jobs, Pane};
+    use super::{Jobs, Message, Pane, SORT_INLINE, Update};
     use sk_model::EntryId;
     use sk_util::{Pool, Waker};
     use std::path::{Path, PathBuf};
@@ -625,6 +717,141 @@ mod tests {
             std::fs::write(root.join("sub").join(name), b"c").unwrap();
         }
         root
+    }
+
+    /// `getdents64` says "symlink" and only `statx` says "and it points at a
+    /// directory", so grouping folders first cannot be settled from the names
+    /// pass alone. Before the reorder was owed on a kind change, `to-sub` drew a
+    /// folder icon, opened on Enter, and sat below the files.
+    #[test]
+    fn a_symlink_to_a_directory_sorts_with_the_directories() {
+        let root = fixture("symlink");
+        if std::os::unix::fs::symlink(root.join("sub"), root.join("to-sub")).is_err() {
+            return;
+        }
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        assert_eq!(
+            names_of(&pane),
+            vec!["sub", "to-sub", "parent-one.txt", "parent-three.txt", "parent-two.txt"],
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The selection is a bitset indexed by `EntryId`, and a refresh rebuilds
+    /// the listing those indices point into. Carried by name, the same files
+    /// stay selected; carried by index, three files nobody touched become
+    /// selected and every operation acts on those.
+    #[test]
+    fn a_refresh_keeps_the_files_that_were_selected_and_not_their_row_numbers() {
+        let root = fixture("carry");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        let wanted = ["parent-two.txt", "parent-three.txt"];
+        for name in wanted {
+            let id = (0..pane.listing.len())
+                .map(|index| EntryId(index as u32))
+                .find(|id| pane.listing.name(*id) == name)
+                .expect(name);
+            pane.selection.select(id);
+        }
+        assert_eq!(pane.selection.count(), 2);
+
+        // Five names that sort ahead of everything already there, so every
+        // `EntryId` moves.
+        for index in 0..5 {
+            std::fs::write(root.join(format!("aa-{index}.txt")), b"new").unwrap();
+        }
+        pane.refresh(&harness.jobs);
+        harness.settle(&mut pane);
+
+        let mut still: Vec<String> = pane
+            .selection
+            .in_order(pane.listing.order())
+            .map(|id| pane.listing.name(id).to_owned())
+            .collect();
+        still.sort();
+        assert_eq!(still, vec!["parent-three.txt", "parent-two.txt"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// And the cursor landing back on its name does not collapse the selection
+    /// to that one row, which is what `cursor_to` would have done — once per
+    /// refresh, so up to four times a second while a download runs.
+    #[test]
+    fn a_refresh_does_not_collapse_a_selection_to_the_cursor() {
+        let root = fixture("collapse");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        let order = pane.listing.order().to_vec();
+        pane.selection.select_all(&order);
+        pane.selection.set_cursor(order.first().copied());
+        let before = pane.selection.count();
+        assert!(before > 1);
+
+        pane.refresh(&harness.jobs);
+        harness.settle(&mut pane);
+        assert_eq!(pane.selection.count(), before, "the refresh collapsed the selection");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Retiring a stale sort must not retire the read. They shared one token,
+    /// so a second click on a column header cancelled every outstanding `statx`
+    /// chunk — and those jobs report anyway, so the pane believed it had
+    /// finished loading with most of its rows still blank.
+    #[test]
+    fn re_sorting_does_not_cancel_the_metadata_that_is_still_arriving() {
+        let harness = Harness::new();
+        let mut pane = Pane::new(std::env::temp_dir());
+        pane.reload(&harness.jobs);
+        let read = pane.cancel.clone();
+        // Above `SORT_INLINE`, which is the only case that reaches a job and so
+        // the only case that has ever had two sorts in flight at once.
+        for index in 0..=SORT_INLINE {
+            pane.listing.push(&format!("entry-{index:06}"), sk_model::Flags::NONE);
+        }
+
+        pane.reorder(&harness.jobs);
+        assert!(pane.sorting, "a listing this size should sort on a job");
+        pane.reorder(&harness.jobs);
+
+        assert!(!read.is_cancelled(), "the second sort cancelled the directory read");
+    }
+
+    /// Two sorts of one listing can both be in flight and both finish. Only the
+    /// one that was asked for last may be shown, or the rows are ordered by the
+    /// previous column while the header underline says the new one.
+    #[test]
+    fn an_overtaken_sort_does_not_publish_over_the_one_that_overtook_it() {
+        let root = fixture("epoch");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        let current = pane.listing.order().to_vec();
+        let mut backwards = current.clone();
+        backwards.reverse();
+        let stale = Message {
+            generation: pane.generation,
+            update: Update::Ordered {
+                epoch: pane.sort_epoch.wrapping_sub(1),
+                order: backwards,
+                elapsed_us: 0,
+            },
+        };
+        assert!(!pane.apply(stale, &harness.jobs), "a retired sort was accepted");
+        assert_eq!(pane.listing.order(), current.as_slice());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Entering a directory shows that directory, and nothing from the one it

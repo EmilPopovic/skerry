@@ -52,9 +52,30 @@ impl Selection {
         self.bits.count() == 0
     }
 
-    /// Every selected entry, in listing order.
+    /// Every selected entry, in **`EntryId` order** — the order the directory
+    /// was read in, which is nobody's idea of an order.
+    ///
+    /// For anything a person sees or receives, use [`Selection::in_order`]. This
+    /// one is for counting and for set arithmetic.
     pub fn iter(&self) -> impl Iterator<Item = EntryId> + '_ {
         self.bits.iter().map(|index| EntryId(index as u32))
+    }
+
+    /// Every selected entry, in the order it appears on screen.
+    ///
+    /// `rows` is the display order. Sorting by size and copying used to hand the
+    /// peer `getdents64` order, so the paths arrived shuffled with respect to the
+    /// list they were taken from — and nothing said so.
+    pub fn in_order<'a>(&'a self, rows: &'a [EntryId]) -> impl Iterator<Item = EntryId> + 'a {
+        rows.iter().copied().filter(|id| self.contains(*id))
+    }
+
+    /// Adds `id` without moving the anchor or the cursor.
+    ///
+    /// For restoring a selection across a re-read, where the anchor and the
+    /// cursor are settled separately and by name.
+    pub fn select(&mut self, id: EntryId) {
+        self.bits.insert(id.index());
     }
 
     /// The entry the focus ring is on.
@@ -66,6 +87,7 @@ impl Selection {
     /// Moves the focus ring without changing the selection.
     pub fn set_cursor(&mut self, id: Option<EntryId>) {
         self.cursor = id;
+        self.anchor = id.or(self.anchor);
     }
 
     /// Selects only `id`, and makes it the anchor and the cursor.

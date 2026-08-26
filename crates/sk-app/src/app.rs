@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sk_cmd::Registry;
 use sk_desktop::{Applications, Launcher, MimeDatabase};
 use sk_gpu::{DrawList, FrameStats, Renderer};
-use sk_model::{Flags, Problem, ProblemKind, SortColumn};
+use sk_model::{Problem, ProblemKind, SortColumn};
 use sk_plat::{Button, Content, Event, Point, Selection, Size, Window, WindowConfig};
 use sk_text::{Fonts, LayoutCache};
 use sk_ui::{Painter, Theme};
@@ -468,6 +468,17 @@ impl App {
         if self.watch_target != self.pane.path {
             self.watch_target = self.pane.path.clone();
             self.watcher.watch(self.watch_target.clone());
+        } else if !self.watcher.armed() && !self.pane.loading && self.pane.problem.is_none() {
+            // The watch is gone but the directory is not. That is what an
+            // atomic replace looks like — a `git checkout` across a branch that
+            // deletes and recreates it, `rsync --delete`, a `mv` over the top —
+            // and `IN_IGNORED` disarms the watch for good. Without this the
+            // listing refreshed exactly once and was then permanently stale,
+            // saying "not watching for changes" until the user navigated away
+            // and back. Rate-limited by the same floor as the read it follows.
+            if self.refreshed.elapsed() >= REFRESH_FLOOR {
+                self.watcher.watch(self.watch_target.clone());
+            }
         }
         // Read every pass rather than once at arm time: the thread establishes the
         // watch asynchronously, so the answer is not known when `watch` returns.
@@ -620,10 +631,19 @@ impl App {
     }
 
     /// The full paths of what is selected, or of the cursor if nothing is.
+    ///
+    /// **In display order.** `Selection::iter` walks a bitset indexed by
+    /// `EntryId`, which is `getdents64` order — so sorting by size and copying
+    /// handed the peer the paths shuffled with respect to the list they were
+    /// taken from, and nothing anywhere said so.
     fn selected_paths(&self) -> Vec<PathBuf> {
         let listing = &self.pane.listing;
-        let mut paths: Vec<PathBuf> =
-            self.pane.selection.iter().map(|id| self.pane.path.join(listing.name(id))).collect();
+        let mut paths: Vec<PathBuf> = self
+            .pane
+            .selection
+            .in_order(listing.order())
+            .map(|id| self.pane.path.join(listing.name(id)))
+            .collect();
         if let Some(id) = self.pane.focused().filter(|_| paths.is_empty()) {
             paths.push(self.pane.path.join(listing.name(id)));
         }
@@ -685,7 +705,10 @@ impl App {
     /// asking.
     pub(crate) fn reload(&mut self) {
         self.measurer.forget_all();
-        self.pane.reload(&self.jobs);
+        // `refresh` rather than `reload`: the directory is the same one, so the
+        // cursor and the selection are carried across by name. Pressing `F5`
+        // should not cost the user what they had picked out.
+        self.pane.refresh(&self.jobs);
     }
 
     /// Moves the cursor by `delta` rows, extending the selection if asked.
@@ -867,14 +890,24 @@ jobs={jobs}/{panics} keys={} stats={}",
         } else {
             self.pane.selection.replace_with(id);
         }
-        if clicks >= 2 && self.pane.listing.flags(id).has(Flags::DIR) {
-            self.pane.open_focused(&self.jobs);
+        if clicks >= 2 {
+            // `App::open_focused`, not `Pane::open_focused`: the pane's one
+            // enters directories and returns false for anything else, so a
+            // double click on a document used to do nothing at all — no notice,
+            // no error — while `Enter` on the same row opened it.
+            self.open_focused();
         }
         self.dirty = true;
     }
 
     fn release(&mut self) {
-        if self.band.take().is_some() || self.thumb_grab.take().is_some() {
+        // Both, not either: `||` short-circuits, so a release that ended a band
+        // left a thumb grab behind. They cannot both be set today, which makes
+        // this the kind of latent bug that becomes a stuck scrollbar the first
+        // time that stops being true.
+        let ended = self.band.take().is_some();
+        let released = self.thumb_grab.take().is_some();
+        if ended || released {
             self.dirty = true;
         }
     }
@@ -892,8 +925,10 @@ jobs={jobs}/{panics} keys={} stats={}",
             {
                 self.select_band(start, position);
             }
+            // Falls through to the hover update rather than returning: returning
+            // froze the highlight on whatever row the drag started over, so the
+            // band and the hover disagreed for the length of the gesture.
             self.dirty = true;
-            return;
         }
         let row = self
             .layout

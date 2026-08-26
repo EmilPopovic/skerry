@@ -124,11 +124,12 @@ class Run:
         path: Path,
         arguments: list[str],
         instance: str = "",
+        environment: dict | None = None,
     ):
         self.instance = instance
         self.log = work / "app.log"
         self.err = work / "app.err"
-        environment = dict(os.environ, WAYLAND_DISPLAY=display)
+        environment = dict(os.environ, **(environment or {}), WAYLAND_DISPLAY=display)
         self.process = subprocess.Popen(
             [str(SKERRY), *arguments, str(path)],
             stdout=self.log.open("w"),
@@ -414,6 +415,42 @@ def pointer_double_click(run: Run, fixture: Path) -> None:
     folder = pointing["hover_name"]
     run.drive("double\nsleep 800\nkey f12\nsleep 200\n")
     expect(run.state(), path=str(fixture / folder))
+
+
+@scenario("double-click-a-file")
+def double_click_a_file(run: Run, fixture: Path) -> None:
+    """A double click on a document has to reach the launcher.
+
+    It used to be guarded on `Flags::DIR` and to call the pane's `open_focused`,
+    which enters directories and returns false for everything else — so double
+    clicking a `.txt` did nothing at all, with no notice and no error, while
+    `Enter` on the same row opened it. The window here is started with the XDG
+    data directories pointed at nothing, so the launcher finds no handler and
+    says so instead of starting a text editor inside the test compositor.
+    """
+    run.close()
+    empty = run.log.parent / "no-handlers"
+    empty.mkdir(exist_ok=True)
+    own = Run(
+        run.display,
+        run.log.parent,
+        fixture,
+        [],
+        run.instance,
+        {"XDG_DATA_HOME": str(empty), "XDG_DATA_DIRS": str(empty)},
+    )
+    try:
+        own.drive("sleep 400\nkey f12\nsleep 100\n")
+        pointing = point_at(own, 3)
+        if not pointing["hover_name"].endswith(".txt"):
+            raise Failure(f"row 3 is {pointing['hover_name']!r}, which is not a document")
+        own.drive("double\nsleep 600\nkey f12\nsleep 200\n")
+        state = own.state()
+        if not state.get("notice"):
+            raise Failure("double clicking a document did nothing and said nothing")
+        expect(state, path=str(fixture))
+    finally:
+        own.close()
 
 
 @scenario("pointer-rubber-band")
