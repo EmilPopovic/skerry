@@ -129,3 +129,4 @@ notice.copied_path = Copied {0}
 error.clipboard_not_a_folder = The clipboard does not hold a folder.
 error.no_clipboard = This compositor offers no clipboard.
 stats.capabilities = platform
+action.dump = Print a diagnostic report

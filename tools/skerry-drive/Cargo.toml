@@ -1,0 +1,26 @@
+[package]
+name = "skerry-drive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Level 5: a binary. Test tooling — not part of the product's dependency graph,
+# which `tools/dep-budget.py` measures by walking `skerry` and nothing else.
+[package.metadata.skerry]
+level = 5
+
+[[bin]]
+name = "skerry-drive"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = { workspace = true }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = { workspace = true }
+rustix = { workspace = true }
+
+[lints]
+workspace = true

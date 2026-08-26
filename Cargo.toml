@@ -13,6 +13,7 @@ members = [
     "crates/sk-ui",
     "crates/sk-app",
     "bin/skerry",
+    "tools/skerry-drive",
 ]
 
 [workspace.package]

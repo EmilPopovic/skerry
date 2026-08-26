@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""End-to-end tests that drive the real window with real input.
+
+Every other test in this repository stops at the edge of `sk-plat`. These press
+keys and move a pointer through a compositor, so what they cover is the whole
+path: `wl_keyboard`, `xkbcommon`, the click counter, the scroll coalescer, the
+command registry, hit-testing, and the frame loop that has to wake up for any of
+it to be seen.
+
+    tools/gui-test                 # run every scenario
+    tools/gui-test --keep          # leave the fixture and the log behind
+    tools/gui-test selection       # run the scenarios whose name matches
+
+**It needs a nested compositor and refuses to run without one.** Synthetic input
+goes wherever the focus is, so pointing this at a live session would type into
+whatever window a person had open. It starts its own Hyprland — the only
+compositor on this machine that advertises `zwp_virtual_keyboard_manager_v1` and
+`zwlr_virtual_pointer_manager_v1`; KWin advertises neither, which is why the
+portability answer for KWin still has to come from running the product there by
+hand.
+
+Assertions read the `skerry-state` line that `F12` prints, which carries the
+layout geometry so a scenario can click an exact row rather than agreeing with a
+copy of the metrics it is testing.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKERRY = ROOT / "target" / "release" / "skerry"
+DRIVE = ROOT / "target" / "release" / "skerry-drive"
+
+# How long to wait for a socket, a window, or a directory read.
+PATIENCE = 20.0
+
+
+class Failure(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------
+# The nested compositor
+# --------------------------------------------------------------------------
+
+
+def sockets() -> set[str]:
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"))
+    return {p.name for p in runtime.glob("wayland-*") if p.name.count("-") == 1}
+
+
+def start_compositor(work: Path) -> tuple[subprocess.Popen, str]:
+    config = work / "hypr.conf"
+    config.write_text(
+        # No bars, no animations, no rounding: the window under test should be
+        # the only thing on this output, and a frame should be what it drew.
+        "monitor = , 1600x1000@60, 0x0, 1\n"
+        "animations { enabled = false }\n"
+        "decoration { blur { enabled = false } rounding = 0 shadow { enabled = false } }\n"
+        "general { border_size = 0, gaps_in = 0, gaps_out = 0 }\n"
+        "misc {\n"
+        "    disable_hyprland_logo = true\n"
+        "    disable_splash_rendering = true\n"
+        "    force_default_wallpaper = 0\n"
+        "    middle_click_paste = true\n"
+        "}\n"
+    )
+    before = sockets()
+    process = subprocess.Popen(
+        ["Hyprland", "--config", str(config)],
+        stdout=(work / "compositor.log").open("w"),
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    deadline = time.time() + PATIENCE
+    while time.time() < deadline:
+        new = sockets() - before
+        if new:
+            time.sleep(1.5)
+            return process, sorted(new)[0]
+        if process.poll() is not None:
+            raise Failure("the nested compositor exited; see compositor.log")
+        time.sleep(0.2)
+    raise Failure("the nested compositor never created a socket")
+
+
+# --------------------------------------------------------------------------
+# One scenario
+# --------------------------------------------------------------------------
+
+
+class Run:
+    """A window, and the state it reported."""
+
+    def __init__(self, display: str, work: Path, path: Path, arguments: list[str]):
+        self.log = work / "app.log"
+        self.err = work / "app.err"
+        environment = dict(os.environ, WAYLAND_DISPLAY=display)
+        self.process = subprocess.Popen(
+            [str(SKERRY), *arguments, str(path)],
+            stdout=self.log.open("w"),
+            stderr=self.err.open("w"),
+            env=environment,
+            start_new_session=True,
+        )
+        self.display = display
+        # Wait for the first frame, which the program announces.
+        deadline = time.time() + PATIENCE
+        while time.time() < deadline:
+            if "first frame" in self.err.read_text():
+                return
+            if self.process.poll() is not None:
+                raise Failure(f"the window exited: {self.err.read_text()[:400]}")
+            time.sleep(0.1)
+        raise Failure("the window never drew a first frame")
+
+    def drive(self, script: str) -> None:
+        environment = dict(os.environ, WAYLAND_DISPLAY=self.display)
+        done = subprocess.run(
+            [str(DRIVE)], input=script, text=True, env=environment, capture_output=True
+        )
+        if done.returncode != 0:
+            raise Failure(f"the driver refused the script: {done.stderr.strip()}")
+
+    def states(self) -> list[dict[str, str]]:
+        found = []
+        for line in self.log.read_text().splitlines():
+            if not line.startswith("skerry-state "):
+                continue
+            fields = dict(re.findall(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)', line))
+            found.append({k: v.strip('"') for k, v in fields.items()})
+        return found
+
+    def state(self, index: int = -1) -> dict[str, str]:
+        found = self.states()
+        if not found:
+            raise Failure("the window reported no state at all")
+        return found[index]
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+
+
+def row_y(state: dict[str, str], row: int) -> float:
+    """The vertical centre of a display row, as a percentage of the window."""
+    top = float(state["body_top"]) + float(state["row_h"]) * row + float(state["row_h"]) / 2
+    top -= float(state["scroll"])
+    height = float(state["logical"].split("x")[1])
+    return top / height * 100.0
+
+
+def name_x(state: dict[str, str]) -> float:
+    """A horizontal position inside the name column."""
+    width = float(state["logical"].split("x")[0])
+    return (float(state["name_x"]) + 30.0) / width * 100.0
+
+
+def expect(state: dict[str, str], **wanted) -> None:
+    for key, value in wanted.items():
+        actual = state.get(key)
+        if str(actual) != str(value):
+            raise Failure(f"{key} is {actual!r}, wanted {value!r}")
+
+
+# --------------------------------------------------------------------------
+# The scenarios
+# --------------------------------------------------------------------------
+
+
+def make_fixture(root: Path) -> Path:
+    fixture = root / "fixture"
+    shutil.rmtree(fixture, ignore_errors=True)
+    for name in ("alpha", "beta", "gamma"):
+        (fixture / name).mkdir(parents=True)
+        (fixture / name / "inner.txt").write_text("x" * 10)
+    (fixture / "alpha" / "nested").mkdir()
+    (fixture / "alpha" / "nested" / "deep.txt").write_text("y" * 20)
+    for index in range(1, 7):
+        (fixture / f"file-{index}.txt").write_text("z" * (index * 100))
+    (fixture / ".hidden").write_text("secret")
+    return fixture
+
+
+SCENARIOS = {}
+
+
+def scenario(name):
+    def register(function):
+        SCENARIOS[name] = function
+        return function
+
+    return register
+
+
+@scenario("keyboard-cursor")
+def keyboard_cursor(run: Run, fixture: Path) -> None:
+    run.drive("sleep 400\nkey f12\nkey down\nkey down\nkey f12\nkey up\nkey f12\nsleep 300\n")
+    first, second, third = run.states()[:3]
+    expect(first, rows="9", cursor="", selected="0")
+    expect(second, cursor="beta", selected="1")
+    expect(third, cursor="alpha", selected="1")
+
+
+@scenario("keyboard-navigate")
+def keyboard_navigate(run: Run, fixture: Path) -> None:
+    run.drive(
+        "sleep 400\n"
+        "key down\n"          # alpha
+        "key enter\n"         # into it
+        "sleep 600\n"
+        "key f12\n"
+        "key backspace\n"     # and back out
+        "sleep 600\n"
+        "key f12\n"
+        "sleep 200\n"
+    )
+    inside, outside = run.states()[:2]
+    expect(inside, path=str(fixture / "alpha"), rows="2")
+    expect(outside, path=str(fixture), cursor="alpha")
+
+
+@scenario("keyboard-back-forward")
+def keyboard_back_forward(run: Run, fixture: Path) -> None:
+    run.drive(
+        "sleep 400\nkey down\nkey enter\nsleep 500\n"
+        "key alt+left\nsleep 500\nkey f12\n"
+        "key alt+right\nsleep 500\nkey f12\nsleep 200\n"
+    )
+    back, forward = run.states()[:2]
+    expect(back, path=str(fixture))
+    expect(forward, path=str(fixture / "alpha"))
+
+
+@scenario("hidden-and-sort")
+def hidden_and_sort(run: Run, fixture: Path) -> None:
+    run.drive(
+        "sleep 400\nkey f12\n"
+        "key ctrl+h\nsleep 200\nkey f12\n"
+        "key alt+2\nsleep 300\nkey f12\n"
+        "key alt+2\nsleep 300\nkey f12\nsleep 200\n"
+    )
+    plain, hidden, by_size, reversed_ = run.states()[:4]
+    expect(plain, rows="9", hidden="false", sort="Name", descending="false")
+    expect(hidden, rows="10", hidden="true")
+    expect(by_size, sort="Size", descending="false")
+    expect(reversed_, sort="Size", descending="true")
+
+
+def point_at(run: Run, row: int) -> dict[str, str]:
+    """Puts the pointer on a display row and returns the state it produced.
+
+    Asserted through `hover` rather than trusted: the pointer's coordinates are
+    over the *output* and the window's are over the window, and under a nested
+    compositor those differ by whatever the frame around it costs. Reading back
+    what the program thinks it is pointing at removes the guess — and is the only
+    honest way for a test to know it clicked what it meant to.
+    """
+    start = run.state()
+    x = name_x(start)
+    for attempt in range(6):
+        # Correct for the offset between the output and the window by nudging
+        # half a row per attempt until `hover` agrees.
+        nudge = 0.0 if attempt == 0 else float(start["row_h"]) / 2 * attempt
+        height = float(start["logical"].split("x")[1])
+        y = row_y(start, row) + (nudge / height * 100.0) * (1 if attempt % 2 else -1)
+        run.drive(f"move {x:.1f} {y:.1f}\nsleep 120\nkey f12\nsleep 120\n")
+        state = run.state()
+        if state["hover"] == str(row):
+            return state
+    raise Failure(
+        f"could not put the pointer on row {row}; it landed on {run.state()['hover']}"
+    )
+
+
+@scenario("pointer-click")
+def pointer_click(run: Run, fixture: Path) -> None:
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    pointing = point_at(run, 2)
+    wanted = pointing["hover_name"]
+    run.drive("click\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor=wanted, selected="1")
+
+
+@scenario("pointer-double-click")
+def pointer_double_click(run: Run, fixture: Path) -> None:
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    pointing = point_at(run, 0)
+    folder = pointing["hover_name"]
+    run.drive("double\nsleep 800\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture / folder))
+
+
+@scenario("pointer-rubber-band")
+def pointer_rubber_band(run: Run, fixture: Path) -> None:
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    # Calibrate on a real row, then band upward from the empty space below the
+    # last one.
+    pointing = point_at(run, 1)
+    top = float(pointing["body_top"])
+    height = float(pointing["logical"].split("x")[1])
+    row_h = float(pointing["row_h"])
+    rows = int(pointing["rows"])
+    empty = (top + row_h * (rows + 1)) / height * 100.0
+    across = (top + row_h * 1.5) / height * 100.0
+    if empty >= 99.0:
+        raise Failure("the window has no empty space below the last row to band from")
+    run.drive(f"drag 60 {empty:.1f} 60 {across:.1f}\nsleep 400\nkey f12\nsleep 200\n")
+    banded = run.state()
+    if int(banded["selected"]) < 2:
+        raise Failure(f"a rubber band across several rows selected {banded['selected']}")
+
+
+@scenario("pointer-scroll")
+def pointer_scroll(run: Run, fixture: Path) -> None:
+    # A directory with more rows than fit, so there is somewhere to scroll to.
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    start = run.state()
+    run.drive("move 50 50\nsleep 100\nscroll 5\nsleep 400\nkey f12\nsleep 200\n")
+    after = run.state()
+    content = int(after["rows"]) * float(after["row_h"])
+    if content <= float(after["body_height"]):
+        return  # nothing to scroll; the fixture is smaller than the window
+    if float(after["scroll"]) <= float(start["scroll"]):
+        raise Failure(f"a wheel scroll moved nothing: {after['scroll']}")
+
+
+@scenario("type-ahead")
+def type_ahead(run: Run, fixture: Path) -> None:
+    run.drive("sleep 400\ntext gam\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor="gamma")
+
+
+@scenario("overlays")
+def overlays(run: Run, fixture: Path) -> None:
+    run.drive(
+        "sleep 400\nkey f1\nsleep 200\nkey f12\n"
+        "key f2\nsleep 200\nkey f12\n"
+        "key escape\nsleep 200\nkey f12\nsleep 200\n"
+    )
+    keys, both, cleared = run.states()[:3]
+    expect(keys, keys="true", stats="false")
+    expect(both, keys="true", stats="true")
+    expect(cleared, keys="false", stats="false")
+
+
+@scenario("folder-sizes")
+def folder_sizes(run: Run, fixture: Path) -> None:
+    run.drive("sleep 1200\nkey f12\nsleep 200\n")
+    state = run.state()
+    known, running = state["sizes"].split("/")
+    if int(known) < 3:
+        raise Failure(f"only {known} of three folders were measured")
+    if running != "0":
+        raise Failure(f"{running} walks were still going after a second")
+
+
+@scenario("select-all-and-clear")
+def select_all_and_clear(run: Run, fixture: Path) -> None:
+    run.drive(
+        "sleep 400\nkey ctrl+a\nsleep 200\nkey f12\n"
+        "key escape\nsleep 200\nkey f12\nsleep 200\n"
+    )
+    everything, nothing = run.states()[:2]
+    expect(everything, selected=everything["rows"])
+    expect(nothing, selected="0")
+
+
+@scenario("copy-to-clipboard")
+def copy_to_clipboard(run: Run, fixture: Path) -> None:
+    run.drive("sleep 400\nkey down\nkey ctrl+c\nsleep 300\nkey f12\nsleep 200\n")
+    state = run.state()
+    if "Copied" not in state.get("notice", ""):
+        raise Failure(f"copying said {state.get('notice')!r}")
+
+
+@scenario("no-cpu-when-idle")
+def no_cpu_when_idle(run: Run, fixture: Path) -> None:
+    run.drive("sleep 1500\n")  # let the folder walks finish
+    ticks = lambda: sum(
+        int(value) for value in Path(f"/proc/{run.process.pid}/stat").read_text().split()[13:15]
+    )
+    before = ticks()
+    time.sleep(3.0)
+    after = ticks()
+    if after != before:
+        raise Failure(f"an idle window used {after - before} ticks of CPU")
+
+
+# --------------------------------------------------------------------------
+
+
+def main(argv: list[str]) -> int:
+    wanted = [a for a in argv[1:] if not a.startswith("--")]
+    keep = "--keep" in argv
+
+    for binary in (SKERRY, DRIVE):
+        if not binary.is_file():
+            print(f"missing {binary}; run `cargo build --release` first")
+            return 2
+
+    work = Path(tempfile.mkdtemp(prefix="skerry-gui-"))
+    compositor = None
+    passed, failed = 0, []
+    try:
+        compositor, display = start_compositor(work)
+        print(f"nested compositor on {display}")
+        fixture = make_fixture(work)
+
+        for name, function in SCENARIOS.items():
+            if wanted and not any(needle in name for needle in wanted):
+                continue
+            run = None
+            try:
+                run = Run(display, work, fixture, [])
+                function(run, fixture)
+                print(f"  ok    {name}")
+                passed += 1
+            except Failure as problem:
+                print(f"  FAIL  {name}: {problem}")
+                failed.append(name)
+            finally:
+                if run is not None:
+                    run.close()
+    except Failure as problem:
+        print(f"fixture: {problem}")
+        return 1
+    finally:
+        if compositor is not None and compositor.poll() is None:
+            os.killpg(os.getpgid(compositor.pid), signal.SIGTERM)
+        if keep:
+            print(f"left behind: {work}")
+        else:
+            shutil.rmtree(work, ignore_errors=True)
+
+    print(f"\n{passed} passed, {len(failed)} failed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

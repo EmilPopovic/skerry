@@ -106,9 +106,20 @@ impl Selection {
         self.cursor = Some(id);
     }
 
-    /// Selects everything.
-    pub fn select_all(&mut self) {
-        self.bits.fill();
+    /// Selects everything the view is showing.
+    ///
+    /// `rows` is the display order, and it is not optional: filling the whole
+    /// bitset instead selects entries the listing holds but does not show — with
+    /// hidden files off, `Ctrl+A` in a folder of nine visible files reported ten
+    /// selected, and the tenth was a dotfile nobody could see. A selection that
+    /// contains something invisible is a selection that a later operation acts
+    /// on by surprise.
+    pub fn select_all(&mut self, rows: &[EntryId]) {
+        self.bits.clear();
+        for id in rows {
+            self.bits.insert(id.index());
+        }
+        self.anchor = rows.first().copied();
     }
 
     /// Selects nothing, keeping the cursor where it is.
@@ -173,11 +184,25 @@ mod tests {
     fn select_all_then_deselect_is_the_operation_the_bitset_exists_for() {
         let mut selection = Selection::default();
         selection.fit(100_000);
-        selection.select_all();
+        let rows = rows(100_000);
+        selection.select_all(&rows);
         for index in 0..200 {
             selection.toggle(EntryId(index));
         }
         assert_eq!(selection.count(), 100_000 - 200);
+    }
+
+    /// The defect a test driving the real window found: with hidden files off,
+    /// `Ctrl+A` reported one more selected than the list was showing.
+    #[test]
+    fn select_all_selects_what_is_shown_and_not_what_is_hidden() {
+        let mut selection = Selection::default();
+        selection.fit(10);
+        // Nine of ten entries are in the display order; the tenth is a dotfile.
+        let shown: Vec<EntryId> = (0..9).map(EntryId).collect();
+        selection.select_all(&shown);
+        assert_eq!(selection.count(), 9);
+        assert!(!selection.contains(EntryId(9)), "something invisible was selected");
     }
 
     #[test]

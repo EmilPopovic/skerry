@@ -161,7 +161,10 @@ fn select(registry: &mut Registry<App>) {
             group: Group::Select,
             keys: &["ctrl+a"],
             enabled: |app: &App| app.pane.listing.rows() > 0,
-            run: |app: &mut App| app.pane.selection.select_all(),
+            run: |app: &mut App| {
+                let rows = app.pane.listing.order().to_vec();
+                app.pane.selection.select_all(&rows);
+            },
         },
         CommandSpec {
             id: "select.none",
@@ -266,6 +269,14 @@ fn help(registry: &mut Registry<App>) {
             keys: &["f1"],
             enabled: |_| true,
             run: App::toggle_keys,
+        },
+        CommandSpec {
+            id: "help.dump",
+            name: "action.dump",
+            group: Group::Help,
+            keys: &["f12"],
+            enabled: |_| true,
+            run: App::dump,
         },
         CommandSpec {
             id: "help.stats",

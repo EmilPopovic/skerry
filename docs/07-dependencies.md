@@ -79,6 +79,20 @@ This is the same boundary that rule 1 and the security model already wanted. Get
 dependency isolation from it is the argument that makes it obviously correct rather than
 merely defensible.
 
+## Test tooling
+
+`tools/skerry-drive` replays keyboard and pointer input into a compositor so that
+`tools/gui-test` can drive the real window. It is not in the product: the budget
+above is measured by walking `skerry`'s graph and nothing else, so what a test
+tool carries cannot hide inside it.
+
+| Crate | Why |
+| --- | --- |
+| `wayland-protocols-misc` | `zwp_virtual_keyboard_manager_v1`, which is where the keyboard half of a replayed input trace comes from. |
+| `wayland-protocols-wlr` | `zwlr_virtual_pointer_manager_v1`, the pointer half. Measured on this machine, `kwin_wayland` advertises neither protocol, so the fixture is Hyprland-only and the portability answer for KWin comes from running the product there by hand. |
+
+Both are the same code generator as `wayland-protocols` and bring nothing new.
+
 ## What the accepted set actually costs
 
 Measured with `tools/dep-budget.py` on the first commit that had crates in it, at

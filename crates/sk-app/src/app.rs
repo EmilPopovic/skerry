@@ -233,6 +233,15 @@ impl App {
         let logical = window.logical();
         let scale_120 = window.scale_120();
         let capabilities = describe(window.capabilities());
+        if std::env::var_os("SKERRY_GLOBALS").is_some() {
+            // Every interface the compositor advertises, with its version.
+            // ADR 0007 says capabilities are probed rather than compiled in; this
+            // is the raw material the probe works from, and printing it is how a
+            // "why did that not work" question gets an answer in one run.
+            for (interface, version) in &window.capabilities().advertised {
+                eprintln!("skerry: global {interface} v{version}");
+            }
+        }
         let measurer = Measurer::new(waker.handle());
         let now = Instant::now();
         Ok(Self {
@@ -721,6 +730,73 @@ impl App {
         self.show_stats = !self.show_stats;
     }
 
+    /// Writes a diagnostic report to the log.
+    ///
+    /// [docs/04-architecture.md](../../../docs/04-architecture.md#observability)
+    /// asks for the frame profiler to be dumpable with a keystroke, so that a
+    /// person saying "it stuttered" becomes a timeline. This is that keystroke,
+    /// and it carries the interface state beside the timings — which is also what
+    /// makes an end-to-end test of the real window able to assert anything at
+    /// all, since a test cannot look at a screen.
+    ///
+    /// One line, machine-readable, on the standard error stream. A file lands
+    /// with the crash reporter in M8.
+    // The path, the cursor and the notice are printed with `Debug` on purpose:
+    // this line is machine-read, and `Debug`'s quoting and escaping is what makes
+    // a filename containing a space or a quote parseable at the other end.
+    #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
+    pub(crate) fn dump(&mut self) {
+        let cursor = self
+            .pane
+            .selection
+            .cursor()
+            .map(|id| self.pane.listing.name(id).to_owned())
+            .unwrap_or_default();
+        let hover = self.pane.hover.map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        let hover_name = self
+            .pane
+            .hover
+            .and_then(|row| self.pane.listing.at(row))
+            .map(|id| self.pane.listing.name(id).to_owned())
+            .unwrap_or_default();
+        let (known, running) = self.measurer.stats();
+        let (jobs, panics) = self.jobs.pool.stats();
+        println!(
+            "skerry-state path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
+selected={} scroll={:.1} loading={} watching={} notice={:?} \
+hover={hover} hover_name={hover_name:?} \
+body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} \
+logical={:.0}x{:.0} scale_120={} \
+frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
+jobs={jobs}/{panics} keys={} stats={}",
+            self.pane.path,
+            self.pane.listing.rows(),
+            self.pane.show_hidden,
+            self.pane.sort.column,
+            self.pane.sort.descending,
+            self.pane.selection.count(),
+            self.pane.scroll.offset(),
+            self.pane.loading,
+            self.watching,
+            self.notice.as_ref().map(|(message, _)| message.as_str()).unwrap_or_default(),
+            self.layout.body.y,
+            self.layout.body.height,
+            self.theme.metrics.row_height,
+            self.layout.name.x,
+            self.layout.size.x,
+            self.logical.width,
+            self.logical.height,
+            self.scale_120,
+            self.frames.percentile(0.5),
+            self.frames.percentile(0.99),
+            self.frames.budget().0,
+            self.frames.budget().1,
+            self.show_keys,
+            self.show_stats,
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
     fn reveal_cursor(&mut self) {
         let Some(row) = self.pane.cursor_row() else { return };
         let height = self.theme.metrics.row_height;
@@ -968,7 +1044,7 @@ impl App {
             let (window_us, gpu_us, font_us) = self.open_time;
             eprintln!(
                 "skerry: first frame in {:.1} ms — window {:.1}, gpu {:.1}, fonts {:.1}, \
-                 frame {:.1}; {} on {}, surface {}×{} at {}%",
+                 frame {:.1}; {} on {}, surface {}×{} at {}%; platform: {}",
                 self.started.elapsed().as_secs_f64() * 1000.0,
                 window_us as f64 / 1000.0,
                 gpu_us as f64 / 1000.0,
@@ -979,6 +1055,7 @@ impl App {
                 physical.0,
                 physical.1,
                 self.scale_120 * 100 / 120,
+                self.capabilities,
             );
         }
     }
