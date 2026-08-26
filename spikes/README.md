@@ -18,7 +18,7 @@ would never ship.
 | F | Can flattened search hit a 50 ms first result on 1M files, and what does an index cost? | first result < 50 ms from a keystroke on a warm 1M-file tree | **Go on the index.** 195 ms cold load on a Pi 5 against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan; sorting 191 ms against a 120 ms target, inside the 300 ms fail — [f-index-and-search](f-index-and-search/README.md) |
 
 Full specifications for A to E, including what each one decides, are in
-[08-roadmap.md](../docs/08-roadmap.md#phase-0--five-spikes-34-weeks). Use
+[08-roadmap.md](../docs/08-roadmap.md#phase-0--spikes-34-weeks). Use
 `/spike` to create or resolve one.
 
 **F is not in the roadmap's original five.** It exists because

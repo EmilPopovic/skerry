@@ -5,12 +5,49 @@ the work, not a schedule.
 
 ---
 
-## Phase 0 — five spikes, ~3–4 weeks
+## Phase 0 — spikes, ~3–4 weeks
 
 Throwaway binaries, each answering one question that could invalidate the plan, each with a
 number attached. They live in `spikes/` afterwards because their measurements are the
 evidence behind the ADRs. **If a spike misses its bar, the architecture changes before
 there is a codebase to rewrite.**
+
+### Status
+
+Four of six resolved. Full results in each spike's own README; the summary tables in
+[09-performance-budgets.md](09-performance-budgets.md) carry the numbers that became gates.
+
+| | Verdict |
+| --- | --- |
+| [A](../spikes/a-million-rows/README.md) | **Go.** 2.6 ms worst p99 of 18 runs against an 8 ms bar. RSS misses on the NVIDIA proprietary driver alone, whose floor is 332 MB before our data exists |
+| [B](../spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
+| [C](../spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
+| D | **not yet run** — and Spike A added a requirement: it must cover fractional-scale negotiation explicitly |
+| E | **not yet run** |
+| [F](../spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
+
+**Spike F is not one of the original five.** It exists because
+[ADR 0008](adr/0008-persistent-index-is-required.md) made the persistent index required
+rather than optional and then declined to choose a format without numbers.
+
+### What Phase 0 changed in the plan
+
+The point of a spike is to move the architecture before there is code. Five things moved:
+
+- **[ADR 0008](adr/0008-persistent-index-is-required.md)** — the persistent index is
+  required, not an optional accelerator, because Linux has no MFT to read and no
+  volume-wide change journal to subscribe to.
+- **`sk-fs` needs two walk strategies**, not one. Per-directory jobs are 3× faster on a
+  realistic tree; deferring `statx` to the pool is 3.4× faster on a single directory holding
+  a million entries, and takes its p99 from 11.9 s to 1.2 s.
+- **Pool width is at least `ncpu`**, not `ncpu - 2`. The old figure is 1.626 s against
+  0.91 s on a four-core machine.
+- **Sort keys as [04-architecture.md](04-architecture.md#data-layout) described them did not
+  work.** Precomputing them is worth 3%; the cost is the access pattern, and a radix pass
+  that never compares is worth 5×.
+- **Two budget rows are known-unmet** and one measures the wrong thing — see
+  [09-performance-budgets.md](09-performance-budgets.md) and
+  [12-measurement.md](12-measurement.md).
 
 ### Spike A — a million rows at 120 fps
 Virtualized list of 1,000,000 synthetic entries with text, icon and three columns. Built
@@ -138,13 +175,26 @@ for both architectures.
 
 ---
 
-## The first week
+## What comes next
 
-**Spike A, and nothing else.** Not the architecture document — it is already written. Not
-the crate skeleton. One question: can a Rust process paint a million-row virtualized list
-with real shaped text at a hard 8 ms p99 on Wayland with fractional scaling, on an Intel
-integrated GPU and on llvmpipe?
+Spike A returned its number: the differentiator is reachable on this stack, with 3× of
+headroom on the frame budget and the GPU consuming 0.02 ms of an 8 ms frame. The plan above
+is sound and the rest is ordinary engineering.
 
-If yes, the plan above is sound and the rest is ordinary engineering. If no, the project's
-single differentiator is unreachable on the chosen stack, and the right response is to
-change the stack while there is nothing to throw away — which is exactly why it goes first.
+**The next artifact is Spike D**, and it is the one the plan calls highest-uncertainty. It
+decides [ADR 0002](adr/0002-own-platform-layer.md), it is the longest pole in M0, and Spike
+A has already added to its scope: fractional-scale negotiation must be covered explicitly,
+because that is where a text-crispness bug lived that every internal assertion called a
+pass.
+
+Spike E gates M3 and can follow. Neither is blocked by anything.
+
+Three measurements are still owed and none blocks a spike:
+
+- **An Intel integrated GPU** for Spike A. Absent from every machine available, and the
+  most common Linux GPU.
+- **Network mounts.** Every enumeration and watching figure is local ext4 on NVMe. inotify
+  does not work over NFS at all — no event, no error — and a listing that shows a stale
+  network mount as live has the defect rule 1 exists to prevent.
+- **A slow device.** Every rescan and cold-load figure is NVMe. A Pi booting from an SD
+  card is the common case and is unmeasured.

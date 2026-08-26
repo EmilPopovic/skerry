@@ -6,15 +6,31 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**Planning. There is no code, and the next artifact is not a crate skeleton.**
+**Phase 0. Four spikes of six resolved, no `crates/` yet, and the next artifact
+is Spike D — not a crate skeleton.**
 
-[docs/08-roadmap.md](docs/08-roadmap.md) is explicit: the first thing to exist is
-**Spike A** — a million-row virtualized list at a hard 8 ms p99, built twice so
-the renderer comparison is measured rather than argued. Building `crates/` before
-that spike returns a number is building on an unverified premise. Use `/spike`.
+| | | |
+| --- | --- | --- |
+| [A](spikes/a-million-rows/README.md) | a million rows at 8 ms p99 | **Go**, 2.6 ms worst p99 |
+| [B](spikes/b-enumeration/README.md) | `getdents64` + batched `statx` | **Go**, but sits *on* the 1 s bar on a Pi 5 |
+| [C](spikes/c-watching/README.md) | inotify at scale | **Go**, three things to design |
+| D | platform layer and drag-and-drop | **next**, and the highest-uncertainty item in the plan |
+| E | operation engine correctness | not yet run; gates M3 |
+| [F](spikes/f-index-and-search/README.md) | index and flattened search | **Go on the index**; sorting misses its budget |
 
-Spikes live in [spikes/](spikes/), are exempt from most rules, and are kept for
-their measurements after they are thrown away.
+Spikes live in [spikes/](spikes/), are exempt from the layering, lint and
+dependency rules — never the banned-toolkit rule — and are kept for their
+measurements after the code is thrown away. Use `/spike`.
+
+**Read [docs/12-measurement.md](docs/12-measurement.md) before taking a number.**
+Every rule in it was learned by getting one wrong here, and three of them cost a
+day each: load contamination is worth 6×, a single per-core multiplier is not a
+portability model, and a gate nobody has watched fail is decoration.
+
+Phase 0 has already moved the architecture in five places, listed in
+[docs/08-roadmap.md](docs/08-roadmap.md#what-phase-0-changed-in-the-plan). Two
+performance budget rows are **known-unmet** and recorded as such rather than
+widened.
 
 ## The craft bar
 
@@ -88,6 +104,7 @@ immutable: a decision that changes is superseded by a new one that links back.
 
 | Question | Document |
 | --- | --- |
+| How do I take a number honestly? | [12-measurement](docs/12-measurement.md) |
 | Is this feature worth building? | [02-positioning](docs/02-positioning.md), [11-non-goals](docs/11-non-goals.md) |
 | Is this design allowed? | [03-principles](docs/03-principles.md), [04-architecture](docs/04-architecture.md) |
 | Where does this code go? | [04-architecture](docs/04-architecture.md) crate table |

@@ -11,7 +11,7 @@ kept off the UI thread?
 
 ## Bar
 
-Quoted from [08-roadmap.md](../../docs/08-roadmap.md#phase-0--five-spikes-34-weeks),
+Quoted from [08-roadmap.md](../../docs/08-roadmap.md#phase-0--spikes-34-weeks),
 written before the first line of code and not adjusted afterwards:
 
 > **Bar:** warm-cache full walk under 1 s · first 200 visible rows on screen

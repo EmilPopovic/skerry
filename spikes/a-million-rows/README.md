@@ -10,7 +10,7 @@ on Wayland at fractional scale, on an integrated GPU and on llvmpipe?
 
 ## Bar
 
-Quoted from [08-roadmap.md](../../docs/08-roadmap.md#phase-0--five-spikes-34-weeks),
+Quoted from [08-roadmap.md](../../docs/08-roadmap.md#phase-0--spikes-34-weeks),
 written before the first line of code and not adjusted afterwards:
 
 > **Bar:** p99 frame under 8 ms while scrolling · crisp glyphs at fractional scale · under
@@ -144,7 +144,7 @@ opinion.
   Wayland backend here would confound a renderer measurement with a platform-layer
   measurement and delay both.
 - **No `sk-*` crates.** Phase 0 precedes the workspace
-  ([08-roadmap.md](../../docs/08-roadmap.md#the-first-week)). Spikes are exempt from the
+  ([08-roadmap.md](../../docs/08-roadmap.md#what-comes-next)). Spikes are exempt from the
   layering, lint and dependency rules — not from the banned-toolkit rule, which
   `tools/check-invariants.py` still enforces here.
 - **Grayscale antialiasing, not subpixel RGB.** One variable at a time; the

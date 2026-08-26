@@ -1,0 +1,166 @@
+# How this project measures
+
+Every rule below was learned by getting a number wrong first, in Phase 0, and
+each one names the measurement that corrected it. They are here because the cost
+of relearning them is days, and because
+[03-principles.md](03-principles.md) demands numbers without saying how to take
+one honestly.
+
+---
+
+## The machine must be idle, and the load must be recorded
+
+The same llvmpipe configuration measured **2.428 ms p99 on an idle machine and
+16.008 ms beside a `cargo build`** — a factor of 6.6, and the difference between
+passing an 8 ms budget and missing it twice over.
+
+Every sweep waits for a one-minute load average under 1.3 before it starts and
+records the load beside the result. A number without its load is not a number.
+
+> **Fails if:** a benchmark result is quoted without the machine state it was
+> taken on.
+
+## A single per-core multiplier is not a portability model
+
+Phase 0 projected reference hardware from a fast laptop with "roughly 3× slower
+per core", taken from one comparison. Measured across the same pair of machines,
+the real factor ranges from **2.6× to 12×** depending on the operation.
+
+The model that works: **an operation ports at the factor of whichever memory
+access pattern dominates it.** Over the same 28.5 MB working set —
+
+| | laptop | Pi 5 | ratio |
+| --- | --- | --- | --- |
+| sequential read | 16.88 GB/s | 5.43 GB/s | **3.1×** |
+| independent random 8-byte reads | 793.9 M/s | 26.1 M/s | **30×** |
+
+— a linear scan ported at 2.6× against a 3.1× primitive, and a radix scatter at
+12× against a 30× one. No constant could have covered both.
+
+> **Fails if:** a budget is declared met on reference hardware without reference
+> hardware having run it.
+
+## Working-set size is a cliff, not a slope
+
+Two machines with **the same four cores** measured **22× apart** on random reads
+and **4.5× apart** on the same sort. The variable was neither core count nor
+instruction set: one holds a 28 MB working set in its last-level cache and the
+other does not.
+
+A million filenames at 28 bytes each sits directly on that boundary. So
+**prefer sequential passes over a compact representation to clever indirection** —
+the indirection is precisely what the slow machine cannot afford, and a design
+tested only on a machine with 64 MB of L3 will not reveal it.
+
+## Predictions about memory behaviour are worse than experiments
+
+Three predictions in Phase 0, each reasoned from a real measurement, each
+plausible, each wrong:
+
+| Prediction | Reality |
+| --- | --- |
+| a single 3× portability multiplier | 2.6× to 12× |
+| "76% of the sort is its serial phase" | parallelising it bought 11 ms |
+| "permuting the arena will help the slow machine" | 5% slower, on that machine |
+
+The rule that follows is uncomfortable and cheap: **when the question is "why is
+this slow", spend five minutes measuring rather than ten minutes reasoning.** The
+reasoning is not worthless — it generates the experiment — but it does not
+substitute for one.
+
+## A test that can only pass has measured nothing
+
+Rule 1's hung-mount test passed on its first run, and had to: a frame loop with
+no path to a filesystem syscall cannot be blocked by one, so "no frame exceeded
+8 ms" restated the design rather than testing it.
+
+Adding the **control** — the same listing issued from the frame loop instead of
+the job pool — produced **4 ms against 28,000 ms**, same mount, same syscall, the
+only variable being which thread called it. That contrast is the result; the
+first number alone was a tautology.
+
+> **Fails if:** a gate has never been observed to fail. Break it on purpose and
+> watch it fire — a banned crate added to a manifest, a bug reintroduced behind a
+> flag — or it is decoration.
+
+## Removing a misleading metric removes the dimension
+
+Peak RSS was dropped from a results table for a good reason: `VmHWM` only rises,
+so with several arms in one process the first arm's peak is every arm's peak. The
+replacement — one run per arm — existed, was correct, and was never run against a
+newly added arm.
+
+The result was a **522 MB peak against an 83 MB baseline**, over a 300 MB bar,
+introduced by the change that made the code fast and unnoticed for two commits.
+It surfaced only because a contributed cold-cache run happened to print the line.
+
+> **Fails if:** a metric is removed from the default output without its
+> replacement being on the default path.
+
+## Some defects are only visible to a person looking
+
+Two text bugs — right-to-left runs rendering as overlapping glyphs, and the
+`.webp` in `קובץ.webp` reordered to the far left — passed every number the
+harness printed, including an assertion that every glyph was drawn 1:1 with its
+raster. They were found by opening a golden frame and reading it.
+
+A third was found the same way and by someone else: text that was crisp by every
+internal measure and visibly fuzzy on screen, because the renderer never
+negotiated the compositor's fractional scale. **The assertion covered
+atlas-to-framebuffer; nothing covered framebuffer-to-screen.**
+
+Golden frames on llvmpipe are therefore mandatory infrastructure, and so is
+looking at them. An assertion proves the thing it asserts and is silent about the
+step after it.
+
+## One median is not a result
+
+A Raspberry Pi's sort was reported at "0.966 s, 3.4% of margin" from a single
+five-repeat median. The width curve — five repeats at each of six widths — gave
+medians from **0.912 s to 1.072 s with every configuration producing runs over a
+second**. The honest description was "sits on the bar", not "meets it".
+
+Report min, median and max, and quote the spread when the decision is close. A
+single median that lands low is how a project talks itself into believing a budget
+is met.
+
+## On a memory-constrained machine, "warm cache" is not warm
+
+Five repeats of the same million-file walk on an 8 GB machine gave a **p50 of
+1,136 ms and a p99 of 6,332 ms** — the signature of runs going back to the device
+because the dentry cache did not survive between them.
+
+Every other "warm" figure in these spikes was taken on a machine with 60 GB. A
+warm-cache benchmark is a claim about the machine as much as the code.
+
+## Shell plumbing quietly eats results
+
+Three separate incidents in one Phase 0 session:
+
+- `./tools/check | tail -3` — a pipeline's exit status is the *last* command's, so
+  a red gate returned success and a commit landed with a broken link.
+- `grep -E "^  ($arm|...)"` where the arm was `read_dir+meta` — `+` is an ERE
+  metacharacter, so the pattern matched `read_di` followed by one-or-more `r`,
+  which is nothing. **Two arms of a cold-cache run were measured and silently
+  discarded**, and the run needed sudo to repeat.
+- A remote job printed its `done` marker while running a **stale binary**,
+  because an interrupted `scp` had failed before the `ssh` that followed it
+  succeeded. Caught by comparing checksums, not by trusting the marker.
+
+> **Fails if:** a gate's output is piped when the gate's exit code is what
+> matters; or a remote result is trusted without verifying what produced it.
+
+## The bar is quoted before the code and never adjusted after
+
+Written into [08-roadmap.md](08-roadmap.md) for the spikes and
+[09-performance-budgets.md](09-performance-budgets.md) for the product. A method
+may be corrected before a result is recorded — a warmup phase that warms the
+wrong thing is a bug, not a result — but **a bar that moves after seeing a number
+has measured nothing.**
+
+Where a bar turns out to be unmeetable, say so and leave it standing. Phase 0 has
+three: the 90 MB "ordinary session" RSS target is below the GPU driver floor on
+every device tested; `Sort 1M entries < 120 ms` is 191 ms at best on reference
+hardware; and "an external `rm -rf` reflected within 100 ms" measures the
+deletion rather than the notification, so it passes at 2,000 files and fails at
+30,000. Each is recorded as unmet. None was quietly widened.

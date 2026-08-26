@@ -10,7 +10,7 @@ fast enough that an external change is on screen before the user notices?
 
 ## Bar
 
-Quoted from [08-roadmap.md](../../docs/08-roadmap.md#phase-0--five-spikes-34-weeks),
+Quoted from [08-roadmap.md](../../docs/08-roadmap.md#phase-0--spikes-34-weeks),
 written before the code and not adjusted afterwards:
 
 > **Bar:** an external `rm -rf` or `git checkout` reflected within 100 ms · no

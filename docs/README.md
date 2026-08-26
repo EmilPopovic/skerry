@@ -11,6 +11,7 @@
 7. **[07-dependencies.md](07-dependencies.md)** — dependency policy.
 8. **[08-roadmap.md](08-roadmap.md)** — spikes and milestones.
 9. **[09-performance-budgets.md](09-performance-budgets.md)**, **[10-risks.md](10-risks.md)**, **[11-non-goals.md](11-non-goals.md)** — the guardrails.
+10. **[12-measurement.md](12-measurement.md)** — how to take a number honestly. Every rule in it was learned by getting one wrong in Phase 0.
 
 ## Conventions
 
