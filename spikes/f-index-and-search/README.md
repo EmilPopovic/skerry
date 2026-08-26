@@ -567,6 +567,40 @@ boundary that a million filenames sits directly on. That is a design rule for
 `sk-index` and `sk-fs`, and it is worth more than any individual number in this
 spike.
 
+#### A prediction the cache finding made, and measurement refused
+
+The cache result suggested an obvious optimisation. The recursive radix makes
+about 2.5 random passes over the arena — one per level, because a tie group's
+names sit wherever the walk happened to put them. If a random pass costs 22× on
+the Pi and a sequential one costs par, then paying it **once** should win: after
+the first radix, copy the names into a second arena in that order, and every tie
+group becomes contiguous so the recursion reads forwards.
+
+| | laptop | Pi 5 |
+| --- | --- | --- |
+| recursive radix | 70.5 ms | **399.8 ms** |
+| permuted-arena radix | 69.3 ms | **421.7 ms** |
+
+**Slower on the machine it was designed for**, by 5%. Verified correct, so it is
+the reasoning that failed rather than the code.
+
+Two candidate explanations, neither measured: the permutation is itself a full
+random pass plus 28 MB of writes and 28 MB of fresh allocation, so it has to save
+more than one pass to break even; and the recursion's arena access may never have
+been 2.5 *random* passes, because names within a tie group arrive from the same
+directory and are already adjacent in the arena more often than not.
+
+**That is the third prediction about this machine's memory behaviour that
+measurement has refuted** — after the single 3× portability multiplier, and after
+the arithmetic that put 76% of the sort in its serial phase. All three were
+plausible, all three were reasoned from a real measurement, and all three were
+wrong. On this hardware, for this access pattern, **prediction has a worse track
+record than a five-minute experiment**, and the honest conclusion is to stop
+predicting and keep measuring.
+
+The best sort remains the fully parallel MSD radix: **250 ms on the Pi, 65 ms on
+homelab, 24 ms on the laptop.**
+
 #### Warm is not reliably warm on 8 GB
 
 | | p50 | p99 | mean |

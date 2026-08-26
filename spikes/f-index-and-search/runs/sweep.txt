@@ -1,193 +1,199 @@
 Spike F — index and flattened search
   pool         24 workers
-  load         1.94
+  load         1.26
 
 ═══ flat-100k — 100000 files ═══
   1 directories, 100001 entries, arena 2.7 MB, store 4.9 MB
-  walk       p50 102.803  p99 103.878  max 103.878  mean 102.892   n=5
-  flatten    p50  0.840  p99  1.357  max   1.357  mean  0.918   n=5
-  walk deferred p50 31.048  p99 32.297  max  32.297  mean 30.830   n=5
-  peak RSS 19.6 MB
+  walk       p50 102.755  p99 105.590  max 105.590  mean 103.004   n=5
+  flatten    p50  1.045  p99  1.408  max   1.408  mean  1.070   n=5
+  walk deferred p50 30.509  p99 31.003  max  31.003  mean 30.438   n=5
+  peak RSS 19.4 MB
 
   flattened search, milliseconds — bar: first result within 50 ms
   query                       first        all      matches  what it is
-  (empty)                     0.000      0.163       100001  everything — the floor, no matching at all
-  zzqx                        2.669      1.721            0  almost nothing — the rejection path
-  snapshot-render-70          0.214      2.340            7  a handful — the realistic case
-  e                           0.000      1.331        62041  a large fraction — where the result set is the cost
-  rpt                         0.000      2.555        15178  scattered subsequence — no contiguous run to find
+  (empty)                     0.000      0.117       100001  everything — the floor, no matching at all
+  zzqx                        1.806      1.805            0  almost nothing — the rejection path
+  snapshot-render-70          0.210      2.237            7  a handful — the realistic case
+  e                           0.000      1.722        62041  a large fraction — where the result set is the cost
+  rpt                         0.000      2.490        15178  scattered subsequence — no contiguous run to find
 
   what this machine offers, over the same 2.7 MB arena
-  sequential 17.01 GB/s · random 8-byte reads 1416.4 M/s across 24 threads · dependent 163.3 M/s on one
+  sequential 10.23 GB/s · random 8-byte reads 1554.4 M/s across 24 threads · dependent 175.0 M/s on one
 
   persistent index
-  build      p50  4.453  p99  5.208  max   5.208  mean  4.344   n=5
-  load       p50  2.244  p99  2.403  max   2.403  mean  2.266   n=5
-  load cold  p50  4.673  p99  4.726  max   4.726  mean  4.634   n=5
+  build      p50  4.583  p99  5.212  max   5.212  mean  4.540   n=5
+  load       p50  2.263  p99  2.449  max   2.449  mean  2.303   n=5
+  load cold  p50  4.822  p99  4.965  max   4.965  mean  4.774   n=5
   on disk 4.9 MB, 49 bytes per entry
-  cold load is 0.05x the warm walk, and 492x faster than a 2.3 s cold walk
+  cold load is 0.05x the warm walk, and 477x faster than a 2.3 s cold walk
 
   sorting 100001 entries, milliseconds — bar: 120 ms, hard fail 300 ms
-  build keys p50  0.169  p99  0.183  max   0.183  mean  0.170   n=5
-  by size    p50  0.108  p99  0.113  max   0.113  mean  0.109   n=5
-  by mtime   p50  0.105  p99  0.123  max   0.123  mean  0.108   n=5
-  by name, arena p50  5.898  p99  5.931  max   5.931  mean  5.903   n=5
-  by name, keyed p50  5.978  p99  6.469  max   6.469  mean  6.075   n=5
-  radix, keys p50  1.050  p99  1.113  max   1.113  mean  1.061   n=5
-  radix + ties p50  4.272  p99  4.382  max   4.382  mean  4.296   n=5
+  build keys p50  0.150  p99  0.176  max   0.176  mean  0.154   n=5
+  by size    p50  0.108  p99  0.120  max   0.120  mean  0.110   n=5
+  by mtime   p50  0.105  p99  0.116  max   0.116  mean  0.106   n=5
+  by name, arena p50  5.939  p99  5.964  max   5.964  mean  5.941   n=5
+  by name, keyed p50  6.031  p99  6.092  max   6.092  mean  6.036   n=5
+  radix, keys p50  1.151  p99  1.185  max   1.185  mean  1.162   n=5
+  radix + ties p50  4.418  p99  4.489  max   4.489  mean  4.422   n=5
   93481 of 100001 entries (93%) share an 8-byte key prefix and need the arena to separate
-  radix packed p50  1.036  p99  1.093  max   1.093  mean  1.047   n=5
-  packed + ties p50  4.280  p99  4.754  max   4.754  mean  4.387   n=5
-  radix recursive p50  3.545  p99  3.665  max   3.665  mean  3.577   n=5
+  radix packed p50  0.868  p99  0.950  max   0.950  mean  0.891   n=5
+  packed + ties p50  4.233  p99  5.241  max   5.241  mean  4.473   n=5
+  radix recursive p50  3.794  p99  3.851  max   3.851  mean  3.796   n=5
   recursive radix produces a correctly ordered result: true
-  radix parallel p50  1.887  p99  2.758  max   2.758  mean  2.059   n=5
+  radix parallel p50  1.857  p99  2.616  max   2.616  mean  2.034   n=5
   parallel radix produces a correctly ordered result: true
-  radix msd par p50  1.466  p99  1.861  max   1.861  mean  1.513   n=5
+  radix permuted p50  4.738  p99  6.849  max   6.849  mean  5.206   n=5
+  permuted-arena radix produces a correctly ordered result: true
+  radix msd par p50  1.739  p99  2.242  max   2.242  mean  1.780   n=5
   msd parallel radix produces a correctly ordered result: true
-  radix msd full p50  1.751  p99  1.995  max   1.995  mean  1.798   n=5
+  radix msd full p50  1.831  p99  1.957  max   1.957  mean  1.802   n=5
   fully parallel msd radix produces a correctly ordered result: true
-  the sort makes about 0.3 M random arena reads and achieves 142.8 M/s, which is 10% of the 1416.4 M/s this machine offers
+  the sort makes about 0.3 M random arena reads and achieves 136.5 M/s, which is 9% of the 1554.4 M/s this machine offers
   first-byte buckets: 29 non-empty, largest 13.6% ('r'), top 4 = 31.9% of entries
-  build keys16 p50  0.237  p99  0.238  max   0.238  mean  0.235   n=5
-  radix16 + ties p50  3.591  p99  3.754  max   3.754  mean  3.606   n=5
+  build keys16 p50  0.371  p99  0.533  max   0.533  mean  0.400   n=5
+  radix16 + ties p50  6.146  p99  6.696  max   6.696  mean  5.790   n=5
   45153 of 100001 entries (45%) still tied at 16 bytes
 
   parallel scan across 24 threads, milliseconds
   query                      1 thread     parallel    speedup
-  (empty)                       0.099        0.318       0.3x
-  zzqx                          1.730        0.484       3.6x
-  snapshot-render-70            2.314        0.543       4.3x
-  e                             1.282        0.429       3.0x
-  rpt                           2.632        0.559       4.7x
-  worst first-result across every query, parallel: 0.509 ms on `zzqx` (inside the 50 ms bar)
+  (empty)                       0.103        0.310       0.3x
+  zzqx                          1.834        0.471       3.9x
+  snapshot-render-70            2.280        0.562       4.1x
+  e                             1.349        0.443       3.0x
+  rpt                           2.493        0.589       4.2x
+  worst first-result across every query, parallel: 0.518 ms on `zzqx` (inside the 50 ms bar)
 
   as-you-type, one full scan per keystroke, milliseconds
-  "r"=1.4 "re"=2.1 "rep"=2.6 "repo"=2.8 "repor"=2.8 "report"=2.9 
-  worst single keystroke 2.4 ms, whole word 14.6 ms
+  "r"=1.4 "re"=1.9 "rep"=2.5 "repo"=2.6 "repor"=2.6 "report"=3.1 
+  worst single keystroke 2.3 ms, whole word 14.1 ms
 
 ═══ flat-1m — 1000000 files ═══
   1 directories, 1000001 entries, arena 28.4 MB, store 50.4 MB
-  walk       p50 1033.157  p99 1045.004  max 1045.004  mean 1032.961   n=5
-  flatten    p50  8.959  p99 12.247  max  12.247  mean  8.289   n=5
-  walk deferred p50 299.257  p99 302.626  max 302.626  mean 298.851   n=5
-  peak RSS 204.4 MB
+  walk       p50 1035.915  p99 1080.839  max 1080.839  mean 1040.165   n=5
+  flatten    p50  8.263  p99 13.914  max  13.914  mean  9.715   n=5
+  walk deferred p50 304.608  p99 306.989  max 306.989  mean 303.547   n=5
+  peak RSS 199.4 MB
 
   flattened search, milliseconds — bar: first result within 50 ms
   query                       first        all      matches  what it is
-  (empty)                     0.000      1.055      1000001  everything — the floor, no matching at all
-  zzqx                       18.213     18.001            0  almost nothing — the rejection path
-  snapshot-render-70          0.015     24.310          118  a handful — the realistic case
-  e                           0.000     13.232       620934  a large fraction — where the result set is the cost
-  rpt                         0.000     26.987       154331  scattered subsequence — no contiguous run to find
+  (empty)                     0.000      1.068      1000001  everything — the floor, no matching at all
+  zzqx                       19.126     19.736            0  almost nothing — the rejection path
+  snapshot-render-70          0.016     24.040          118  a handful — the realistic case
+  e                           0.000     13.703       620934  a large fraction — where the result set is the cost
+  rpt                         0.000     25.684       154331  scattered subsequence — no contiguous run to find
 
   what this machine offers, over the same 28.4 MB arena
-  sequential 16.86 GB/s · random 8-byte reads 693.9 M/s across 24 threads · dependent 221.6 M/s on one
+  sequential 9.49 GB/s · random 8-byte reads 739.0 M/s across 24 threads · dependent 219.8 M/s on one
 
   persistent index
-  build      p50 43.990  p99 48.803  max  48.803  mean 43.176   n=5
-  load       p50 27.200  p99 27.784  max  27.784  mean 27.271   n=5
-  load cold  p50 40.397  p99 41.064  max  41.064  mean 40.238   n=5
+  build      p50 43.400  p99 47.114  max  47.114  mean 42.664   n=5
+  load       p50 27.408  p99 28.559  max  28.559  mean 27.590   n=5
+  load cold  p50 40.927  p99 45.459  max  45.459  mean 41.398   n=5
   on disk 50.4 MB, 50 bytes per entry
-  cold load is 0.04x the warm walk, and 57x faster than a 2.3 s cold walk
+  cold load is 0.04x the warm walk, and 56x faster than a 2.3 s cold walk
 
   sorting 1000001 entries, milliseconds — bar: 120 ms, hard fail 300 ms
-  build keys p50  1.737  p99  1.765  max   1.765  mean  1.741   n=5
-  by size    p50  1.136  p99  1.160  max   1.160  mean  1.137   n=5
-  by mtime   p50  2.321  p99  2.419  max   2.419  mean  2.309   n=5
-  by name, arena p50 169.858  p99 176.820  max 176.820  mean 169.667   n=5
-  by name, keyed p50 165.929  p99 167.004  max 167.004  mean 162.554   n=5
-  radix, keys p50 15.754  p99 16.763  max  16.763  mean 15.841   n=5
-  radix + ties p50 95.922  p99 97.763  max  97.763  mean 96.337   n=5
+  build keys p50  1.767  p99  2.532  max   2.532  mean  1.993   n=5
+  by size    p50  1.149  p99  1.216  max   1.216  mean  1.152   n=5
+  by mtime   p50  2.162  p99  2.517  max   2.517  mean  2.228   n=5
+  by name, arena p50 161.094  p99 165.395  max 165.395  mean 161.101   n=5
+  by name, keyed p50 156.686  p99 160.194  max 160.194  mean 156.221   n=5
+  radix, keys p50 15.889  p99 16.802  max  16.802  mean 16.087   n=5
+  radix + ties p50 98.317  p99 101.231  max 101.231  mean 98.802   n=5
   936866 of 1000001 entries (94%) share an 8-byte key prefix and need the arena to separate
-  radix packed p50 15.833  p99 17.354  max  17.354  mean 16.076   n=5
-  packed + ties p50 98.223  p99 99.045  max  99.045  mean 97.794   n=5
-  radix recursive p50 67.988  p99 69.521  max  69.521  mean 68.041   n=5
+  radix packed p50 14.843  p99 16.917  max  16.917  mean 15.568   n=5
+  packed + ties p50 93.769  p99 97.443  max  97.443  mean 94.374   n=5
+  radix recursive p50 67.658  p99 70.482  max  70.482  mean 68.435   n=5
   recursive radix produces a correctly ordered result: true
-  radix parallel p50 24.983  p99 27.698  max  27.698  mean 25.003   n=5
+  radix parallel p50 23.864  p99 27.770  max  27.770  mean 24.273   n=5
   parallel radix produces a correctly ordered result: true
-  radix msd par p50 24.930  p99 26.399  max  26.399  mean 25.247   n=5
+  radix permuted p50 67.141  p99 67.564  max  67.564  mean 67.015   n=5
+  permuted-arena radix produces a correctly ordered result: true
+  radix msd par p50 26.383  p99 26.983  max  26.983  mean 25.752   n=5
   msd parallel radix produces a correctly ordered result: true
-  radix msd full p50 24.117  p99 24.754  max  24.754  mean 24.277   n=5
+  radix msd full p50 25.660  p99 26.272  max  26.272  mean 24.421   n=5
   fully parallel msd radix produces a correctly ordered result: true
-  the sort makes about 2.5 M random arena reads and achieves 103.7 M/s, which is 15% of the 693.9 M/s this machine offers
+  the sort makes about 2.5 M random arena reads and achieves 97.4 M/s, which is 13% of the 739.0 M/s this machine offers
   first-byte buckets: 29 non-empty, largest 13.7% ('r'), top 4 = 31.7% of entries
-  build keys16 p50  3.106  p99  6.344  max   6.344  mean  3.565   n=5
-  radix16 + ties p50 94.956  p99 117.636  max 117.636  mean 100.307   n=5
+  build keys16 p50  2.464  p99  2.563  max   2.563  mean  2.492   n=5
+  radix16 + ties p50 98.392  p99 99.973  max  99.973  mean 96.941   n=5
   600225 of 1000001 entries (60%) still tied at 16 bytes
 
   parallel scan across 24 threads, milliseconds
   query                      1 thread     parallel    speedup
-  (empty)                       0.981        0.539       1.8x
-  zzqx                         18.020        2.379       7.6x
-  snapshot-render-70           24.336        3.039       8.0x
-  e                            19.907        1.890      10.5x
-  rpt                          26.622        3.312       8.0x
-  worst first-result across every query, parallel: 2.270 ms on `zzqx` (inside the 50 ms bar)
+  (empty)                       1.042        0.560       1.9x
+  zzqx                         22.360        3.079       7.3x
+  snapshot-render-70           24.476        3.213       7.6x
+  e                            13.789        2.332       5.9x
+  rpt                          25.374        3.293       7.7x
+  worst first-result across every query, parallel: 2.341 ms on `zzqx` (inside the 50 ms bar)
 
   as-you-type, one full scan per keystroke, milliseconds
-  "r"=14.0 "re"=19.6 "rep"=26.0 "repo"=28.8 "repor"=29.6 "report"=29.8 
-  worst single keystroke 24.6 ms, whole word 147.9 ms
+  "r"=14.3 "re"=19.4 "rep"=25.7 "repo"=27.5 "repor"=27.6 "report"=27.7 
+  worst single keystroke 23.7 ms, whole word 142.2 ms
 
 ═══ realistic — 1000000 files ═══
   21338 directories, 1021338 entries, arena 28.5 MB, store 51.0 MB
-  walk       p50 125.573  p99 137.011  max 137.011  mean 125.348   n=5
-  flatten    p50  8.656  p99  9.342  max   9.342  mean  8.674   n=5
-  walk deferred p50 420.852  p99 425.777  max 425.777  mean 416.408   n=5
-  peak RSS 294.0 MB
+  walk       p50 128.862  p99 133.580  max 133.580  mean 129.018   n=5
+  flatten    p50 10.108  p99 16.370  max  16.370  mean 11.173   n=5
+  walk deferred p50 397.480  p99 413.054  max 413.054  mean 398.526   n=5
+  peak RSS 281.2 MB
 
   flattened search, milliseconds — bar: first result within 50 ms
   query                       first        all      matches  what it is
-  (empty)                     0.000      1.083      1021338  everything — the floor, no matching at all
-  zzqx                       17.919     17.924            0  almost nothing — the rejection path
-  snapshot-render-70          0.264     24.067          118  a handful — the realistic case
-  e                           0.000     13.148       620938  a large fraction — where the result set is the cost
-  rpt                         0.002     26.672       154331  scattered subsequence — no contiguous run to find
+  (empty)                     0.000      1.087      1021338  everything — the floor, no matching at all
+  zzqx                       18.873     18.712            0  almost nothing — the rejection path
+  snapshot-render-70          0.112     23.794          118  a handful — the realistic case
+  e                           0.000     13.960       620938  a large fraction — where the result set is the cost
+  rpt                         0.002     25.698       154331  scattered subsequence — no contiguous run to find
 
   what this machine offers, over the same 28.5 MB arena
-  sequential 16.90 GB/s · random 8-byte reads 771.9 M/s across 24 threads · dependent 220.0 M/s on one
+  sequential 10.21 GB/s · random 8-byte reads 682.7 M/s across 24 threads · dependent 219.3 M/s on one
 
   persistent index
-  build      p50 44.763  p99 45.875  max  45.875  mean 43.483   n=5
-  load       p50 27.464  p99 27.898  max  27.898  mean 27.559   n=5
-  load cold  p50 40.231  p99 51.826  max  51.826  mean 42.236   n=5
+  build      p50 43.010  p99 45.010  max  45.010  mean 41.956   n=5
+  load       p50 27.568  p99 33.361  max  33.361  mean 28.685   n=5
+  load cold  p50 41.164  p99 51.531  max  51.531  mean 43.746   n=5
   on disk 51.0 MB, 50 bytes per entry
-  cold load is 0.32x the warm walk, and 57x faster than a 2.3 s cold walk
+  cold load is 0.32x the warm walk, and 56x faster than a 2.3 s cold walk
 
   sorting 1021338 entries, milliseconds — bar: 120 ms, hard fail 300 ms
-  build keys p50  1.768  p99  2.100  max   2.100  mean  1.866   n=5
-  by size    p50  0.919  p99  0.963  max   0.963  mean  0.930   n=5
-  by mtime   p50  1.845  p99  1.998  max   1.998  mean  1.887   n=5
-  by name, arena p50 166.626  p99 175.016  max 175.016  mean 165.675   n=5
-  by name, keyed p50 160.398  p99 167.262  max 167.262  mean 161.178   n=5
-  radix, keys p50 19.211  p99 20.634  max  20.634  mean 19.234   n=5
-  radix + ties p50 99.317  p99 102.347  max 102.347  mean 100.157   n=5
+  build keys p50  1.751  p99  1.987  max   1.987  mean  1.813   n=5
+  by size    p50  0.937  p99  1.266  max   1.266  mean  0.997   n=5
+  by mtime   p50  2.228  p99  2.245  max   2.245  mean  2.222   n=5
+  by name, arena p50 161.670  p99 162.769  max 162.769  mean 161.094   n=5
+  by name, keyed p50 155.570  p99 157.021  max 157.021  mean 154.971   n=5
+  radix, keys p50 19.209  p99 20.055  max  20.055  mean 19.055   n=5
+  radix + ties p50 102.069  p99 102.959  max 102.959  mean 101.904   n=5
   958203 of 1021338 entries (94%) share an 8-byte key prefix and need the arena to separate
-  radix packed p50 16.212  p99 17.059  max  17.059  mean 16.275   n=5
-  packed + ties p50 96.658  p99 99.539  max  99.539  mean 97.319   n=5
-  radix recursive p50 68.655  p99 70.301  max  70.301  mean 68.782   n=5
+  radix packed p50 15.450  p99 17.147  max  17.147  mean 15.542   n=5
+  packed + ties p50 97.802  p99 101.005  max 101.005  mean 97.903   n=5
+  radix recursive p50 72.941  p99 76.172  max  76.172  mean 73.454   n=5
   recursive radix produces a correctly ordered result: true
-  radix parallel p50 24.923  p99 26.906  max  26.906  mean 24.573   n=5
+  radix parallel p50 22.795  p99 24.038  max  24.038  mean 22.978   n=5
   parallel radix produces a correctly ordered result: true
-  radix msd par p50 23.388  p99 28.360  max  28.360  mean 24.040   n=5
+  radix permuted p50 70.876  p99 73.252  max  73.252  mean 70.535   n=5
+  permuted-arena radix produces a correctly ordered result: true
+  radix msd par p50 24.366  p99 25.192  max  25.192  mean 24.034   n=5
   msd parallel radix produces a correctly ordered result: true
-  radix msd full p50 23.508  p99 24.897  max  24.897  mean 22.821   n=5
+  radix msd full p50 23.454  p99 24.703  max  24.703  mean 23.582   n=5
   fully parallel msd radix produces a correctly ordered result: true
-  the sort makes about 2.6 M random arena reads and achieves 108.6 M/s, which is 14% of the 771.9 M/s this machine offers
+  the sort makes about 2.6 M random arena reads and achieves 108.9 M/s, which is 16% of the 682.7 M/s this machine offers
   first-byte buckets: 29 non-empty, largest 13.4% ('r'), top 4 = 33.2% of entries
-  build keys16 p50  2.532  p99  2.637  max   2.637  mean  2.548   n=5
-  radix16 + ties p50 93.945  p99 96.245  max  96.245  mean 94.157   n=5
+  build keys16 p50  2.554  p99  2.591  max   2.591  mean  2.560   n=5
+  radix16 + ties p50 96.919  p99 99.468  max  99.468  mean 96.962   n=5
   614658 of 1021338 entries (60%) still tied at 16 bytes
 
   parallel scan across 24 threads, milliseconds
   query                      1 thread     parallel    speedup
-  (empty)                       1.001        0.513       2.0x
-  zzqx                         17.923        2.455       7.3x
-  snapshot-render-70           24.127        3.071       7.9x
-  e                            13.199        1.795       7.4x
-  rpt                          26.878        3.304       8.1x
-  worst first-result across every query, parallel: 2.088 ms on `zzqx` (inside the 50 ms bar)
+  (empty)                       1.658        0.562       2.9x
+  zzqx                         19.181        2.904       6.6x
+  snapshot-render-70           24.727        3.471       7.1x
+  e                            13.783        2.197       6.3x
+  rpt                          25.587        3.425       7.5x
+  worst first-result across every query, parallel: 2.398 ms on `zzqx` (inside the 50 ms bar)
 
   as-you-type, one full scan per keystroke, milliseconds
-  "r"=14.1 "re"=20.1 "rep"=27.4 "repo"=28.8 "repor"=29.5 "report"=29.8 
-  worst single keystroke 24.9 ms, whole word 149.6 ms
+  "r"=14.1 "re"=19.8 "rep"=25.8 "repo"=27.0 "repor"=27.5 "report"=28.2 
+  worst single keystroke 23.7 ms, whole word 142.4 ms
 

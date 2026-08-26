@@ -632,3 +632,57 @@ pub fn radix_msd_fully_parallel(flat: &Flat, order: &mut [u32], threads: usize) 
         }
     });
 }
+
+/// Sort by permuting the arena once, so everything after it reads sequentially.
+///
+/// The cache measurement says the Pi pays 22× the laptop on a random arena read
+/// and roughly par on a sequential one. The recursive radix makes about 2.5
+/// random passes over the arena — one per level, because a tie group's names are
+/// scattered wherever the walk happened to put them.
+///
+/// So pay it once. After the first radix on an eight-byte key, copy the names
+/// into a second arena in that order. Every tie group is then *contiguous*, and
+/// the recursion that resolves it reads forwards instead of jumping. The cost is
+/// one random pass plus 28 MB of extra memory; the saving is every later pass.
+pub fn radix_permuted(flat: &Flat, keys: &[u64], out: &mut Vec<u32>) {
+    radix_packed(keys, out);
+
+    // Materialise the names in first-pass order.
+    let mut names = Vec::with_capacity(flat.names.len());
+    let mut ends = Vec::with_capacity(out.len());
+    for index in out.iter() {
+        names.extend_from_slice(flat.name(*index as usize));
+        ends.push(names.len() as u32);
+    }
+    let permuted = Flat {
+        names,
+        ends,
+        size: Vec::new(),
+        mtime: Vec::new(),
+        flags: Vec::new(),
+    };
+
+    // Positions within the permuted arena, which is what the recursion sorts.
+    let mut local: Vec<u32> = (0..out.len() as u32).collect();
+
+    let mut start = 0usize;
+    while start < local.len() {
+        let key = keys[out[start] as usize];
+        let mut end = start + 1;
+        while end < local.len() && keys[out[end] as usize] == key {
+            end += 1;
+        }
+        if end - start > 1 {
+            // Reads run forwards through a contiguous slice of the new arena.
+            let mut scratch = Vec::new();
+            radix_recursive(&permuted, &mut local[start..end], 8, &mut scratch);
+        }
+        start = end;
+    }
+
+    // Map back: local positions carry the original indices.
+    let original: Vec<u32> = out.clone();
+    for (slot, position) in out.iter_mut().zip(local.iter()) {
+        *slot = original[*position as usize];
+    }
+}

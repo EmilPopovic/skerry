@@ -415,6 +415,23 @@ dependent {:.1} M/s on one",
         println!("  parallel radix produces a correctly ordered result: {sorted}");
     }
 
+    let mut permuted_ms = Samples::new("radix permuted");
+    for _ in 0..options.repeats {
+        let mut order = Vec::new();
+        let started = Instant::now();
+        sort::radix_permuted(&flat, &keys, &mut order);
+        permuted_ms.push(started.elapsed().as_secs_f32() * 1000.0);
+    }
+    println!("  {}", permuted_ms.row());
+    {
+        let mut order = Vec::new();
+        sort::radix_permuted(&flat, &keys, &mut order);
+        let sorted = order
+            .windows(2)
+            .all(|w| flat.name(w[0] as usize) <= flat.name(w[1] as usize));
+        println!("  permuted-arena radix produces a correctly ordered result: {sorted}");
+    }
+
     let mut msd_ms = Samples::new("radix msd par");
     for _ in 0..options.repeats {
         let mut order = base.clone();
