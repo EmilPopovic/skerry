@@ -145,6 +145,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 band: None,
                 watching: true,
                 notice: None,
+                hovered_button: None,
+                window: sk_plat::WindowState::default(),
             };
             view::draw(&mut painter, &pane, &layout, now, &chrome, &mut diagnostics);
         }

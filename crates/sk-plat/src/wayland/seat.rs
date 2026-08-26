@@ -49,15 +49,48 @@ struct Repeat {
     interval: Duration,
 }
 
+/// One gesture step's worth of scroll, before it is resolved into a distance.
+///
+/// The three sources are kept apart and chosen between at `frame` rather than as
+/// they arrive, because **the protocol does not order them**. It guarantees
+/// `axis_source` before the axes and nothing about `axis` against
+/// `axis_value120` or `axis_discrete`, so a first-one-wins guard is a guard that
+/// depends on which compositor is running.
 #[derive(Default)]
 struct PendingScroll {
-    delta: Point,
+    /// `axis_value120`, in 120ths of a notch. v8, and the best answer: a
+    /// free-spinning wheel sends fractions of a notch and rounding them to whole
+    /// notches is what makes such a wheel feel like it is skipping.
+    high: Point,
+    /// `axis_discrete`, in whole notches. v5 to v7.
+    notches: Point,
+    /// `axis`, a surface-local distance. Right for a touchpad, and for a wheel
+    /// it is whatever the compositor decided a notch is worth — typically ten or
+    /// fifteen pixels, which is less than half a row.
+    distance: Point,
     precise: bool,
     any: bool,
 }
 
+impl PendingScroll {
+    /// The distance this step should scroll, in logical pixels.
+    fn resolve(&self) -> Point {
+        let scale = |value: Point, by: f32| Point::new(value.x * by, value.y * by);
+        if self.high.x != 0.0 || self.high.y != 0.0 {
+            return scale(self.high, WHEEL_NOTCH / 120.0);
+        }
+        if self.notches.x != 0.0 || self.notches.y != 0.0 {
+            return scale(self.notches, WHEEL_NOTCH);
+        }
+        self.distance
+    }
+}
+
 /// The seat's keyboard and pointer, and everything derived from them.
 pub struct Seat {
+    /// The seat object itself. Needed by `xdg_toplevel.move` and `.resize`,
+    /// which are requests *about* a seat rather than about a pointer.
+    object: wl_seat::WlSeat,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
 
@@ -85,8 +118,8 @@ pub struct Seat {
 
 impl Seat {
     pub fn new(seat: &wl_seat::WlSeat, _handle: &QueueHandle<State>) -> Self {
-        let _ = seat;
         Self {
+            object: seat.clone(),
             keyboard: None,
             pointer: None,
             context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
@@ -102,6 +135,11 @@ impl Seat {
             keyboard_serial: None,
             button_serial: None,
         }
+    }
+
+    /// The seat, for the requests that name one.
+    pub fn seat(&self) -> &wl_seat::WlSeat {
+        &self.object
     }
 
     /// How long until the next key repeat is due, if one is pending.
@@ -356,18 +394,25 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             // rounding them to whole notches is what makes such a wheel feel
             // like it is skipping.
             wl_pointer::Event::AxisValue120 { axis, value120 } => {
-                let amount = f32::from(value120 as i16) / 120.0 * WHEEL_NOTCH;
-                accumulate(&mut seat.scroll, axis, amount);
+                let (axis, amount) = (axis, f32::from(value120 as i16));
+                accumulate(&mut seat.scroll.high, &mut seat.scroll.any, axis, amount);
+            }
+            // v5 to v7's notch count. Without it a wheel notch on a compositor
+            // that has no `axis_value120` moved whatever `axis` said, which is
+            // ten or fifteen pixels — under half a row, where the same notch is
+            // three rows everywhere else.
+            wl_pointer::Event::AxisDiscrete { axis, discrete } => {
+                let amount = discrete as f32;
+                accumulate(&mut seat.scroll.notches, &mut seat.scroll.any, axis, amount);
             }
             wl_pointer::Event::Axis { axis, value, .. } => {
-                if !seat.scroll.any {
-                    accumulate(&mut seat.scroll, axis, value as f32);
-                }
+                let amount = value as f32;
+                accumulate(&mut seat.scroll.distance, &mut seat.scroll.any, axis, amount);
             }
             wl_pointer::Event::Frame if seat.scroll.any => {
                 let scroll = std::mem::take(&mut seat.scroll);
                 state.events.push_back(Event::Scroll {
-                    delta: scroll.delta,
+                    delta: scroll.resolve(),
                     precise: scroll.precise,
                     mods: seat.mods,
                 });
@@ -377,21 +422,60 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
     }
 }
 
-fn accumulate(scroll: &mut PendingScroll, axis: WEnum<wl_pointer::Axis>, amount: f32) {
+fn accumulate(into: &mut Point, any: &mut bool, axis: WEnum<wl_pointer::Axis>, amount: f32) {
     match axis {
-        WEnum::Value(wl_pointer::Axis::VerticalScroll) => scroll.delta.y += amount,
-        WEnum::Value(wl_pointer::Axis::HorizontalScroll) => scroll.delta.x += amount,
+        WEnum::Value(wl_pointer::Axis::VerticalScroll) => into.y += amount,
+        WEnum::Value(wl_pointer::Axis::HorizontalScroll) => into.x += amount,
         _ => return,
     }
-    scroll.any = true;
+    *any = true;
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{WHEEL_NOTCH, button_of};
-    use crate::event::Button;
+    use super::{PendingScroll, WHEEL_NOTCH, button_of};
+    use crate::event::{Button, Point};
+
+    /// A wheel notch is a wheel notch whichever of the three the compositor
+    /// sends, and the choice cannot depend on which arrives first: the protocol
+    /// orders `axis_source` before the axes and says nothing about the rest.
+    #[test]
+    fn one_wheel_notch_travels_the_same_distance_on_every_protocol_version() {
+        // v8: 120ths of a notch.
+        let high = PendingScroll { high: Point::new(0.0, 120.0), ..Default::default() };
+        assert!((high.resolve().y - WHEEL_NOTCH).abs() < f32::EPSILON);
+
+        // v5 to v7: a notch count, and an `axis` distance beside it that the
+        // same compositor also sends. The notch count wins whichever order they
+        // arrived in, because both are recorded and neither is a guard.
+        let old = PendingScroll {
+            notches: Point::new(0.0, 1.0),
+            distance: Point::new(0.0, 10.0),
+            ..Default::default()
+        };
+        assert!((old.resolve().y - WHEEL_NOTCH).abs() < f32::EPSILON);
+
+        // And v8 beside both of those still wins.
+        let all = PendingScroll {
+            high: Point::new(0.0, 60.0),
+            notches: Point::new(0.0, 1.0),
+            distance: Point::new(0.0, 10.0),
+            ..Default::default()
+        };
+        assert!((all.resolve().y - WHEEL_NOTCH / 2.0).abs() < f32::EPSILON);
+    }
+
+    /// A touchpad sends a real distance and nothing else, and that distance is
+    /// the answer: scaling it to notches would make a one-pixel swipe jump.
+    #[test]
+    fn a_touchpad_distance_is_taken_as_it_is() {
+        let swipe =
+            PendingScroll { distance: Point::new(3.0, 17.5), precise: true, ..Default::default() };
+        assert!((swipe.resolve().y - 17.5).abs() < f32::EPSILON);
+        assert!((swipe.resolve().x - 3.0).abs() < f32::EPSILON);
+    }
 
     #[test]
     fn the_three_buttons_a_file_manager_binds_are_named() {

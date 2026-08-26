@@ -27,4 +27,4 @@ pub mod wayland;
 
 pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size};
 pub use wayland::clipboard::{Clipboard, Content, Selection, decode_uri};
-pub use wayland::{Capabilities, RawHandles, Window, WindowConfig};
+pub use wayland::{Capabilities, Edge, RawHandles, Window, WindowConfig, WindowState};

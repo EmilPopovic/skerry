@@ -20,6 +20,7 @@ fn main() -> std::process::ExitCode {
     let mut dark = true;
     let mut stats = false;
     let mut keys = false;
+    let mut own_frame = false;
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
@@ -31,6 +32,7 @@ fn main() -> std::process::ExitCode {
             "--light" => dark = false,
             "--stats" => stats = true,
             "--keys" => keys = true,
+            "--own-frame" => own_frame = true,
             "--capture" => match arguments.next() {
                 Some(file) => capture = Some(PathBuf::from(file)),
                 None => return usage_error("--capture needs a file"),
@@ -72,15 +74,17 @@ fn main() -> std::process::ExitCode {
         (None, Some(frames)) => {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
         }
-        (None, None) => App::new(Options { path, dark, stats, started }).map(|mut app| {
-            // A compositor that goes away is not the user closing the window, and
-            // the difference is worth a line on the way out.
-            if let Some(failure) = app.run() {
-                eprintln!("skerry: the display server went away — {failure}");
-                return false;
-            }
-            true
-        }),
+        (None, None) => {
+            App::new(Options { path, dark, stats, own_frame, started }).map(|mut app| {
+                // A compositor that goes away is not the user closing the window, and
+                // the difference is worth a line on the way out.
+                if let Some(failure) = app.run() {
+                    eprintln!("skerry: the display server went away — {failure}");
+                    return false;
+                }
+                true
+            })
+        }
     };
 
     match outcome {
@@ -126,6 +130,9 @@ skerry [OPTIONS] [PATH]
   --light          use the light palette
   --stats          show the frame statistics overlay
   --keys           show the keyboard overlay
+  --own-frame      draw the window frame here rather than asking the compositor
+                   to. Always on where the compositor offers no decorations,
+                   which is GNOME.
   -h, --help       this
 
 Rendering one frame without a display server, for a golden-frame test or for

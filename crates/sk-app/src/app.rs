@@ -15,7 +15,7 @@ use sk_util::{Pool, Waker};
 
 use crate::frames::Frames;
 use crate::keys;
-use crate::layout::Layout;
+use crate::layout::{Frame, Layout};
 use crate::pane::{Jobs, Message, Pane};
 use crate::sizes::Measurer;
 use crate::view::{self, Chrome, Diagnostics};
@@ -56,6 +56,8 @@ pub struct Options {
     pub dark: bool,
     /// Whether the statistics overlay is on from the first frame.
     pub stats: bool,
+    /// Ask for a client-drawn window frame even where the compositor offers one.
+    pub own_frame: bool,
     /// When the process started, for the cold-start measurement.
     pub started: Instant,
 }
@@ -117,6 +119,57 @@ fn read_desktop_databases(
         }
     });
     receiver
+}
+
+/// What frame this window has to draw, and what belongs in it.
+///
+/// Every part of it comes from the compositor: whether it decorates, whether the
+/// window has free edges, and which of the three actions it offers. Nothing here
+/// is assumed, because every one of them differs between the three compositors
+/// in [docs/06](../../../docs/06-portability.md).
+fn frame_of(window: &Window) -> Frame {
+    if !window.needs_own_frame() {
+        return Frame::None;
+    }
+    let state = window.state();
+    Frame::Own {
+        edges: !(state.maximized || state.fullscreen || state.tiled),
+        minimize: state.can_minimize,
+        maximize: state.can_maximize,
+    }
+}
+
+/// Gathers the numbers the diagnostics overlay and the status line read.
+///
+/// Split out of `render` only because it is a struct literal with ten borrowed
+/// fields and `render` has a hundred-line limit, which is a limit worth keeping.
+#[allow(clippy::too_many_arguments, reason = "a struct literal with one call site")]
+fn diagnostics_for<'a>(
+    frames: &'a mut Frames,
+    last: FrameStats,
+    renderer: &Renderer,
+    cache: &LayoutCache,
+    jobs: &Jobs,
+    adapter: &'a str,
+    backend: &'a str,
+    physical: (u32, u32),
+    scale_120: u32,
+    capabilities: &'a str,
+) -> Diagnostics<'a> {
+    let (hits, misses, _) = cache.stats();
+    let (finished, panics) = jobs.pool.stats();
+    Diagnostics {
+        frames,
+        last,
+        atlas: renderer.atlas_stats(),
+        shaping: (cache.len(), hits, misses),
+        pool: (jobs.pool.width(), finished, panics),
+        adapter,
+        backend,
+        physical,
+        scale_120,
+        capabilities,
+    }
 }
 
 /// What a launch job came back with.
@@ -194,6 +247,11 @@ pub struct App {
     open_owed: Option<PathBuf>,
     /// Something to tell the person, shown in the status line.
     notice: Option<(String, Instant)>,
+    /// What the compositor last said the window is, when the window draws its
+    /// own frame and so has to know.
+    window_state: sk_plat::WindowState,
+    /// The window button under the pointer.
+    hovered_button: Option<crate::layout::Button>,
     /// Bytes read from a peer's clipboard, once the job that read them is done.
     paste_rx: Receiver<Pasted>,
     paste_tx: std::sync::mpsc::Sender<Pasted>,
@@ -229,7 +287,10 @@ impl App {
     /// Opens a window, a device and a directory.
     pub fn new(options: Options) -> Result<Self, Problem> {
         let window_started = Instant::now();
-        let window = Window::open(&WindowConfig::default())?;
+        let window = Window::open(&WindowConfig {
+            own_frame: options.own_frame,
+            ..WindowConfig::default()
+        })?;
         let window_us = window_started.elapsed().as_micros();
 
         // The pool and the directory read start **before** the GPU. Opening a
@@ -292,7 +353,7 @@ impl App {
         Ok(Self {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
-            layout: Layout::compute(logical, &theme.metrics),
+            layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window)),
             renderer,
             window,
             fonts,
@@ -321,6 +382,8 @@ impl App {
             launched_tx,
             open_owed: None,
             notice: None,
+            window_state: sk_plat::WindowState::default(),
+            hovered_button: None,
             paste_rx,
             paste_tx,
             frames: Frames::new(),
@@ -501,6 +564,16 @@ impl App {
             self.typed.clear();
             self.dirty = true;
         }
+        // A configure can change what the window *is* without changing its size
+        // — activation, tiling, a maximise granted at the same dimensions — and
+        // that changes what the frame draws. Read every pass rather than only on
+        // `Resized`, which is the event that does not fire for any of them.
+        let shell = self.window.state();
+        if shell != self.window_state {
+            self.window_state = shell;
+            self.relayout();
+            self.dirty = true;
+        }
         if self.watch_target != self.pane.path {
             self.watch_target = self.pane.path.clone();
             self.watcher.watch(self.watch_target.clone());
@@ -536,7 +609,7 @@ impl App {
                 self.logical = *logical;
                 self.physical = *physical;
                 self.scale_120 = *scale_120;
-                self.layout = Layout::compute(*logical, &self.theme.metrics);
+                self.relayout();
                 self.renderer.resize(*physical);
                 self.dirty = true;
             }
@@ -545,19 +618,21 @@ impl App {
             Event::KeyDown(key) => self.key(key, commands),
             Event::PointerMoved { position, .. } => self.moved(*position),
             Event::PointerLeft => {
-                if self.pane.hover.take().is_some() {
+                if self.pane.hover.take().is_some() || self.hovered_button.take().is_some() {
                     self.dirty = true;
                 }
             }
-            Event::Button { button, pressed, position, clicks, mods } => {
-                if *button == Button::Primary {
-                    if *pressed {
-                        self.press(*position, *clicks, mods.ctrl, mods.shift);
-                    } else {
-                        self.release();
-                    }
+            Event::Button { button, pressed, position, clicks, mods } => match button {
+                Button::Primary if *pressed => {
+                    self.press(*position, *clicks, mods.ctrl, mods.shift);
                 }
-            }
+                Button::Primary => self.release(),
+                // The compositor's own window menu, which is where "always on
+                // top" and "move to workspace" live. Ours to offer and not ours
+                // to draw.
+                Button::Secondary if *pressed => self.frame_menu(*position),
+                _ => {}
+            },
             Event::Scroll { delta, precise, .. } => {
                 self.pane.scroll.by(delta.y, *precise);
                 self.dirty = true;
@@ -833,7 +908,13 @@ impl App {
     /// Swaps the palette.
     pub(crate) fn toggle_theme(&mut self) {
         self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
-        self.layout = Layout::compute(self.logical, &self.theme.metrics);
+        self.relayout();
+    }
+
+    /// Recomputes every region, including whose frame this window is drawing.
+    fn relayout(&mut self) {
+        self.layout =
+            Layout::compute_with(self.logical, &self.theme.metrics, frame_of(&self.window));
     }
 
     /// Sorts by `column`, reversing if it is already the sort column.
@@ -882,11 +963,24 @@ impl App {
             .unwrap_or_default();
         let (known, running) = self.measurer.stats();
         let (jobs, panics) = self.jobs.pool.stats();
+        let frame = if self.window.needs_own_frame() { "own" } else { "server" };
+        let frame_hover = match self.hovered_button {
+            Some(crate::layout::Button::Minimize) => "minimize",
+            Some(crate::layout::Button::Maximize) => "maximize",
+            Some(crate::layout::Button::Close) => "close",
+            None => "none",
+        };
+        let maximized = self.window_state.maximized;
+        // The centre of the close button, so a test can aim at it without a copy
+        // of the metrics it is testing.
+        let close = self.layout.buttons[2];
+        let close_x = close.x + close.width / 2.0;
         println!(
             "skerry-state path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
 body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
+frame={frame} frame_hover={frame_hover} maximized={maximized} close_x={close_x:.1} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
 jobs={jobs}/{panics} keys={} stats={}",
@@ -931,6 +1025,34 @@ jobs={jobs}/{panics} keys={} stats={}",
 
     fn press(&mut self, position: Point, clicks: u8, ctrl: bool, shift: bool) {
         self.pointer = position;
+        // The frame comes first, and the resize border before the buttons: the
+        // border overlaps the top-right corner where the close button is, and a
+        // window whose corner cannot be grabbed is a window that cannot be
+        // resized diagonally.
+        if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical) {
+            self.window.start_resize(edge);
+            return;
+        }
+        if let Some(button) = self.layout.button_at(position.x, position.y) {
+            match button {
+                crate::layout::Button::Minimize => self.window.minimize(),
+                crate::layout::Button::Maximize => {
+                    self.window.set_maximized(!self.window_state.maximized);
+                }
+                crate::layout::Button::Close => self.window.request_close(),
+            }
+            return;
+        }
+        if self.layout.drag.contains(position.x, position.y) {
+            // A double click on a title bar toggles maximize everywhere else, so
+            // it does here.
+            if clicks >= 2 {
+                self.window.set_maximized(!self.window_state.maximized);
+            } else {
+                self.window.start_move();
+            }
+            return;
+        }
         if self.layout.header.contains(position.x, position.y) {
             if let Some(column) = self.column_at(position.x) {
                 self.pane.sort_by(column, &self.jobs);
@@ -988,8 +1110,21 @@ jobs={jobs}/{panics} keys={} stats={}",
         }
     }
 
+    /// The compositor's own window menu, which is where "always on top" and
+    /// "move to workspace" live. Ours to offer and not ours to draw.
+    fn frame_menu(&mut self, position: Point) {
+        if self.layout.drag.contains(position.x, position.y) {
+            self.window.show_window_menu(position);
+        }
+    }
+
     fn moved(&mut self, position: Point) {
         self.pointer = position;
+        let over = self.layout.button_at(position.x, position.y);
+        if self.hovered_button != over {
+            self.hovered_button = over;
+            self.dirty = true;
+        }
         if let Some(grab) = self.thumb_grab {
             self.drag_thumb(position, grab);
             self.dirty = true;
@@ -1130,6 +1265,8 @@ jobs={jobs}/{panics} keys={} stats={}",
             watching,
             notice,
             capabilities,
+            hovered_button,
+            window_state,
             ..
         } = self;
 
@@ -1142,24 +1279,21 @@ jobs={jobs}/{panics} keys={} stats={}",
             band: *band,
             watching: *watching,
             notice: notice.as_ref().map(|(message, _)| message.as_str()),
+            hovered_button: *hovered_button,
+            window: *window_state,
         };
-        let atlas = renderer.atlas_stats();
-        let (hits, misses, _) = cache.stats();
-        let mut diagnostics = Diagnostics {
+        let mut diagnostics = diagnostics_for(
             frames,
-            last: *last,
-            atlas,
-            shaping: (cache.len(), hits, misses),
-            pool: {
-                let (finished, panics) = jobs.pool.stats();
-                (jobs.pool.width(), finished, panics)
-            },
+            *last,
+            renderer,
+            cache,
+            jobs,
             adapter,
             backend,
             physical,
-            scale_120: *scale_120,
+            *scale_120,
             capabilities,
-        };
+        );
 
         {
             let mut painter = Painter { list, fonts, cache, theme, scale };

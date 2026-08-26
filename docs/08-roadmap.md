@@ -143,7 +143,7 @@ defects they exposed.
 
 | Done | Owed |
 | --- | --- |
-| Wayland windowing, `xdg_shell`, server-side decoration negotiation | **X11**, and the whole of `x11rb` |
+| Wayland windowing, `xdg_shell`, decoration negotiation and the client-drawn frame that GNOME requires | **X11**, and the whole of `x11rb` |
 | Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change | The 1×1 pre-map probe that would make **frame 1** right and not just frame 2 |
 | Keyboard through `xkbcommon`, with key repeat implemented client-side | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |

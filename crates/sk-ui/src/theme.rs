@@ -40,6 +40,11 @@ pub struct Palette {
     pub pending: Color,
     /// The scrollbar thumb.
     pub thumb: Color,
+    /// A window button under the pointer.
+    pub button_hover: Color,
+    /// The close button under the pointer, which is the one destructive thing
+    /// in the frame and says so.
+    pub close_hover: Color,
 }
 
 /// Sizes, in logical pixels.
@@ -69,6 +74,11 @@ pub struct Metrics {
     pub modified_column: f32,
     /// Width of the icon column, including its trailing space.
     pub icon_column: f32,
+    /// Width of one window button, when the window draws its own frame.
+    pub button_width: f32,
+    /// How far in from a window edge a press starts a resize, when the window
+    /// draws its own frame.
+    pub resize_border: f32,
 }
 
 impl Default for Metrics {
@@ -89,6 +99,15 @@ impl Default for Metrics {
             size_column: 96.0,
             modified_column: 128.0,
             icon_column: 26.0,
+            // 46 x 44: wider than it is tall, because three of them sit in a row
+            // and a square target next to a square target reads as a grid. The
+            // whole strip is 138 logical pixels, which is a fifth of a narrow
+            // window and no more than a title bar costs anywhere else.
+            button_width: 46.0,
+            // 6 logical pixels. Fitts' law wants more and a list wants none;
+            // this is what GTK and Qt both use for a client-side frame, so it is
+            // what a user's hands already expect.
+            resize_border: 6.0,
         }
     }
 }
@@ -120,6 +139,8 @@ impl Theme {
                 hover: Color::hex(0xffffff).with_alpha(14),
                 pending: Color::hex(0x646d7d),
                 thumb: Color::hex(0xffffff).with_alpha(52),
+                button_hover: Color::hex(0xffffff).with_alpha(28),
+                close_hover: Color::hex(0xe5484d),
             },
             metrics: Metrics::default(),
             dark: true,
@@ -141,6 +162,8 @@ impl Theme {
                 hover: Color::hex(0x000000).with_alpha(12),
                 pending: Color::hex(0x9aa1ae),
                 thumb: Color::hex(0x000000).with_alpha(64),
+                button_hover: Color::hex(0x000000).with_alpha(22),
+                close_hover: Color::hex(0xd93a3f),
             },
             metrics: Metrics::default(),
             dark: false,

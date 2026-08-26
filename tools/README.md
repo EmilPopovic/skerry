@@ -32,6 +32,13 @@ It found three defects on its first run, one of which no unit test could have:
 `select_all` filled the whole bitset rather than the display order and the tenth
 was a dotfile.
 
+Two of them drive the window frame the program draws for itself — the one GNOME
+requires, because mutter advertises no decoration manager at all. They start the
+window with `--own-frame`, which asks the compositor for a client-side frame *and*
+draws one whatever it answers, since Hyprland refuses the request. The pointer is
+aimed with the compositor's own geometry rather than by nudging: a row has a name
+to check against and a title bar does not.
+
 One scenario goes further and reads the **pixels**, with `grim` and Pillow: it
 walks a twenty-thousand-file subtree, waits for the model to report the total,
 and then counts the ink in the size cell, because a dash is one stroke and

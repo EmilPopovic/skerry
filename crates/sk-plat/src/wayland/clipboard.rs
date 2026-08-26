@@ -282,6 +282,24 @@ impl super::Window {
     }
 }
 
+/// Creates the data devices, **before the first surface commit**.
+///
+/// A data device created after the first keyboard `enter` never learns the
+/// current selection, and the symptom is an empty clipboard with nothing
+/// reporting an error — which is exactly how Spike D lost an afternoon.
+pub(super) fn open(
+    handle: &QueueHandle<State>,
+    seat: &wl_seat::WlSeat,
+    data: Option<&wl_data_device_manager::WlDataDeviceManager>,
+    primary: Option<&zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+) -> Clipboard {
+    Clipboard {
+        device: data.map(|manager| manager.get_data_device(seat, handle, ())),
+        primary_device: primary.map(|manager| manager.get_device(seat, handle, ())),
+        ..Clipboard::default()
+    }
+}
+
 /// A transfer to a peer that has not finished.
 ///
 /// A pipe holds 64 KiB. `Ctrl+A` in a directory the budgets are written for —

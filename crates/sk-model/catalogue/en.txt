@@ -46,6 +46,10 @@ error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.ino
 # translatable as any other word on screen: the overlay is the discovery
 # surface, and a keyboard list half in English is not a translated build. The
 # arrows are entries too, so a language that prefers a word can have one.
+# The close button's mark. A multiplication sign, because it is the one shape
+# in the window frame that a rectangle cannot draw and every font has this.
+chrome.close = ×
+
 key.super = Super
 key.ctrl = Ctrl
 key.alt = Alt

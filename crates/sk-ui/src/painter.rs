@@ -11,6 +11,10 @@ pub enum Align {
     /// Anchored at the right edge. Used for numbers, so digits line up under
     /// each other and a column of sizes can be compared by eye.
     Right,
+    /// Centred in the box. For a mark in a button, where neither edge means
+    /// anything and being one pixel off centre is the whole of how a button
+    /// looks wrong.
+    Center,
 }
 
 /// How a string is drawn.
@@ -47,6 +51,12 @@ impl TextStyle {
     #[must_use]
     pub const fn right(self) -> Self {
         Self { align: Align::Right, ..self }
+    }
+
+    /// The same style centred in its box.
+    #[must_use]
+    pub const fn centred(self) -> Self {
+        Self { align: Align::Center, ..self }
     }
 }
 
@@ -167,6 +177,7 @@ impl Painter<'_> {
             let start = match align {
                 Align::Left => left,
                 Align::Right => (left + limit - advance).round(),
+                Align::Center => (left + (limit - advance) / 2.0).round(),
             };
             for glyph in &source.resolve(cache, text, fonts).glyphs {
                 emit(list, glyph, start, baseline, px_size, color);

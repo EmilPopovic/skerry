@@ -111,7 +111,7 @@ somebody.
 | --- | --- | --- | --- |
 | `wp_fractional_scale_v1` | yes | yes | yes |
 | `wp_viewporter` | yes | yes | yes |
-| `zxdg_decoration_manager_v1` | yes, and grants server-side | yes, and grants server-side | **not advertised at all** |
+| `zxdg_decoration_manager_v1` | yes, and **always** server-side | yes, and grants server-side | **not advertised at all** |
 | `wl_data_device_manager` | yes | yes | yes |
 | `zwp_primary_selection_device_manager_v1` | yes, but see below | yes | yes |
 | `zwp_text_input_manager_v3` | yes | yes, and v1 and v2 | yes |
@@ -121,11 +121,11 @@ somebody.
 
 Four things follow that were not obvious before running it:
 
-- **GNOME has no decoration manager**, so the window has no title bar, no close
-  button and no resize edges there. Client-side decorations are not a nicety for
-  one desktop; they are the difference between a usable window and an unusable
-  one on the most common Linux desktop. This is the largest single gap the
-  product has today.
+- **GNOME has no decoration manager**, so a client that does not draw a frame has
+  no title bar, no close button and no resize edges there. That was the largest
+  single gap the product had; the window draws its own frame now, and `--own-frame`
+  asks for it everywhere so it can be seen and tested on a desktop that would
+  otherwise decorate.
 - **Only Hyprland can be driven by a test.** The virtual-keyboard and
   virtual-pointer protocols are wlroots', and neither KWin nor mutter implements
   them, so the input-replay fixture is Hyprland-only and the other two are
@@ -136,6 +136,39 @@ Four things follow that were not obvious before running it:
 - **Hyprland discards a primary-selection write** unless `middle_click_paste` is
   on, silently, with no error — which is Spike D's finding and remains a
   documented limitation with no fallback.
+
+## What a compositor says about the window it is showing you
+
+Four differences found by drawing a frame and asking the compositor what to put
+in it. Every one of them is a reason the frame reads state rather than assuming
+it, and three of them are Hyprland's.
+
+- **A decoration request can be refused.** `zxdg_toplevel_decoration_v1.set_mode`
+  is a request, and Hyprland answers `server_side` whatever it is asked for. So
+  `--own-frame` is two things and not one: it asks for `client_side`, *and* it
+  draws the frame whatever comes back. A preference a compositor can silently
+  veto is not a preference — and where the request is refused, asking for it
+  means two frames.
+- **`wm_capabilities` is not decoration.** Hyprland offers no minimise, so there
+  are two buttons there and three under a compositor that does. The layout drops
+  the absent one and packs the rest against the edge: a slot left empty for an
+  action that does not exist reads as a bug, and a button that does nothing reads
+  as a worse one.
+- **A window can be told it is maximized when it is not.** Hyprland sends
+  `maximized` together with all four `tiled` flags for a floating 320×240 window,
+  and ignores `unset_maximized` for a tiled one. The maximise button therefore has
+  no assertable effect there, which is recorded rather than worked around — the
+  GUI scenario covers the half that is ours, from a pixel to
+  `xdg_toplevel.set_maximized`, and stops at the compositor.
+- **A tiled window has no edges to pull.** The six-pixel resize band is off
+  whenever the compositor reports `maximized`, `fullscreen` or any `tiled` state,
+  because an invisible band that swallows clicks at the top of a maximized list is
+  worse than no resize at all.
+
+Owed from the frame: no drop shadow, and so no shadow margin. A shadow needs a
+surface larger than the window with `xdg_surface.set_window_geometry` naming the
+part that is the window, which is also where a comfortable resize target beyond
+the edge would live. Six pixels inside the frame is what there is today.
 
 Owed: none of this is a real GNOME *session*. Under a nested, headless mutter the
 GL renderer refuses the drawing surface's dmabuf — `failed to import supplied

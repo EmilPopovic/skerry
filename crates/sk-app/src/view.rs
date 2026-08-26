@@ -6,12 +6,12 @@
 
 use sk_gpu::{Color, FrameStats};
 use sk_model::{Flags, SortColumn, i18n};
-use sk_plat::Point;
+use sk_plat::{Point, WindowState};
 use sk_text::Weight;
 use sk_ui::{Align, Painter, RunKey, TextStyle, format, visible_rows};
 
 use crate::frames::{BUDGET_US, Frames};
-use crate::layout::{Area, Layout};
+use crate::layout::{Area, Button, Layout};
 use crate::pane::Pane;
 
 /// Which column a row cache key is for.
@@ -40,6 +40,10 @@ pub struct Chrome<'a> {
     /// status line says so, because a listing that is a snapshot should not look
     /// like one that is live.
     pub watching: bool,
+    /// The window button under the pointer, if the window draws its own frame.
+    pub hovered_button: Option<Button>,
+    /// What the compositor says the window is, for the frame the window draws.
+    pub window: WindowState,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -79,7 +83,8 @@ pub fn draw(
     chrome: &Chrome<'_>,
     diagnostics: &mut Diagnostics<'_>,
 ) {
-    path_bar(painter, pane, layout);
+    path_bar(painter, pane, layout, chrome);
+    window_buttons(painter, layout, chrome);
     header(painter, pane, layout);
     body(painter, pane, layout, now, chrome);
     status(painter, pane, layout, chrome, diagnostics);
@@ -111,11 +116,14 @@ fn line(
     painter.label(text, style, box_rect, baseline)
 }
 
-fn path_bar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
+fn path_bar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, _chrome: &Chrome<'_>) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    fill(painter, layout.path, theme.palette.chrome);
-    painter.hairline(0.0, layout.path.bottom() - 1.0, layout.path.width, theme.palette.divider);
+    // The whole strip, buttons included: the path area stops short of them and a
+    // gap in the title bar's background is the first thing an eye finds.
+    let strip = Area { width: layout.path.width + strip_width(layout), ..layout.path };
+    fill(painter, strip, theme.palette.chrome);
+    painter.hairline(0.0, strip.bottom() - 1.0, strip.width, theme.palette.divider);
 
     let baseline = painter.baseline(layout.path.y, layout.path.height, metrics.path_size);
     let hint_style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
@@ -152,6 +160,66 @@ fn path_bar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
     line(painter, leaf, leaf_style, cursor, remaining, baseline);
 }
 
+/// The width the window buttons take, or zero when the compositor draws them.
+fn strip_width(layout: &Layout) -> f32 {
+    layout.buttons.iter().map(|button| button.width).sum()
+}
+
+/// Minimise, maximise and close, drawn rather than taken from an icon theme.
+///
+/// Three marks, all of them axis-aligned rectangles except the close cross,
+/// which is the one shape a quad cannot make and so is the `×` the font already
+/// has. An icon theme would be four hundred lines of `index.theme` parsing and a
+/// dependency on the user having one installed, for three ten-pixel glyphs.
+fn window_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_>) {
+    let theme = *painter.theme;
+    for (button, area) in Button::ALL.into_iter().zip(layout.buttons) {
+        // The layout has already dropped the buttons the compositor does not
+        // offer, so a zero-width slot is an absent action and not a narrow one.
+        if area.width <= 0.0 {
+            continue;
+        }
+        if chrome.hovered_button == Some(button) {
+            let background = if button == Button::Close {
+                theme.palette.close_hover
+            } else {
+                theme.palette.button_hover
+            };
+            fill(painter, area, background);
+        }
+        // Dimmed when the window is not the active one, the way every other
+        // window on the desktop dims its frame.
+        let mut ink = if chrome.window.activated { theme.palette.text } else { theme.palette.dim };
+        if chrome.hovered_button == Some(button) && button == Button::Close {
+            ink = theme.palette.selected_text;
+        }
+        let centre = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+        match button {
+            Button::Minimize => {
+                let bar = painter.rect(centre.0 - 5.0, centre.1, 10.0, 1.0);
+                painter.list.rect(bar, ink, 0.0);
+            }
+            Button::Maximize => {
+                let box_rect = painter.rect(centre.0 - 4.5, centre.1 - 4.5, 9.0, 9.0);
+                // Two offset squares mean restore, one means maximise — the
+                // convention every desktop uses, and the only way the button
+                // says what it will do rather than what it is.
+                if chrome.window.maximized {
+                    let behind = painter.rect(centre.0 - 2.5, centre.1 - 6.5, 9.0, 9.0);
+                    painter.list.stroke(behind, ink.with_alpha(120), 1.0, painter.snap(1.0));
+                }
+                painter.list.stroke(box_rect, ink, 1.0, painter.snap(1.0));
+            }
+            Button::Close => {
+                let style = TextStyle::new(theme.metrics.path_size + 2.0, ink);
+                let baseline = painter.baseline(area.y, area.height, style.size);
+                let box_rect = painter.rect(area.x, 0.0, area.width, 0.0);
+                painter.label(i18n::lookup("chrome.close"), style.centred(), box_rect, baseline);
+            }
+        }
+    }
+}
+
 fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -174,7 +242,7 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
         let style = TextStyle { weight: Weight::Bold, size: metrics.header_size, color, align };
         let (x, width) = match align {
             Align::Left => (area.x + inset, area.width - inset),
-            Align::Right => (area.x, area.width - inset),
+            Align::Right | Align::Center => (area.x, area.width - inset),
         };
         let label = i18n::lookup(column.label_key());
         let advance = line(painter, label, style, x, width, baseline);
@@ -194,7 +262,7 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
                 painter.snap(layout.header.bottom() - 7.0)
             };
             let left = match align {
-                Align::Left => painter.snap(x),
+                Align::Left | Align::Center => painter.snap(x),
                 Align::Right => painter.snap(x + width) - advance,
             };
             let bar = sk_gpu::Rect::new(left, y, advance, painter.px(2.0).max(1.0).round());
@@ -677,6 +745,8 @@ mod tests {
                 band: None,
                 watching: true,
                 notice: None,
+                hovered_button: None,
+                window: sk_plat::WindowState::default(),
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test

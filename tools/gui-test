@@ -171,6 +171,20 @@ class Run:
             raise Failure("the window reported no state at all")
         return found[index]
 
+    def make_floating(self) -> None:
+        """Take the window out of the tiling layout.
+
+        Hyprland tiles by default and reports a tiled window as `maximized`,
+        which is honest — a tiled window has no free edges and nothing to
+        maximise. The frame scenarios need a window that does.
+        """
+        subprocess.run(
+            ["hyprctl", "dispatch", "setfloating", "class:dev.skerry.Skerry"],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+        )
+        time.sleep(0.4)
+
     def ask_to_close(self) -> int:
         """Has the compositor ask the window to close, the way a person would.
 
@@ -211,6 +225,54 @@ def name_x(state: dict[str, str]) -> float:
     """A horizontal position inside the name column."""
     width = float(state["logical"].split("x")[0])
     return (float(state["name_x"]) + 30.0) / width * 100.0
+
+
+def window_box(run: Run) -> tuple[int, int, int, int]:
+    """Where the window is on the output, from the compositor itself."""
+    clients = subprocess.run(
+        ["hyprctl", "-j", "clients"],
+        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
+        capture_output=True,
+        text=True,
+    )
+    window = next(
+        (c for c in json.loads(clients.stdout) if c.get("class") == "dev.skerry.Skerry"),
+        None,
+    )
+    if window is None:
+        raise Failure("the compositor does not know about the window")
+    (left, top), (width, height) = window["at"], window["size"]
+    return left, top, width, height
+
+
+def output_size(run: Run) -> tuple[int, int]:
+    monitors = subprocess.run(
+        ["hyprctl", "-j", "monitors"],
+        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
+        capture_output=True,
+        text=True,
+    )
+    first = json.loads(monitors.stdout)[0]
+    return first["width"], first["height"]
+
+
+def aim(run: Run, state: dict[str, str], x: float, y: float) -> tuple[float, float]:
+    """A point inside the window, as the percentages the driver takes.
+
+    The driver moves a *virtual pointer*, which is in output coordinates; every
+    coordinate the program reports is in window coordinates. Asking the
+    compositor where the window is turns the guess into arithmetic — `point_at`
+    still nudges, because a row is a target with a known name to check against
+    and a title bar is not.
+    """
+    left, top, width, height = window_box(run)
+    logical = [float(value) for value in state["logical"].split("x")]
+    across, down = output_size(run)
+    scale = (width / logical[0], height / logical[1])
+    return (
+        (left + x * scale[0]) / across * 100.0,
+        (top + y * scale[1]) / down * 100.0,
+    )
 
 
 def photograph(run: Run, state: dict[str, str], into: Path, cell: str = "") -> "object":
@@ -591,6 +653,81 @@ def copy_to_clipboard(run: Run, fixture: Path) -> None:
     state = run.state()
     if "Copied" not in state.get("notice", ""):
         raise Failure(f"copying said {state.get('notice')!r}")
+
+
+@scenario("own-frame-close-button")
+def own_frame_close_button(run: Run, fixture: Path) -> None:
+    """The close button in the frame this program draws has to close it.
+
+    GNOME advertises no `zxdg_decoration_manager_v1` at all, so on the most
+    common Linux desktop there is no title bar, no close button and no resize
+    edges unless the window draws them. `--own-frame` asks for that everywhere,
+    which is what makes it testable under a compositor that would otherwise
+    decorate.
+    """
+    run.close()
+    own = Run(run.display, run.log.parent, fixture, ["--own-frame"], run.instance)
+    try:
+        own.drive("sleep 400\nkey f12\nsleep 200\n")
+        state = own.state()
+        expect(state, frame="own", frame_hover="none")
+
+        # The middle of the title strip: the path bar is the title bar here.
+        x, y = aim(own, state, float(state["close_x"]), float(state["body_top"]) / 4.0)
+        own.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 200\n")
+        if own.state()["frame_hover"] != "close":
+            raise Failure(
+                f"the pointer over the close button reads as {own.state()['frame_hover']!r}"
+            )
+
+        own.drive("click\nsleep 400\n")
+        code = own.process.wait(timeout=10)
+        if code < 0:
+            raise Failure(f"the close button killed it with signal {-code}")
+        if code != 0:
+            raise Failure(f"the close button exited {code}: {own.err.read_text()[-300:]}")
+    finally:
+        own.close()
+
+
+@scenario("own-frame-maximize")
+def own_frame_maximize(run: Run, fixture: Path) -> None:
+    """The maximise button is where the layout says it is, and works.
+
+    **The state cannot be asserted under this compositor.** Hyprland sends
+    `maximized` together with all four `tiled` flags for a floating 320x240
+    window, and ignores `unset_maximized` for a tiled one — so what it reports is
+    neither what the window looks like nor what was asked for. That is recorded
+    in docs/06-portability.md as a compositor difference, not worked around here.
+
+    What this does cover is the half that is ours: the button is where
+    `Layout::compute_with` put it, hit-testing finds it, and the request goes out
+    without the window dying — which is the whole path from a pixel to
+    `xdg_toplevel.set_maximized`.
+    """
+    run.close()
+    own = Run(run.display, run.log.parent, fixture, ["--own-frame"], run.instance)
+    try:
+        own.drive("sleep 400\nkey f12\nsleep 200\n")
+        state = own.state()
+        expect(state, frame="own")
+
+        # One button width to the left of the close button's centre. The width
+        # comes from the close button's own offset from the right edge, so the
+        # test does not carry a copy of the metric it is testing.
+        button_width = (float(state["logical"].split("x")[0]) - float(state["close_x"])) * 2.0
+        maximize_x = float(state["close_x"]) - button_width
+        x, y = aim(own, state, maximize_x, float(state["body_top"]) / 4.0)
+        own.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 200\n")
+        if own.state()["frame_hover"] != "maximize":
+            raise Failure(f"aimed at maximise and hit {own.state()['frame_hover']!r}")
+
+        own.drive("click\nsleep 600\nclick\nsleep 600\nkey f12\nsleep 200\n")
+        if own.process.poll() is not None:
+            raise Failure(f"maximising killed the window: {own.err.read_text()[-300:]}")
+        expect(own.state(), frame="own", frame_hover="maximize")
+    finally:
+        own.close()
 
 
 @scenario("clean-close")

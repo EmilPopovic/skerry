@@ -43,7 +43,7 @@ use wayland_protocols::xdg::decoration::zv1::client::{
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel};
 
-use crate::event::{Event, Size};
+use crate::event::{Event, Point, Size};
 
 use self::seat::Seat;
 
@@ -57,6 +57,18 @@ pub struct WindowConfig {
     pub app_id: String,
     /// The size in logical pixels, used until the compositor names one.
     pub logical: (u32, u32),
+    /// Draw the frame here rather than asking the compositor to.
+    ///
+    /// Two things, because the protocol only offers one of them: the decoration
+    /// mode asked for becomes `client_side`, **and** the frame is drawn whatever
+    /// the compositor answers. A compositor may refuse the request — Hyprland
+    /// does, measured — and a preference that a compositor can silently veto is
+    /// not a preference. Where it refuses, a person who asked for this gets two
+    /// frames, which is what asking for it means.
+    ///
+    /// GNOME advertises no decoration manager at all, so there the frame is
+    /// drawn regardless and this flag changes nothing.
+    pub own_frame: bool,
 }
 
 impl Default for WindowConfig {
@@ -65,6 +77,7 @@ impl Default for WindowConfig {
             title: sk_model::t!("app.name").to_owned(),
             app_id: "dev.skerry.Skerry".to_owned(),
             logical: (1100, 720),
+            own_frame: false,
         }
     }
 }
@@ -99,6 +112,77 @@ pub struct Capabilities {
     /// Every advertised global with its version, so "why did that not work" has
     /// an answer that does not need a second run.
     pub advertised: Vec<(String, u32)>,
+}
+
+/// Which edge or corner a resize drag is pulling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(missing_docs, reason = "each variant is the edge of that name")]
+pub enum Edge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Edge {
+    const fn as_protocol(self) -> xdg_toplevel::ResizeEdge {
+        match self {
+            Self::Top => xdg_toplevel::ResizeEdge::Top,
+            Self::Bottom => xdg_toplevel::ResizeEdge::Bottom,
+            Self::Left => xdg_toplevel::ResizeEdge::Left,
+            Self::Right => xdg_toplevel::ResizeEdge::Right,
+            Self::TopLeft => xdg_toplevel::ResizeEdge::TopLeft,
+            Self::TopRight => xdg_toplevel::ResizeEdge::TopRight,
+            Self::BottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
+            Self::BottomRight => xdg_toplevel::ResizeEdge::BottomRight,
+        }
+    }
+}
+
+/// What the compositor last said about the window.
+///
+/// Read rather than assumed: a maximized or tiled window must not draw a rounded
+/// corner over the screen edge, and a window that is not activated draws its
+/// title bar dimmed the way every other window on the desktop does.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct WindowState {
+    /// Filling its output.
+    pub maximized: bool,
+    /// Filling its output with no chrome at all.
+    pub fullscreen: bool,
+    /// Holding keyboard focus, as far as the shell is concerned.
+    pub activated: bool,
+    /// Snapped against at least one edge, so its corners are not free.
+    pub tiled: bool,
+    /// Whether the compositor offers a maximize action at all.
+    pub can_maximize: bool,
+    /// Whether it offers a minimize action.
+    pub can_minimize: bool,
+    /// Whether it offers a window menu.
+    pub can_show_menu: bool,
+}
+
+impl WindowState {
+    /// What to assume until a compositor says otherwise.
+    ///
+    /// All three actions present: `wm_capabilities` is `xdg_wm_base` v5, and on
+    /// anything older the actions simply exist — which is what every compositor
+    /// before v5 meant by not saying.
+    const fn before_any_configure() -> Self {
+        Self {
+            maximized: false,
+            fullscreen: false,
+            activated: false,
+            tiled: false,
+            can_maximize: true,
+            can_minimize: true,
+            can_show_menu: true,
+        }
+    }
 }
 
 /// A window, its surface, and the input state that belongs to it.
@@ -147,7 +231,14 @@ struct State {
     /// event and does not cost a frame.
     reported: Option<((u32, u32), u32)>,
     configured: bool,
+    /// What the compositor said about the window, accumulated across one
+    /// configure and published on the `xdg_surface.configure` that ends it.
+    shell: WindowState,
+    /// The states of the configure currently being received.
+    incoming: WindowState,
     close_requested: bool,
+    /// Whether the frame is drawn here by request rather than by necessity.
+    own_frame: bool,
     /// Why the connection died, if it did.
     ///
     /// A protocol error is not recoverable: every later dispatch fails the same
@@ -194,18 +285,8 @@ impl Window {
             zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
         > = bind(&globals, &handle, 1..=1);
 
-        // **Before the first commit.** A data device created after the first
-        // keyboard `enter` never learns the current selection, and the symptom is
-        // an empty clipboard with nothing reporting an error — which is exactly
-        // how Spike D lost an afternoon.
-        let mut clipboard = clipboard::Clipboard::default();
-        if let Some(manager) = &data_manager {
-            clipboard.device = Some(manager.get_data_device(&wl_seat, &handle, ()));
-        }
-        if let Some(manager) = &primary_manager {
-            clipboard.primary_device = Some(manager.get_device(&wl_seat, &handle, ()));
-        }
-
+        let clipboard =
+            clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
         let surface = compositor.create_surface(&handle, ());
         // The order below is the invariant, not a style: both objects exist
         // before the first commit, so the first configure already carries the
@@ -227,9 +308,13 @@ impl Window {
 
         let decoration = decorations.as_ref().map(|manager| {
             let object = manager.get_toplevel_decoration(&toplevel, &handle, ());
-            // Ask for a compositor-drawn frame. mutter answers `client_side`
-            // and means it, so the answer is recorded and the fallback is ours.
-            object.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+            // mutter answers `client_side` and means it, so the answer is
+            // recorded rather than assumed and the fallback is ours either way.
+            object.set_mode(if config.own_frame {
+                zxdg_toplevel_decoration_v1::Mode::ClientSide
+            } else {
+                zxdg_toplevel_decoration_v1::Mode::ServerSide
+            });
             object
         });
 
@@ -267,7 +352,10 @@ impl Window {
             logical: config.logical,
             reported: None,
             configured: false,
+            shell: WindowState::before_any_configure(),
+            incoming: WindowState::before_any_configure(),
             close_requested: false,
+            own_frame: config.own_frame,
             fatal: None,
             events: VecDeque::new(),
         };
@@ -291,6 +379,74 @@ impl Window {
     #[must_use]
     pub fn capabilities(&self) -> &Capabilities {
         &self.state.capabilities
+    }
+
+    /// What the compositor last said about the window.
+    #[must_use]
+    pub fn state(&self) -> WindowState {
+        self.state.shell
+    }
+
+    /// Whether the window has to draw its own frame.
+    ///
+    /// True on GNOME, which does not advertise `zxdg_decoration_manager_v1` at
+    /// all — so on the most common Linux desktop a client that does not draw one
+    /// has no title bar, no close button and no resize edges.
+    #[must_use]
+    pub fn needs_own_frame(&self) -> bool {
+        self.state.own_frame || !self.state.capabilities.server_side_decorations
+    }
+
+    /// Starts an interactive move, as if the title bar had been grabbed.
+    ///
+    /// The serial has to come from a real button press: it is the protocol's way
+    /// of saying a window cannot start dragging itself.
+    pub fn start_move(&self) {
+        if let Some(serial) = self.state.seat.button_serial {
+            self.state.toplevel._move(self.state.seat.seat(), serial);
+        }
+    }
+
+    /// Starts an interactive resize from `edge`.
+    pub fn start_resize(&self, edge: Edge) {
+        if let Some(serial) = self.state.seat.button_serial {
+            self.state.toplevel.resize(self.state.seat.seat(), serial, edge.as_protocol());
+        }
+    }
+
+    /// Maximizes or restores.
+    pub fn set_maximized(&self, yes: bool) {
+        if yes {
+            self.state.toplevel.set_maximized();
+        } else {
+            self.state.toplevel.unset_maximized();
+        }
+    }
+
+    /// Minimizes, if the compositor has such a thing.
+    pub fn minimize(&self) {
+        if self.state.shell.can_minimize {
+            self.state.toplevel.set_minimized();
+        }
+    }
+
+    /// Opens the compositor's own window menu at a point in the window.
+    pub fn show_window_menu(&self, at: Point) {
+        let Some(serial) = self.state.seat.button_serial else { return };
+        if !self.state.shell.can_show_menu {
+            return;
+        }
+        self.state.toplevel.show_window_menu(
+            self.state.seat.seat(),
+            serial,
+            at.x as i32,
+            at.y as i32,
+        );
+    }
+
+    /// Asks the window to close, as the title bar's button does.
+    pub fn request_close(&mut self) {
+        self.state.close_requested = true;
     }
 
     /// The size to lay out and hit-test in.
@@ -565,6 +721,9 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
         if let xdg_surface::Event::Configure { serial } = event {
             surface.ack_configure(serial);
             state.configured = true;
+            // The `xdg_surface.configure` is what ends a configure sequence, so
+            // this is the moment the accumulated states become true.
+            state.shell = state.incoming;
         }
     }
 }
@@ -579,12 +738,55 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            xdg_toplevel::Event::Configure { width, height, .. } => {
+            xdg_toplevel::Event::Configure { width, height, states } => {
                 // Zero means "you choose", which is what a compositor sends for
                 // a floating window it has no opinion about.
                 if width > 0 && height > 0 {
                     state.logical = (width as u32, height as u32);
                 }
+                // The states are a fresh, complete list every configure: absent
+                // means false, so they are collected rather than merged. The
+                // capabilities are **not** part of this — `wm_capabilities` is
+                // its own event with its own cadence — so they are carried over.
+                state.incoming = WindowState {
+                    can_maximize: state.incoming.can_maximize,
+                    can_minimize: state.incoming.can_minimize,
+                    can_show_menu: state.incoming.can_show_menu,
+                    ..WindowState::default()
+                };
+                for value in states.chunks_exact(4) {
+                    let raw = u32::from_ne_bytes([value[0], value[1], value[2], value[3]]);
+                    match xdg_toplevel::State::try_from(raw) {
+                        Ok(xdg_toplevel::State::Maximized) => state.incoming.maximized = true,
+                        Ok(xdg_toplevel::State::Fullscreen) => state.incoming.fullscreen = true,
+                        Ok(xdg_toplevel::State::Activated) => state.incoming.activated = true,
+                        Ok(
+                            xdg_toplevel::State::TiledLeft
+                            | xdg_toplevel::State::TiledRight
+                            | xdg_toplevel::State::TiledTop
+                            | xdg_toplevel::State::TiledBottom,
+                        ) => state.incoming.tiled = true,
+                        _ => {}
+                    }
+                }
+            }
+            xdg_toplevel::Event::WmCapabilities { capabilities } => {
+                let (mut maximize, mut minimize, mut menu) = (false, false, false);
+                for value in capabilities.chunks_exact(4) {
+                    let raw = u32::from_ne_bytes([value[0], value[1], value[2], value[3]]);
+                    match xdg_toplevel::WmCapabilities::try_from(raw) {
+                        Ok(xdg_toplevel::WmCapabilities::Maximize) => maximize = true,
+                        Ok(xdg_toplevel::WmCapabilities::Minimize) => minimize = true,
+                        Ok(xdg_toplevel::WmCapabilities::WindowMenu) => menu = true,
+                        _ => {}
+                    }
+                }
+                state.incoming.can_maximize = maximize;
+                state.incoming.can_minimize = minimize;
+                state.incoming.can_show_menu = menu;
+                state.shell.can_maximize = maximize;
+                state.shell.can_minimize = minimize;
+                state.shell.can_show_menu = menu;
             }
             xdg_toplevel::Event::Close => state.close_requested = true,
             _ => {}

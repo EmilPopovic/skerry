@@ -4,7 +4,7 @@
 //! alternative — each region computing its own rectangle at draw time and each
 //! event handler recomputing it — is how a click lands one row off at 125%.
 
-use sk_plat::Size;
+use sk_plat::{Edge, Size};
 use sk_ui::Metrics;
 
 /// A rectangle in logical pixels.
@@ -49,6 +49,77 @@ pub struct Layout {
     pub size: Area,
     /// The modified column.
     pub modified: Area,
+
+    /// The three window buttons — minimise, maximise, close, left to right.
+    ///
+    /// All empty when the compositor draws the frame, which is every desktop
+    /// except GNOME.
+    pub buttons: [Area; 3],
+    /// Where a press starts moving the window.
+    ///
+    /// The path strip doubles as the title bar rather than a title bar being
+    /// added above it: a strip that says where you are is already the strip a
+    /// person reaches for to drag the window, and a second one costs 36 logical
+    /// pixels of list for a duplicate of the same information.
+    pub drag: Area,
+    /// How far in from an edge a press starts a resize. Zero with server-side
+    /// decorations, and zero when the window is maximized or tiled — its edges
+    /// are not free to move then.
+    pub resize_border: f32,
+}
+
+/// Whether the window draws its own frame, and what belongs in it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Frame {
+    /// The compositor draws it. Every desktop measured except GNOME.
+    #[default]
+    None,
+    /// Ours.
+    Own {
+        /// Whether the edges can be pulled. False when the window is maximized,
+        /// tiled or fullscreen, where its edges are not free to move.
+        edges: bool,
+        /// Whether the compositor offers a minimise action at all. Hyprland does
+        /// not, measured, and a button that does nothing is worse than no button.
+        minimize: bool,
+        /// Whether it offers a maximise action.
+        maximize: bool,
+    },
+}
+
+impl Frame {
+    /// Whether this window draws its own frame.
+    #[must_use]
+    pub const fn is_own(self) -> bool {
+        matches!(self, Self::Own { .. })
+    }
+
+    /// Which of the three buttons belong in it, in layout order.
+    ///
+    /// Close is not optional: `xdg_toplevel.close` exists in every version of
+    /// the protocol, and a window with no way to close it is not a window.
+    const fn offered(self) -> [bool; 3] {
+        match self {
+            Self::None => [false, false, false],
+            Self::Own { minimize, maximize, .. } => [minimize, maximize, true],
+        }
+    }
+}
+
+/// Which window button.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Button {
+    /// Minimise.
+    Minimize,
+    /// Maximise, or restore when the window is already maximized.
+    Maximize,
+    /// Close.
+    Close,
+}
+
+impl Button {
+    /// The three, in the order they are laid out.
+    pub const ALL: [Self; 3] = [Self::Minimize, Self::Maximize, Self::Close];
 }
 
 impl Layout {
@@ -61,8 +132,42 @@ impl Layout {
     /// narrow window shows names rather than three unreadable columns.
     #[must_use]
     pub fn compute(size: Size, metrics: &Metrics) -> Self {
+        Self::compute_with(size, metrics, Frame::None)
+    }
+
+    /// The same, told whether the window has to draw its own frame.
+    #[must_use]
+    pub fn compute_with(size: Size, metrics: &Metrics, frame: Frame) -> Self {
         let full = size.width.max(1.0);
-        let path = Area { x: 0.0, y: 0.0, width: full, height: metrics.path_height };
+        // Only the buttons the compositor actually offers, packed against the
+        // right edge: a slot left empty for an absent action reads as a bug, and
+        // a button that does nothing reads as a worse one.
+        let offered = frame.offered();
+        let strip = metrics.button_width * offered.iter().filter(|it| **it).count() as f32;
+        let path =
+            Area { x: 0.0, y: 0.0, width: (full - strip).max(0.0), height: metrics.path_height };
+        let mut cursor = full - strip;
+        let mut buttons = [Area::default(); 3];
+        for (slot, offered) in buttons.iter_mut().zip(offered) {
+            if !offered {
+                continue;
+            }
+            *slot = Area {
+                x: cursor,
+                y: 0.0,
+                width: metrics.button_width,
+                height: metrics.path_height,
+            };
+            cursor += metrics.button_width;
+        }
+        let drag = if frame.is_own() { path } else { Area::default() };
+        // A maximized or tiled window has no free edges, so there is nothing to
+        // grab — and an invisible six-pixel band that swallows clicks at the top
+        // of a maximized list is worse than no resize at all.
+        let resize_border = match frame {
+            Frame::Own { edges: true, .. } => metrics.resize_border,
+            _ => 0.0,
+        };
         let header = Area { x: 0.0, y: path.bottom(), width: full, height: metrics.header_height };
         let status = Area {
             x: 0.0,
@@ -106,7 +211,47 @@ impl Layout {
                 width: modified_width,
                 height: 0.0,
             },
+            buttons,
+            drag,
+            resize_border,
         }
+    }
+
+    /// The window button at a point, if any.
+    #[must_use]
+    pub fn button_at(&self, x: f32, y: f32) -> Option<Button> {
+        Button::ALL
+            .into_iter()
+            .zip(self.buttons)
+            .find_map(|(button, area)| (area.width > 0.0 && area.contains(x, y)).then_some(button))
+    }
+
+    /// The resize edge at a point, if the window has free edges to pull.
+    ///
+    /// Corners win over sides: a diagonal drag is what a person is reaching for
+    /// when they aim at a corner, and a band that reports `Right` there makes
+    /// the corner unusable.
+    #[must_use]
+    pub fn edge_at(&self, x: f32, y: f32, size: Size) -> Option<Edge> {
+        let band = self.resize_border;
+        if band <= 0.0 {
+            return None;
+        }
+        let left = x < band;
+        let right = x >= size.width - band;
+        let top = y < band;
+        let bottom = y >= size.height - band;
+        Some(match (top, bottom, left, right) {
+            (true, _, true, _) => Edge::TopLeft,
+            (true, _, _, true) => Edge::TopRight,
+            (_, true, true, _) => Edge::BottomLeft,
+            (_, true, _, true) => Edge::BottomRight,
+            (true, ..) => Edge::Top,
+            (_, true, ..) => Edge::Bottom,
+            (_, _, true, _) => Edge::Left,
+            (_, _, _, true) => Edge::Right,
+            _ => return None,
+        })
     }
 
     /// The display row at logical `y`, or `None` outside the list.
@@ -123,9 +268,93 @@ impl Layout {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::Layout;
-    use sk_plat::Size;
+    use super::{Button, Frame, Layout};
+    use sk_plat::{Edge, Size};
     use sk_ui::Metrics;
+
+    /// A compositor that offers no minimise must not leave a hole where the
+    /// button would have been: the two that exist pack against the right edge,
+    /// and the path bar gets the width the third one would have taken.
+    #[test]
+    fn only_the_buttons_the_compositor_offers_are_laid_out() {
+        let metrics = Metrics::default();
+        let size = Size::new(1100.0, 720.0);
+        let all = Layout::compute_with(
+            size,
+            &metrics,
+            Frame::Own { edges: true, minimize: true, maximize: true },
+        );
+        assert!(all.buttons.iter().all(|button| button.width > 0.0));
+        assert!((all.buttons[2].right() - 1100.0).abs() < f32::EPSILON, "close is not at the edge");
+        assert!((all.path.right() - all.buttons[0].x).abs() < f32::EPSILON, "a gap before the row");
+
+        let two = Layout::compute_with(
+            size,
+            &metrics,
+            Frame::Own { edges: true, minimize: false, maximize: true },
+        );
+        assert!(two.buttons[0].width <= 0.0, "an absent action was given a slot");
+        assert!((two.buttons[2].right() - 1100.0).abs() < f32::EPSILON);
+        assert!((two.buttons[1].right() - two.buttons[2].x).abs() < f32::EPSILON, "a hole");
+        assert!(two.path.width > all.path.width, "the path bar did not take the freed width");
+
+        let served = Layout::compute_with(size, &metrics, Frame::None);
+        assert!(served.buttons.iter().all(|button| button.width <= 0.0));
+        assert!(served.drag.width <= 0.0, "a compositor-drawn title bar is not ours to drag");
+        assert!((served.path.width - 1100.0).abs() < f32::EPSILON);
+    }
+
+    /// Corners win over sides, or a diagonal drag is impossible: the band is six
+    /// logical pixels and the corner is where two of them cross.
+    #[test]
+    fn a_corner_is_a_corner_and_not_whichever_side_was_checked_first() {
+        let size = Size::new(800.0, 600.0);
+        let layout = Layout::compute_with(
+            size,
+            &Metrics::default(),
+            Frame::Own { edges: true, minimize: true, maximize: true },
+        );
+        assert_eq!(layout.edge_at(1.0, 1.0, size), Some(Edge::TopLeft));
+        assert_eq!(layout.edge_at(799.0, 1.0, size), Some(Edge::TopRight));
+        assert_eq!(layout.edge_at(1.0, 599.0, size), Some(Edge::BottomLeft));
+        assert_eq!(layout.edge_at(799.0, 599.0, size), Some(Edge::BottomRight));
+        assert_eq!(layout.edge_at(400.0, 1.0, size), Some(Edge::Top));
+        assert_eq!(layout.edge_at(400.0, 599.0, size), Some(Edge::Bottom));
+        assert_eq!(layout.edge_at(1.0, 300.0, size), Some(Edge::Left));
+        assert_eq!(layout.edge_at(799.0, 300.0, size), Some(Edge::Right));
+        assert_eq!(layout.edge_at(400.0, 300.0, size), None);
+    }
+
+    /// A maximized or tiled window has no edges to pull, and an invisible band
+    /// that swallows clicks at the top of a maximized list is worse than no
+    /// resize at all.
+    #[test]
+    fn a_window_with_no_free_edges_has_no_resize_band() {
+        let size = Size::new(800.0, 600.0);
+        let fixed = Layout::compute_with(
+            size,
+            &Metrics::default(),
+            Frame::Own { edges: false, minimize: true, maximize: true },
+        );
+        assert!(fixed.resize_border <= 0.0);
+        assert_eq!(fixed.edge_at(1.0, 1.0, size), None);
+        assert!(fixed.buttons[2].width > 0.0, "a tiled window still has to close");
+    }
+
+    /// And the buttons are found by the same rectangles they are drawn from.
+    #[test]
+    fn a_press_on_a_button_finds_that_button() {
+        let layout = Layout::compute_with(
+            Size::new(1100.0, 720.0),
+            &Metrics::default(),
+            Frame::Own { edges: true, minimize: true, maximize: true },
+        );
+        for (button, area) in Button::ALL.into_iter().zip(layout.buttons) {
+            let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+            assert_eq!(layout.button_at(x, y), Some(button));
+        }
+        assert_eq!(layout.button_at(10.0, 10.0), None, "the path bar is not a button");
+    }
 
     #[test]
     fn the_regions_tile_the_window_with_no_gap_and_no_overlap() {
