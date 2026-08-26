@@ -304,6 +304,61 @@ on the Pi gave a p50 of 1,136 ms and a p99 of 6,332 ms, the signature of runs
 going back to the device. Every "warm cache" number elsewhere in this document was
 taken on a machine with 60 GB of RAM.
 
+## What Spike C measured
+
+[Spike C](../spikes/c-watching/README.md) measured inotify across the 21,338
+directories of a million-file tree, on the 24-thread laptop.
+
+| Measure | Result |
+| --- | --- |
+| One file created, to event delivered | **0.039 ms** |
+| `rm -rf` of 2,000 files, to last event | **7.13 ms** |
+| 500 renames, 1,000 paired events | **3.84 ms** |
+| Establishing 21,338 watches | 0.112 s, 190,000/s, 127 bytes each |
+
+Change latency is not a risk. The two findings that matter are elsewhere.
+
+### The watch budget is per-user and shared
+
+`max_user_watches` is 65,536, and **one million-file tree needs 21,338 of them —
+33%.** Worse, a probe that expected to reach 65,536 stopped at **41,539**, because
+the limit is per *user* and the program was already holding the first 21,338.
+
+**So a file manager never has the whole budget.** It has what is left after the
+IDE, the sync client, the language server and the desktop's own indexer, and it
+discovers the remainder by being refused one directory at a time. `ENOSPC` from
+`inotify_add_watch` needs a real policy — which directories get watches when there
+are not enough — because the failure it prevents is a listing that looks current
+and is not.
+
+### Overflow recovery cannot meet the 100 ms bar, and the row should say so
+
+`max_queued_events` is 16,384. A burst of 52,000 file creations across 4,000
+directories delivered exactly 16,384 events **from 316 distinct watches** and
+dropped 35,616 in silence.
+
+**The surviving-event set is worse than useless — it is misleading.** The queue
+filled from the first few directories the burst reached, so "rescan what we heard
+from" would rescan 316 of the 4,000 directories that changed and report itself
+finished. `IN_Q_OVERFLOW` is one bit and the dropped events are gone, not buffered
+elsewhere.
+
+The only correct recovery is to rescan everything watched: **331 ms here, and over
+a second on a Pi by Spike B's walk numbers.** Against a 100 ms budget that is 3.3×
+over, and it is not fixable by tuning — it is a full walk by definition.
+
+**The budget should distinguish the two things it currently conflates:** observing
+a change, which is microseconds, and recovering from having missed thirty-five
+thousand of them, which is a progressive cancellable rescan and cannot be
+instantaneous. A row that demands 100 ms for both is a row that will be quietly
+ignored.
+
+| Measure | Target | Hard fail | Method |
+| --- | --- | --- | --- |
+| External change reflected | < 100 ms | 250 ms | inotify event to repaint; measured at 7.1 ms for `rm -rf` of 2,000 files |
+| Overflow recovery *begins* | < 100 ms | 250 ms | First rescanned directory repainted, visible pane first |
+| Overflow recovery completes | < 2 s for 1M entries | 5 s | Full rescan of watched directories, progressive and cancellable; measured at 331 ms on a laptop |
+
 ## On measuring frame time honestly
 
 p99 over a realistic input trace, not an average over an idle window. The interesting
