@@ -118,83 +118,72 @@ having before the architecture depends on it.
 
 ## Result
 
-24-thread laptop, idle at load 1.21, watching Spike F's realistic tree — a million
-files in 21,338 directories. Raw output in [runs/laptop.txt](runs/laptop.txt).
+Three machines: the 24-thread laptop, a 4-vCPU Zen 3 VM, and a Raspberry Pi 5.
+All watching Spike F's realistic tree — a million files in 21,338 directories.
+Raw output in [runs/](runs/).
 
-### Latency passes, and not narrowly
+### Latency, and what the number is actually measuring
 
-| Case | median | vs the 100 ms bar |
-| --- | --- | --- |
-| one file created | **0.039 ms** | 2,500× inside |
-| `rm -rf` of 2,000 files — first event | 7.09 ms | 14× inside |
-| `rm -rf` of 2,000 files — last event | 7.13 ms | 14× inside |
-| 500 renames (1,000 paired events) | 3.84 ms | 26× inside |
+| Case | laptop | homelab | **Pi 5** | vs the 100 ms bar |
+| --- | --- | --- | --- | --- |
+| one file created, p50 | 0.039 ms | 0.043 ms | **0.063 ms** | 1,600× inside |
+| one file created, p99 | 0.060 ms | 5.41 ms | 1.19 ms | still 19× inside |
+| `rm -rf` 2,000 files, all events | 7.13 ms | 25.4 ms | **40.1 ms** | 2.5× inside |
+| 500 renames, 1,000 events | 3.84 ms | 11.1 ms | **16.9 ms** | 6× inside |
 
-Establishing the watches is not a startup problem either: **21,338 watches in
-0.112 s**, about 190,000 per second, and 127 bytes of our own memory per watch.
+**Notification itself is free** — 63 microseconds on the slowest machine. Watches
+establish at 125,000–206,000 per second and cost 119 bytes each on our side.
 
-The bar's first condition is met with room that makes it uninteresting. **The
-other two are where this spike earns its place.**
+**But the `rm -rf` figure is not a notification latency and should not be read as
+one.** The clock starts before `remove_dir_all` and stops when the last event
+arrives, so it includes the deletion. That is the right thing to measure for the
+bar as written — "an external `rm -rf` reflected within 100 ms" is about when the
+listing is correct again — but it means **the number scales with the size of the
+deletion, not with inotify.**
 
-### The watch budget, as the number the bar asks for
+On the Pi, 2,000 files take 40 ms, so roughly **50 files per millisecond**. A
+`rm -rf node_modules` is routinely 30,000 files: **around 600 ms, six times the
+bar.** The bar is met for the case measured and is not met for the case people
+actually run, and that is a property of how fast a Pi can unlink files rather
+than anything inotify does.
 
-| | |
-| --- | --- |
-| `max_user_watches` on this machine | 65,536 |
-| Directories in one million-file tree | **21,338 — 32.6% of it** |
-| Watches actually obtainable **while already holding those 21,338** | **41,539, then `ENOSPC`** |
-| Our own memory per watch | 100–127 bytes |
+### The watch budget, confirmed exactly on three machines
 
-That third row is the finding, and it corrects the test that produced it. The
-probe expected to reach 65,536 and stopped at 41,539 — because **the limit is per
-*user*, not per process or per instance**, and this program was already holding
-21,338 of them. 21,338 + 41,539 = 62,877, which is the budget minus whatever else
-this login session had open.
+| | `max_user_watches` | obtained while already holding 21,338 | sum | as % of the limit |
+| --- | --- | --- | --- | --- |
+| laptop | 65,536 | 41,539 | 62,877 | 96% |
+| homelab | 60,793 | 39,446 | 60,784 | **99.99%** |
+| Pi 5 | 62,164 | 40,815 | 62,153 | **99.98%** |
 
-**So a file manager never has 65,536 watches. It has 65,536 minus the IDE, minus
-the sync client, minus the language server, minus the desktop's own indexer** —
-and it finds out by being refused, one directory at a time, with no signal that
-anything is wrong beyond an errno it could have ignored.
+**The limit is exactly per-user**, to within 0.02% on two of three machines. One
+million-file tree costs 34–35% of it. Three exhaust it.
 
-Three million-file trees exhaust the budget outright. A developer's home directory
-with a few `node_modules` and a couple of large checkouts is past it before a file
-manager starts.
+And **the limit is not a constant**: 65,536, 62,164 and 60,793 on three machines,
+because the kernel derives it from available memory. Any policy that hard-codes
+65,536 is wrong on two of these three.
 
-### Overflow: the bar is met only by a full rescan, and that misses the latency budget
+### Overflow recovery: 12× the bar on reference hardware
 
-One directory first, the easy case:
+Identical behaviour everywhere — a burst of 52,000 creations across 4,000
+directories delivered **exactly 16,384 events from 316 distinct watches** on all
+three machines, and dropped 35,616. The queue depth is the constant; what differs
+is only what recovery costs.
 
-| | |
-| --- | --- |
-| Files created in a burst | 49,152 in 0.35 s |
-| Events delivered | **16,384 — exactly `max_queued_events`** |
-| Events lost | 32,768 — **66.7%** |
-| Overflow signalled | yes |
-| Targeted rescan of the one directory | 49,152 entries in **7.1 ms**, recovers everything |
+| | laptop | homelab | **Pi 5** |
+| --- | --- | --- | --- |
+| rescan the 4,000 directories touched | 132 ms | 148 ms | **701 ms** |
+| **rescan all 21,338, which correctness requires** | **331 ms** | **569 ms** | **1,234 ms** |
+| against the 100 ms bar | 3.3× over | 5.7× over | **12.3× over** |
 
-Then the case that actually happens — a burst spread across the tree, which is
-what `git checkout`, `cargo build` and `npm install` produce:
+The earlier laptop-only result projected "over a second on a Pi" from Spike B's
+walk numbers. Measured: **1.234 s.** For once a projection in this project was
+right, which is worth noting only because [the last three were not](../f-index-and-search/README.md#a-prediction-the-cache-finding-made-and-measurement-refused).
 
-| | |
-| --- | --- |
-| Files created | 52,000 across **4,000 directories** in 0.26 s |
-| Events delivered | 16,384, from **316 distinct watches** |
-| Events lost | 35,616, across an unknown subset of 4,000 directories |
-| Rescan of the 4,000 directories actually touched | 132 ms |
-| **Rescan of all 21,338, which is what correctness requires** | **331 ms** |
-
-**The surviving-event set is not just insufficient, it is misleading.** 16,384
-events arrived from **316** watches — the queue filled up from the first few
-directories the burst reached and then dropped everything else in silence. A
-recovery that rescans "the directories we heard from" would rescan 316 of the
-4,000 that changed and confidently report itself finished.
-
-The kernel offers nothing better. `IN_Q_OVERFLOW` is one bit; the dropped events
-are gone, not buffered elsewhere, and there is no way to ask what they were. **The
-only correct recovery is to rescan everything watched, and that is 331 ms against
-a 100 ms latency budget** — 3.3× over, on the fastest machine measured in this
-project. Spike B's walk numbers put the same rescan at over a second on a
-Raspberry Pi.
+The 316 figure is the one to keep. It is identical on all three machines because
+it is a property of the queue, not the hardware: the queue fills from the first
+directories a burst reaches and then drops everything else in silence. **A recovery
+that rescans "the directories we heard from" covers 316 of 4,000 and reports
+itself finished.**
 
 ## Verdict
 
@@ -202,9 +191,9 @@ Raspberry Pi.
 
 | Condition | Result |
 | --- | --- |
-| An external `rm -rf` or `git checkout` reflected within 100 ms | **PASS**, 7.1 ms and 3.8 ms, 14–26× inside |
-| No lost entries after a forced overflow | **PASS only via a full rescan**, which costs 331 ms and therefore misses the latency bar |
-| The watch budget documented as a number | **21,338 directories per million-file tree, against a per-user budget of 65,536 shared with every other application** |
+| An external `rm -rf` or `git checkout` reflected within 100 ms | **PASS for the case measured** — 40 ms on a Pi for 2,000 files — and **fails at scale**: the figure is dominated by the deletion at ~50 files/ms, so a 30,000-file `node_modules` is ~600 ms |
+| No lost entries after a forced overflow | **PASS only via a full rescan**, which is **1,234 ms on a Pi** — 12× the latency bar |
+| The watch budget documented as a number | **21,338 directories per million-file tree = 34% of a per-user budget that is 60,793–65,536 depending on the machine's memory, and is shared with every other application** |
 
 ### `fanotify` is still the wrong answer, and now the cost is priced
 
@@ -220,6 +209,19 @@ wants a binary that runs unprivileged on any distribution. **The refusal stands,
 and it costs us a shared 65,536-watch budget and a 331 ms recovery path.** That is
 the price, stated, rather than an expectation confirmed.
 
+### A third thing, which the scaling exposed
+
+**The bar's own wording does not survive its own test.** "An external `rm -rf`
+reflected within 100 ms" is met at 2,000 files and missed at 30,000, because the
+number is the deletion rather than the notification. A budget row that passes or
+fails depending on how large the user's `node_modules` is, is not measuring the
+thing it names.
+
+What the measurements support instead: **notification latency** — microseconds,
+and worth a tight bar — and **time for a bulk external change to be fully
+reflected**, which is bounded by the kernel's unlink rate and belongs in the same
+family as overflow recovery: progressive, visible, and not instantaneous.
+
 ### What has to be designed
 
 1. **Running out of watches is a normal condition, not an error.** The budget is
@@ -229,8 +231,12 @@ the price, stated, rather than an expectation confirmed.
    panes first, then recently visited, then nothing — and a fallback for the rest
    that does not pretend to be live. The failure this prevents is the worst kind:
    a listing that looks current and is not.
+
+   **And the limit must be read, never assumed.** It is 65,536, 62,164 and 60,793
+   on the three machines measured, because the kernel derives it from available
+   memory. Any code with 65,536 in it is wrong on two of these three.
 2. **Overflow recovery cannot meet the latency bar, so it must not pretend to.**
-   331 ms here, over a second on a Pi. A rescan that blocks the listing for a
+   331 ms on a laptop, 569 ms on a four-core VM, **1,234 ms on a Pi.** A rescan that blocks the listing for a
    second is a frozen window; one that silently rescans the wrong subset is a lie.
    What the measurement supports is a *visible, progressive, cancellable* rescan —
    the same machinery rule 1 already requires for a first listing — with the panes
@@ -260,10 +266,10 @@ visibly distinguishable from live ones.
 
 ### What it does not license
 
-- **One machine.** Everything here is the 24-thread laptop. The latencies have
-  three orders of magnitude of headroom and will survive; the 331 ms rescan will
-  not, and Spike B's walk numbers put it over a second on a Pi. The rescan is the
-  number to re-measure.
+- **Three machines, all local ext4 on NVMe.** The thing left unmeasured across
+  hardware is a slow *device*: every rescan figure here is NVMe, and the same
+  recovery on a spinning disk or an SD card — which is what a great many Pis
+  actually boot from — would be far worse than 1.2 s.
 - **One filesystem, no network.** ext4 on NVMe. inotify does not work across NFS
   at all — a change made on another host is invisible, with no event and no error
   — and this spike did not touch that. A file manager that shows a stale network

@@ -307,57 +307,70 @@ taken on a machine with 60 GB of RAM.
 ## What Spike C measured
 
 [Spike C](../spikes/c-watching/README.md) measured inotify across the 21,338
-directories of a million-file tree, on the 24-thread laptop.
+directories of a million-file tree, on three machines.
 
-| Measure | Result |
-| --- | --- |
-| One file created, to event delivered | **0.039 ms** |
-| `rm -rf` of 2,000 files, to last event | **7.13 ms** |
-| 500 renames, 1,000 paired events | **3.84 ms** |
-| Establishing 21,338 watches | 0.112 s, 190,000/s, 127 bytes each |
+| Measure | laptop | homelab | **Pi 5** |
+| --- | --- | --- | --- |
+| One file created, to event delivered | 0.039 ms | 0.043 ms | **0.063 ms** |
+| `rm -rf` 2,000 files, to last event | 7.13 ms | 25.4 ms | **40.1 ms** |
+| 500 renames, 1,000 paired events | 3.84 ms | 11.1 ms | **16.9 ms** |
+| Establishing 21,338 watches | 0.112 s | 0.103 s | 0.171 s |
 
-Change latency is not a risk. The two findings that matter are elsewhere.
+Notification costs 63 microseconds on the slowest machine. Three findings sit
+behind that, and each one changes a row.
 
-### The watch budget is per-user and shared
+### The `rm -rf` row measures the deletion, not the notification
 
-`max_user_watches` is 65,536, and **one million-file tree needs 21,338 of them —
-33%.** Worse, a probe that expected to reach 65,536 stopped at **41,539**, because
-the limit is per *user* and the program was already holding the first 21,338.
+40 ms on a Pi for 2,000 files is **50 files per millisecond**, and the clock is
+dominated by `unlink` rather than by inotify. So the row scales with the size of
+the deletion: a 30,000-file `node_modules` is **~600 ms, six times the bar.**
 
-**So a file manager never has the whole budget.** It has what is left after the
-IDE, the sync client, the language server and the desktop's own indexer, and it
-discovers the remainder by being refused one directory at a time. `ENOSPC` from
-`inotify_add_watch` needs a real policy — which directories get watches when there
-are not enough — because the failure it prevents is a listing that looks current
-and is not.
+**A row that passes or fails depending on how large the user's `node_modules` is
+not measuring what it names.** It should be two rows: notification latency, which
+is microseconds and deserves a tight bar, and time for a bulk external change to
+be fully reflected, which is bounded by the kernel's unlink rate.
 
-### Overflow recovery cannot meet the 100 ms bar, and the row should say so
+### The watch budget is per-user, shared, and not a constant
 
-`max_queued_events` is 16,384. A burst of 52,000 file creations across 4,000
-directories delivered exactly 16,384 events **from 316 distinct watches** and
-dropped 35,616 in silence.
+| | `max_user_watches` | obtained while holding 21,338 | sum vs limit |
+| --- | --- | --- | --- |
+| laptop | 65,536 | 41,539 | 96% |
+| homelab | 60,793 | 39,446 | **99.99%** |
+| Pi 5 | 62,164 | 40,815 | **99.98%** |
 
-**The surviving-event set is worse than useless — it is misleading.** The queue
-filled from the first few directories the burst reached, so "rescan what we heard
-from" would rescan 316 of the 4,000 directories that changed and report itself
-finished. `IN_Q_OVERFLOW` is one bit and the dropped events are gone, not buffered
-elsewhere.
+The limit is **exactly per-user**, to within 0.02%. One million-file tree costs
+34–35% of it and three exhaust it — and a file manager only ever gets what is left
+after the IDE, the sync client and the language server.
 
-The only correct recovery is to rescan everything watched: **331 ms here, and over
-a second on a Pi by Spike B's walk numbers.** Against a 100 ms budget that is 3.3×
-over, and it is not fixable by tuning — it is a full walk by definition.
+**It is also not 65,536.** It was 65,536, 62,164 and 60,793 on three machines,
+because the kernel derives it from available memory. Any code containing the
+constant is wrong on two of these three.
 
-**The budget should distinguish the two things it currently conflates:** observing
-a change, which is microseconds, and recovering from having missed thirty-five
-thousand of them, which is a progressive cancellable rescan and cannot be
-instantaneous. A row that demands 100 ms for both is a row that will be quietly
-ignored.
+### Overflow recovery is 12× the bar on reference hardware
+
+A burst of 52,000 creations across 4,000 directories delivered **exactly 16,384
+events from 316 distinct watches on all three machines** — the queue depth is
+hardware-independent — and dropped 35,616 in silence.
+
+| Recovery | laptop | homelab | **Pi 5** |
+| --- | --- | --- | --- |
+| rescan the 4,000 directories touched | 132 ms | 148 ms | 701 ms |
+| **rescan all 21,338, as correctness requires** | 331 ms | 569 ms | **1,234 ms** |
+
+**The surviving-event set is misleading, not merely insufficient.** 16,384 events
+arrived from 316 watches, so "rescan what we heard from" covers 316 of the 4,000
+directories that changed and reports itself finished. `IN_Q_OVERFLOW` is one bit
+and the dropped events are gone.
+
+### The rows these three findings imply
 
 | Measure | Target | Hard fail | Method |
 | --- | --- | --- | --- |
-| External change reflected | < 100 ms | 250 ms | inotify event to repaint; measured at 7.1 ms for `rm -rf` of 2,000 files |
+| Notification latency | < 1 ms | 10 ms | inotify event delivered after a single create; measured at 0.063 ms on a Pi 5 |
+| Bulk external change fully reflected | < 100 ms per 5,000 entries | 250 ms | Wall clock from the start of an external `rm -rf`; bounded by the kernel's unlink rate, ~50 files/ms on a Pi 5 |
 | Overflow recovery *begins* | < 100 ms | 250 ms | First rescanned directory repainted, visible pane first |
-| Overflow recovery completes | < 2 s for 1M entries | 5 s | Full rescan of watched directories, progressive and cancellable; measured at 331 ms on a laptop |
+| Overflow recovery completes | < 2 s per 1M entries | 5 s | Full rescan of watched directories, progressive and cancellable; measured at 1,234 ms on a Pi 5 |
+| Watch budget consumed | ≤ 40% of `max_user_watches` for one tree | 80% | Read the limit at runtime; 21,338 directories per million files is 34% of 62,164 |
 
 ## On measuring frame time honestly
 

@@ -1,0 +1,34 @@
+Spike C — watching at scale
+  tree         /var/tmp/skerry-spike-f/realistic
+  kernel       max_user_watches 62164, max_queued_events 16384, max_user_instances 128
+  load         0.02
+
+  21338 directories found in 2.83 s
+  that is 34.3% of this machine's entire watch budget for one tree
+
+  21338 watches established in 0.171 s (124982/s), 0 refused
+  process RSS grew 2.54 MB, so 119 bytes per watch on our side alone
+
+  one create p50  0.063  p99  1.192  max   1.192  mean  0.183   n=10
+  bar: an external change reflected within 100 ms
+
+  rm -rf 1st p50 40.008  p99 40.811  max  40.811  mean 39.637   n=5
+  rm -rf all p50 40.130  p99 40.926  max  40.926  mean 39.769   n=5   (2000 files)
+  rename 500 p50 16.934  p99 16.964  max  16.964  mean 16.810   n=5   (500 renames, 1000 events)
+
+  forced overflow — max_queued_events is 16384
+  created 49152 files in 1.47 s; queue delivered 16384 events and SIGNALLED overflow
+  events lost: 32768 of 49152 (66.7%) — the kernel does not say which
+  targeted rescan of the one affected directory: 49152 entries in 26.6 ms — recovers everything (PASS)
+
+  scattered overflow — a burst across many watched directories
+  created 52000 files across 4000 directories in 2.41 s
+  delivered 16384 events from 316 distinct watches, overflow SIGNALLED
+  35616 events lost across an unknown subset of 4000 directories
+  rescanning the 4000 directories we happened to touch: 701 ms, 483780 entries
+  rescanning all 21338 directories, which is what correctness requires: 1234 ms, 1073338 entries
+  bar: no lost entries after a forced overflow — met only by the full rescan, at 12x the 100 ms latency budget
+
+  watch-limit probe
+  added 40815 watches before Some(Os { code: 28, kind: StorageFull, message: "No space left on device" }); sysctl says 62164
+  our own RSS for those: 4.34 MB (106 bytes each)
