@@ -138,6 +138,7 @@ max_user_instances {}",
     overflow(&watcher, &scratch, max_queued)?;
 
     scattered_overflow(&watcher, &directories, max_queued, &options)?;
+    pruned_rescan(&watcher, &directories, max_queued)?;
 
     if options.limit_probe {
         limit_probe(max_watches)?;
@@ -423,6 +424,132 @@ the 100 ms latency budget",
     }
     watcher.drain(usize::MAX, Duration::from_millis(200));
     Ok(())
+}
+
+/// Overflow recovery by pruning on directory mtime instead of re-reading
+/// everything.
+///
+/// A full rescan is 1,234 ms on a Pi because it reads all 21,338 directories. But
+/// a directory's mtime moves whenever an entry is created, deleted or renamed in
+/// it — so `statx` on each directory is enough to tell which ones can be skipped,
+/// and `statx` is far cheaper than `getdents64`.
+///
+/// **What this is sound for, and what it is not.** Directory mtime tracks
+/// *structural* change: entries appearing, disappearing, being renamed. It does
+/// not move when a file already in the directory is written to or has its
+/// permissions changed, so a lost `MODIFY` or `ATTRIB` event is invisible to this
+/// scheme. It recovers the listing's shape, not every column in it — and the
+/// columns are recoverable separately, by re-`statx`ing the entries of the
+/// handful of directories actually on screen.
+fn pruned_rescan(
+    watcher: &Watcher,
+    directories: &[PathBuf],
+    max_queued: usize,
+) -> Result<(), String> {
+    println!("\n  overflow recovery by mtime pruning");
+
+    // Baseline: one statx per directory, which is what a listing already has.
+    let started = Instant::now();
+    let mut baseline: Vec<i64> = Vec::with_capacity(directories.len());
+    for directory in directories {
+        baseline.push(directory_mtime(directory));
+    }
+    let baseline_cost = started.elapsed();
+    println!(
+        "  baseline: {} directory mtimes in {:.0} ms",
+        baseline.len(),
+        baseline_cost.as_secs_f64() * 1000.0
+    );
+
+    // The same burst that overflowed the queue before.
+    let spread = directories.len().min(4_000);
+    let per = (max_queued * 3) / spread.max(1) + 1;
+    let victims = &directories[..spread];
+    let mut created = 0usize;
+    for (n, directory) in victims.iter().enumerate() {
+        for i in 0..per {
+            if std::fs::File::create(directory.join(format!(".spike-c-p{n}-{i}"))).is_ok() {
+                created += 1;
+            }
+        }
+    }
+    let drained = watcher.drain(usize::MAX, Duration::from_millis(500));
+
+    // Recovery: stat everything, read only what moved.
+    let started = Instant::now();
+    let mut changed = Vec::new();
+    for (index, directory) in directories.iter().enumerate() {
+        if directory_mtime(directory) != baseline[index] {
+            changed.push(directory);
+        }
+    }
+    let stat_pass = started.elapsed();
+
+    let started = Instant::now();
+    let mut entries = 0usize;
+    for directory in &changed {
+        // skerry-allow: no-read-dir — a spike pricing recovery
+        if let Ok(read) = std::fs::read_dir(directory) {
+            entries += read.count();
+        }
+    }
+    let read_pass = started.elapsed();
+    let total = stat_pass + read_pass;
+
+    println!(
+        "  burst of {created} files across {spread} directories; {} events delivered, overflow {}",
+        drained.events,
+        if drained.overflowed { "signalled" } else { "not signalled" }
+    );
+    println!(
+        "  detected {} changed directories of {} ({:.1}%) — {} false negatives",
+        changed.len(),
+        directories.len(),
+        100.0 * changed.len() as f64 / directories.len() as f64,
+        spread.saturating_sub(changed.len())
+    );
+    println!(
+        "  stat pass {:.0} ms + read of {} directories {:.0} ms = {:.0} ms total, {entries} entries",
+        stat_pass.as_secs_f64() * 1000.0,
+        changed.len(),
+        read_pass.as_secs_f64() * 1000.0,
+        total.as_secs_f64() * 1000.0
+    );
+
+    // The same recovery, done the only other correct way, for comparison.
+    let started = Instant::now();
+    let mut whole = 0usize;
+    for directory in directories {
+        // skerry-allow: no-read-dir — as above
+        if let Ok(read) = std::fs::read_dir(directory) {
+            whole += read.count();
+        }
+    }
+    let full = started.elapsed();
+    println!(
+        "  against a full rescan: {:.0} ms for {whole} entries — pruning is {:.1}x faster",
+        full.as_secs_f64() * 1000.0,
+        full.as_secs_f64() / total.as_secs_f64().max(0.000_001)
+    );
+
+    for (n, directory) in victims.iter().enumerate() {
+        for i in 0..per {
+            let _ = std::fs::remove_file(directory.join(format!(".spike-c-p{n}-{i}")));
+        }
+    }
+    watcher.drain(usize::MAX, Duration::from_millis(200));
+    Ok(())
+}
+
+fn directory_mtime(directory: &Path) -> i64 {
+    rustix::fs::statx(
+        rustix::fs::CWD,
+        directory,
+        rustix::fs::AtFlags::empty(),
+        rustix::fs::StatxFlags::MTIME,
+    )
+    .map(|s| s.stx_mtime.tv_sec * 1_000_000_000 + i64::from(s.stx_mtime.tv_nsec))
+    .unwrap_or(0)
 }
 
 fn collect_directories(root: &Path) -> Vec<PathBuf> {
