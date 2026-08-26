@@ -321,9 +321,19 @@ has never seen.
 **M3's gate is satisfiable.** The roadmap says *"M3 does not ship until the Spike
 E matrix is green in CI"*, and green now has a meaning: 37 checks that pass, 6
 that are the destination's limits, and 3 that need a filesystem CI can create with
-the privileges CI has. The matrix is one binary with no arguments, it discovers
-what to test, and it exits non-zero on a failure — so it is a CI job today rather
-than a thing to be written later.
+the privileges CI has. The matrix is one binary that discovers what to test, exits
+non-zero on a failure, and prints one machine-readable line so a job can assert on
+the numbers instead of grepping prose:
+
+```
+counts pass=37 fail=0 limitation=6 owed=3 total=46
+```
+
+`run --strict` additionally fails when anything was left *unmeasured*. That
+distinction is the whole point on a runner that is supposed to have every
+filesystem: an owed check there is not a missing capability, it is a filesystem
+that has silently disappeared from the image — and a gate nobody has watched fail
+is decoration.
 
 **Four defects were found by a check failing, and all four would have shipped.**
 A sparse file becoming a gigabyte of zeros, an external drive silently copying

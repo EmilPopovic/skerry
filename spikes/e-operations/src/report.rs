@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Pass,
     Fail,
@@ -76,6 +76,19 @@ impl Report {
 
     pub fn failed(&self) -> bool {
         self.checks.iter().any(|c| c.outcome == Outcome::Fail)
+    }
+
+    /// Whether anything was left unmeasured. Distinct from `failed` because an
+    /// owed check is a missing filesystem rather than a defect — but on a CI
+    /// runner that is *supposed* to have that filesystem, an owed check is
+    /// exactly the regression worth catching, and a gate nobody has watched fail
+    /// is decoration ([12-measurement.md](../../docs/12-measurement.md)).
+    pub fn owed_any(&self) -> bool {
+        self.checks.iter().any(|c| c.outcome == Outcome::Owed)
+    }
+
+    pub fn count(&self, outcome: Outcome) -> usize {
+        self.checks.iter().filter(|c| c.outcome == outcome).count()
     }
 }
 

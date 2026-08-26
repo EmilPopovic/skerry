@@ -6,6 +6,7 @@
 //!
 //!     probe                     what each filesystem here can do
 //!     run [dir...]              the matrix, on every filesystem found
+//!     run --strict [dir...]     the same, and fail if anything was left unmeasured
 //!     inject <mnt> <mode> <n>   a filesystem that fails at an exact offset
 
 use std::time::Duration;
@@ -314,9 +315,14 @@ fn probe_mode(extra: &[String]) {
     }
 }
 
-fn run_mode(extra: &[String]) {
-    header("the torture matrix");
-    let targets = probe::discover(extra);
+fn run_mode(args: &[String]) {
+    // `--strict` is for a CI runner that is supposed to have every filesystem: it
+    // turns "owed" into a failure, so a filesystem quietly disappearing from the
+    // image is caught instead of being reported as a pass.
+    let strict = args.iter().any(|a| a == "--strict");
+    let extra: Vec<String> = args.iter().filter(|a| !a.starts_with("--")).cloned().collect();
+    header(if strict { "the torture matrix (strict)" } else { "the torture matrix" });
+    let targets = probe::discover(&extra);
     if targets.is_empty() {
         eprintln!("no writable filesystem found");
         std::process::exit(1);
@@ -348,5 +354,25 @@ fn run_mode(extra: &[String]) {
         tree::remove_tree(&t.dir);
     }
     println!("  {}", report.summary());
-    std::process::exit(i32::from(report.failed()));
+    // One machine-readable line, so a CI job can assert on the numbers rather
+    // than grepping prose.
+    println!(
+        "  counts pass={} fail={} limitation={} owed={} total={}",
+        report.count(report::Outcome::Pass),
+        report.count(report::Outcome::Fail),
+        report.count(report::Outcome::Limitation),
+        report.count(report::Outcome::Owed),
+        report.count(report::Outcome::Pass)
+            + report.count(report::Outcome::Fail)
+            + report.count(report::Outcome::Limitation)
+            + report.count(report::Outcome::Owed),
+    );
+    if strict && report.owed_any() {
+        eprintln!(
+            "  --strict: {} checks were left unmeasured, which on a runner that is supposed to \
+             have every filesystem is the regression worth catching",
+            report.count(report::Outcome::Owed)
+        );
+    }
+    std::process::exit(i32::from(report.failed() || (strict && report.owed_any())));
 }
