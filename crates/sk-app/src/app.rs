@@ -79,11 +79,16 @@ impl Drop for App {
 /// [ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md) says
 /// capabilities are probed and never compiled in. A probe nobody can see is a
 /// probe nobody can debug, so the answer goes on screen under `F2`.
-fn describe(found: &sk_plat::Capabilities) -> String {
+fn describe(window: &Window) -> String {
+    let found = window.capabilities();
     [
         ("fractional", found.fractional_scale),
         ("viewport", found.viewporter),
         ("decorations", found.server_side_decorations),
+        // Stated rather than inferred from the absence above: "why has this
+        // window a title bar here and not there" is a question that should be
+        // answerable from one line of a bug report.
+        ("own-frame", window.needs_own_frame()),
         ("keyboard", found.keyboard),
         ("pointer", found.pointer),
         ("clipboard", found.clipboard),
@@ -338,7 +343,7 @@ impl App {
         let theme = if options.dark { Theme::dark() } else { Theme::light() };
         let logical = window.logical();
         let scale_120 = window.scale_120();
-        let capabilities = describe(window.capabilities());
+        let capabilities = describe(&window);
         if std::env::var_os("SKERRY_GLOBALS").is_some() {
             // Every interface the compositor advertises, with its version.
             // ADR 0007 says capabilities are probed rather than compiled in; this

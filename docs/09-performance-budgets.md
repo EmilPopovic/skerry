@@ -90,6 +90,20 @@ before, and it is a real cost the old harness was constructed not to see:
 
 `skerry --bench` reports it as its own row so it cannot be averaged away.
 
+**Cold start on the NVIDIA proprietary driver is twice as slow, and it is all
+the driver.** Measured under a nested GNOME on the same machine, six sequential
+runs after a warm-up: **211, 220, 220, 241, 220 ms**, of which `wgpu` device
+setup is **193–220 ms** and everything of ours is about 20 ms — a window in 1–3
+ms, fonts in 8–20 ms, the first frame in 2.4–5.8 ms. Against 92.5 ms best on
+RADV with the same code. The first run against a freshly started compositor was
+999 ms with 783 ms of it inside `Window::open`, which is the compositor settling
+rather than a driver and is recorded as an outlier with a cause.
+
+That closes Spike A's NVIDIA arm, which was owed, and it says something the AMD
+number could not: **the cold-start row is a driver number wherever it is taken.**
+A persisted pipeline cache and a first frame from a software buffer are the two
+remaining levers, and neither is ours to take inside `wgpu`.
+
 **Cold start misses, and 67–113 ms of it is the Vulkan loader.** Attributed:
 `wgpu::Instance::new` is 67–113 ms, `request_device` 19–25 ms, surface
 configuration 2–3 ms, and shader plus pipeline creation **1.3–2.2 ms**. Our own

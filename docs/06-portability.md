@@ -170,7 +170,31 @@ surface larger than the window with `xdg_surface.set_window_geometry` naming the
 part that is the window, which is also where a comfortable resize target beyond
 the edge would live. Six pixels inside the frame is what there is today.
 
-Owed: none of this is a real GNOME *session*. Under a nested, headless mutter the
-GL renderer refuses the drawing surface's dmabuf — `failed to import supplied
-dmabufs` — and kills the connection. That may be the nested software path rather
-than anything about GNOME, and the way to find out is a real session on this GPU.
+## A hybrid machine can put the client and the compositor on different GPUs
+
+The nested mutter killed the connection with `error 7: failed to import supplied
+dmabufs: Could not bind the given EGLImage to a CoglTexture2D`. It is not the
+nested path and it is not GNOME. Its own log says why:
+
+```
+Added device '/dev/dri/renderD128' (nvidia-drm) using no mode setting.
+Added device '/dev/dri/renderD129' (amdgpu) using no mode setting.
+GPU /dev/dri/renderD128 selected as primary
+```
+
+**mutter chose the discrete NVIDIA GPU and `wgpu` chose the integrated AMD one**,
+because [ADR 0003](adr/0003-wgpu-first-backend.md)'s adapter request asks for
+`LowPower` — a file manager is not a game. The buffer is then an AMD dmabuf handed
+to an NVIDIA EGL, and the import fails. Forcing the client onto the same GPU with
+`VK_LOADER_DRIVERS_SELECT=nvidia_icd.json` makes it work: the window maps, draws
+its own frame, and reports `own-frame` in its capability line.
+
+This is a real configuration and not a laboratory one — it is every hybrid laptop
+where the compositor has picked the discrete card. What is owed is the fix rather
+than the diagnosis: the adapter request should prefer the GPU the compositor is
+on, which on Wayland means reading the DRM device from `wp_linux_dmabuf_v1`'s
+`main_device` and matching it against the adapters' device ids. Until then, the
+symptom is a protocol error at start-up, and the window now says so and exits
+non-zero rather than spinning.
+
+Owed: none of this is a real GNOME *session*, only a headless one.
