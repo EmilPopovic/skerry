@@ -1,0 +1,19 @@
+# Spike D, arm 2. The comparison arm: what a general-purpose windowing crate can
+# reach through its public API alone. Standalone, not a workspace member, exempt
+# from the layering and dependency rules (spikes/README.md).
+#
+# `winit` is here as the subject of the measurement, not as a candidate for
+# `sk-plat`. The question is [ADR 0002](../../docs/adr/0002-own-platform-layer.md)'s
+# revisit trigger, and the answer has to be a table rather than an opinion.
+[package]
+name = "spike-d-platform-winit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+winit = "0.30.13"
+
+[profile.release]
+opt-level = 3
+debug = 1
