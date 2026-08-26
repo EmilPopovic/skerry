@@ -437,6 +437,40 @@ The gate for all three is the same and it is a test, not a threshold: `sk-plat`'
 own suite must pass with each of these absent, because on at least one shipping
 compositor each of them is.
 
+## What Spike E measured
+
+[Spike E](../spikes/e-operations/README.md) is a correctness spike, so almost all
+of its output is a pass or a limitation rather than a number. Three numbers belong
+here, and one row in [the correctness gates](#correctness-gates-that-are-not-negotiable)
+now has a test behind it.
+
+| Measure | Target | Measured | How |
+| --- | --- | --- | --- |
+| A 1 GiB sparse file with 12 KiB of data, copied | no growth | **12 KiB → 12 KiB** | the extent map from `SEEK_HOLE`/`SEEK_DATA` and `st_blocks`, not a byte comparison — a byte comparison passes while the file grows 87,000× |
+| `ENOSPC` mid-copy | no partial file | **fails at byte 307,200 of 1,048,576; the destination name does not exist** | a FUSE filesystem that refuses the 307,201st byte, every time |
+| Move within a filesystem | a rename | **0.011 ms** | `renameat2`, with `EXDEV` as the only reliable test of whether two paths share a filesystem |
+| Reflink instant on btrfs | measurable | **owed** | `FICLONE` is refused by every filesystem this machine can create |
+
+### The row that now has a test
+
+"Zero data loss across the filesystem matrix" was a gate with nothing behind it.
+It now has 46 checks, and the number that matters is not 37 passes — it is that
+**four defects were found by a check failing**, listed in
+[the spike](../spikes/e-operations/README.md#four-things-this-changed-three-of-them-in-our-own-code).
+Two of them pass a byte-for-byte comparison. One of them copies nothing at all to
+an external drive.
+
+### Why the ENOSPC number is exact
+
+A real full disk is a bad instrument: filling one is slow, and the byte at which
+it gives up depends on the allocator, so a regression would not be visible.
+Spike E ships a filesystem that fails at an offset it is told, which turns the
+gate from "we handle ENOSPC" into a number that a CI job can compare against.
+
+The same instrument produces a read error mid-copy, a destination that never
+accepts a whole buffer, and a destination that refuses extended attributes — three
+more paths that have no other way to be reached on demand.
+
 ## On measuring frame time honestly
 
 p99 over a realistic input trace, not an average over an idle window. The interesting

@@ -14,7 +14,7 @@ there is a codebase to rewrite.**
 
 ### Status
 
-Five of six resolved. Full results in each spike's own README; the summary tables in
+**All six resolved.** Full results in each spike's own README; the summary tables in
 [09-performance-budgets.md](09-performance-budgets.md) carry the numbers that became gates.
 
 | | Verdict |
@@ -23,7 +23,7 @@ Five of six resolved. Full results in each spike's own README; the summary table
 | [B](../spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
 | [C](../spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
 | [D](../spikes/d-platform-and-dnd/README.md) | **Go, three things to design.** Files land on disk from a drag we start; every Wayland pair passes and two of the peers pass on X11 too; four compositor limitations are documented and three of them report no error at all. `winit` reaches 5 of 9 capabilities, so [ADR 0002](adr/0002-own-platform-layer.md) is Accepted rather than pending |
-| E | **not yet run** |
+| [E](../spikes/e-operations/README.md) | **Go, reflink owed.** 37 pass, 0 fail, 6 limitations of 46 checks; `ENOSPC` clean at an exact byte. Four defects found that would have shipped. The reflink condition needs btrfs, which needs root — [with-root.sh](../spikes/e-operations/with-root.sh) is one command |
 | [F](../spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
 
 **Spike F is not one of the original five.** It exists because
@@ -48,6 +48,14 @@ The point of a spike is to move the architecture before there is code. Five thin
 - **Two budget rows are known-unmet** and one measures the wrong thing — see
   [09-performance-budgets.md](09-performance-budgets.md) and
   [12-measurement.md](12-measurement.md).
+- **`copy_file_range` cannot be used unconditionally.** It does not preserve
+  holes, and using it over a whole file turned a 1 GiB sparse file into a gigabyte
+  of zeros on ext4 and tmpfs. `sk-fs` copies per data extent, which keeps the
+  kernel-side copy and the sparseness at once.
+- **`RENAME_NOREPLACE` needs a fallback chain.** ntfs-3g refuses the flag, and an
+  engine that relies on it copies nothing at all to an external drive. `link` then
+  `unlink` is the atomic fallback; `stat` then `rename` is the last resort and has
+  to be reported as such, because it has a race.
 - **Three drag-and-drop capabilities are absent with no error attached** — a
   discarded primary selection, an unreported drag action, an undelivered
   `dnd_finished`. `sk-plat` cannot detect any of them, so M3's move operation must
@@ -102,6 +110,12 @@ integrity after each. This spike becomes the permanent torture matrix.
 
 > **Bar:** zero data loss across the matrix · `ENOSPC` handled cleanly mid-copy with no
 > partial file left behind · reflink measurably instant on btrfs.
+
+**Resolved: Go, with the reflink condition owed.** Two of the three conditions are met
+exactly; the third needs btrfs, and no machine available can create one without root.
+Full result in [e-operations](../spikes/e-operations/README.md). Unlike every other spike
+its code stays: the matrix is a CI job today, it discovers what to test rather than being
+told, and it ships a filesystem that fails at an exact offset on demand.
 
 ---
 
@@ -191,17 +205,23 @@ Spike A returned its number: the differentiator is reachable on this stack, with
 headroom on the frame budget and the GPU consuming 0.02 ms of an 8 ms frame. The plan above
 is sound and the rest is ordinary engineering.
 
-**The next artifact is Spike E**, the last of the six and the one that gates M3. It is
-also the one whose failure mode is unbounded: every other spike risks a missed budget,
-and this one risks losing somebody's files.
+**Phase 0 is over. The next artifact is `crates/` — M0, the platform layer.**
 
-Spike D closed the highest-uncertainty item. `sk-plat` can be written, ADR 0002 is
-settled, and M0 now has four ordering invariants to hold and three absent capabilities to
-be correct without — all of them listed in
-[d-platform-and-dnd](../spikes/d-platform-and-dnd/README.md#what-this-changed) with the
-measurement that produced each one.
+All six spikes are resolved and none of them said no. What they changed is listed above:
+eight architectural moves, two known-unmet budget rows, and a set of invariants that M0
+and M3 have to hold rather than rediscover.
 
-Five measurements are still owed and none blocks a spike:
+Two of those are worth repeating here because they are the ones a milestone can quietly
+skip. M0 owes four ordering invariants from
+[Spike D](../spikes/d-platform-and-dnd/README.md#what-this-changed) — devices before the
+first commit, the offer surviving `leave`, a fresh serial per selection, a source that
+keeps dispatching after the drop — each of which was a silent failure that looked like a
+compositor bug. M3 owes the copy engine's two, from
+[Spike E](../spikes/e-operations/README.md#four-things-this-changed-three-of-them-in-our-own-code):
+`copy_file_range` per extent, and a placement fallback chain. Both sets are already
+written as tests; what M0 and M3 have to do is not delete them.
+
+Six measurements are still owed and none blocks M0:
 
 - **An Intel integrated GPU** for Spike A. Absent from every machine available, and the
   most common Linux GPU.
@@ -214,3 +234,5 @@ Five measurements are still owed and none blocks a spike:
   rather than Wayland's, and mutter and kwin would say which.
 - **Dolphin**, for the Qt half of rule 5. Konsole and Qt Designer stand in for it today,
   and KIO's drop handling is its own dialect.
+- **btrfs and xfs**, for Spike E's reflink condition, plus exFAT and NFS. One command with
+  a password: `sudo ./spikes/e-operations/with-root.sh`.
