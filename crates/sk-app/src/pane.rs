@@ -10,7 +10,7 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use sk_fs::{META_CHUNK, MetaRow};
-use sk_model::{EntryId, Flags, Listing, Problem, Selection, Sort, SortColumn};
+use sk_model::{BitSet, EntryId, Flags, Listing, Problem, Selection, Sort, SortColumn};
 use sk_util::{Cancel, Lane, Pool, WakeHandle};
 
 /// What a directory read reports back.
@@ -32,6 +32,17 @@ pub enum Update {
     },
     /// Metadata for one slice of the names.
     Meta(Vec<MetaRow>),
+    /// How big a directory is, so far.
+    Size {
+        /// Which directory.
+        id: EntryId,
+        /// Bytes counted so far.
+        bytes: u64,
+        /// Whether the walk finished.
+        complete: bool,
+        /// Whether anything under it could not be counted.
+        partial: bool,
+    },
     /// A display order computed on a job.
     Ordered {
         /// The permutation.
@@ -62,6 +73,13 @@ pub struct Jobs {
     /// Where updates go.
     pub sender: Sender<Message>,
 }
+
+/// Directories remembered for Back and Forward.
+///
+/// A session that visits more than this has stopped using Back as an undo for a
+/// wrong turn and started using it as a log, which is what Recents is for. The
+/// oldest entry is dropped rather than the navigation refused.
+const HISTORY_DEPTH: usize = 128;
 
 /// Entries a reorder will do on the calling thread.
 ///
@@ -97,6 +115,11 @@ pub struct Pane {
     /// Microseconds for the last reorder.
     pub sort_us: u64,
 
+    /// Where Back goes, newest last.
+    back: Vec<PathBuf>,
+    /// Where Forward goes, newest last. Cleared by any fresh navigation.
+    forward: Vec<PathBuf>,
+
     cancel: Cancel,
     generation: u64,
     /// Which lane this directory's device belongs on, probed once per read.
@@ -111,6 +134,12 @@ pub struct Pane {
     reorder_owed: bool,
     /// Whether a sort job is in flight, so a second one is not queued behind it.
     sorting: bool,
+    /// Directories a size walk has already been started for.
+    ///
+    /// A bitset over entry ids rather than a set of paths: measuring is
+    /// idempotent but not free, and scrolling a row off screen and back must not
+    /// walk the tree again.
+    measuring: BitSet,
     /// A name to put the cursor on once the names land.
     ///
     /// Set by [`Pane::go_up`], because coming out of a folder should leave the
@@ -136,6 +165,8 @@ impl Pane {
             names_us: 0,
             meta_us: 0,
             sort_us: 0,
+            back: Vec::new(),
+            forward: Vec::new(),
             cancel: Cancel::new(),
             generation: 0,
             lane: Lane::Parallel,
@@ -144,13 +175,60 @@ impl Pane {
             meta_started: None,
             reorder_owed: false,
             sorting: false,
+            measuring: BitSet::default(),
             select_after_load: None,
         }
     }
 
-    /// Navigates to `path` and starts reading it.
+    /// Navigates to `path`, remembering where it came from.
     pub fn open(&mut self, path: PathBuf, jobs: &Jobs) {
-        self.path = path;
+        if path == self.path {
+            return;
+        }
+        // A fresh navigation ends the forward branch, which is what Back and
+        // Forward mean everywhere a person has met them before.
+        self.forward.clear();
+        self.back.push(std::mem::replace(&mut self.path, path));
+        if self.back.len() > HISTORY_DEPTH {
+            self.back.remove(0);
+        }
+        self.arrive(jobs);
+    }
+
+    /// Goes back, if there is anywhere to go. Returns whether it moved.
+    pub fn go_back(&mut self, jobs: &Jobs) -> bool {
+        let Some(previous) = self.back.pop() else { return false };
+        self.forward.push(std::mem::replace(&mut self.path, previous));
+        // Coming back to a directory should land the cursor on whatever was left
+        // from, the same way going up does.
+        self.select_after_load = leaf_of(self.forward.last());
+        self.arrive(jobs);
+        true
+    }
+
+    /// Goes forward, if Back was used. Returns whether it moved.
+    pub fn go_forward(&mut self, jobs: &Jobs) -> bool {
+        let Some(next) = self.forward.pop() else { return false };
+        self.back.push(std::mem::replace(&mut self.path, next));
+        self.arrive(jobs);
+        true
+    }
+
+    /// Whether Back and Forward have anywhere to go, for a menu or a toolbar.
+    #[must_use]
+    pub fn can_go(&self) -> (bool, bool) {
+        (!self.back.is_empty(), !self.forward.is_empty())
+    }
+
+    /// Goes to `$HOME`, or does nothing if the environment has none.
+    pub fn go_home(&mut self, jobs: &Jobs) {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            self.open(home, jobs);
+        }
+    }
+
+    /// Resets everything that is about the old directory, then reads the new one.
+    fn arrive(&mut self, jobs: &Jobs) {
         self.listing = Listing::default();
         self.selection = Selection::default();
         self.scroll.to(0.0);
@@ -253,6 +331,22 @@ impl Pane {
         }
     }
 
+    /// Re-reads the current path, keeping the selection and the scroll position.
+    ///
+    /// What a change notification triggers, as distinct from [`Pane::reload`]:
+    /// a file appearing must not move the cursor or scroll the view, because the
+    /// person may be reading a row at the time. The cursor is restored by name.
+    pub fn refresh(&mut self, jobs: &Jobs) {
+        self.select_after_load = self
+            .selection
+            .cursor()
+            .map(|id| self.listing.name(id).to_owned())
+            .or_else(|| self.select_after_load.take());
+        let offset = self.scroll.offset();
+        self.reload(jobs);
+        self.scroll.to(offset);
+    }
+
     /// Goes to the parent directory, keeping the child selected.
     pub fn go_up(&mut self, jobs: &Jobs) {
         let Some(parent) = self.path.parent().map(Path::to_path_buf) else { return };
@@ -274,6 +368,7 @@ impl Pane {
                 self.names_us = elapsed_us;
                 self.sort_us = sort_us;
                 self.selection.fit(self.listing.len());
+                self.measuring = BitSet::new(self.listing.len());
                 self.restore_cursor();
                 self.dispatch_metadata(&names, jobs);
             }
@@ -298,6 +393,9 @@ impl Pane {
                     }
                 }
             }
+            Update::Size { id, bytes, complete, partial } => {
+                self.listing.set_recursive_size(id, bytes, complete, partial);
+            }
             Update::Ordered { order, elapsed_us } => {
                 self.sorting = false;
                 self.sort_us = elapsed_us;
@@ -311,6 +409,42 @@ impl Pane {
             }
         }
         true
+    }
+
+    /// Starts measuring any directory in `rows` that has not been measured yet.
+    ///
+    /// Driven by the viewport, not by the listing: a directory of ten thousand
+    /// folders would otherwise start ten thousand recursive walks to answer a
+    /// question about the forty a person can see. Called every frame; the bitset
+    /// makes all but the first call for a row free.
+    pub fn measure_visible(&mut self, rows: std::ops::Range<usize>, jobs: &Jobs) {
+        for row in rows {
+            let Some(id) = self.listing.at(row) else { continue };
+            if !self.listing.flags(id).has(Flags::DIR) || self.measuring.contains(id.index()) {
+                continue;
+            }
+            self.measuring.insert(id.index());
+
+            let path = self.path.join(self.listing.name(id));
+            let sender = jobs.sender.clone();
+            let wake = jobs.wake.clone();
+            let generation = self.generation;
+            jobs.pool.spawn(self.lane, self.cancel.clone(), move |cancel| {
+                sk_index::measure(&path, cancel, &mut |progress| {
+                    let update = Update::Size {
+                        id,
+                        bytes: progress.bytes,
+                        complete: progress.complete,
+                        partial: progress.partial,
+                    };
+                    if sender.send(Message { generation, update }).is_err() {
+                        cancel.cancel();
+                        return;
+                    }
+                    wake.wake();
+                });
+            });
+        }
     }
 
     /// Rebuilds the display order, on this thread or on a job.
@@ -466,6 +600,11 @@ impl Pane {
             }
         }
     }
+}
+
+/// The final component of a path, for putting a cursor back on it.
+fn leaf_of(path: Option<&PathBuf>) -> Option<String> {
+    path?.file_name().map(|name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

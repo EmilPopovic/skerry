@@ -119,6 +119,21 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 
     let (mut pane, _) = read_fully(&request.path, &jobs, &updates);
 
+    // Folder totals are measured for what is on screen, and a capture is all of
+    // it. Bounded by the same deadline as the read, because a capture of `/` is
+    // not a reason to walk the whole disk.
+    let visible = 0..pane.listing.rows().min(120);
+    pane.measure_visible(visible, &jobs);
+    let deadline = Instant::now() + READ_DEADLINE;
+    while Instant::now() < deadline {
+        match updates.recv_timeout(Duration::from_millis(20)) {
+            Ok(message) => {
+                pane.apply(message, &jobs);
+            }
+            Err(_) => break,
+        }
+    }
+
     for row in SELECTED {
         if let Some(id) = pane.listing.at(row) {
             pane.selection.toggle(id);
@@ -130,6 +145,12 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     if pane.listing.rows() > HOVERED {
         pane.hover = Some(HOVERED);
     }
+
+    // The overlay reads the command registry, so a capture of it builds one.
+    let keys_rows = request.keys.then(|| {
+        let registry = crate::commands::registry();
+        crate::commands::overlay_rows(&registry)
+    });
 
     let theme = if request.dark { Theme::dark() } else { Theme::light() };
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
@@ -172,8 +193,13 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 theme: &theme,
                 scale,
             };
-            let chrome =
-                Chrome { keys: request.keys, stats: request.stats, typed: None, band: None };
+            let chrome = Chrome {
+                keys: keys_rows.as_deref(),
+                stats: request.stats,
+                typed: None,
+                band: None,
+                watching: true,
+            };
             view::draw(&mut painter, &pane, &layout, now, &chrome, &mut diagnostics);
         }
         stats = renderer.draw(&mut list, &mut fonts, theme.palette.background);

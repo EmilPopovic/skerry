@@ -51,6 +51,15 @@ impl Flags {
     pub const BROKEN: Self = Self(1 << 4);
     /// Neither a file nor a directory: a socket, fifo, or device node.
     pub const SPECIAL: Self = Self(1 << 5);
+    /// A recursive size has been computed for this directory, complete or not.
+    pub const SIZE_MEASURED: Self = Self(1 << 7);
+    /// The recursive size finished. Without this it is a lower bound that is
+    /// still climbing, and the view draws it dimmed to say so.
+    pub const SIZE_COMPLETE: Self = Self(1 << 8);
+    /// Something under it could not be counted: an unreadable subdirectory, or
+    /// one on another filesystem.
+    pub const SIZE_PARTIAL: Self = Self(1 << 9);
+
     /// `statx` has not landed yet, so size and mtime are not yet real.
     ///
     /// The view draws these rows immediately with the name it has, because
@@ -101,6 +110,13 @@ pub struct Listing {
     size: Vec<u64>,
     mtime: Vec<i64>,
     flags: Vec<Flags>,
+    /// Recursive size, for directories that have been measured.
+    ///
+    /// Eight bytes an entry for a column only directories use. A parallel array
+    /// rather than a map because the sort reads it per comparison, and a hash
+    /// lookup per comparison is the access pattern
+    /// [docs/12-measurement.md](../../../docs/12-measurement.md) says costs 30×.
+    recursive: Vec<u64>,
     /// The rows a view walks, in display order.
     order: Vec<EntryId>,
     /// Entries still waiting for `statx`, counted rather than searched for.
@@ -141,6 +157,7 @@ impl Listing {
             size: Vec::with_capacity(capacity),
             mtime: Vec::with_capacity(capacity),
             flags: Vec::with_capacity(capacity),
+            recursive: Vec::new(),
             order: Vec::with_capacity(capacity),
             pending: 0,
         }
@@ -161,6 +178,56 @@ impl Listing {
         self.order.push(id);
         self.pending += 1;
         id
+    }
+
+    /// Records how big a directory is, counting everything under it.
+    ///
+    /// Called repeatedly for one entry as the walk progresses, which is why it
+    /// takes the total rather than an increment: a partial report that arrives
+    /// after a later one must not make the number go backwards.
+    pub fn set_recursive_size(&mut self, id: EntryId, bytes: u64, complete: bool, partial: bool) {
+        let index = id.index();
+        if index >= self.name.len() {
+            return;
+        }
+        if self.recursive.len() < self.name.len() {
+            // Allocated on first use: a listing whose directories are never
+            // measured never pays for the column.
+            self.recursive.resize(self.name.len(), 0);
+        }
+        self.recursive[index] = self.recursive[index].max(bytes);
+        self.flags[index] = self.flags[index].with(Flags::SIZE_MEASURED);
+        if complete {
+            self.flags[index] = self.flags[index].with(Flags::SIZE_COMPLETE);
+        }
+        if partial {
+            self.flags[index] = self.flags[index].with(Flags::SIZE_PARTIAL);
+        }
+    }
+
+    /// The recursive size of a directory, and whether the walk finished.
+    #[must_use]
+    pub fn recursive_size(&self, id: EntryId) -> Option<(u64, bool)> {
+        if !self.flags(id).has(Flags::SIZE_MEASURED) {
+            return None;
+        }
+        let bytes = self.recursive.get(id.index()).copied().unwrap_or(0);
+        Some((bytes, self.flags(id).has(Flags::SIZE_COMPLETE)))
+    }
+
+    /// What the size column sorts and displays for an entry.
+    ///
+    /// A directory's own `st_size` is the size of its inode — 4,096 on most
+    /// filesystems, whatever it contains — so it is never the answer. An
+    /// unmeasured directory sorts as zero, which keeps directories together at
+    /// one end rather than scattering them through the files.
+    #[must_use]
+    pub fn sort_size(&self, id: EntryId) -> u64 {
+        if self.flags(id).has(Flags::DIR) {
+            self.recursive_size(id).map_or(0, |(bytes, _)| bytes)
+        } else {
+            self.size(id)
+        }
     }
 
     /// Fills in what `statx` returned, clearing [`Flags::META_PENDING`].
@@ -296,9 +363,13 @@ impl Listing {
             .filter(|id| show_hidden || !self.flags[id.index()].has(Flags::HIDDEN))
             .collect();
 
-        let (names, name_refs, size, mtime, flags) =
-            (&self.names, &self.name, &self.size, &self.mtime, &self.flags);
+        let (names, name_refs, mtime, flags) = (&self.names, &self.name, &self.mtime, &self.flags);
         let name_of = |index: usize| names.get(name_refs[index]);
+        // Resolved once rather than per comparison: a sort does O(n log n)
+        // comparisons and this is O(n), so the branch on "is it a directory"
+        // happens two hundred thousand times instead of three million.
+        let sizes: Vec<u64> =
+            (0..self.name.len()).map(|index| self.sort_size(EntryId(index as u32))).collect();
 
         order.sort_unstable_by(|a, b| {
             let (a, b) = (a.index(), b.index());
@@ -311,7 +382,7 @@ impl Listing {
             let primary = match sort.column {
                 SortColumn::Name => natural_cmp(name_of(a), name_of(b)),
                 SortColumn::Size => {
-                    size[a].cmp(&size[b]).then_with(|| natural_cmp(name_of(a), name_of(b)))
+                    sizes[a].cmp(&sizes[b]).then_with(|| natural_cmp(name_of(a), name_of(b)))
                 }
                 SortColumn::Modified => {
                     mtime[a].cmp(&mtime[b]).then_with(|| natural_cmp(name_of(a), name_of(b)))

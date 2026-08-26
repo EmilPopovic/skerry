@@ -25,6 +25,7 @@
 mod app;
 mod bench;
 mod capture;
+mod commands;
 mod frames;
 mod keys;
 mod layout;

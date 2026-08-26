@@ -108,7 +108,8 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 theme: &theme,
                 scale,
             };
-            let chrome = Chrome { keys: false, stats: false, typed: None, band: None };
+            let chrome =
+                Chrome { keys: None, stats: false, typed: None, band: None, watching: true };
             view::draw(&mut painter, &pane, &layout, now, &chrome, &mut diagnostics);
         }
         let build_us = started.elapsed().as_micros() as u64;

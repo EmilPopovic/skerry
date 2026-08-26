@@ -93,3 +93,23 @@ stats.shaping = shaped runs · hits / misses
 stats.listing = names / metadata / sort
 stats.pool = pool workers · jobs
 stats.surface = surface
+
+# Command groups.
+group.navigate = Go
+group.select = Select
+group.view = View
+group.file = File
+group.help = Help
+
+# Commands added with the registry.
+action.back = Back
+action.forward = Forward
+action.home = Home folder
+
+# Freshness. inotify does not work on NFS at all — no event and no error — so a
+# listing there is a snapshot and says so rather than implying otherwise.
+status.unwatched = · not watching for changes
+
+# A folder total with something missing from it: an unreadable subdirectory, or
+# one on another filesystem. The number is a lower bound and says so.
+size.atleast = ≥ {0}

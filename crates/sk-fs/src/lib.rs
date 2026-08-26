@@ -16,6 +16,8 @@
 
 pub mod device;
 pub mod scan;
+pub mod watch;
 
 pub use device::{Device, lane_for};
 pub use scan::{META_CHUNK, MetaRow, Names, metadata, names};
+pub use watch::{Change, Watcher, can_watch};

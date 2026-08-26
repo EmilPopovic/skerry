@@ -1,0 +1,18 @@
+[package]
+name = "sk-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Read by tools/check-layering.py. A crate may depend on lower levels only.
+[package.metadata.skerry]
+level = 2
+
+[dependencies]
+sk-model = { workspace = true }
+sk-util = { workspace = true }
+rustix = { workspace = true }
+
+[lints]
+workspace = true

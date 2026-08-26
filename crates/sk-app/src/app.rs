@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use sk_cmd::Registry;
 use sk_gpu::{DrawList, FrameStats, Renderer};
 use sk_model::{Flags, Problem, ProblemKind, SortColumn};
 use sk_plat::{Button, Event, Point, Size, Window, WindowConfig};
@@ -12,7 +13,7 @@ use sk_ui::{Painter, Theme};
 use sk_util::{Pool, Waker};
 
 use crate::frames::Frames;
-use crate::keys::{self, Action};
+use crate::keys;
 use crate::layout::Layout;
 use crate::pane::{Jobs, Message, Pane};
 use crate::view::{self, Chrome, Diagnostics};
@@ -23,6 +24,16 @@ use crate::view::{self, Chrome, Diagnostics};
 /// coming back to the keyboard starts a fresh jump rather than extending an
 /// abandoned one.
 const TYPE_AHEAD_WINDOW: Duration = Duration::from_secs(1);
+
+/// The soonest a change notification may cause another read.
+///
+/// The watcher already coalesces a burst into one notification every 16 ms; this
+/// is the second floor, and it is about the *read* rather than the events. A
+/// download writing continuously would otherwise re-read the directory sixty
+/// times a second, which for two hundred thousand entries is a quarter of a
+/// second of work per notification. A quarter-second floor is well under what
+/// anyone notices and two orders of magnitude cheaper.
+const REFRESH_FLOOR: Duration = Duration::from_millis(250);
 
 /// How far the pointer must travel before a press becomes a rubber band.
 ///
@@ -49,10 +60,25 @@ pub struct App {
     cache: LayoutCache,
     list: DrawList,
     theme: Theme,
-    pane: Pane,
+    /// Visible to `crate::commands`, which is where every action on it lives.
+    pub(crate) pane: Pane,
     jobs: Jobs,
     waker: Waker,
     updates: Receiver<Message>,
+    watcher: sk_fs::Watcher,
+    changes: Receiver<sk_fs::Change>,
+    /// The directory the watcher is currently on.
+    ///
+    /// Compared against the pane's path every pass rather than retargeted by
+    /// each navigation command, so a new way of navigating cannot forget to do
+    /// it — the same reasoning as the `Waker` that `pump` now owns.
+    watch_target: PathBuf,
+    /// When the last change-driven read was started.
+    refreshed: Instant,
+    /// A change arrived inside [`REFRESH_FLOOR`] and is still owed a read.
+    refresh_owed: bool,
+    /// Whether the watcher managed to arm on the current directory.
+    watching: bool,
     layout: Layout,
     frames: Frames,
     last: FrameStats,
@@ -100,6 +126,12 @@ impl App {
         let mut pane = Pane::new(options.path);
         pane.reload(&jobs);
 
+        let (watch_sender, changes) = mpsc::channel();
+        let watcher = sk_fs::Watcher::new(watch_sender, waker.handle())
+            .map_err(|error| Problem::plain(ProblemKind::NoDisplay, format!("inotify: {error}")))?;
+        watcher.watch(pane.path.clone());
+        let watch_target = pane.path.clone();
+
         let gpu_started = Instant::now();
         let physical = window.physical();
         // SAFETY: the handles come from `window`, which this struct owns and
@@ -135,6 +167,12 @@ impl App {
             jobs,
             waker,
             updates,
+            watcher,
+            changes,
+            watch_target,
+            refreshed: Instant::now(),
+            refresh_owed: false,
+            watching: true,
             frames: Frames::new(),
             last: FrameStats::default(),
             pending: Vec::with_capacity(64),
@@ -159,13 +197,27 @@ impl App {
 
     /// Runs until the window closes.
     pub fn run(&mut self) {
+        // The registry lives here rather than in `App`, so that running a command
+        // can take `&mut App` without the registry being part of what is
+        // borrowed. It is built once; a command's `run` is a plain function
+        // pointer, so there is nothing to keep warm.
+        let commands = crate::commands::registry();
+        if !commands.problems().is_empty() {
+            // A conflicting binding is a bug and a test fails on it, but a
+            // release build that meets one should say so rather than silently
+            // giving a key to whichever command registered first.
+            for problem in commands.problems() {
+                eprintln!("skerry: keymap: {problem}");
+            }
+        }
         while !self.closing && !self.window.close_requested() {
             self.window.pump(Some(&self.waker), self.timeout());
-            self.drain_platform();
+            self.drain_platform(&commands);
             self.drain_jobs();
+            self.drain_changes();
             self.advance();
             if self.dirty {
-                self.render();
+                self.render(&commands);
                 self.dirty = false;
             }
         }
@@ -181,20 +233,24 @@ impl App {
         if self.dirty {
             return Some(Duration::ZERO);
         }
-        if !self.typed.is_empty() {
-            return Some(TYPE_AHEAD_WINDOW.saturating_sub(self.typed_at.elapsed()));
-        }
-        None
+        // A read that the floor deferred owes a wake-up, or it would wait for
+        // whatever the user does next.
+        let deadlines = [
+            (!self.typed.is_empty())
+                .then(|| TYPE_AHEAD_WINDOW.saturating_sub(self.typed_at.elapsed())),
+            self.refresh_owed.then(|| REFRESH_FLOOR.saturating_sub(self.refreshed.elapsed())),
+        ];
+        deadlines.into_iter().flatten().min()
     }
 
-    fn drain_platform(&mut self) {
+    fn drain_platform(&mut self, commands: &Registry<Self>) {
         // The queue is moved out and back rather than collected, so a frame with
         // forty events does not allocate.
         let mut pending = std::mem::take(&mut self.pending);
         pending.clear();
         pending.extend(self.window.drain_events());
         for event in &pending {
-            self.handle(event);
+            self.handle(event, commands);
         }
         self.pending = pending;
     }
@@ -208,6 +264,30 @@ impl App {
         }
     }
 
+    /// Applies change notifications, at most one read per [`REFRESH_FLOOR`].
+    fn drain_changes(&mut self) {
+        let mut owed = self.refresh_owed;
+        while let Ok(change) = self.changes.try_recv() {
+            // Every one of the three means the same thing to a listing: read it
+            // again. `Vanished` reads it again too, and the read fails with a
+            // message that says the directory is gone — which is the honest
+            // thing to show, rather than the entries it used to have.
+            let _ = change;
+            owed = true;
+        }
+        if !owed {
+            return;
+        }
+        if self.refreshed.elapsed() < REFRESH_FLOOR {
+            self.refresh_owed = true;
+            return;
+        }
+        self.refresh_owed = false;
+        self.refreshed = Instant::now();
+        self.pane.refresh(&self.jobs);
+        self.dirty = true;
+    }
+
     fn advance(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame).as_secs_f32();
@@ -219,9 +299,20 @@ impl App {
             self.typed.clear();
             self.dirty = true;
         }
+        if self.watch_target != self.pane.path {
+            self.watch_target = self.pane.path.clone();
+            self.watcher.watch(self.watch_target.clone());
+        }
+        // Read every pass rather than once at arm time: the thread establishes the
+        // watch asynchronously, so the answer is not known when `watch` returns.
+        let armed = self.watcher.armed();
+        if armed != self.watching {
+            self.watching = armed;
+            self.dirty = true;
+        }
     }
 
-    fn handle(&mut self, event: &Event) {
+    fn handle(&mut self, event: &Event, commands: &Registry<Self>) {
         match event {
             Event::Resized { logical, physical, scale_120 } => {
                 self.logical = *logical;
@@ -233,7 +324,7 @@ impl App {
             }
             Event::CloseRequested => self.closing = true,
             Event::Focused(_) => self.dirty = true,
-            Event::KeyDown(key) => self.key(key),
+            Event::KeyDown(key) => self.key(key, commands),
             Event::PointerMoved { position, .. } => self.moved(*position),
             Event::PointerLeft => {
                 if self.pane.hover.take().is_some() {
@@ -257,9 +348,12 @@ impl App {
         }
     }
 
-    fn key(&mut self, event: &sk_plat::KeyEvent) {
-        if let Some(action) = keys::resolve(event) {
-            self.act(action);
+    fn key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) {
+        if let Some(command) = commands.resolve(event) {
+            // A disabled command consumes its key and does nothing, which is the
+            // same thing a dimmed menu item does. Falling through to type-ahead
+            // instead would make `Alt ←` with no history type an arrow.
+            commands.run(command, self);
             self.dirty = true;
             return;
         }
@@ -273,66 +367,103 @@ impl App {
         }
     }
 
-    #[allow(clippy::too_many_lines, reason = "one arm per action; splitting it hides the table")]
-    fn act(&mut self, action: Action) {
-        let page = (self.layout.body.height / self.theme.metrics.row_height).floor().max(1.0);
-        match action {
-            Action::CursorUp => {
-                self.pane.move_cursor(-1, false);
-                self.reveal_cursor();
-            }
-            Action::CursorDown => {
-                self.pane.move_cursor(1, false);
-                self.reveal_cursor();
-            }
-            Action::ExtendUp => {
-                self.pane.move_cursor(-1, true);
-                self.reveal_cursor();
-            }
-            Action::ExtendDown => {
-                self.pane.move_cursor(1, true);
-                self.reveal_cursor();
-            }
-            Action::PageUp => {
-                self.pane.move_cursor(-(page as isize), false);
-                self.reveal_cursor();
-            }
-            Action::PageDown => {
-                self.pane.move_cursor(page as isize, false);
-                self.reveal_cursor();
-            }
-            Action::Top => {
-                self.pane.cursor_to(0, false);
-                self.pane.scroll.to(0.0);
-            }
-            Action::Bottom => {
-                let last = self.pane.listing.rows().saturating_sub(1);
-                self.pane.cursor_to(last, false);
-                self.reveal_cursor();
-            }
-            Action::Open => {
-                self.pane.open_focused(&self.jobs);
-            }
-            Action::Parent => self.pane.go_up(&self.jobs),
-            Action::SelectAll => self.pane.selection.select_all(),
-            Action::ClearSelection => {
-                self.pane.selection.clear();
-                self.typed.clear();
-                self.show_keys = false;
-                self.show_stats = false;
-            }
-            Action::ToggleHidden => self.pane.toggle_hidden(&self.jobs),
-            Action::Reload => self.pane.reload(&self.jobs),
-            Action::ToggleTheme => {
-                self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
-                self.layout = Layout::compute(self.logical, &self.theme.metrics);
-            }
-            Action::ShowKeys => self.show_keys = !self.show_keys,
-            Action::ShowStats => self.show_stats = !self.show_stats,
-            Action::SortName => self.pane.sort_by(SortColumn::Name, &self.jobs),
-            Action::SortSize => self.pane.sort_by(SortColumn::Size, &self.jobs),
-            Action::SortModified => self.pane.sort_by(SortColumn::Modified, &self.jobs),
-        }
+    // ------------------------------------------------------------------
+    // What the commands in `crate::commands` do. One method each, so the
+    // registry holds function pointers and nothing else.
+    // ------------------------------------------------------------------
+
+    /// Opens the focused entry, if it is something that opens.
+    pub(crate) fn open_focused(&mut self) {
+        self.pane.open_focused(&self.jobs);
+    }
+
+    /// Goes to the parent directory.
+    pub(crate) fn go_up(&mut self) {
+        self.pane.go_up(&self.jobs);
+    }
+
+    /// Goes back to where the last navigation came from.
+    pub(crate) fn go_back(&mut self) {
+        self.pane.go_back(&self.jobs);
+    }
+
+    /// Undoes a Back.
+    pub(crate) fn go_forward(&mut self) {
+        self.pane.go_forward(&self.jobs);
+    }
+
+    /// Goes to `$HOME`.
+    pub(crate) fn go_home(&mut self) {
+        self.pane.go_home(&self.jobs);
+    }
+
+    /// Re-reads the current directory.
+    pub(crate) fn reload(&mut self) {
+        self.pane.reload(&self.jobs);
+    }
+
+    /// Moves the cursor by `delta` rows, extending the selection if asked.
+    pub(crate) fn move_cursor(&mut self, delta: isize, extend: bool) {
+        self.pane.move_cursor(delta, extend);
+        self.reveal_cursor();
+    }
+
+    /// Moves the cursor by a screenful.
+    pub(crate) fn move_page(&mut self, direction: isize) {
+        let rows = (self.layout.body.height / self.theme.metrics.row_height).floor().max(1.0);
+        self.pane.move_cursor(direction * rows as isize, false);
+        self.reveal_cursor();
+    }
+
+    /// Moves the cursor to the first row.
+    pub(crate) fn go_top(&mut self) {
+        self.pane.cursor_to(0, false);
+        self.pane.scroll.to(0.0);
+    }
+
+    /// Moves the cursor to the last row.
+    pub(crate) fn go_bottom(&mut self) {
+        let last = self.pane.listing.rows().saturating_sub(1);
+        self.pane.cursor_to(last, false);
+        self.reveal_cursor();
+    }
+
+    /// Clears the selection, the type-ahead buffer and any overlay.
+    ///
+    /// One key that means "never mind", whatever is going on. Escape doing three
+    /// different things depending on state is worse than Escape doing all of
+    /// them.
+    pub(crate) fn clear(&mut self) {
+        self.pane.selection.clear();
+        self.typed.clear();
+        self.show_keys = false;
+        self.show_stats = false;
+    }
+
+    /// Shows or hides dotfiles.
+    pub(crate) fn toggle_hidden(&mut self) {
+        self.pane.toggle_hidden(&self.jobs);
+    }
+
+    /// Swaps the palette.
+    pub(crate) fn toggle_theme(&mut self) {
+        self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
+        self.layout = Layout::compute(self.logical, &self.theme.metrics);
+    }
+
+    /// Sorts by `column`, reversing if it is already the sort column.
+    pub(crate) fn sort_by(&mut self, column: SortColumn) {
+        self.pane.sort_by(column, &self.jobs);
+    }
+
+    /// Shows or hides the keyboard list.
+    pub(crate) fn toggle_keys(&mut self) {
+        self.show_keys = !self.show_keys;
+    }
+
+    /// Shows or hides the frame statistics.
+    pub(crate) fn toggle_stats(&mut self) {
+        self.show_stats = !self.show_stats;
     }
 
     fn reveal_cursor(&mut self) {
@@ -482,7 +613,7 @@ impl App {
         None
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, commands: &Registry<Self>) {
         let physical = self.window.physical();
         if physical != self.renderer.size() {
             self.renderer.resize(physical);
@@ -495,6 +626,17 @@ impl App {
 
         let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
         self.pane.scroll.set_extent(content, self.layout.body.height);
+
+        // Folder sizes are measured for what is on screen, so the cost is bounded
+        // by the viewport rather than by the directory. Asked for here, once per
+        // frame, rather than by each thing that scrolls.
+        let visible = sk_ui::visible_rows(
+            self.pane.scroll.offset(),
+            self.layout.body.height,
+            self.theme.metrics.row_height,
+            self.pane.listing.rows(),
+        );
+        self.pane.measure_visible(visible, &self.jobs);
 
         let build_started = Instant::now();
         self.list.begin(physical);
@@ -517,14 +659,18 @@ impl App {
             adapter,
             backend,
             scale_120,
+            watching,
             ..
         } = self;
 
+        // Built only when the overlay is up, which is why it may allocate.
+        let rows = show_keys.then(|| crate::commands::overlay_rows(commands));
         let chrome = Chrome {
-            keys: *show_keys,
+            keys: rows.as_deref(),
             stats: *show_stats,
             typed: (!typed.is_empty()).then_some(typed.as_str()),
             band: *band,
+            watching: *watching,
         };
         let atlas = renderer.atlas_stats();
         let (hits, misses, _) = cache.stats();

@@ -11,7 +11,6 @@ use sk_text::Weight;
 use sk_ui::{Align, Painter, RunKey, TextStyle, format, visible_rows};
 
 use crate::frames::{BUDGET_US, Frames};
-use crate::keys::BINDINGS;
 use crate::layout::{Area, Layout};
 use crate::pane::Pane;
 
@@ -22,14 +21,23 @@ const COLUMN_MODIFIED: u8 = 2;
 
 /// What the overlays are showing.
 pub struct Chrome<'a> {
-    /// The keyboard list.
-    pub keys: bool,
+    /// The keyboard list: what to press, and what it does. `None` hides it.
+    ///
+    /// The rows come from the command registry rather than from a table beside
+    /// it, so the string on screen cannot describe a key that is not bound.
+    pub keys: Option<&'a [(String, String)]>,
     /// The frame statistics.
     pub stats: bool,
     /// The type-ahead buffer, while it is live.
     pub typed: Option<&'a str>,
     /// The rubber-band rectangle, while one is being dragged.
     pub band: Option<(Point, Point)>,
+    /// Whether changes to this directory are being watched.
+    ///
+    /// `false` on a filesystem inotify does not cover — every NFS mount — and the
+    /// status line says so, because a listing that is a snapshot should not look
+    /// like one that is live.
+    pub watching: bool,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -66,12 +74,12 @@ pub fn draw(
     path_bar(painter, pane, layout);
     header(painter, pane, layout);
     body(painter, pane, layout, now, chrome);
-    status(painter, pane, layout, diagnostics);
+    status(painter, pane, layout, chrome, diagnostics);
     if chrome.stats {
         stats_overlay(painter, pane, layout, diagnostics);
     }
-    if chrome.keys {
-        keys_overlay(painter, layout);
+    if let Some(rows) = chrome.keys {
+        keys_overlay(painter, layout, rows);
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, layout, typed);
@@ -289,43 +297,83 @@ fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row
             Align::Left,
         );
 
-        // A row whose metadata has not arrived shows nothing in the metadata
-        // columns rather than a zero. Spike B's whole argument is that the name
-        // arrives first; printing `0 B` for the milliseconds in between would
-        // spend that advantage on a lie.
-        if flags.has(Flags::META_PENDING) {
-            return;
-        }
-        let meta_color = if selected { theme.palette.selected_text } else { theme.palette.dim };
-        if layout.size.width > 0.0 {
-            let text = if directory {
-                format::directory_size().to_owned()
-            } else {
-                format::size(pane.listing.size(id))
-            };
-            let box_rect = painter.rect(layout.size.x, 0.0, layout.size.width - 12.0, 0.0);
-            painter.cell(
-                RunKey::cell(listing, id.0, COLUMN_SIZE, Weight::Regular, text_px),
-                &text,
-                box_rect,
-                baseline,
-                meta_color,
-                Align::Right,
-            );
-        }
-        if layout.modified.width > 0.0 {
-            let text = format::modified(pane.listing.mtime(id), now);
-            let box_rect =
-                painter.rect(layout.modified.x + 12.0, 0.0, layout.modified.width - 12.0, 0.0);
-            painter.cell(
-                RunKey::cell(listing, id.0, COLUMN_MODIFIED, Weight::Regular, text_px),
-                &text,
-                box_rect,
-                baseline,
-                meta_color,
-                Align::Left,
-            );
-        }
+        metadata_cells(painter, pane, layout, now, id, baseline, selected, directory);
+    }
+}
+
+/// The size and modified cells of one row.
+///
+/// Split out of [`row_at`] because the size cell has four cases now: a file, a
+/// folder nobody has measured yet, a folder still being measured, and a folder
+/// whose total is missing something.
+#[expect(clippy::too_many_arguments, reason = "one row's worth of already-resolved state")]
+fn metadata_cells(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &Layout,
+    now: i64,
+    id: sk_model::EntryId,
+    baseline: f32,
+    selected: bool,
+    directory: bool,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let text_px = painter.px(metrics.text_size);
+    let listing = pane.listing.version();
+    let flags = pane.listing.flags(id);
+
+    // A row whose metadata has not arrived shows nothing in the metadata
+    // columns rather than a zero. Spike B's whole argument is that the name
+    // arrives first; printing `0 B` for the milliseconds in between would
+    // spend that advantage on a lie.
+    let pending = flags.has(Flags::META_PENDING);
+    let measured = pane.listing.recursive_size(id);
+    if pending && measured.is_none() {
+        return;
+    }
+    let meta_color = if selected { theme.palette.selected_text } else { theme.palette.dim };
+    if layout.size.width > 0.0 {
+        let (text, size_color) = match (directory, measured) {
+            // A folder total that is still climbing is drawn dimmed: it is a
+            // real number and a lower bound at the same time, and rule 7 says
+            // progress is honest or it is a spinner.
+            (true, Some((bytes, complete))) => {
+                let text = if flags.has(Flags::SIZE_PARTIAL) {
+                    i18n::format("size.atleast", &[&format::size(bytes)])
+                } else {
+                    format::size(bytes)
+                };
+                (text, if complete { meta_color } else { theme.palette.pending })
+            }
+            (true, None) => (format::directory_size().to_owned(), meta_color),
+            (false, _) => (format::size(pane.listing.size(id)), meta_color),
+        };
+        let box_rect = painter.rect(layout.size.x, 0.0, layout.size.width - 12.0, 0.0);
+        painter.cell(
+            RunKey::cell(listing, id.0, COLUMN_SIZE, Weight::Regular, text_px),
+            &text,
+            box_rect,
+            baseline,
+            size_color,
+            Align::Right,
+        );
+    }
+    if pending {
+        return;
+    }
+    if layout.modified.width > 0.0 {
+        let text = format::modified(pane.listing.mtime(id), now);
+        let box_rect =
+            painter.rect(layout.modified.x + 12.0, 0.0, layout.modified.width - 12.0, 0.0);
+        painter.cell(
+            RunKey::cell(listing, id.0, COLUMN_MODIFIED, Weight::Regular, text_px),
+            &text,
+            box_rect,
+            baseline,
+            meta_color,
+            Align::Left,
+        );
     }
 }
 
@@ -349,6 +397,7 @@ fn status(
     painter: &mut Painter<'_>,
     pane: &Pane,
     layout: &Layout,
+    chrome: &Chrome<'_>,
     diagnostics: &mut Diagnostics<'_>,
 ) {
     let theme = *painter.theme;
@@ -366,6 +415,8 @@ fn status(
     } else {
         i18n::format("status.counts.none", &[&format::grouped(rows)])
     };
+    let left =
+        if chrome.watching { left } else { format!("{left} {}", i18n::lookup("status.unwatched")) };
     let style = TextStyle::new(metrics.header_size, theme.palette.dim);
     line(painter, &left, style, metrics.gutter, layout.status.width * 0.6, baseline);
 
@@ -394,18 +445,11 @@ fn type_ahead(painter: &mut Painter<'_>, layout: &Layout, typed: &str) {
     line(painter, typed, style, area.x + 16.0, area.width - 32.0, baseline);
 }
 
-fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout) {
+fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, String)]) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let step = 24.0;
-    // One row per binding, read from the same table the key handler reads. An
-    // action missing from that table is a build failure, not a missing line.
-    let entries: Vec<(&str, &str)> = BINDINGS
-        .iter()
-        .map(|(_, keys, label)| (*keys, i18n::lookup(label)))
-        .chain(std::iter::once((i18n::lookup("keys.typing"), i18n::lookup("action.type_ahead"))))
-        .collect();
-    let per_column = entries.len().div_ceil(2);
+    let per_column = entries.len().max(1).div_ceil(2);
 
     let width = 660.0_f32.min(layout.body.width - 40.0);
     let height = per_column as f32 * step + 76.0;
@@ -602,7 +646,8 @@ mod tests {
         };
         {
             let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
-            let chrome = Chrome { keys: false, stats: false, typed: None, band: None };
+            let chrome =
+                Chrome { keys: None, stats: false, typed: None, band: None, watching: true };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test
             // is looking for.

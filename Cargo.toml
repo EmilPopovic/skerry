@@ -6,7 +6,9 @@ members = [
     "crates/sk-plat",
     "crates/sk-text",
     "crates/sk-fs",
+    "crates/sk-cmd",
     "crates/sk-gpu",
+    "crates/sk-index",
     "crates/sk-ui",
     "crates/sk-app",
     "bin/skerry",
@@ -24,7 +26,9 @@ sk-model = { path = "crates/sk-model" }
 sk-plat = { path = "crates/sk-plat" }
 sk-text = { path = "crates/sk-text" }
 sk-fs = { path = "crates/sk-fs" }
+sk-cmd = { path = "crates/sk-cmd" }
 sk-gpu = { path = "crates/sk-gpu" }
+sk-index = { path = "crates/sk-index" }
 sk-ui = { path = "crates/sk-ui" }
 sk-app = { path = "crates/sk-app" }
 
