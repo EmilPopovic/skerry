@@ -14,7 +14,7 @@ there is a codebase to rewrite.**
 
 ### Status
 
-Four of six resolved. Full results in each spike's own README; the summary tables in
+Five of six resolved. Full results in each spike's own README; the summary tables in
 [09-performance-budgets.md](09-performance-budgets.md) carry the numbers that became gates.
 
 | | Verdict |
@@ -22,7 +22,7 @@ Four of six resolved. Full results in each spike's own README; the summary table
 | [A](../spikes/a-million-rows/README.md) | **Go.** 2.6 ms worst p99 of 18 runs against an 8 ms bar. RSS misses on the NVIDIA proprietary driver alone, whose floor is 332 MB before our data exists |
 | [B](../spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
 | [C](../spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
-| D | **not yet run** — and Spike A added a requirement: it must cover fractional-scale negotiation explicitly |
+| [D](../spikes/d-platform-and-dnd/README.md) | **Go, three things to design.** Files land on disk from a drag we start, against GTK 4 and Qt 6, on both display servers; four compositor limitations are documented and three of them report no error at all. `winit` reaches 5 of 9 capabilities, so [ADR 0002](adr/0002-own-platform-layer.md) is Accepted rather than pending |
 | E | **not yet run** |
 | [F](../spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
 
@@ -48,6 +48,11 @@ The point of a spike is to move the architecture before there is code. Five thin
 - **Two budget rows are known-unmet** and one measures the wrong thing — see
   [09-performance-budgets.md](09-performance-budgets.md) and
   [12-measurement.md](12-measurement.md).
+- **Three drag-and-drop capabilities are absent with no error attached** — a
+  discarded primary selection, an unreported drag action, an undelivered
+  `dnd_finished`. `sk-plat` cannot detect any of them, so M3's move operation must
+  not be built on `dnd_finished`, and the policy above `sk-plat` has to be correct
+  when all three are missing.
 
 ### Spike A — a million rows at 120 fps
 Virtualized list of 1,000,000 synthetic entries with text, icon and three columns. Built
@@ -84,6 +89,11 @@ Chrome and Thunderbird, covering copy, move and link.
 
 > **Bar:** every pair works on both display servers, or the failure is documented as a
 > compositor limitation with a fallback · IME composes CJK text into a field.
+
+**Resolved: Go.** Built twice, on `wayland-client` + `x11rb` and on `winit`, so the
+revisit trigger is answered rather than argued. Full result in
+[d-platform-and-dnd](../spikes/d-platform-and-dnd/README.md). What it changed is above;
+what it left owed is Dolphin, a second compositor, and the peer-to-us direction on X11.
 
 ### Spike E — operation engine correctness
 Reflink, `copy_file_range` and fallback paths across ext4, btrfs, xfs, tmpfs, exFAT and NFS,
@@ -181,15 +191,17 @@ Spike A returned its number: the differentiator is reachable on this stack, with
 headroom on the frame budget and the GPU consuming 0.02 ms of an 8 ms frame. The plan above
 is sound and the rest is ordinary engineering.
 
-**The next artifact is Spike D**, and it is the one the plan calls highest-uncertainty. It
-decides [ADR 0002](adr/0002-own-platform-layer.md), it is the longest pole in M0, and Spike
-A has already added to its scope: fractional-scale negotiation must be covered explicitly,
-because that is where a text-crispness bug lived that every internal assertion called a
-pass.
+**The next artifact is Spike E**, the last of the six and the one that gates M3. It is
+also the one whose failure mode is unbounded: every other spike risks a missed budget,
+and this one risks losing somebody's files.
 
-Spike E gates M3 and can follow. Neither is blocked by anything.
+Spike D closed the highest-uncertainty item. `sk-plat` can be written, ADR 0002 is
+settled, and M0 now has four ordering invariants to hold and three absent capabilities to
+be correct without — all of them listed in
+[d-platform-and-dnd](../spikes/d-platform-and-dnd/README.md#what-this-changed) with the
+measurement that produced each one.
 
-Three measurements are still owed and none blocks a spike:
+Five measurements are still owed and none blocks a spike:
 
 - **An Intel integrated GPU** for Spike A. Absent from every machine available, and the
   most common Linux GPU.
@@ -198,3 +210,7 @@ Three measurements are still owed and none blocks a spike:
   network mount as live has the defect rule 1 exists to prevent.
 - **A slow device.** Every rescan and cold-load figure is NVMe. A Pi booting from an SD
   card is the common case and is unmeasured.
+- **A second compositor** for Spike D. Three of its four limitations are Hyprland's
+  rather than Wayland's, and mutter and kwin would say which.
+- **Dolphin**, for the Qt half of rule 5. Konsole and Qt Designer stand in for it today,
+  and KIO's drop handling is its own dialect.

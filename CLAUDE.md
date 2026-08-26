@@ -6,16 +6,16 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**Phase 0. Four spikes of six resolved, no `crates/` yet, and the next artifact
-is Spike D — not a crate skeleton.**
+**Phase 0. Five spikes of six resolved, no `crates/` yet, and the next artifact
+is Spike E — not a crate skeleton.**
 
 | | | |
 | --- | --- | --- |
 | [A](spikes/a-million-rows/README.md) | a million rows at 8 ms p99 | **Go**, 2.6 ms worst p99 |
 | [B](spikes/b-enumeration/README.md) | `getdents64` + batched `statx` | **Go**, but sits *on* the 1 s bar on a Pi 5 |
 | [C](spikes/c-watching/README.md) | inotify at scale | **Go**, three things to design |
-| D | platform layer and drag-and-drop | **next**, and the highest-uncertainty item in the plan |
-| E | operation engine correctness | not yet run; gates M3 |
+| [D](spikes/d-platform-and-dnd/README.md) | platform layer and drag-and-drop | **Go**, and three limitations report no error at all |
+| E | operation engine correctness | **next**; gates M3, and the only spike that can lose data |
 | [F](spikes/f-index-and-search/README.md) | index and flattened search | **Go on the index**; sorting misses its budget |
 
 Spikes live in [spikes/](spikes/), are exempt from the layering, lint and
@@ -27,10 +27,11 @@ Every rule in it was learned by getting one wrong here, and three of them cost a
 day each: load contamination is worth 6×, a single per-core multiplier is not a
 portability model, and a gate nobody has watched fail is decoration.
 
-Phase 0 has already moved the architecture in five places, listed in
+Phase 0 has already moved the architecture in six places, listed in
 [docs/08-roadmap.md](docs/08-roadmap.md#what-phase-0-changed-in-the-plan). Two
 performance budget rows are **known-unmet** and recorded as such rather than
-widened.
+widened, and three drag-and-drop capabilities are **absent with no error
+attached**, which is a design constraint rather than a bug to fix.
 
 ## The craft bar
 

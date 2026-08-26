@@ -62,15 +62,26 @@ The one integration nobody can fake, because it is judged against other applicat
 
 - `text/uri-list` everywhere, plus GNOME's `x-special/gnome-copied-files` and KDE's
   cut-selection convention, so cut/copy/paste actually works between Skerry, Nautilus and
-  Dolphin.
+  Dolphin. **Also the portal types**: Nautilus asks for `application/vnd.portal.filetransfer`
+  and `application/vnd.portal.files` *before* it asks for `text/uri-list`, and a sandboxed
+  target may not fall back.
 - XDND on X11, `wl_data_device` on Wayland, as both **source and target** — the source half
   is why Skerry owns its platform layer ([ADR 0002](adr/0002-own-platform-layer.md)).
 - Copy, move and link semantics with the modifier conventions of the desktop, plus the
-  right-drag menu that makes them explicit.
+  right-drag menu that makes them explicit. **The two protocols do not share an action
+  vocabulary**: XDND has copy, move, link, ask and private; `wl_data_device_manager` has
+  copy, move and ask and no link. `sk-plat` exposes the union and the policy above it greys
+  out what the display server cannot express.
 - Drop targets that make sense: onto a folder, onto a pane, onto a tab, onto an archive,
   onto an executable as arguments.
+- **The primary selection is best-effort and nothing depends on it.** At least one shipping
+  compositor discards a primary-selection claim with no protocol error, so the failure
+  cannot be detected and the feature cannot even be greyed out.
 
-Spike D exists because this is the highest-uncertainty item in the whole plan.
+Spike D was the highest-uncertainty item in the whole plan and is now
+[resolved](../spikes/d-platform-and-dnd/README.md): a drag we start lands files on disk in
+GTK 4 and Qt 6 targets on both display servers. What it changed here is above; the four
+ordering invariants it produced are M0's, not this document's.
 
 ## Thumbnails
 

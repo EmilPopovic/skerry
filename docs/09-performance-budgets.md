@@ -385,6 +385,58 @@ and the dropped events are gone.
 | Overflow recovery completes | < 2 s per 1M entries | 5 s | mtime-pruned rescan of watched directories, progressive and cancellable; measured at 411 ms on a Pi 5, against 1,234 ms unpruned |
 | Watch budget consumed | ≤ 40% of `max_user_watches` for one tree | 80% | Read the limit at runtime; 21,338 directories per million files is 34% of 62,164 |
 
+## What Spike D measured
+
+[Spike D](../spikes/d-platform-and-dnd/README.md) is a capability spike, so most
+of what it produced is a matrix rather than a table of milliseconds. Four numbers
+belong here because they became gates.
+
+| Measure | Target | Hard fail | Measured | How |
+| --- | --- | --- | --- | --- |
+| Dispatch interval with a clipboard transfer outstanding from a hung peer | < 8 ms | 8 ms | **0.394 ms** worst, p99 0.275 ms, n=4,784 | A second process owns the selection, is asked for the bytes, and never writes. The read stays open for 1,200 ms while the loop is timed |
+| Fractional-scale negotiation | exact | any resample | **150/120**, a 480×320 logical window as a 600×400 buffer | `wp_fractional_scale_v1` plus `wp_viewporter`, asserted against the integer the compositor sent |
+| One buffer pixel to one output pixel | 64 px | < 62 px | **64 px** | The longest run of one-physical-pixel alternation between two greys, found by scanning the compositor's own 2880×1800 capture |
+| CJK preedit to field, and commit | < 16 ms | 50 ms | **2.19 ms** and **2.18 ms** | `zwp_text_input_v3`, driven by the spike acting as its own input method over `zwp_input_method_manager_v2` |
+
+### The crispness row is now a framebuffer test, not an assertion
+
+Spike A's crispness check compared each glyph's quad to the size it was
+rasterized at and reported 0 of 29.6 M quads scaled — while the compositor was
+stretching the entire surface. The number was true and the screen was blurry.
+
+Spike D's replacement asks the framebuffer instead, and it locates itself: it
+scans the whole output for the longest horizontal run in which consecutive pixels
+alternate between two known greys. A resample turns that run into a gradient, and
+nothing else on a desktop produces one. The arithmetic that would convert a
+logical window position into a physical one is deliberately left out, because that
+arithmetic can be wrong in the same direction as the bug.
+
+**This is the row that should be in CI**, not the per-glyph assertion — or rather,
+both, because the per-glyph assertion catches a different failure and neither
+subsumes the other.
+
+### Three rows that cannot exist, because the protocol reports nothing
+
+Spike D's other findings are not numbers, and pretending otherwise would produce
+exactly the decoration [12-measurement.md](12-measurement.md) warns about. Each of
+these is a *capability* that is absent with no error attached:
+
+- **A negotiated drag action.** `wl_data_source.action` and
+  `wl_data_offer.action` were delivered zero times across every pair tested,
+  including pairs where a file demonstrably landed on disk. There is no number to
+  bound here; there is a design that must be correct when the answer never comes.
+- **`dnd_finished`.** Delivered by Nautilus, delivered by Konsole without
+  `dnd_drop_performed`, and delivered by neither in a two-process pair of ours
+  where the peer read the data. A move that deletes its originals on this event
+  would silently never delete.
+- **The primary selection.** Hyprland discards
+  `zwp_primary_selection_device_v1.set_selection` while
+  `misc:middle_click_paste` is off, with no protocol error and no `cancelled`.
+
+The gate for all three is the same and it is a test, not a threshold: `sk-plat`'s
+own suite must pass with each of these absent, because on at least one shipping
+compositor each of them is.
+
 ## On measuring frame time honestly
 
 p99 over a realistic input trace, not an average over an idle window. The interesting
