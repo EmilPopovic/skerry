@@ -1,34 +1,34 @@
-### 2026-08-26T15:18:53+02:00
+### 2026-08-26T15:39:58+02:00
 Spike D — Wayland arm
   compositor   Hyprland
   session      wayland
-  load         1.53
+  load         1.97
 
   PASS  globals                64 interfaces advertised; required present: 9; instruments: 2
   PASS  frac-scale             preferred_scale 150/120 = 1.2500x; buffer 600x400 px for a 480x320 logical window; viewport destination 480x320
-  PASS  checker-1:1            window 563x695 logical at 1157,738; captured 2880x1800 px; longest run of 1-px alternation between 0x10 and 0xf0 is 64 px, 64 expected
-  PASS  keyboard               keymap 38129 bytes compiled in 1449 us, layout "English (US)"; focus held
-  PASS  clipboard-out          wl-paste read text/uri-list: file:///tmp/skerry-spike-d-1215942/dragged-one.txt  file:///tmp/skerry-spike-d-1215942/dra...
-  PASS  clipboard-out          wl-paste read text/plain: file:///tmp/skerry-spike-d-1215942/dragged-one.txt file:///tmp/skerry-spike-d-1215942/drag...
+  PASS  checker-1:1            window 563x345 logical at 1157,33; captured 2880x1800 px; longest run of 1-px alternation between 0x10 and 0xf0 is 64 px, 64 expected
+  PASS  keyboard               keymap 38129 bytes compiled in 512 us, layout "English (US)"; focus held
+  PASS  clipboard-out          wl-paste read text/uri-list: file:///tmp/skerry-spike-d-1239990/dragged-one.txt  file:///tmp/skerry-spike-d-1239990/dra...
+  PASS  clipboard-out          wl-paste read text/plain: file:///tmp/skerry-spike-d-1239990/dragged-one.txt file:///tmp/skerry-spike-d-1239990/drag...
   PASS  clipboard-out          wl-paste read mime list: text/uri-list text/plain;charset=utf-8 x-special/gnome-copied-files 
-  PASS  clipboard-in           5 MIME types offered (text/plain text/plain;charset=utf-8 TEXT STRING UTF8_STRING); read 25 bytes = "spike-d-clipboard-1215942"; worst dispatch gap during the transfer 0.577 ms
-  LIMIT primary-out            wl-paste --primary listed no types (""); a second instance reading over zwp_primary_selection_device_v1 saw: no-offer; requests served []; sources cancelled since set_selection 0; serial 87340; misc:middle_click_paste = Some(0). Toggling that option to 1 and changing nothing else makes the same code readable by wl-paste, so the selection is being discarded by the compositor. There is no fallback: the request produces no error, so a primary-selection feature cannot even be greyed out
-  PASS  primary-in             5 MIME types offered (text/plain text/plain;charset=utf-8 TEXT STRING UTF8_STRING); read 23 bytes = "spike-d-primary-1215942"; worst dispatch gap during the transfer 0.560 ms
-  PASS  slow-transfer          peer offered text/plain;charset=utf-8 and never wrote: 0 bytes after 1200 ms, transfer still open (true); dispatch interval p50 0.255 ms p99 0.275 ms max 0.433 ms n=4774; worst 0.433 ms against rule 1's 8 ms
-  PASS  text-input-v3          preedit "にほんご" arrived in 2.221 ms with cursor (0, 12); commit "日本語" in 2.188 ms replaced it; the field holds 3 chars and the preedit is now ""
+  PASS  clipboard-in           5 MIME types offered (text/plain text/plain;charset=utf-8 TEXT STRING UTF8_STRING); read 25 bytes = "spike-d-clipboard-1239990"; worst dispatch gap during the transfer 0.575 ms
+  LIMIT primary-out            wl-paste --primary listed no types (""); a second instance reading over zwp_primary_selection_device_v1 saw: no-offer; requests served []; sources cancelled since set_selection 0; serial 89087; misc:middle_click_paste = Some(0). Toggling that option to 1 and changing nothing else makes the same code readable by wl-paste, so the selection is being discarded by the compositor. There is no fallback: the request produces no error, so a primary-selection feature cannot even be greyed out
+  PASS  primary-in             5 MIME types offered (text/plain text/plain;charset=utf-8 TEXT STRING UTF8_STRING); read 23 bytes = "spike-d-primary-1239990"; worst dispatch gap during the transfer 0.567 ms
+  PASS  slow-transfer          peer offered text/plain;charset=utf-8 and never wrote: 0 bytes after 1200 ms, transfer still open (true); dispatch interval p50 0.255 ms p99 0.273 ms max 0.311 ms n=4777; worst 0.311 ms against rule 1's 8 ms
+  PASS  text-input-v3          preedit "にほんご" arrived in 2.175 ms with cursor (0, 12); commit "日本語" in 2.171 ms replaced it; the field holds 3 chars and the preedit is now ""
 
   11 pass, 0 fail, 1 limitation, 0 owed, of 12 checks
-  fixture      /tmp/skerry-spike-d-1215942
+  fixture      /tmp/skerry-spike-d-1239990
 
 Spike D — X11 arm
   compositor   Hyprland
   session      wayland
-  load         1.49
+  load         1.89
 
   PASS  x-window               window 480x320 mapped, XdndAware Some(5); Xft.dpi unset; RANDR reports 2880x1800 px over 762x476 mm = 96.0 dpi
-  PASS  x-clipboard-out        our own requestor read TARGETS as owner Some("0x600000") targets ["TARGETS", "TIMESTAMP", "text/uri-list", "text/plain;chars... and the data as owner Some("0x600000") bytes 104 incr false chunks 1 worst-gap 0.572 ms first "file:///tmp...; 1 requests served, asked for ["TARGETS", "TARGETS", "text/uri-list"]
+  PASS  x-clipboard-out        our own requestor read TARGETS as owner Some("0xa00000") targets ["TARGETS", "TIMESTAMP", "text/uri-list", "text/plain;chars... and the data as owner Some("0xa00000") bytes 104 incr false chunks 1 worst-gap 0.559 ms first "file:///tmp...; 1 requests served, asked for ["TARGETS", "TARGETS", "text/uri-list"]
   PASS  x-clipboard-in         GTK offered 10 targets (TIMESTAMP TARGETS MULTIPLE SAVE_TARGETS UTF8_STRING COMPOUND_TEXT TEXT STRING text/plain;c...); we read 21 bytes = "spike-d-gtk-clipboard" with a real server timestamp
-  PASS  x-primary-out          our own requestor read TARGETS as owner Some("0x600000") targets ["TARGETS", "TIMESTAMP", "text/uri-list", "text/plain;chars... and the data as owner Some("0x600000") bytes 104 incr false chunks 1 worst-gap 0.573 ms first "file:///tmp...; 1 requests served, asked for ["TARGETS", "TARGETS", "text/uri-list"]
+  PASS  x-primary-out          our own requestor read TARGETS as owner Some("0xa00000") targets ["TARGETS", "TIMESTAMP", "text/uri-list", "text/plain;chars... and the data as owner Some("0xa00000") bytes 104 incr false chunks 1 worst-gap 0.573 ms first "file:///tmp...; 1 requests served, asked for ["TARGETS", "TARGETS", "text/uri-list"]
   PASS  x-primary-in           GTK offered 9 targets (TIMESTAMP TARGETS MULTIPLE UTF8_STRING COMPOUND_TEXT TEXT STRING text/plain;charset=utf-8 ...); we read 19 bytes = "spike-d-gtk-primary" with a real server timestamp
   PASS  x-incr                 1360000 bytes over the 262144-byte threshold, 40000 entries offered; our requestor received 1360000 bytes in 21 property chunks, which is 40000 entries; the owner wrote 22 chunks and served 2 requests
   LIMIT x-bridge-out           X11 owner to Wayland reader: with our window as owner wl-paste saw ""; with a GTK X11 window as owner it saw "". Both of those are read by the same wl-paste that reads a Wayland owner correctly
@@ -36,188 +36,172 @@ Spike D — X11 arm
   LIMIT dnd-action-vocab       XDND offers 5 actions (XdndActionCopy XdndActionMove XdndActionLink XdndActionAsk XdndActionPrivate); wl_data_device_manager.dnd_action offers 3 (copy move ask) and has no link. A link drop on Wayland has to be expressed as `ask` plus a menu of ours
 
   6 pass, 0 fail, 3 limitation, 0 owed, of 9 checks
-  fixture      /tmp/skerry-spike-d-1216079
+  fixture      /tmp/skerry-spike-d-1240122
 
 ########## self ##########
-Spike D — drag to pid:1216152 — spike-d
+Spike D — drag to pid:1240200 — spike-d
   compositor   Hyprland
   session      wayland
-  load         1.49
+  load         1.89
 
-  drop point   1438,1304
+  drop point   1582,248
   PASS  dnd-source/spike-d     target accepted Some("text/uri-list") and asked for ["text/uri-list"]; action None; drop_performed false finished false cancelled false
   LIMIT dnd-finish/spike-d     the peer read the data; dnd_drop_performed false, dnd_finished false. Without dnd_finished a move cannot delete the originals, so the fallback is to treat every unconfirmed drop as a copy
   LIMIT dnd-actions            source offered copy|move|ask; the compositor reported source_actions to the target but sent wl_data_source.action never and wl_data_offer.action never to us; target accepted None
 
   1 pass, 0 fail, 2 limitation, 0 owed, of 3 checks
-  fixture      /tmp/skerry-spike-d-1216151
+  fixture      /tmp/skerry-spike-d-1240199
 
   --- the target's own report ---
   Spike D — waiting 40 s for a drop — spike-d
     compositor   Hyprland
     session      wayland
-    load         1.49
+    load         1.89
   
-    target-rect  1157 738 563 695
-    target-drop  1438 1085
-    PASS  dnd-target/spike-d     3 types offered (text/uri-list text/plain;charset=utf-8 x-special/gnome-copied-files); source_actions Some("DndAction(Copy | Move | Ask)"); negotiated None; read 104 bytes = file:///tmp/skerry-spike-d-1216151/dragged-one.txt  file:///tmp/skerry-spike-d-1216151/dra...
+    target-rect  1157 33 563 345
+    target-drop  1438 205
+    PASS  dnd-target/spike-d     3 types offered (text/uri-list text/plain;charset=utf-8 x-special/gnome-copied-files); source_actions Some("DndAction(Copy | Move | Ask)"); negotiated None; read 104 bytes = file:///tmp/skerry-spike-d-1240199/dragged-one.txt  file:///tmp/skerry-spike-d-1240199/dra...
   
     1 pass, 0 fail, 0 limitation, 0 owed, of 1 checks
 
 ########## nautilus-wayland ##########
 === nautilus (wayland, wl) ===
-  peer window  1157 738 563 695 (pid 1216262)
-Spike D — drag to pid:1216262 — nautilus
+  peer window  1157 33 563 345 (pid 1240316)
+Spike D — drag to pid:1240316 — nautilus
   compositor   Hyprland
   session      wayland
-  load         1.41
+  load         1.75
 
-  drop point   1438,950
+  drop point   1295,248
   PASS  dnd-source/nautilus    target accepted Some("text/uri-list") and asked for ["text/uri-list"]; action None; drop_performed true finished true cancelled false
   PASS  dnd-finish/nautilus    the peer read the data; dnd_drop_performed true, dnd_finished true. Without dnd_finished a move cannot delete the originals, so the fallback is to treat every unconfirmed drop as a copy
   LIMIT dnd-actions            source offered copy|move|ask; the compositor reported source_actions to the target but sent wl_data_source.action never and wl_data_offer.action never to us; target accepted Some("text/uri-list")
 
   2 pass, 0 fail, 1 limitation, 0 owed, of 3 checks
-  fixture      /tmp/skerry-spike-d-1216450
+  fixture      /tmp/skerry-spike-d-1240408
   files now in the destination directory: 2
   exit 0
 
 
 ########## konsole-wayland ##########
 === konsole (wayland, wl) ===
-  peer window  1157 738 563 695 (pid 1216529)
-Spike D — drag to pid:1216529 — konsole
+  peer window  1157 33 563 345 (pid 1240476)
+Spike D — drag to pid:1240476 — konsole
   compositor   Hyprland
   session      wayland
-  load         1.38
+  load         1.85
 
-  drop point   1438,1304
+  drop point   1582,248
   PASS  dnd-source/konsole     target accepted Some("text/uri-list") and asked for ["text/uri-list"]; action None; drop_performed false finished true cancelled false
   PASS  dnd-finish/konsole     the peer read the data; dnd_drop_performed false, dnd_finished true. Without dnd_finished a move cannot delete the originals, so the fallback is to treat every unconfirmed drop as a copy
   LIMIT dnd-actions            source offered copy|move|ask; the compositor reported source_actions to the target but sent wl_data_source.action never and wl_data_offer.action never to us; target accepted Some("text/uri-list")
 
   2 pass, 0 fail, 1 limitation, 0 owed, of 3 checks
-  fixture      /tmp/skerry-spike-d-1216955
+  fixture      /tmp/skerry-spike-d-1240911
   files now in the destination directory: 0
   exit 0
 
 
 ########## firefox-wayland ##########
-=== firefox (wayland, wl) ===
-  peer window  7 33 2290 1400 (pid 16073)
-Spike D — drag to pid:16073 — firefox
+=== firefox (existing process, wl) ===
+  new window   0x5f679672f160
+Spike D — drag to addr:0x5f679672f160 — firefox
   compositor   Hyprland
   session      wayland
-  load         1.75
+  load         1.86
 
-  drop point   1152,908
-  LIMIT dnd-source/firefox     target accepted None and asked for []; action None; drop_performed false finished false cancelled true
-  LIMIT dnd-actions            source offered copy|move|ask; the compositor reported source_actions to the target but sent wl_data_source.action never and wl_data_offer.action never to us; target accepted None
+  drop point   1295,248
+  PASS  dnd-source/firefox     target accepted Some("x-special/gnome-copied-files") and asked for ["text/uri-list", "text/plain;charset=utf-8"]; action None; drop_performed true finished true cancelled false
+  PASS  dnd-finish/firefox     the peer read the data; dnd_drop_performed true, dnd_finished true. Without dnd_finished a move cannot delete the originals, so the fallback is to treat every unconfirmed drop as a copy
+  LIMIT dnd-actions            source offered copy|move|ask; the compositor reported source_actions to the target but sent wl_data_source.action never and wl_data_offer.action never to us; target accepted Some("x-special/gnome-copied-files")
 
-  0 pass, 0 fail, 2 limitation, 0 owed, of 2 checks
-  fixture      /tmp/skerry-spike-d-1217206
-  files now in the destination directory: 0
+  2 pass, 0 fail, 1 limitation, 0 owed, of 3 checks
+  fixture      /tmp/skerry-spike-d-1241249
   exit 0
 
 
 ########## designer-wayland ##########
 === designer (wayland, wl) ===
-  peer window  1157 738 563 341 (pid 1217418)
-Spike D — drag to pid:1217418 — designer
+  peer window  1157 33 277 345 (pid 1241318)
+Spike D — drag to pid:1241318 — designer
   compositor   Hyprland
   session      wayland
-  load         1.87
+  load         1.88
 
-  drop point   1438,950
-  LIMIT dnd-source/designer    target accepted None and asked for []; action None; drop_performed false finished false cancelled true
+  drop point   1295,248
+  PASS  dnd-source/designer    target accepted None and asked for ["text/uri-list", "text/plain;charset=utf-8"]; action None; drop_performed false finished false cancelled true
+  LIMIT dnd-finish/designer    the peer read the data; dnd_drop_performed false, dnd_finished false. Without dnd_finished a move cannot delete the originals, so the fallback is to treat every unconfirmed drop as a copy
   LIMIT dnd-actions            source offered copy|move|ask; the compositor reported source_actions to the target but sent wl_data_source.action never and wl_data_offer.action never to us; target accepted None
 
-  0 pass, 0 fail, 2 limitation, 0 owed, of 2 checks
-  fixture      /tmp/skerry-spike-d-1217504
+  1 pass, 0 fail, 2 limitation, 0 owed, of 3 checks
+  fixture      /tmp/skerry-spike-d-1241398
   files now in the destination directory: 0
   exit 0
 
 
 ########## nautilus-x11 ##########
 === nautilus (x11, x11) ===
-  peer window  7 33 2290 1400 (pid 1217633)
-Spike D — XDND drag to pid:1217633 — nautilus
+  peer window  7 33 2290 1400 (pid 1241547)
+Spike D — XDND drag to pid:1241547 — nautilus
   compositor   Hyprland
   session      wayland
-  load         2.12
+  load         1.81
 
   drop point   1152,908
-  PASS  xdnd-source/nautilus   target 0x600004 speaks XDND v5; 9 XdndStatus messages, accepted true, action Some("XdndActionCopy"); asked us for ["application/vnd.portal.filetransfer", "application/vnd.portal.files", "text/uri-list"]; XdndFinished true accepted Some(true)
+  PASS  xdnd-source/nautilus   target 0xa00004 speaks XDND v5; 9 XdndStatus messages, accepted true, action Some("XdndActionCopy"); asked us for ["application/vnd.portal.filetransfer", "application/vnd.portal.files", "text/uri-list"]; XdndFinished true accepted Some(true)
 
   1 pass, 0 fail, 0 limitation, 0 owed, of 1 checks
-  fixture      /tmp/skerry-spike-d-1217720
+  fixture      /tmp/skerry-spike-d-1241630
   files now in the destination directory: 2
   exit 0
 
 
 ########## konsole-x11 ##########
 === konsole (x11, x11) ===
-  peer window  1157 738 563 341 (pid 1217780)
-Spike D — XDND drag to pid:1217780 — konsole
+  peer window  7 738 1140 695 (pid 1241707)
+Spike D — XDND drag to pid:1241707 — konsole
   compositor   Hyprland
   session      wayland
-  load         2.11
+  load         1.74
 
-  drop point   1438,950
-  PASS  xdnd-source/konsole    target 0x600008 speaks XDND v5; 8 XdndStatus messages, accepted true, action Some("XdndActionCopy"); asked us for ["text/uri-list"]; XdndFinished true accepted Some(false)
+  drop point   577,1171
+  PASS  xdnd-source/konsole    target 0xa00008 speaks XDND v5; 8 XdndStatus messages, accepted true, action Some("XdndActionCopy"); asked us for ["text/uri-list"]; XdndFinished true accepted Some(false)
 
   1 pass, 0 fail, 0 limitation, 0 owed, of 1 checks
-  fixture      /tmp/skerry-spike-d-1218223
+  fixture      /tmp/skerry-spike-d-1242150
   files now in the destination directory: 0
   exit 0
-
-
-########## firefox-x11 ##########
-=== firefox (x11, x11) ===
-  peer window  7 33 2290 1400 (pid 16073)
-Spike D — XDND drag to pid:16073 — firefox
-  compositor   Hyprland
-  session      wayland
-  load         2.10
-
-  drop point   1152,908
-  FAIL  xdnd-source/firefox    no XdndAware window under the pointer — nothing to drag onto
-
-  0 pass, 1 fail, 0 limitation, 0 owed, of 1 checks
-  fixture      /tmp/skerry-spike-d-1218414
-  files now in the destination directory: 0
-  exit 1
 
 
 ########## designer-x11 ##########
 === designer (x11, x11) ===
-  peer window  1157 738 563 341 (pid 1218444)
-Spike D — XDND drag to pid:1218444 — designer
+  peer window  7 738 1140 695 (pid 1242205)
+Spike D — XDND drag to pid:1242205 — designer
   compositor   Hyprland
   session      wayland
-  load         2.25
+  load         1.68
 
-  drop point   1438,950
-  LIMIT xdnd-source/designer   target 0x600014 speaks XDND v5; 8 XdndStatus messages, accepted false, action None; asked us for []; XdndFinished true accepted Some(false)
+  drop point   577,1171
+  FAIL  xdnd-source/designer   no XdndAware window under the pointer — nothing to drag onto
 
-  0 pass, 0 fail, 1 limitation, 0 owed, of 1 checks
-  fixture      /tmp/skerry-spike-d-1218506
+  0 pass, 1 fail, 0 limitation, 0 owed, of 1 checks
+  fixture      /tmp/skerry-spike-d-1242273
   files now in the destination directory: 0
-  exit 0
+  exit 1
 
 
 ########## nautilus-in-wayland ##########
 === nautilus-in (wayland, in) ===
-  peer window  1157 738 563 341 (pid 1218576)
-Spike D — drag from pid:1218576 into us — nautilus-in
+  peer window  7 738 1140 695 (pid 1242320)
+Spike D — drag from pid:1242320 into us — nautilus-in
   compositor   Hyprland
   session      wayland
-  load         2.23
+  load         1.71
 
-  peer         1444,738 276x341
-  us           1157,738 277x341; landing at 1295,908
-  grabbed at   1514,868
-  PASS  dnd-target/nautilus-in 5 types offered (application/x-gtk-local-dnd text/plain;charset=utf-8 text/uri-list application/vnd.portal....); source_actions Some("DndAction(Copy | Move | Ask)"); negotiated None; read 54 bytes = file:///tmp/skerry-spike-d-src.14H7CY/bbb-second.txt  
+  peer         584,738 563x695
+  us           7,738 567x695; landing at 290,1085
+  grabbed at   654,868
+  PASS  dnd-target/nautilus-in 5 types offered (application/x-gtk-local-dnd text/plain;charset=utf-8 text/uri-list application/vnd.portal....); source_actions Some("DndAction(Copy | Move | Ask)"); negotiated None; read 54 bytes = file:///tmp/skerry-spike-d-src.s3513f/bbb-second.txt  
 
   1 pass, 0 fail, 0 limitation, 0 owed, of 1 checks
   files now in the destination directory: 0
@@ -226,14 +210,14 @@ Spike D — drag from pid:1218576 into us — nautilus-in
 
 ########## nautilus-in-x11 ##########
 === nautilus-in (x11, in) ===
-  peer window  707 436 712 453 (pid 1218852)
-Spike D — drag from pid:1218852 into us — nautilus-in
+  peer window  7 33 2290 1400 (pid 1242590)
+Spike D — drag from pid:1242590 into us — nautilus-in
   compositor   Hyprland
   session      wayland
-  load         2.37
+  load         1.73
 
   peer         707,436 712x453
-  us           1157,738 563x341; landing at 1438,908
+  us           6,32 2292x1402; landing at 1152,733
   grabbed at   nothing — no candidate position started a drag
   FAIL  dnd-target/nautilus-in 0 types were offered () and no drop followed
 

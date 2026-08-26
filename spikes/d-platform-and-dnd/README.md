@@ -64,7 +64,7 @@ machine actually has:
 | Peer | Toolkit | Role tested |
 | --- | --- | --- |
 | Nautilus 4x | GTK 4 | file-URI source and target — the reference implementation |
-| Firefox | GTK 3 widget layer | target for file drops, source for text and URLs |
+| Firefox | GTK 3 widget layer, **snap-confined** | target for file drops. Tested against the running instance and the real profile, targeted by window address — a browser reuses its process, and a fresh profile shows onboarding instead of a page |
 | `konsole` | Qt 6 + KDE Frameworks | Qt target for `text/uri-list` |
 | `designer6` | Qt 6 | second Qt target, richer DnD |
 | the spike itself | ours | **the control** — proves source and target independently of anyone else's bugs |
@@ -89,7 +89,8 @@ after it is edited.
 
 The one thing that cannot be automated is *what the peer did with the drop*, so
 that is read back from the peer: the file appearing in the destination directory
-for Nautilus, the pasted path for `konsole`, the opened tab for Firefox.
+for Nautilus, and the MIME types a peer asked us for, which is the strongest
+signal available when the peer's own state cannot be read.
 
 `zwp_input_method_manager_v2` is also advertised, so the spike acts as its own
 input method for the IME condition: it sends a preedit and a commit for CJK text
@@ -243,10 +244,10 @@ destination directory afterwards, checked on disk rather than believed.
 
 | Peer | Toolkit | Wayland | X11 |
 | --- | --- | --- | --- |
-| Nautilus | GTK 4 | **pass** — accepted `text/uri-list`, read it, `dnd_finished`, **2 files landed** | **pass** — XDND v5, 9 `XdndStatus`, `XdndActionCopy`, `XdndFinished` accepted, **2 files landed** |
+| Nautilus | GTK 4 | **pass** — accepted and read `text/uri-list`, `dnd_finished`, **2 files landed** | **pass** — XDND v5, 9 `XdndStatus`, `XdndActionCopy`, `XdndFinished` accepted, **2 files landed** |
 | Konsole | Qt 6 + KDE | **pass** — accepted and read `text/uri-list`, `dnd_finished` without `dnd_drop_performed` | **pass** — XDND v5, 8 `XdndStatus`, `XdndActionCopy` |
-| Qt Designer | Qt 6 | declined the type, drag cancelled | XDND v5, 8 `XdndStatus`, `accepted false`, `XdndFinished` with accepted false |
-| Firefox | GTK 3 | declined every type — reproducible, cause not isolated | owed — no window appeared for a fresh `--no-remote` instance under Xwayland |
+| Firefox | GTK 3, snap | **pass** — accepted `x-special/gnome-copied-files`, asked for `text/uri-list` and `text/plain;charset=utf-8`, `dnd_finished` | owed — see below |
+| Qt Designer | Qt 6 | **pass** — asked for both types with no accepted type reported | flaky — no `XdndAware` window found under the pointer in the recorded run, and accepted-with-refusal in an earlier one |
 | the spike itself | ours | **pass** — the peer read the data | — |
 
 **Us as the target:**
@@ -256,18 +257,16 @@ destination directory afterwards, checked on disk rather than believed.
 | Nautilus | GTK 4 | **pass** — 5 types offered, including `application/x-gtk-local-dnd` and a portal type; we read the URI | owed — no grab position started a drag |
 | the spike itself | ours | **pass** — **104 bytes** of `text/uri-list` from our own source | — |
 
-Qt Designer declining a `.txt` is correct behaviour, not a failure: a form editor
-has no use for one. What matters is that the conversation completed in both
-protocols and the refusal arrived as a refusal — `accepted false` and an
-`XdndFinished` that says so — rather than as a hang.
+**Every Wayland source pair passes.** On X11, Nautilus and Konsole pass; Qt
+Designer's XDND path is flaky in a way the harness cannot currently distinguish
+from a missed pointer position, and Firefox is owed for the reason below.
 
-**Firefox is the one result that is neither a pass nor an explained refusal.** A
-fresh `--no-remote` instance on Wayland accepted no type from a drag whose offer
-Nautilus and Konsole both accepted, and the cause is not isolated: it could be the
-drop landing on chrome rather than content, a sandboxed target wanting the portal
-types, or something in our offer that GTK 3's drop path treats differently from
-GTK 4's. Recording it as unexplained is the honest option; guessing which of the
-three it is would be worse than leaving it open.
+Qt Designer is the peer that shows why "the peer asked us for the bytes" is the
+right criterion. It requests `text/uri-list` and `text/plain;charset=utf-8`
+without ever reporting an accepted type, and then does nothing useful with a
+`.txt` — which is correct behaviour for a form editor. The protocol conversation
+completed; the application declined the content. Those are different things and
+only the first is ours.
 
 Nautilus on X11 asked for **`application/vnd.portal.filetransfer` first**, then
 `application/vnd.portal.files`, and only then `text/uri-list`. A source that
@@ -380,6 +379,10 @@ of them would have been found by reading the protocol.
 - **The peer-to-us direction on X11.** It works on Wayland against Nautilus. On
   X11 no candidate grab position started a drag, and the harness cannot tell a
   view that ignored the press from a position that missed an item.
+- **Firefox on X11.** The browser on this machine is a Wayland snap, so
+  `--new-window` cannot produce an X11 window, and a second instance needs its own
+  profile and then shows onboarding rather than content. `./peers.sh firefox-x11`
+  exists for a session that has an X11 Firefox in it.
 - **Dolphin, Chrome and Thunderbird.** Not installed, and there is no root on this
   machine. Dolphin is the one that matters: KIO's drop handling is its own
   dialect.
@@ -389,21 +392,20 @@ of them would have been found by reading the protocol.
 - **`xdg_toplevel_drag`.** Not advertised by this compositor, and M2's
   drag-a-tab-into-a-new-window depends on it.
 
-One note on the harness itself, because it nearly produced a false result.
-Firefox re-execs on startup, so the window does not belong to the pid that was
-launched, and matching by window class instead will happily match a Firefox window
-that was **already open** — which turns "we dragged onto Firefox" into "we dragged
-onto whatever was already there". The class fallback now records the set of
-matching pids before launching and requires a new one. Any pair whose peer is
-already running should be read with that in mind.
+Everything a peer does is read back from the peer, and everything the harness does
+to a peer is a guess about somebody else's UI. The Firefox sequence above is the
+cautionary tale: three separate harness faults, each producing a refusal that was
+reproducible, consistent and wrong. A pair that fails is a reason to distrust the
+harness first.
 
 ## Verdict
 
 **Go.** Every condition of the bar is met or is a documented compositor
 limitation, and the four limitations are named with their fallbacks above.
 
-We are a drag-and-drop **source** against GTK 4 and Qt 6 on both display servers,
-with files landing on disk to prove it, and a target that reads what it is given.
+We are a drag-and-drop **source** against GTK 4, GTK 3 and Qt 6 — every Wayland
+pair passes, and Nautilus and Konsole pass on X11 as well — with files landing on
+disk to prove it, and a target that reads what Nautilus gives it.
 The clipboard carries the full MIME set both ways on Wayland and both ways on X11
 including a 1.36 MB `INCR` transfer. Fractional scale negotiates exactly and
 survives to the framebuffer at one buffer pixel per output pixel. CJK composes

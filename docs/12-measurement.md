@@ -150,6 +150,33 @@ Three separate incidents in one Phase 0 session:
 > **Fails if:** a gate's output is piped when the gate's exit code is what
 > matters; or a remote result is trusted without verifying what produced it.
 
+## A harness that drives someone else's UI is the first suspect
+
+Spike D's drag matrix has to press a button inside another application's window,
+and there is no protocol request for "pick up that peer's first item". Every pair
+that fails is therefore two hypotheses at once: the peer refused, or the harness
+missed. Firefox produced **three** clean, reproducible, consistent refusals, and
+all three were the harness:
+
+- The peer was matched by window class, which found the browser that was *already
+  open*. "We dragged onto Firefox" meant "we dragged onto whatever was there".
+- A `--profile "$(mktemp -d)"` instance could not load a profile at all under
+  confinement, so the window under test had no page in it. Fixing the path fixed
+  the loading and still failed, because a first-run profile fills the window with
+  onboarding UI.
+- A press 250 ms after a click at the same position is a **double click**, which
+  opens the file instead of dragging it. Six candidate grab positions opened six
+  text editors and started no drags.
+
+The tell in all three cases was the same: a refusal that was *too clean*. A peer
+that declines a type it does not want says so and completes the conversation —
+Qt Designer sends `accepted false` and an `XdndFinished` that agrees. A peer that
+was never really there declines everything, identically, every time.
+
+> **Fails if:** a peer-interaction failure is recorded as a finding before the
+> harness has been eliminated, or before a peer that is known to work has been run
+> through the same path as a control.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and
