@@ -1,6 +1,6 @@
 # 0002 — Own the Wayland/X11 platform layer instead of using `winit`
 
-**Status:** Accepted, pending Spike D
+**Status:** Accepted
 **Supersedes:** the `winit` assumption in the first draft of the architecture plan
 
 ## Context
