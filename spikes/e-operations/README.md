@@ -161,9 +161,17 @@ separately — the destination had room for eight of twenty equal files:
 0 incomplete; 0 temporary files left
 ```
 
-**The third condition — reflink measurably instant on btrfs — is not measured**,
-because no machine here can create a btrfs filesystem without root. See *what is
-owed*; it is one command away and the command is written.
+**Reflink measurably instant on btrfs and xfs.** The measurement is free space,
+not time, because time at this size measures page cache:
+
+```
+192 MiB on xfs: FICLONE consumed 0 KiB of free space;
+                a true byte copy of the same file consumed 196,608 KiB
+```
+
+Zero against the whole file. `copy_file_range` is excluded from the control
+because on both of these filesystems it *is* a clone — which is finding 6 below,
+and the reason the first version of this check measured 0x.
 
 ### The structural decision that makes the ENOSPC claim provable
 
@@ -191,7 +199,8 @@ the destination tree looking for `.skerry-copy-*`, not a question to the engine.
 | move within / across | rename in 0.011 ms / verified | rename in 0.009 ms | rename / verified |
 | reflink | `EOPNOTSUPP` | `EOPNOTSUPP` | `EOPNOTSUPP` |
 
-And what the privileged run added, from a machine with all four mounted:
+And what the privileged run added, from a machine with all four mounted — **seven
+filesystems, 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks**:
 
 | | btrfs | xfs | exFAT | vfat |
 | --- | --- | --- | --- | --- |
@@ -305,9 +314,18 @@ and the first is the most useful thing this spike has said about the design:
    architecture assumed: on the two filesystems that can share extents,
    `copy_file_range` does it already, so an explicit `FICLONE` path buys nothing
    except a way to *ask* whether sharing is possible. The check now uses a true
-   byte copy as its control — `kernel_copy: false` as well — and measures
-   **allocated blocks rather than time**, because extent sharing is what "instant"
-   actually means and free space does not depend on what is in page cache.
+   byte copy as its control — `kernel_copy: false` as well — and measures **free
+   space rather than time**, because extent sharing is what "instant" actually
+   means and space does not depend on what is in page cache.
+
+   That correction then produced a second one. The rewritten check passed on btrfs
+   with `FICLONE consumed 0 KiB` **and** `a true byte copy consumed 0 KiB`, because
+   the condition was `clone_cost * 8 < copy_cost.max(1)` — and `0 * 8 < 1` is true.
+   btrfs delays allocation, so neither copy had been accounted yet. **A comparison
+   that both sides can satisfy with zero is not a comparison**, so the check now
+   flushes with `fsync` and `syncfs` first and requires the *control* to consume at
+   least half the file before it will call anything a pass. Third instance of the
+   same rule in this spike, and the first one inside an operator.
 
 7. **A fixture sized for one filesystem breaks another.** The 1 GiB sparse file is
    12 KiB on ext4 and *1 GiB of real data* on FAT, which filled a 1 GiB vfat image

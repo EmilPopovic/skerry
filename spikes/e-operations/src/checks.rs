@@ -645,9 +645,21 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
         report.owed(format!("reflink/{pair}"), "not enough room for the reflink source file");
         return;
     }
+    // btrfs delays allocation, so free space does not move until the data is
+    // flushed. Without this the control copy of 192 MiB appeared to consume zero
+    // bytes — and the check passed anyway, because `0 * 8 < 1`.
+    let settle = |p: &Path| {
+        if let Ok(f) = std::fs::File::open(p) {
+            let _ = rustix::fs::fsync(&f);
+            let _ = rustix::fs::syncfs(&f);
+        }
+    };
+    settle(&big);
     let free_before = free_bytes(src);
 
-    let clone = copy::copy_file(&big, &cloned, &Options { reflink: true, ..Default::default() });
+    let clone =
+        copy::copy_file(&big, &cloned, &Options { reflink: true, fsync: true, ..Default::default() });
+    settle(&cloned);
     let free_after_clone = free_bytes(src);
 
     let plain = copy::copy_file(
@@ -655,8 +667,9 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
         &copied,
         // Both kernel-side paths off: on btrfs and xfs `copy_file_range` is itself
         // a clone, so leaving it on measures nothing.
-        &Options { reflink: false, kernel_copy: false, ..Default::default() },
+        &Options { reflink: false, kernel_copy: false, fsync: true, ..Default::default() },
     );
+    settle(&copied);
     let free_after_copy = free_bytes(src);
 
     let (Ok(c), Ok(p)) = (&clone, &plain) else {
@@ -668,24 +681,39 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
     };
     let clone_cost = free_before.saturating_sub(free_after_clone);
     let copy_cost = free_after_clone.saturating_sub(free_after_copy);
-    let speedup = p.elapsed.as_secs_f64() / c.elapsed.as_secs_f64().max(1e-9);
     let evidence = format!(
-        "{} MiB: FICLONE consumed {} KiB of free space in {:.3} ms; a true byte copy of the same \
-         file consumed {} KiB in {:.3} ms — {:.0}x the space and {speedup:.0}x the time. \
-         copy_file_range on this filesystem is itself a clone, which is why it is excluded from \
-         the control",
+        "{} MiB: FICLONE consumed {} KiB of free space in {:.1} ms; a true byte copy of the same \
+         file consumed {} KiB in {:.1} ms. copy_file_range on this filesystem is itself a clone, \
+         so it is excluded from the control; the time is similar because both fit in page cache, \
+         and the space is the measurement",
         SIZE / (1 << 20),
         clone_cost / 1024,
         c.elapsed.as_secs_f64() * 1000.0,
         copy_cost / 1024,
         p.elapsed.as_secs_f64() * 1000.0,
-        if clone_cost == 0 { f64::INFINITY } else { copy_cost as f64 / clone_cost as f64 }
     );
-    // The space test is the real one: a clone that shares extents costs a
-    // rounding error, and a byte copy costs the whole file.
-    let shared = clone_cost * 8 < copy_cost.max(1);
-    let ok = c.strategy == Strategy::Reflink && shared;
-    report.record(format!("reflink/{pair}"), if ok { Outcome::Pass } else { Outcome::Fail }, evidence);
+    // Both halves have to hold, and the second one is what keeps the first
+    // honest: a clone that costs nothing proves nothing unless the control
+    // actually costs something. Before this, btrfs passed on `0 * 8 < 1` because
+    // delayed allocation had not been flushed and *neither* copy appeared to
+    // consume space.
+    let clone_free = clone_cost < SIZE as u64 / 16;
+    let control_paid = copy_cost > SIZE as u64 / 2;
+    let outcome = match (c.strategy == Strategy::Reflink && clone_free, control_paid) {
+        (true, true) => Outcome::Pass,
+        // The control did not consume space either, so nothing was compared.
+        (_, false) => Outcome::Fail,
+        (false, _) => Outcome::Fail,
+    };
+    let evidence = if control_paid {
+        evidence
+    } else {
+        format!(
+            "{evidence}. The control consumed no space either, so this measured nothing — the \
+             filesystem has not accounted the allocation yet"
+        )
+    };
+    report.record(format!("reflink/{pair}"), outcome, evidence);
     for f in [&big, &cloned, &copied] {
         let _ = std::fs::remove_file(f);
     }
