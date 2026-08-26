@@ -204,13 +204,16 @@ probing 8 MB at random (232 → 131 for one pass on the Pi, and almost nothing o
 cache-rich laptop, which is why it went unnoticed); and splitting on the most
 significant byte with that split parallel too (216 → 191).
 
-**The remaining 1.6× is memory bandwidth, not parallelism.** Four cores buy 1.9×
-on a pattern that reads a 28 MB arena at random — the same shortfall the parallel
-search shows at 3.4× — and bucket skew is not the constraint, with 29 non-empty
-first-byte buckets and the largest at 13.4%. A single packed pass that does not
-even finish the job is already 131 ms. **Closing the gap means moving less
-memory, not adding threads**, and sorting by a metadata column is 8 ms, so this
-remains specifically a *filename* sorting problem.
+**The remaining 1.6× is memory, not parallelism — on the Pi.** Four cores buy
+1.9×, bucket skew is not the constraint (29 non-empty first-byte buckets, largest
+13.4%), and the sort achieves 33% of the machine's measured random-read rate,
+which is close enough for memory to be a real limit. On the laptop the same sort
+uses **12%** of what is available, so there the limit is something else and an
+earlier revision of this section was wrong to say otherwise.
+
+Closing the gap means **moving less memory rather than adding threads**, and
+sorting by a metadata column is 8 ms, so this remains specifically a *filename*
+sorting problem.
 
 ### The row that needs a mechanism, not a number
 
@@ -234,14 +237,35 @@ which is the only way a budget row means anything.
 ### On extrapolating between machines
 
 This section previously projected reference hardware from the laptop using a
-single "3× slower per core" factor from Spike B. **Measured, the factor runs from
-2.6× to 12× on the same pair of machines** — 2.6× for a linear scan, 5.6× for a
-comparison sort, 12× for a radix scatter. It tracks how much memory an operation
-moves per unit of work, not clock speed, because cache size and memory bandwidth
-differ independently of it.
+single "3× slower per core" factor. Measured, the factor runs from **2.6× to 12×
+on the same pair of machines**, and [Spike F](../spikes/f-index-and-search/README.md#measuring-what-the-machines-offer-and-retracting-bandwidth-bound)
+then measured *why*, over the same 28.5 MB arena:
+
+| | laptop | Pi 5 | ratio |
+| --- | --- | --- | --- |
+| sequential read | 16.88 GB/s | 5.43 GB/s | **3.1×** |
+| independent random 8-byte reads, all threads | 793.9 M/s | 26.1 M/s | **30×** |
+| dependent random reads, one thread | 220.6 M/s | 82.2 M/s | 2.7× |
+
+**An operation's portability factor is the factor of whichever access pattern
+dominates it.** A scan ports at 2.6× against a 3.1× primitive; a radix scatter
+ports at 12× against a 30× primitive. Those two primitives differ by an order of
+magnitude on the same pair of machines, so no single multiplier could have worked.
+
+The cause is that **28 MB of names fits in the laptop's cache and not in the
+Pi's** — a dependent random read is 4.5 ns on one and 12 ns on the other — and on
+the Pi four threads doing independent random reads achieve *less* than one thread
+doing dependent ones. Concurrent random access over a working set that does not
+fit collapses rather than scales.
+
+The design rule that follows, and it is worth more than any single number here:
+**an operation that streams ports well, and an operation that scatters does not.**
+Prefer sequential passes over a compact representation to clever indirection,
+because the indirection is what the reference machine cannot afford.
 
 Every projection in this document should be treated as a hypothesis until a slow
-machine has run it. This project has now guessed wrong about that twice.
+machine has run it. This project has now guessed wrong about that twice, and once
+about the reason.
 
 ### One shape that is not in any row yet
 

@@ -8,6 +8,7 @@ mod flat;
 mod index;
 mod matcher;
 mod pool;
+mod probe;
 mod shape;
 mod sort;
 mod stats;
@@ -236,6 +237,20 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         );
     }
 
+    let threads = pool_width(options);
+
+    // ── what the machine can do ───────────────────────────────────────────────
+    // So that "memory-bandwidth bound" is a comparison rather than an assertion.
+    let bandwidth = probe::measure(&flat.names, threads);
+    println!("\n  what this machine offers, over the same {:.1} MB arena", flat.names.len() as f64 / 1e6);
+    println!(
+        "  sequential {:.2} GB/s · random 8-byte reads {:.1} M/s across {threads} threads · \
+dependent {:.1} M/s on one",
+        bandwidth.sequential / 1e9,
+        bandwidth.random / 1e6,
+        bandwidth.dependent / 1e6
+    );
+
     // ── index ─────────────────────────────────────────────────────────────────
     let path = options.base.join(format!("{}.skix", shape.label()));
     let mut build = Samples::new("build");
@@ -287,8 +302,6 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
         cold.percentile(50.0) / walk_ms.percentile(50.0).max(0.001),
         2300.0 / cold.percentile(50.0).max(0.001)
     );
-
-    let threads = pool_width(options);
 
     // ── sorting ───────────────────────────────────────────────────────────────
     println!("\n  sorting {} entries, milliseconds — bar: 120 ms, hard fail 300 ms", flat.len());
@@ -434,6 +447,23 @@ fn measure(shape: Shape, options: &Options) -> Result<(), String> {
             .windows(2)
             .all(|w| flat.name(w[0] as usize) <= flat.name(w[1] as usize));
         println!("  fully parallel msd radix produces a correctly ordered result: {sorted}");
+    }
+
+    {
+        // The sort's own throughput, against what the probe says is available.
+        // A recursive radix touches each name roughly once per level of
+        // recursion; with 94% of names sharing eight bytes, two levels is the
+        // floor and three is typical.
+        let touches = flat.len() as f64 * 2.5;
+        let achieved = touches / (full_ms.percentile(50.0) as f64 / 1000.0);
+        println!(
+            "  the sort makes about {:.1} M random arena reads and achieves {:.1} M/s, \
+which is {:.0}% of the {:.1} M/s this machine offers",
+            touches / 1e6,
+            achieved / 1e6,
+            100.0 * achieved / bandwidth.random.max(1.0),
+            bandwidth.random / 1e6
+        );
     }
 
     {

@@ -469,16 +469,68 @@ wrong, so the conclusion drawn from it was too.
 
 What the numbers say instead: serial recursion is 367 ms and four threads bring it
 to 191 ms, a speedup of **1.9× on four cores** — the same shortfall the parallel
-*search* shows at 3.4×. **The sort is memory-bandwidth bound**, and 191 ms is
-close to what this hardware does for an access pattern that reads a 28 MB arena
-at random. Bucket skew is not the limit: 29 non-empty first-byte buckets, the
-largest 13.4% and the top four 33.2%, so at four threads a balanced schedule is
-still available.
+*search* shows at 3.4×. Bucket skew is not the limit: 29 non-empty first-byte
+buckets, the largest 13.4% and the top four 33.2%, so at four threads a balanced
+schedule is still available.
+
+At this point this document concluded "the sort is memory-bandwidth bound".
+[Measuring the machines](#measuring-what-the-machines-offer-and-retracting-bandwidth-bound)
+showed that is **wrong on the laptop** — the sort uses 12% of the available random
+read rate — and roughly right on the Pi at 33%.
 
 **Getting to 120 ms therefore needs less memory traffic, not more threads.** The
 lower bound in the table is the packed single pass at 131 ms, which is already
 1.1× over target and does not finish the job. That is the honest ceiling for this
 representation, and beating it means changing what is sorted — not how.
+
+#### Measuring what the machines offer, and retracting "bandwidth-bound"
+
+This document asserted several times that the sort and the search are limited by
+memory bandwidth rather than by cores, on the evidence that adding threads stopped
+helping. That is *consistent* with the claim and does not establish it — a lock, a
+scheduler, or a straggler looks identical from outside. So the same arena was
+measured directly.
+
+| Over the same 28.5 MB arena | laptop | Pi 5 | ratio |
+| --- | --- | --- | --- |
+| sequential read | 16.88 GB/s | 5.43 GB/s | **3.1×** |
+| independent random 8-byte reads, all threads | **793.9 M/s** | **26.1 M/s** | **30×** |
+| dependent random reads, one thread | 220.6 M/s | 82.2 M/s | 2.7× |
+
+**The claim is wrong on the laptop and roughly right on the Pi.** The sort makes
+about 2.6 M random arena reads and achieves 96.9 M/s on the laptop — **12% of what
+the machine offers**, so arena access is at most an eighth of its time and
+something else is the cost. On the Pi it achieves 8.6 M/s against 26.1 M/s
+available: **33%**, which is close enough that memory is a real constraint there.
+
+Two things fall out that matter more than the retraction.
+
+**The laptop's arena fits in its cache and the Pi's does not.** A dependent random
+read costs 4.5 ns on the laptop, which is cache latency, not memory latency. 28 MB
+of names simply live in the L3. On the Pi the same read is 12 ns and — the
+striking part — **four threads doing independent random reads achieve 26 M/s,
+less than one thread doing dependent ones at 82 M/s.** Concurrent random access
+over a working set that does not fit collapses rather than scales.
+
+**And this is the model for cross-machine extrapolation that was missing.** The
+earlier finding was that the laptop-to-Pi factor ranges from 2.6× to 12× with no
+apparent pattern. There is a pattern, and it is in the table above:
+
+| Operation | measured factor | dominated by | primitive's factor |
+| --- | --- | --- | --- |
+| search scan | 2.6× | sequential reads | 3.1× |
+| index cold load | 4.1× | sequential I/O | — |
+| comparison sort | 5.6× | mixed | between |
+| radix scatter | 12.0× | random reads | 30× |
+
+**An operation's portability factor is the factor of whichever access pattern
+dominates it**, and those two primitives differ by an order of magnitude on the
+same pair of machines. A single "3× slower per core" multiplier was never going
+to work, and now there is a reason rather than an observation.
+
+The practical form: **an operation that streams ports well, and an operation that
+scatters does not.** That is a design rule for `sk-index` and `sk-fs`, and it is
+worth more than any individual number in this spike.
 
 #### Warm is not reliably warm on 8 GB
 
