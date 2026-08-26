@@ -177,6 +177,44 @@ was never really there declines everything, identically, every time.
 > harness has been eliminated, or before a peer that is known to work has been run
 > through the same path as a control.
 
+## A byte-for-byte comparison is not a correctness test
+
+[Spike E](../spikes/e-operations/README.md) found four defects. **Two of them pass
+a byte-for-byte comparison of source and destination.**
+
+- `copy_file_range` over a whole file turned a 1 GiB sparse file with 12 KiB of
+  data into a gigabyte of zeros. Every byte matched. What did not match was the
+  extent map, and the allocated size, and the free space on the disk.
+- The `link`+`unlink` placement left a temporary name linked to the copy. Every
+  byte matched. What did not match was the link count.
+
+The pattern is that identity of *content* is the cheapest property a file has, and
+the one least likely to be the thing that broke. A copy has a hole map, an
+allocated size, a link count, a mode, a timestamp to the nanosecond, a set of
+extended attributes and a name — and each of them is a separate comparison.
+
+> **Fails if:** a data-preserving operation is verified by comparing contents and
+> nothing else.
+
+## A matrix whose cases all say yes has not been tested
+
+Spike E ran green on ext4 and tmpfs. Both support reflink probing, holes,
+hardlinks, symlinks, `user.*` attributes, POSIX modes and nanosecond timestamps —
+so the code paths that *report what could not be preserved* were never reached,
+and the distinction between "not preserved" and "not preservable" had never been
+exercised.
+
+Adding NTFS — which is not in the roadmap's list, and is what an external drive is
+actually formatted as — produced six limitations and **two defects in an
+afternoon**, including one where every single file failed to copy because ntfs-3g
+refuses `RENAME_NOREPLACE`.
+
+The general form: a test suite needs a case that says no, and the case that says
+no is usually the one nobody thought to install.
+
+> **Fails if:** every filesystem, compositor, driver or peer in a matrix supports
+> everything under test. That is a matrix of one case wearing several hats.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

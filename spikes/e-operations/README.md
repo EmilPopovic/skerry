@@ -129,7 +129,9 @@ is always by comparison against the source, never by trusting the copy:
 
 From [runs/matrix-yoga.txt](runs/matrix-yoga.txt), which is the whole of
 `./target/release/spike-e-operations run` — one command, every filesystem it can
-find, every fault case.
+find, every fault case. The same binary's output on the other two machines is in
+[runs/matrix-homelab.txt](runs/matrix-homelab.txt) and
+[runs/matrix-pi.txt](runs/matrix-pi.txt).
 
 **37 pass, 0 fail, 6 limitations, 3 owed, of 46 checks.** Every limitation is a
 property of NTFS, and every one of the three owed is the same missing filesystem.
@@ -193,6 +195,36 @@ The NTFS column is the reason NTFS is in a matrix that does not name it. Two
 filesystems that both say yes to everything do not test the paths that report
 what could not be preserved — and those paths are where a copy engine quietly
 loses a permission bit.
+
+### Three machines, two architectures
+
+The matrix's design claim is that it can be re-run somewhere it has never been,
+because the filesystem list is discovered rather than declared. That claim is
+testable, so it was tested: the same source, built for `x86_64-unknown-linux-musl`
+and `aarch64-unknown-linux-musl`, on the three machines Spikes B, C and F used.
+
+| | this laptop | homelab (x86_64 VM) | Pi 5 (aarch64) |
+| --- | --- | --- | --- |
+| result | 37 pass, 0 fail | **26 pass, 0 fail** | **26 pass, 0 fail** |
+| filesystems found | ext4, tmpfs, NTFS | ext4, tmpfs | ext4, tmpfs |
+| rename within a filesystem | 0.011 ms | 0.015 ms | 0.025 ms |
+| fault arm | 5 cases | owed | owed |
+
+Identical behaviour on both architectures, and no code change to run there. The
+two remote machines have fewer checks for two reasons that are worth separating:
+
+- **The fault arm needs `libfuse` at link time**, so the static musl build omits
+  it and reports the five cases as owed rather than skipping them silently. A
+  toolchain on the remote machine would close that; cross-compiling against
+  `libfuse` for another architecture is not worth the effort for a spike.
+- **`ntfs-3g` is setuid root on this laptop and is not on the Pi**, which is a
+  packaging choice: `-rwsr-xr-x` against `-rwxr-xr-x`. So the NTFS arm exists on
+  one machine and not the others, and the matrix reports that as owed with the
+  reason rather than pretending NTFS passed.
+
+Neither is a portability problem in the engine, and that is the useful result: the
+part that copies files behaves the same everywhere, and what varies is which
+filesystems a machine will let an unprivileged process create.
 
 ### Four things this changed, three of them in our own code
 

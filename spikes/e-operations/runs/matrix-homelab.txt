@@ -1,0 +1,40 @@
+Spike E — the torture matrix
+  kernel       6.8.0-138-generic
+  load         0.00
+
+═══ ext4 at /home/homelab/skerry-spike-e ═══
+  PASS  fixture/ext4           11 files and 0 refusals: the filesystem accepted every fixture
+  PASS  tree/ext4→ext4         11 files, 4 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 11x copy_file_range; placement 11x renameat2(NOREPLACE); 0 failures
+  PASS  no-temp-files/ext4→ext4 0 reported by the engine, 0 found by walking the destination
+  PASS  bytes/ext4→ext4        11 files compared byte for byte
+  PASS  sparse/ext4→ext4       1073741824 apparent bytes in 3 extents; source occupies 12 KiB, destination 12 KiB
+  PASS  metadata/ext4→ext4     mode 4755 to 4755 (the filesystem keeps POSIX mode bits); mtime off by 0 ns, against exact to the nanosecond measured on a probe file
+  PASS  xattrs/ext4→ext4       2 user attributes on the source, 2 on the copy; 0 reported as unpreservable
+  PASS  hardlinks/ext4→ext4    3 names share 1 inode(s); 3 of them resolve to the first one; the filesystem reports a link count of 3
+  PASS  symlinks/ext4→ext4     4 of 4 symlinks copied as symlinks with identical targets
+  PASS  names/ext4→ext4        4 of 4 adversarial names round-tripped: 255 bytes, an embedded newline, invalid UTF-8, and a leading dash
+  PASS  self-copy/ext4→ext4    refused at same-file with Os { code: 22, kind: InvalidInput, message: "Invalid argument" }; size still 3145735 of 3145735
+  PASS  clobber/ext4→ext4      refused at destination-exists with Os { code: 17, kind: AlreadyExists, message: "File exists" }; the destination is unchanged: true
+  OWED  reflink/ext4→ext4      FICLONE refused with Os { code: 95, kind: Unsupported, message: "Not supported" } on ext4, so the bar's reflink condition cannot be measured here — it needs btrfs or xfs, and creating either needs root
+  PASS  move/ext4→ext4         within a filesystem: renamed in 0.015 ms; across: renamed — the paths were on one filesystem; the source survives exactly when the destination does not: true
+
+═══ tmpfs at /dev/shm/skerry-spike-e ═══
+  PASS  fixture/tmpfs          11 files and 0 refusals: the filesystem accepted every fixture
+  PASS  tree/tmpfs→tmpfs       11 files, 4 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 11x copy_file_range; placement 11x renameat2(NOREPLACE); 0 failures
+  PASS  no-temp-files/tmpfs→tmpfs 0 reported by the engine, 0 found by walking the destination
+  PASS  bytes/tmpfs→tmpfs      11 files compared byte for byte
+  PASS  sparse/tmpfs→tmpfs     1073741824 apparent bytes in 3 extents; source occupies 12 KiB, destination 12 KiB
+  PASS  metadata/tmpfs→tmpfs   mode 4755 to 4755 (the filesystem keeps POSIX mode bits); mtime off by 0 ns, against exact to the nanosecond measured on a probe file
+  PASS  xattrs/tmpfs→tmpfs     2 user attributes on the source, 2 on the copy; 0 reported as unpreservable
+  PASS  hardlinks/tmpfs→tmpfs  3 names share 1 inode(s); 3 of them resolve to the first one; the filesystem reports a link count of 3
+  PASS  symlinks/tmpfs→tmpfs   4 of 4 symlinks copied as symlinks with identical targets
+  PASS  names/tmpfs→tmpfs      4 of 4 adversarial names round-tripped: 255 bytes, an embedded newline, invalid UTF-8, and a leading dash
+  PASS  self-copy/tmpfs→tmpfs  refused at same-file with Os { code: 22, kind: InvalidInput, message: "Invalid argument" }; size still 3145735 of 3145735
+  PASS  clobber/tmpfs→tmpfs    refused at destination-exists with Os { code: 17, kind: AlreadyExists, message: "File exists" }; the destination is unchanged: true
+  OWED  reflink/tmpfs→tmpfs    FICLONE refused with Os { code: 95, kind: Unsupported, message: "Not supported" } on tmpfs, so the bar's reflink condition cannot be measured here — it needs btrfs or xfs, and creating either needs root
+  PASS  move/tmpfs→tmpfs       within a filesystem: renamed in 0.009 ms; across: copied 65536 bytes, verified before unlinking: true; the source survives exactly when the destination does not: true
+
+  OWED  ntfs                   ntfs-3g would not mount the image
+  OWED  faults                 built without the inject feature
+  26 pass, 0 fail, 0 limitation, 4 owed, of 30 checks
+rc=0
