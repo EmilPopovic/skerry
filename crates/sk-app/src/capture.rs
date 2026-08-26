@@ -66,8 +66,20 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // Folder totals are measured for what is on screen, and a capture is all of
     // it. Bounded by the same deadline as the read, because a capture of `/` is
     // not a reason to walk the whole disk.
-    pane.measure_visible(0..pane.listing.rows().min(MEASURED), &session.jobs);
-    session.settle(&mut pane, READ_DEADLINE);
+    let mut measurer = crate::sizes::Measurer::new(session.waker.handle());
+    let rows = 0..pane.listing.rows().min(MEASURED);
+    let deadline = std::time::Instant::now() + READ_DEADLINE;
+    loop {
+        // `update` applies what is known and claims what is not, so a pass that
+        // claims nothing and has nothing running is a pass with nothing left.
+        measurer.update(&mut pane, rows.clone(), &session.jobs);
+        measurer.drain();
+        if measurer.stats().1 == 0 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    measurer.stop();
 
     for row in SELECTED {
         if let Some(id) = pane.listing.at(row) {

@@ -31,6 +31,7 @@ mod headless;
 mod keys;
 mod layout;
 mod pane;
+mod sizes;
 mod view;
 
 pub use app::{App, Options};

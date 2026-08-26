@@ -15,4 +15,4 @@
 
 pub mod size;
 
-pub use size::{Progress, measure};
+pub use size::{Progress, Sizes, measure};

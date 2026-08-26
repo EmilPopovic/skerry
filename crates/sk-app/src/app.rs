@@ -17,6 +17,7 @@ use crate::frames::Frames;
 use crate::keys;
 use crate::layout::Layout;
 use crate::pane::{Jobs, Message, Pane};
+use crate::sizes::Measurer;
 use crate::view::{self, Chrome, Diagnostics};
 
 /// How long a type-ahead buffer stays live after the last keystroke.
@@ -57,6 +58,18 @@ pub struct Options {
     pub stats: bool,
     /// When the process started, for the cold-start measurement.
     pub started: Instant,
+}
+
+impl Drop for App {
+    /// Stops every folder walk before the pool is dropped.
+    ///
+    /// Dropping the pool joins its workers, and a worker three minutes into a
+    /// directory tree would hold the window open for all of it. `Drop::drop` runs
+    /// before the fields are dropped, which is the ordering this relies on.
+    fn drop(&mut self) {
+        self.measurer.stop();
+        self.pane.stop();
+    }
 }
 
 /// The platform capabilities that were found, as one line.
@@ -115,6 +128,8 @@ pub struct App {
     watching: bool,
     /// The platform capabilities found at start-up, as one line.
     capabilities: String,
+    /// Folder totals, kept by path so they survive every listing.
+    measurer: Measurer,
 
     /// The freedesktop databases, once the job that reads them has finished.
     ///
@@ -218,6 +233,7 @@ impl App {
         let logical = window.logical();
         let scale_120 = window.scale_120();
         let capabilities = describe(window.capabilities());
+        let measurer = Measurer::new(waker.handle());
         let now = Instant::now();
         Ok(Self {
             adapter: renderer.adapter().to_owned(),
@@ -243,6 +259,7 @@ impl App {
             refresh_owed: false,
             watching: true,
             capabilities,
+            measurer,
             desktop: None,
             desktop_rx,
             launcher: Launcher::default(),
@@ -294,6 +311,7 @@ impl App {
             self.drain_changes();
             self.drain_desktop();
             self.drain_paste();
+            self.drain_sizes();
             self.advance();
             if self.dirty {
                 self.render(&commands);
@@ -366,6 +384,13 @@ impl App {
         self.refreshed = Instant::now();
         self.pane.refresh(&self.jobs);
         self.dirty = true;
+    }
+
+    /// Takes delivery of folder totals.
+    fn drain_sizes(&mut self) {
+        if self.measurer.drain() {
+            self.dirty = true;
+        }
     }
 
     /// Applies whatever came back from a clipboard read.
@@ -621,8 +646,14 @@ impl App {
         self.pane.go_home(&self.jobs);
     }
 
-    /// Re-reads the current directory.
+    /// Re-reads the current directory, and re-measures every folder in it.
+    ///
+    /// The totals are the reason this forgets as well as reloads. A watch on a
+    /// directory says nothing about its grandchildren, so a subtree that changed
+    /// underneath keeps its old number until somebody asks — and `F5` is a person
+    /// asking.
     pub(crate) fn reload(&mut self) {
+        self.measurer.forget_all();
         self.pane.reload(&self.jobs);
     }
 
@@ -851,16 +882,20 @@ impl App {
         let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
         self.pane.scroll.set_extent(content, self.layout.body.height);
 
-        // Folder sizes are measured for what is on screen, so the cost is bounded
-        // by the viewport rather than by the directory. Asked for here, once per
-        // frame, rather than by each thing that scrolls.
+        // Folder totals are applied to what is on screen and measured for what is
+        // missing, once per frame. Bounded by the viewport rather than by the
+        // directory, and keyed by path rather than by row — so a new listing
+        // shows what is already known instead of starting again.
         let visible = sk_ui::visible_rows(
             self.pane.scroll.offset(),
             self.layout.body.height,
             self.theme.metrics.row_height,
             self.pane.listing.rows(),
         );
-        self.pane.measure_visible(visible, &self.jobs);
+        {
+            let Self { measurer, pane, jobs, .. } = self;
+            measurer.update(pane, visible, jobs);
+        }
 
         let build_started = Instant::now();
         self.list.begin(physical);

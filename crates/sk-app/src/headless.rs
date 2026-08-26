@@ -29,8 +29,12 @@ pub(crate) struct Session {
     pub fonts: Fonts,
     pub jobs: Jobs,
     pub updates: mpsc::Receiver<Message>,
-    /// Kept alive because the jobs hold handles to it.
-    pub _waker: Waker,
+    /// The eventfd the jobs signal.
+    ///
+    /// Nothing here waits on it — a headless run has no frame loop to wake — but
+    /// it has to outlive the handles the jobs hold, and a capture hands one to
+    /// the folder-total walks.
+    pub waker: Waker,
     /// The surface size in device pixels.
     pub physical: (u32, u32),
     /// Device pixels per logical pixel.
@@ -55,7 +59,7 @@ impl Session {
             fonts,
             jobs,
             updates,
-            _waker: waker,
+            waker,
             physical,
             scale: scale_120 as f32 / 120.0,
         })

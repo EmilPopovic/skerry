@@ -215,6 +215,46 @@ no is usually the one nobody thought to install.
 > **Fails if:** every filesystem, compositor, driver or peer in a matrix supports
 > everything under test. That is a matrix of one case wearing several hats.
 
+## State keyed by an index into a rebuilt collection is a bug waiting for a rebuild
+
+Twice now, and the second time was a user report.
+
+An `EntryId` is an index into one listing's parallel arrays. Entry 3 of a
+directory and entry 3 of the next one are different files. Anything that caches
+by that index — and caching by it is the *point* of an index — serves the first
+when asked for the second, and does it silently, on the frame after a navigation.
+
+* The **text layout cache** drew the parent directory's names in the child's
+  rows.
+* The **folder totals** were stored in the `Listing` and their in-flight walks
+  tracked by `EntryId`, so every new listing threw all of them away. A change
+  anywhere in the watched directory, or a trip to the parent folder and back,
+  re-walked every subtree from nothing.
+
+Both fixes were the same shape and neither was "remember to invalidate": key the
+state by something that outlives the rebuild. The layout cache gained the
+listing's version; the totals moved out of the listing entirely and are keyed by
+**path**, which is what a folder's size actually belongs to. The second fix also
+made coming back to a directory instant, because the right key was the one that
+made the cache useful rather than merely correct.
+
+> **Fails if:** anything outside a collection remembers a position in it.
+
+## The first suspect is rarely the culprit; instrument before fixing
+
+The folder-total report came with a plausible cause attached — the directory was
+being watched, a watch causes a refresh, a refresh looked likely to cancel the
+walks. Twenty seconds of `inotify` on the same directory recorded **zero events**.
+The walks were not being cancelled by the watcher at all; a trace of the running
+program showed **all twenty folders reporting and nothing being dropped**, which
+moved the question from "why is nothing arriving" to "why is nothing kept" and
+found the real defect in a minute.
+
+The measurement cost less than the first fix would have, and the first fix would
+have been for a cause that was not occurring.
+
+> **Fails if:** a defect is explained before it is observed.
+
 ## Every unit test can pass while the frame is wrong
 
 Entering a subdirectory drew four rows: two of the child's files, and two of the

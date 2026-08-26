@@ -29,6 +29,7 @@
 //! known — and it costs one channel message every few frames instead of a
 //! spinner that means nothing.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -287,5 +288,163 @@ mod tests {
         assert_eq!((found.bytes, found.files, found.directories), (0, 0, 1));
         assert!(found.complete && !found.partial);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// Folder totals, remembered by path.
+///
+/// **Keyed by path and owned above the listing**, which is the whole point. A
+/// total belongs to a directory on the disk, not to a row: the first version of
+/// this stored it in the `Listing` and keyed the in-flight set by `EntryId`, so
+/// every new listing threw all of it away. Going to the parent folder, or any
+/// change at all in the current one, re-walked every subtree from nothing — and
+/// on a home directory that is minutes of work to rediscover something that had
+/// not changed.
+///
+/// Two consequences worth stating, because both are visible:
+///
+/// * **Coming back to a folder is instant.** The totals are already known.
+/// * **A total can be stale.** inotify on a directory says nothing about its
+///   grandchildren, so a subtree that changed underneath keeps its old number
+///   until something asks again. `F5` is that something — it forgets and
+///   re-measures — and the alternative is a recursive watch on every visible
+///   folder, which [Spike C](../../../spikes/c-watching/README.md) priced at 34%
+///   of the per-user watch budget for one `node_modules`.
+pub struct Sizes {
+    known: HashMap<PathBuf, Progress>,
+    running: HashSet<PathBuf>,
+    concurrent: usize,
+}
+
+impl Sizes {
+    /// A cache that runs at most `concurrent` walks at once.
+    #[must_use]
+    pub fn new(concurrent: usize) -> Self {
+        Self { known: HashMap::new(), running: HashSet::new(), concurrent: concurrent.max(1) }
+    }
+
+    /// What is known about a folder, complete or not.
+    #[must_use]
+    pub fn get(&self, path: &Path) -> Option<Progress> {
+        self.known.get(path).copied()
+    }
+
+    /// Claims `path` for a walk, if one is worth starting and there is room.
+    ///
+    /// The cap is why this can say no to something it has never seen: scrolling
+    /// through a directory of three hundred folders must not start three hundred
+    /// recursive walks. A refusal is not final — the caller asks again on the
+    /// next frame, and the next frame arrives because something else reported.
+    pub fn claim(&mut self, path: &Path) -> bool {
+        if self.running.contains(path) || self.running.len() >= self.concurrent {
+            return false;
+        }
+        if self.known.get(path).is_some_and(|progress| progress.complete) {
+            return false;
+        }
+        self.running.insert(path.to_path_buf());
+        true
+    }
+
+    /// Records what a walk found. A complete report releases its slot.
+    pub fn record(&mut self, path: &Path, progress: Progress) {
+        if progress.complete {
+            self.running.remove(path);
+        }
+        let entry = self.known.entry(path.to_path_buf()).or_insert(progress);
+        // A partial report that arrives after the complete one must not undo it,
+        // and a total must never go backwards while a person is reading it.
+        if progress.complete || progress.bytes >= entry.bytes {
+            *entry = progress;
+        }
+    }
+
+    /// Forgets everything, so the next look measures again.
+    pub fn forget_all(&mut self) {
+        self.known.clear();
+        self.running.clear();
+    }
+
+    /// Folders known, and walks running.
+    #[must_use]
+    pub fn stats(&self) -> (usize, usize) {
+        (self.known.len(), self.running.len())
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Progress, Sizes};
+    use std::path::Path;
+
+    fn total(bytes: u64, complete: bool) -> Progress {
+        Progress { bytes, complete, ..Progress::default() }
+    }
+
+    #[test]
+    fn a_total_is_remembered_by_path_and_survives_everything_else() {
+        let mut sizes = Sizes::new(4);
+        assert!(sizes.claim(Path::new("/a/one")));
+        sizes.record(Path::new("/a/one"), total(100, true));
+        assert_eq!(sizes.get(Path::new("/a/one")).map(|it| it.bytes), Some(100));
+        assert_eq!(sizes.get(Path::new("/a/two")), None);
+    }
+
+    #[test]
+    fn a_folder_already_measured_is_not_measured_again() {
+        let mut sizes = Sizes::new(4);
+        assert!(sizes.claim(Path::new("/a/one")));
+        sizes.record(Path::new("/a/one"), total(100, true));
+        assert!(!sizes.claim(Path::new("/a/one")), "a complete total was re-walked");
+    }
+
+    #[test]
+    fn an_incomplete_total_keeps_its_slot_and_may_be_resumed_after_it_is_released() {
+        let mut sizes = Sizes::new(4);
+        assert!(sizes.claim(Path::new("/a/one")));
+        sizes.record(Path::new("/a/one"), total(50, false));
+        assert!(!sizes.claim(Path::new("/a/one")), "already running");
+        assert_eq!(sizes.stats(), (1, 1));
+
+        sizes.record(Path::new("/a/one"), total(100, true));
+        assert_eq!(sizes.stats(), (1, 0));
+    }
+
+    #[test]
+    fn the_cap_defers_rather_than_refusing_forever() {
+        let mut sizes = Sizes::new(2);
+        assert!(sizes.claim(Path::new("/a/one")));
+        assert!(sizes.claim(Path::new("/a/two")));
+        assert!(!sizes.claim(Path::new("/a/three")), "the cap held");
+
+        sizes.record(Path::new("/a/one"), total(1, true));
+        assert!(sizes.claim(Path::new("/a/three")), "a finished walk freed a slot");
+    }
+
+    /// A number a person is reading must not go backwards.
+    #[test]
+    fn a_late_partial_report_does_not_undo_a_larger_one() {
+        let mut sizes = Sizes::new(4);
+        sizes.claim(Path::new("/a/one"));
+        sizes.record(Path::new("/a/one"), total(900, false));
+        sizes.record(Path::new("/a/one"), total(100, false));
+        assert_eq!(sizes.get(Path::new("/a/one")).map(|it| it.bytes), Some(900));
+
+        // A complete report is authoritative even if it is smaller: the folder
+        // may genuinely have shrunk.
+        sizes.record(Path::new("/a/one"), total(50, true));
+        assert_eq!(sizes.get(Path::new("/a/one")).map(|it| it.bytes), Some(50));
+    }
+
+    #[test]
+    fn forgetting_makes_everything_measurable_again() {
+        let mut sizes = Sizes::new(4);
+        sizes.claim(Path::new("/a/one"));
+        sizes.record(Path::new("/a/one"), total(100, true));
+        sizes.forget_all();
+        assert_eq!(sizes.get(Path::new("/a/one")), None);
+        assert!(sizes.claim(Path::new("/a/one")));
     }
 }

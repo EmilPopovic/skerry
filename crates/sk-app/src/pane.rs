@@ -10,7 +10,7 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use sk_fs::{META_CHUNK, MetaRow};
-use sk_model::{BitSet, EntryId, Flags, Listing, Problem, Selection, Sort, SortColumn};
+use sk_model::{EntryId, Flags, Listing, Problem, Selection, Sort, SortColumn};
 use sk_util::{Cancel, Lane, Pool, WakeHandle};
 
 /// What a directory read reports back.
@@ -32,17 +32,6 @@ pub enum Update {
     },
     /// Metadata for one slice of the names.
     Meta(Vec<MetaRow>),
-    /// How big a directory is, so far.
-    Size {
-        /// Which directory.
-        id: EntryId,
-        /// Bytes counted so far.
-        bytes: u64,
-        /// Whether the walk finished.
-        complete: bool,
-        /// Whether anything under it could not be counted.
-        partial: bool,
-    },
     /// A display order computed on a job.
     Ordered {
         /// The permutation.
@@ -134,12 +123,6 @@ pub struct Pane {
     reorder_owed: bool,
     /// Whether a sort job is in flight, so a second one is not queued behind it.
     sorting: bool,
-    /// Directories a size walk has already been started for.
-    ///
-    /// A bitset over entry ids rather than a set of paths: measuring is
-    /// idempotent but not free, and scrolling a row off screen and back must not
-    /// walk the tree again.
-    measuring: BitSet,
     /// A name to put the cursor on once the names land.
     ///
     /// Set by [`Pane::go_up`], because coming out of a folder should leave the
@@ -175,7 +158,6 @@ impl Pane {
             meta_started: None,
             reorder_owed: false,
             sorting: false,
-            measuring: BitSet::default(),
             select_after_load: None,
         }
     }
@@ -331,6 +313,14 @@ impl Pane {
         }
     }
 
+    /// Cancels everything this pane started.
+    ///
+    /// Called when the window closes: a directory read of a million entries must
+    /// not hold the process open after there is nothing to show it to.
+    pub fn stop(&self) {
+        self.cancel.cancel();
+    }
+
     /// Re-reads the current path, keeping the selection and the scroll position.
     ///
     /// What a change notification triggers, as distinct from [`Pane::reload`]:
@@ -368,7 +358,6 @@ impl Pane {
                 self.names_us = elapsed_us;
                 self.sort_us = sort_us;
                 self.selection.fit(self.listing.len());
-                self.measuring = BitSet::new(self.listing.len());
                 self.restore_cursor();
                 self.dispatch_metadata(&names, jobs);
             }
@@ -393,9 +382,6 @@ impl Pane {
                     }
                 }
             }
-            Update::Size { id, bytes, complete, partial } => {
-                self.listing.set_recursive_size(id, bytes, complete, partial);
-            }
             Update::Ordered { order, elapsed_us } => {
                 self.sorting = false;
                 self.sort_us = elapsed_us;
@@ -409,42 +395,6 @@ impl Pane {
             }
         }
         true
-    }
-
-    /// Starts measuring any directory in `rows` that has not been measured yet.
-    ///
-    /// Driven by the viewport, not by the listing: a directory of ten thousand
-    /// folders would otherwise start ten thousand recursive walks to answer a
-    /// question about the forty a person can see. Called every frame; the bitset
-    /// makes all but the first call for a row free.
-    pub fn measure_visible(&mut self, rows: std::ops::Range<usize>, jobs: &Jobs) {
-        for row in rows {
-            let Some(id) = self.listing.at(row) else { continue };
-            if !self.listing.flags(id).has(Flags::DIR) || self.measuring.contains(id.index()) {
-                continue;
-            }
-            self.measuring.insert(id.index());
-
-            let path = self.path.join(self.listing.name(id));
-            let sender = jobs.sender.clone();
-            let wake = jobs.wake.clone();
-            let generation = self.generation;
-            jobs.pool.spawn(self.lane, self.cancel.clone(), move |cancel| {
-                sk_index::measure(&path, cancel, &mut |progress| {
-                    let update = Update::Size {
-                        id,
-                        bytes: progress.bytes,
-                        complete: progress.complete,
-                        partial: progress.partial,
-                    };
-                    if sender.send(Message { generation, update }).is_err() {
-                        cancel.cancel();
-                        return;
-                    }
-                    wake.wake();
-                });
-            });
-        }
     }
 
     /// Rebuilds the display order, on this thread or on a job.
