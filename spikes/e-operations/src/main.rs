@@ -124,7 +124,10 @@ fn with_ntfs(report: &mut report::Report, source: Option<&(String, std::path::Pa
 fn reopen(root: &std::path::Path) -> fixture::Fixture {
     let mut names = Vec::new();
     collect_files(root, &mut names);
-    fixture::Fixture { root: root.to_path_buf(), names, refused: Vec::new() }
+    // The sparse fixture's size is read back from the file rather than assumed,
+    // because a reopened tree does not know how it was built.
+    let sparse_size = std::fs::metadata(root.join("sparse.bin")).ok().map(|m| m.len());
+    fixture::Fixture { root: root.to_path_buf(), names, refused: Vec::new(), sparse_size }
 }
 
 fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {

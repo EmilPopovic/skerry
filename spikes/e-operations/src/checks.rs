@@ -126,12 +126,12 @@ pub fn run_pair(report: &mut Report, fx: &Fixture, target: &Target, pair: &str) 
     }
 
     bytes(report, fx, &fx.root, &dst, pair);
-    sparse(report, &fx.root, &dst, target, pair);
+    sparse(report, fx, &dst, target, pair);
     metadata(report, &fx.root, &dst, target, pair);
     xattrs(report, &fx.root, &dst, target, &t, pair);
-    hardlinks(report, &dst, target, pair);
-    symlinks(report, &fx.root, &dst, pair);
-    names(report, &dst, pair);
+    hardlinks(report, &fx.root, &dst, target, pair);
+    symlinks(report, fx, &dst, pair);
+    names(report, &fx.root, &dst, pair);
     self_copy(report, &fx.root, pair);
     clobber(report, &fx.root, &dst, pair);
     reflink(report, target, &fx.root, pair);
@@ -181,9 +181,17 @@ fn bytes(report: &mut Report, fx: &Fixture, src: &Path, dst: &Path, pair: &str) 
 
 /// A hole that becomes zeros passes a byte comparison and fails the user. The
 /// extent map and `st_blocks` are the only things that can tell the difference.
-fn sparse(report: &mut Report, src: &Path, dst: &Path, target: &Target, pair: &str) {
+fn sparse(report: &mut Report, fx: &Fixture, dst: &Path, target: &Target, pair: &str) {
+    let src = &fx.root;
     let a = src.join("sparse.bin");
     let b = dst.join("sparse.bin");
+    if fx.sparse_size.is_none() || !a.exists() {
+        report.limitation(
+            format!("sparse/{pair}"),
+            "the source filesystem could not hold a sparse file, so there is nothing to preserve",
+        );
+        return;
+    }
     if !target.caps.sparse {
         report.limitation(
             format!("sparse/{pair}"),
@@ -216,8 +224,16 @@ fn sparse(report: &mut Report, src: &Path, dst: &Path, target: &Target, pair: &s
 fn metadata(report: &mut Report, src: &Path, dst: &Path, target: &Target, pair: &str) {
     let a = src.join("mode-4755.bin");
     let b = dst.join("mode-4755.bin");
+    if !a.exists() {
+        report.limitation(
+            format!("metadata/{pair}"),
+            "the source filesystem refused a setuid file with a nanosecond mtime, so there is \
+             nothing to compare",
+        );
+        return;
+    }
     let (Ok(ma), Ok(mb)) = (verify::meta(&a), verify::meta(&b)) else {
-        report.fail(format!("metadata/{pair}"), "could not stat both files");
+        report.fail(format!("metadata/{pair}"), format!("{} exists and its copy does not", name_of(&a)));
         return;
     };
     let allowed_ns = target.caps.time_residue_ns;
@@ -278,6 +294,13 @@ fn worse_of(a: Outcome, b: Outcome) -> Outcome {
 fn xattrs(report: &mut Report, src: &Path, dst: &Path, target: &Target, t: &tree::Tree, pair: &str) {
     let a = src.join("with-xattrs.bin");
     let b = dst.join("with-xattrs.bin");
+    if !a.exists() {
+        report.limitation(
+            format!("xattrs/{pair}"),
+            "the source filesystem would not create the attribute-bearing file",
+        );
+        return;
+    }
     let (Ok(xa), Ok(xb)) = (verify::xattrs(&a), verify::xattrs(&b)) else {
         report.fail(format!("xattrs/{pair}"), "could not list attributes on both files");
         return;
@@ -296,7 +319,14 @@ fn xattrs(report: &mut Report, src: &Path, dst: &Path, target: &Target, t: &tree
         reported.len(),
         if reported.is_empty() { String::new() } else { format!(": {}", reported.join(", ")) }
     );
-    if target.caps.user_xattr.is_err() {
+    if user_a.is_empty() {
+        // Nothing to preserve: the source filesystem refused the attributes too.
+        // Asserting that the destination lost nothing would be asserting nothing.
+        report.limitation(
+            format!("xattrs/{pair}"),
+            format!("{evidence}; the source filesystem holds no user attributes either"),
+        );
+    } else if target.caps.user_xattr.is_err() {
         // The important half: it must be *reported*, not silently dropped.
         let outcome = if reported.is_empty() { Outcome::Fail } else { Outcome::Limitation };
         report.record(format!("xattrs/{pair}"), outcome, format!("{evidence}; the destination refuses user attributes"));
@@ -315,8 +345,20 @@ fn xattrs(report: &mut Report, src: &Path, dst: &Path, target: &Target, t: &tree
 /// filesystem's link count. ntfs-3g reports one more link than there are names,
 /// and testing its bookkeeping instead of the user-visible property turns a
 /// working copy into a failure.
-fn hardlinks(report: &mut Report, dst: &Path, target: &Target, pair: &str) {
+fn hardlinks(report: &mut Report, src: &Path, dst: &Path, target: &Target, pair: &str) {
     let names = ["hardlink-a", "hardlink-b", "hardlink-c"];
+    let in_source = names.iter().filter(|n| src.join(n).exists()).count();
+    if in_source < names.len() {
+        report.limitation(
+            format!("hardlinks/{pair}"),
+            format!(
+                "the source filesystem accepted {in_source} of {} names for one inode, so there \
+                 is no set to preserve",
+                names.len()
+            ),
+        );
+        return;
+    }
     let mut found = Vec::new();
     for n in names {
         match verify::meta(&dst.join(n)) {
@@ -360,11 +402,22 @@ fn hardlinks(report: &mut Report, dst: &Path, target: &Target, pair: &str) {
     report.record(format!("hardlinks/{pair}"), outcome, evidence);
 }
 
-fn symlinks(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
-    let names = ["link-relative", "link-absolute", "link-dangling", "link-invalid-target"];
+fn symlinks(report: &mut Report, fx: &Fixture, dst: &Path, pair: &str) {
+    let src = &fx.root;
+    let all = ["link-relative", "link-absolute", "link-dangling", "link-invalid-target"];
+    // Only the ones the source filesystem allowed. FAT allows none, and faulting
+    // a copy for not reproducing a symlink that never existed is asserting nothing.
+    let names: Vec<&str> = all.iter().copied().filter(|n| fx.has_symlink(n)).collect();
+    if names.is_empty() {
+        report.limitation(
+            format!("symlinks/{pair}"),
+            "the source filesystem accepts no symlinks, so there are none to copy",
+        );
+        return;
+    }
     let mut wrong = Vec::new();
     let mut ok = 0;
-    for n in names {
+    for n in names.iter().copied() {
         let (a, b) = (src.join(n), dst.join(n));
         let ma = verify::meta_nofollow(&b);
         match (verify::symlink_target(&a), verify::symlink_target(&b), ma) {
@@ -376,7 +429,13 @@ fn symlinks(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
             (Err(e), _, _) => wrong.push(format!("{n}: unreadable in the source ({e:?})")),
         }
     }
-    let evidence = format!("{ok} of {} symlinks copied as symlinks with identical targets", names.len());
+    let evidence = format!(
+        "{ok} of {} symlinks copied as symlinks with identical targets ({} of {} exist in the \
+         source)",
+        names.len(),
+        names.len(),
+        all.len()
+    );
     if wrong.is_empty() {
         report.pass(format!("symlinks/{pair}"), evidence);
     } else {
@@ -385,12 +444,12 @@ fn symlinks(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
         // would be losing one it could have held.
         let unencodable: Vec<&str> = names
             .iter()
+            .copied()
             .filter(|n| {
                 verify::symlink_target(&src.join(n))
                     .map(|t| std::str::from_utf8(&t).is_err())
                     .unwrap_or(false)
             })
-            .copied()
             .collect();
         let all_excused = wrong.iter().all(|w| unencodable.iter().any(|n| w.starts_with(n)));
         report.record(
@@ -401,18 +460,29 @@ fn symlinks(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
     }
 }
 
-fn names(report: &mut Report, dst: &Path, pair: &str) {
-    let want = fixture::adversarial_names();
+fn names(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
+    let all = fixture::adversarial_names();
+    // Only the names the *source* filesystem accepted. exFAT refuses a newline and
+    // invalid UTF-8 outright, so a copy cannot be faulted for their absence.
+    let want: Vec<_> = all.iter().filter(|n| src.join(n).exists()).cloned().collect();
+    if want.is_empty() {
+        report.limitation(
+            format!("names/{pair}"),
+            format!("the source filesystem accepted none of the {} adversarial names", all.len()),
+        );
+        return;
+    }
     let missing: Vec<String> = want
         .iter()
         .filter(|n| !dst.join(n).exists())
         .map(|n| n.to_string_lossy().chars().take(20).collect())
         .collect();
     let evidence = format!(
-        "{} of {} adversarial names round-tripped: 255 bytes, an embedded newline, invalid \
-         UTF-8, and a leading dash",
+        "{} of {} names the source could hold round-tripped, out of {} tried: 255 bytes, an \
+         embedded newline, invalid UTF-8, and a leading dash",
         want.len() - missing.len(),
-        want.len()
+        want.len(),
+        all.len()
     );
     if missing.is_empty() {
         report.pass(format!("names/{pair}"), evidence);
@@ -451,6 +521,14 @@ fn self_copy(report: &mut Report, src: &Path, pair: &str) {
 fn clobber(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
     let from = src.join("plain.bin");
     let onto = dst.join("mode-4755.bin");
+    if !from.exists() || !onto.exists() {
+        report.limitation(
+            format!("clobber/{pair}"),
+            "the source or the destination file does not exist, so there is nothing to refuse to \
+             overwrite",
+        );
+        return;
+    }
     let before = verify::meta(&onto).map(|m| (m.size, m.mtime)).ok();
     let result = copy::copy_file(&from, &onto, &Options { replace: false, ..Default::default() });
     let after = verify::meta(&onto).map(|m| (m.size, m.mtime)).ok();
@@ -527,50 +605,89 @@ fn moves(report: &mut Report, src: &Path, target: &Target, pair: &str) {
     );
 }
 
-/// The bar's third condition. On a filesystem that cannot share extents this
-/// records the errno and says what is owed; it never pretends to have measured
-/// something.
+/// The bar's third condition: **reflink measurably instant on btrfs**.
+///
+/// The first version of this compared `FICLONE` against a copy with `reflink:
+/// false` and called anything under 4x a failure — and on btrfs it measured 0x,
+/// because `copy_file_range` **already reflinks** on btrfs and xfs. The comparison
+/// was a reflink against a reflink. That is a finding about the strategy ladder,
+/// not just about the check: the explicit `FICLONE` path buys nothing over
+/// `copy_file_range` on the two filesystems that support either.
+///
+/// So the control is a *true* byte copy — `kernel_copy: false` as well — and the
+/// primary signal is **allocated blocks**, not time. A reflink shares extents, so
+/// the filesystem's free space does not move; a byte copy consumes the file's size.
+/// That is what "instant" means here, and unlike a duration it does not depend on
+/// what happens to be in page cache.
 fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
-    let from = src.join("plain.bin");
-    let to = src.join("reflink-target.bin");
-    let _ = std::fs::remove_file(&to);
-    match &target.caps.reflink {
-        Err(e) => {
-            report.owed(
-                format!("reflink/{pair}"),
-                format!(
-                    "FICLONE refused with {e:?} on {}, so the bar's reflink condition cannot be \
-                     measured here — it needs btrfs or xfs, and creating either needs root",
-                    target.caps.fstype
-                ),
-            );
-            return;
-        }
-        Ok(()) => {}
+    if let Err(e) = &target.caps.reflink {
+        report.owed(
+            format!("reflink/{pair}"),
+            format!(
+                "FICLONE refused with {e:?} on {}. The bar's reflink condition needs btrfs or \
+                 xfs; `sudo ./with-root.sh` creates both",
+                target.caps.fstype
+            ),
+        );
+        return;
     }
-    let clone = copy::copy_file(&from, &to, &Options { reflink: true, ..Default::default() });
-    let plain = {
-        let p = src.join("copy-target.bin");
-        let _ = std::fs::remove_file(&p);
-        copy::copy_file(&from, &p, &Options { reflink: false, ..Default::default() })
-    };
-    match (clone, plain) {
-        (Ok(c), Ok(p)) => {
-            let ratio = p.elapsed.as_secs_f64() / c.elapsed.as_secs_f64().max(1e-9);
-            let evidence = format!(
-                "FICLONE took {:.3} ms against {:.3} ms for a byte copy of the same {} bytes — \
-                 {ratio:.0}x",
-                c.elapsed.as_secs_f64() * 1000.0,
-                p.elapsed.as_secs_f64() * 1000.0,
-                c.bytes
-            );
-            report.record(
-                format!("reflink/{pair}"),
-                if c.strategy == Strategy::Reflink && ratio > 4.0 { Outcome::Pass } else { Outcome::Fail },
-                evidence,
-            );
+
+    // Large enough that a byte copy has to move real data, and small enough to
+    // fit a 2 GiB loopback image twice over.
+    const SIZE: usize = 192 * 1024 * 1024;
+    let big = src.join("reflink-source.bin");
+    let cloned = src.join("reflink-cloned.bin");
+    let copied = src.join("reflink-copied.bin");
+    for p in [&big, &cloned, &copied] {
+        let _ = std::fs::remove_file(p);
+    }
+    if fixture::write_pattern(&big, SIZE).is_err() {
+        report.owed(format!("reflink/{pair}"), "not enough room for the reflink source file");
+        return;
+    }
+    let free_before = free_bytes(src);
+
+    let clone = copy::copy_file(&big, &cloned, &Options { reflink: true, ..Default::default() });
+    let free_after_clone = free_bytes(src);
+
+    let plain = copy::copy_file(
+        &big,
+        &copied,
+        // Both kernel-side paths off: on btrfs and xfs `copy_file_range` is itself
+        // a clone, so leaving it on measures nothing.
+        &Options { reflink: false, kernel_copy: false, ..Default::default() },
+    );
+    let free_after_copy = free_bytes(src);
+
+    let (Ok(c), Ok(p)) = (&clone, &plain) else {
+        report.fail(format!("reflink/{pair}"), format!("a copy failed: {clone:?} / {plain:?}"));
+        for f in [&big, &cloned, &copied] {
+            let _ = std::fs::remove_file(f);
         }
-        (a, b) => report.fail(format!("reflink/{pair}"), format!("a copy failed: {a:?} / {b:?}")),
+        return;
+    };
+    let clone_cost = free_before.saturating_sub(free_after_clone);
+    let copy_cost = free_after_clone.saturating_sub(free_after_copy);
+    let speedup = p.elapsed.as_secs_f64() / c.elapsed.as_secs_f64().max(1e-9);
+    let evidence = format!(
+        "{} MiB: FICLONE consumed {} KiB of free space in {:.3} ms; a true byte copy of the same \
+         file consumed {} KiB in {:.3} ms — {:.0}x the space and {speedup:.0}x the time. \
+         copy_file_range on this filesystem is itself a clone, which is why it is excluded from \
+         the control",
+        SIZE / (1 << 20),
+        clone_cost / 1024,
+        c.elapsed.as_secs_f64() * 1000.0,
+        copy_cost / 1024,
+        p.elapsed.as_secs_f64() * 1000.0,
+        if clone_cost == 0 { f64::INFINITY } else { copy_cost as f64 / clone_cost as f64 }
+    );
+    // The space test is the real one: a clone that shares extents costs a
+    // rounding error, and a byte copy costs the whole file.
+    let shared = clone_cost * 8 < copy_cost.max(1);
+    let ok = c.strategy == Strategy::Reflink && shared;
+    report.record(format!("reflink/{pair}"), if ok { Outcome::Pass } else { Outcome::Fail }, evidence);
+    for f in [&big, &cloned, &copied] {
+        let _ = std::fs::remove_file(f);
     }
 }
 
@@ -589,6 +706,11 @@ fn stray_temporaries(root: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// Free space on the filesystem holding `path`, in bytes.
+fn free_bytes(path: &Path) -> u64 {
+    rustix::fs::statvfs(path).map(|s| s.f_bavail * s.f_frsize).unwrap_or(0)
 }
 
 fn name_of(p: &Path) -> String {

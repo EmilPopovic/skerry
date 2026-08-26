@@ -191,6 +191,24 @@ the destination tree looking for `.skerry-copy-*`, not a question to the engine.
 | move within / across | rename in 0.011 ms / verified | rename in 0.009 ms | rename / verified |
 | reflink | `EOPNOTSUPP` | `EOPNOTSUPP` | `EOPNOTSUPP` |
 
+And what the privileged run added, from a machine with all four mounted:
+
+| | btrfs | xfs | exFAT | vfat |
+| --- | --- | --- | --- | --- |
+| strategy used | **`FICLONE`** | **`FICLONE`** | `copy_file_range` | — |
+| symlinks | yes | yes | **`EPERM`** | **`EPERM`** |
+| hardlinks | yes | yes | **`EPERM`** | **`EPERM`** |
+| `user.*` xattrs | yes | yes | **`EOPNOTSUPP`** | **`EOPNOTSUPP`** |
+| POSIX mode bits | yes | yes | no | no |
+| timestamp rounding | 0 ns | 0 ns | **3.46 ms** | — |
+| a newline in a name | yes | yes | **`EINVAL`** | **`EINVAL`** |
+| holes | yes | yes | no | no |
+
+exFAT and vfat are the two destinations that refuse almost everything, and they
+are what a camera card and a BIOS boot partition are formatted as. Every refusal
+there is a `LIMIT` with the errno beside it rather than a silent loss — which is
+the behaviour the whole matrix exists to establish.
+
 The NTFS column is the reason NTFS is in a matrix that does not name it. Two
 filesystems that both say yes to everything do not test the paths that report
 what could not be preserved — and those paths are where a copy engine quietly
@@ -274,6 +292,40 @@ mine, and it is the worst of them:
    [12-measurement.md](../../docs/12-measurement.md)'s "a test that can only pass
    has measured nothing" arriving in the one place I had not looked for it: not in
    a check, but in the list of things to check.
+
+A first run with btrfs, xfs, exFAT and vfat actually mounted produced three more,
+and the first is the most useful thing this spike has said about the design:
+
+6. **`copy_file_range` already reflinks on btrfs and xfs.** The whole tree copied
+   with `11x FICLONE` on both — and the reflink check measured **0x**, because its
+   control was a copy with `reflink: false` and `copy_file_range` still enabled.
+   It was comparing a reflink against a reflink.
+
+   The consequence for `sk-fs` is that the strategy ladder is shorter than the
+   architecture assumed: on the two filesystems that can share extents,
+   `copy_file_range` does it already, so an explicit `FICLONE` path buys nothing
+   except a way to *ask* whether sharing is possible. The check now uses a true
+   byte copy as its control — `kernel_copy: false` as well — and measures
+   **allocated blocks rather than time**, because extent sharing is what "instant"
+   actually means and free space does not depend on what is in page cache.
+
+7. **A fixture sized for one filesystem breaks another.** The 1 GiB sparse file is
+   12 KiB on ext4 and *1 GiB of real data* on FAT, which filled a 1 GiB vfat image
+   and turned every later fixture into `ENOSPC`. Fourteen refusals, one cause. The
+   size is now chosen from a probe of the filesystem's own free space and hole
+   support, and skipped with a reason where it does not fit — so a cascade is not
+   mistaken for fourteen findings.
+
+8. **A check must compare against the source that exists, not the source it
+   wanted.** exFAT accepts no symlinks, no extended attributes, no second name for
+   an inode, no newline in a filename. The checks reported the *destination* as
+   having lost all of them, when the source had never had any: `0 of 4 symlinks`
+   with the reason `unreadable in the source`. Six failures that asserted nothing.
+
+   Every check now establishes what the source holds before comparing, and reports
+   *not applicable* with the reason where the source is empty. This is the same
+   mistake as the silent skip above, one level in: not a missing target, but a
+   missing premise.
 
 Two more findings are about the destination rather than about us, and both belong
 in `sk-fs`:

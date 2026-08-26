@@ -10,11 +10,49 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{self, Mode, OFlags};
 
-/// 1 GiB apparent, three extents, about 12 KiB on disk. A copy that expands holes
-/// turns this into a gigabyte, which is the kind of bug that is only noticed when
-/// the disk fills.
+/// 1 GiB apparent, three extents, about 12 KiB on disk — on a filesystem that has
+/// holes. A copy that expands them turns this into a gigabyte, which is the kind
+/// of bug only noticed when the disk fills.
+///
+/// On a filesystem *without* holes it is written in full, and on a 1 GiB FAT image
+/// that fills the disk and every later fixture fails with `ENOSPC`. So the size is
+/// chosen from what the filesystem can do rather than fixed: see `sparse_plan`.
 pub const SPARSE_SIZE: u64 = 1 << 30;
-pub const SPARSE_EXTENTS: [(u64, u64); 3] = [(0, 4096), (1 << 20, 4096), (SPARSE_SIZE - 4096, 4096)];
+
+/// What size of sparse file this filesystem can hold, and why.
+fn sparse_plan(root: &Path) -> Result<u64, String> {
+    let st = rustix::fs::statvfs(root).map_err(|e| format!("statvfs failed: {e:?}"))?;
+    let free = st.f_bavail * st.f_frsize;
+    let holes = {
+        // Ask directly rather than trusting the filesystem's name.
+        let probe = root.join(".skerry-sparse-probe");
+        let ok = std::fs::File::create(&probe)
+            .and_then(|f| {
+                f.set_len(1 << 20)?;
+                Ok(rustix::fs::seek(&f, rustix::fs::SeekFrom::Hole(0)).map(|h| h == 0).unwrap_or(false))
+            })
+            .unwrap_or(false);
+        let _ = std::fs::remove_file(&probe);
+        ok
+    };
+    if !holes {
+        return Err(format!(
+            "the filesystem has no holes, so a {} MiB sparse file would be written in full and \
+             fill a small volume",
+            SPARSE_SIZE / (1 << 20)
+        ));
+    }
+    // Room for the source *and* a copy of it, with margin. A hole costs nothing,
+    // but a filesystem that reports holes and then materialises them on copy is
+    // exactly the bug being looked for, so the space has to actually be there.
+    if free / 4 >= SPARSE_SIZE {
+        Ok(SPARSE_SIZE)
+    } else if free / 4 >= 16 << 20 {
+        Ok(free / 4)
+    } else {
+        Err(format!("only {} MiB free", free / (1 << 20)))
+    }
+}
 
 pub struct Fixture {
     pub root: PathBuf,
@@ -24,6 +62,8 @@ pub struct Fixture {
     /// fixture that insists on creating everything cannot be built on half the
     /// filesystems a user owns. What it refused is a *result*, not an obstacle.
     pub refused: Vec<(String, std::io::Error)>,
+    /// The apparent size of the sparse fixture, if the filesystem could hold one.
+    pub sparse_size: Option<u64>,
 }
 
 /// Every step is tolerant. A fixture that aborts on the first refusal tells us
@@ -43,7 +83,12 @@ macro_rules! attempt {
 impl Fixture {
     pub fn build(root: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(root)?;
-        let mut f = Self { root: root.to_path_buf(), names: Vec::new(), refused: Vec::new() };
+        let mut f = Self {
+            root: root.to_path_buf(),
+            names: Vec::new(),
+            refused: Vec::new(),
+            sparse_size: None,
+        };
 
         // The floor.
         let plain = root.join("plain.bin");
@@ -51,9 +96,19 @@ impl Fixture {
             f.names.push(plain.clone());
         }
 
-        let sparse = root.join("sparse.bin");
-        if attempt!(f, "sparse file", make_sparse(&sparse)).is_some() {
-            f.names.push(sparse);
+        // The sparse fixture is sized from the filesystem, not fixed. A 1 GiB
+        // apparent file on a filesystem with no holes is 1 GiB of real data, and
+        // on a small FAT volume that fills it and makes every later refusal a
+        // cascade rather than a result.
+        match sparse_plan(root) {
+            Ok(size) => {
+                let sparse = root.join("sparse.bin");
+                if attempt!(f, "sparse file", make_sparse(&sparse, size)).is_some() {
+                    f.sparse_size = Some(size);
+                    f.names.push(sparse);
+                }
+            }
+            Err(why) => f.refused.push((format!("sparse file — {why}"), std::io::Error::other(""))),
         }
 
         // Three names for one inode. A copy that breaks the set silently triples
@@ -130,6 +185,15 @@ impl Fixture {
     pub fn has(&self, name: &str) -> bool {
         self.root.join(name).exists()
     }
+
+    /// Whether the source has a symlink at this name. A destination cannot be
+    /// faulted for lacking what the source never had, and on a FAT filesystem the
+    /// source never has any.
+    pub fn has_symlink(&self, name: &str) -> bool {
+        std::fs::symlink_metadata(self.root.join(name))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
 }
 
 /// Four names, each of which has broken something shipped. The 255-byte one is
@@ -172,18 +236,21 @@ pub fn write_pattern(path: &Path, len: usize) -> std::io::Result<()> {
     Ok(())
 }
 
-fn make_sparse(path: &Path) -> std::io::Result<()> {
+/// Three extents: one at the start, one a megabyte in, one at the very end. The
+/// last one matters — a copy that gets the length from the last write rather than
+/// from the source's size truncates a file that ends in a hole.
+fn make_sparse(path: &Path, size: u64) -> std::io::Result<()> {
     use std::io::Seek;
     let mut f = std::fs::File::create(path)?;
-    for (offset, len) in SPARSE_EXTENTS {
+    for offset in [0, 1 << 20, size - 4096] {
         f.seek(std::io::SeekFrom::Start(offset))?;
-        let mut chunk = vec![0u8; len as usize];
+        let mut chunk = vec![0u8; 4096];
         for (i, b) in chunk.iter_mut().enumerate() {
             *b = (i % 251) as u8 | 1;
         }
         f.write_all(&chunk)?;
     }
-    f.set_len(SPARSE_SIZE)?;
+    f.set_len(size)?;
     Ok(())
 }
 
