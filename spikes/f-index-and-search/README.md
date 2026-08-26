@@ -512,6 +512,39 @@ striking part — **four threads doing independent random reads achieve 26 M/s,
 less than one thread doing dependent ones at 82 M/s.** Concurrent random access
 over a working set that does not fit collapses rather than scales.
 
+#### Isolating it: four cores with cache, four cores without
+
+`homelab` settles which of the two variables matters. It has the **same four
+cores as the Pi** and a **64 MiB L3 like the laptop**, so it separates core count
+from cache in a way neither of the other machines can.
+
+| Over the same 28.5 MB arena | laptop (24 cores) | **homelab (4 cores)** | **Pi 5 (4 cores)** |
+| --- | --- | --- | --- |
+| sequential read | 16.88 GB/s | 11.41 GB/s | 5.43 GB/s |
+| random reads, all threads | 793.9 M/s | **576.4 M/s** | **26.1 M/s** |
+| dependent, one thread | 220.6 M/s | 199.1 M/s | 82.2 M/s |
+| **sort by name, best** | 23.6 ms | **65.2 ms** | **296.0 ms** |
+| comparison sort, for scale | 156.7 ms | 292.9 ms | 948.3 ms |
+
+**Two four-core machines, 22× apart on random reads and 4.5× apart on the sort.**
+The variable is not the core count and it is not the instruction set: it is
+whether 28 MB of names fits in the last-level cache. homelab, with a quarter of
+the laptop's cores, **meets the 120 ms sort budget at 65 ms**, while the Pi with
+the same four cores is at 296 ms.
+
+That reframes the sort result. It is not "sorting a million filenames is too slow
+for reference hardware" — it is **"the working set is 28 MB, and a machine whose
+cache cannot hold it pays 22× on every random access into it."** The laptop and
+homelab are on one side of that cliff and the Pi is on the other.
+
+The design consequence is concrete and belongs in `sk-index`: **keep the hot
+working set inside a modest cache, or make the access sequential.** A million
+entries at 28 bytes of name apiece sits exactly on the boundary. Sorting a
+compact 8 MB key array without touching the arena would keep far more machines on
+the fast side of it — which is what the single packed radix pass already does at
+131 ms on the Pi, and it is the reason that row is the fastest thing in the table
+that does real work.
+
 **And this is the model for cross-machine extrapolation that was missing.** The
 earlier finding was that the laptop-to-Pi factor ranges from 2.6× to 12× with no
 apparent pattern. There is a pattern, and it is in the table above:
@@ -529,8 +562,10 @@ same pair of machines. A single "3× slower per core" multiplier was never going
 to work, and now there is a reason rather than an observation.
 
 The practical form: **an operation that streams ports well, and an operation that
-scatters does not.** That is a design rule for `sk-index` and `sk-fs`, and it is
-worth more than any individual number in this spike.
+scatters does not** — and whether "scatters" is expensive depends on a cache
+boundary that a million filenames sits directly on. That is a design rule for
+`sk-index` and `sk-fs`, and it is worth more than any individual number in this
+spike.
 
 #### Warm is not reliably warm on 8 GB
 

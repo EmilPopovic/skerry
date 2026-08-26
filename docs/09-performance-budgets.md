@@ -252,11 +252,28 @@ dominates it.** A scan ports at 2.6× against a 3.1× primitive; a radix scatter
 ports at 12× against a 30× primitive. Those two primitives differ by an order of
 magnitude on the same pair of machines, so no single multiplier could have worked.
 
-The cause is that **28 MB of names fits in the laptop's cache and not in the
-Pi's** — a dependent random read is 4.5 ns on one and 12 ns on the other — and on
-the Pi four threads doing independent random reads achieve *less* than one thread
-doing dependent ones. Concurrent random access over a working set that does not
-fit collapses rather than scales.
+The cause is a cache boundary, isolated on a third machine. `homelab` has the
+**same four cores as the Pi** and a **64 MiB L3 like the laptop**:
+
+| Over the same 28.5 MB arena | laptop (24 cores) | homelab (4 cores) | Pi 5 (4 cores) |
+| --- | --- | --- | --- |
+| random reads, all threads | 793.9 M/s | **576.4 M/s** | **26.1 M/s** |
+| sort by name, best | 23.6 ms | **65.2 ms** | 296.0 ms |
+
+**Two four-core machines, 22× apart on random reads and 4.5× apart on the sort.**
+The variable is neither core count nor instruction set: it is whether 28 MB of
+names fits in the last-level cache. homelab **meets the 120 ms sort budget at
+65 ms** with a quarter of the laptop's cores; the Pi with the same four cores does
+not. On the Pi, four threads doing independent random reads achieve *less* than
+one thread doing dependent ones — concurrent random access over a working set
+that does not fit collapses rather than scales.
+
+So `Sort 1M entries` is better read as **"the working set is 28 MB and a machine
+whose cache cannot hold it pays 22× per random access"** than as a sorting
+problem. **Keep the hot working set inside a modest cache, or make the access
+sequential.** A million entries at 28 bytes of name apiece sits exactly on that
+boundary, which is why the single packed radix pass — 8 MB of keys, no arena
+access — is the fastest thing measured that does real work.
 
 The design rule that follows, and it is worth more than any single number here:
 **an operation that streams ports well, and an operation that scatters does not.**
