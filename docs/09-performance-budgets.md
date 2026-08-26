@@ -53,9 +53,9 @@ the same renderer and the same glyph atlas the window uses.
 | Row | Target | Measured | Verdict |
 | --- | --- | --- | --- |
 | Cold start to first frame | < 80 ms | **92.5 ms best, 122.6 ms median** of 12, plus one 2,654 ms outlier | **missed**, see below |
-| Keystroke to frame | < 8 ms | frame p99 **0.445 ms** median of 5 runs at 200,000 entries | met |
+| Keystroke to frame | < 8 ms | frame p99 **0.342 ms** median of 5 runs at 200,000 entries; **worst 5.0 ms**, while the read is landing | met |
 | Open a 10k-entry directory | < 30 ms | **23.9 ms** to a sorted, painted listing | met |
-| Scroll a large listing | < 8 ms/frame | p99 **0.408–0.562 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% | met at 200,000; 1M unmeasured |
+| Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% | met at 200,000; 1M unmeasured |
 | Sort a large listing | < 120 ms at 1M | **150.2 ms** median at 200,000, on a job | **missed**, see below |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
@@ -65,12 +65,30 @@ the same renderer and the same glyph atlas the window uses.
 
 Four of those rows are worth more than a cell.
 
-**The frame budget is not close.** 200,000 entries scroll at a 0.445 ms p99
-against 8 ms, and the number does not move with the entry count: 154 entries
-measure 0.454 ms and 10,000 measure 0.560 ms. That is the virtualized list doing
-exactly what it exists to do — the loop runs once per *visible* row, about forty
-times, whatever the directory holds. The worst single frame across every
-configuration measured is 2.6 ms.
+**The frame budget is not close, and the number above is the second one taken.**
+The first was 0.445 ms and it was measured wrong. Two things were outside the
+clock: the harness read the directory to completion *before* the trace started,
+so the two most expensive things the loop ever does — moving a 10 MB `Listing`
+into the pane and writing 2,048 metadata rows — happened where nothing was
+timing; and the clock inside the window started after those same steps had run.
+Both are fixed. The clock now starts when `pump` returns and stops at the
+submission, and the trace starts the read and lets it land underneath the scroll.
+
+The scroll itself did not move: 0.19 ms p50, 0.34 ms p99, and it still does not
+depend on the entry count, because the loop runs once per *visible* row — about
+forty times — whatever the directory holds. What appeared is a second regime.
+**The worst frame while the read is in flight is 2.5–5.0 ms**, against 0.9 ms
+before, and it is a real cost the old harness was constructed not to see:
+
+- The pool is 24 wide and saturating every core with `statx` while the loop tries
+  to draw, which is most of it. A frame that shaped a whole fresh viewport — 27
+  runs, the frame where a directory first appears — paid 0.7 ms more than one that
+  shaped 8, so shaping is the smaller half.
+- It is still inside 8 ms, and it is the single most expensive frame the product
+  has. Lowering the priority of the pool's threads is the obvious lever and it has
+  not been measured.
+
+`skerry --bench` reports it as its own row so it cannot be averaged away.
 
 **Cold start misses, and 67–113 ms of it is the Vulkan loader.** Attributed:
 `wgpu::Instance::new` is 67–113 ms, `request_device` 19–25 ms, surface

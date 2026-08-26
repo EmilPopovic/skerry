@@ -26,6 +26,7 @@ copy of the metrics it is testing.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -46,6 +47,10 @@ PATIENCE = 20.0
 
 class Failure(Exception):
     pass
+
+
+class Skipped(Exception):
+    """The scenario needs something this machine does not have."""
 
 
 # --------------------------------------------------------------------------
@@ -205,6 +210,75 @@ def name_x(state: dict[str, str]) -> float:
     """A horizontal position inside the name column."""
     width = float(state["logical"].split("x")[0])
     return (float(state["name_x"]) + 30.0) / width * 100.0
+
+
+def photograph(run: Run, state: dict[str, str], into: Path, cell: str = "") -> "object":
+    """What the compositor has, cropped to the list body or to one column of it.
+
+    Everything else on the window changes between two otherwise identical
+    frames — the status line carries frame timings — so the crop is the part
+    that is supposed to be a function of the directory and nothing else. Pass
+    `cell="size"` for the size column of the first row alone.
+    """
+    from PIL import Image
+
+    clients = subprocess.run(
+        ["hyprctl", "-j", "clients"],
+        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
+        capture_output=True,
+        text=True,
+    )
+    window = next(
+        (c for c in json.loads(clients.stdout) if c.get("class") == "dev.skerry.Skerry"),
+        None,
+    )
+    if window is None:
+        raise Failure("the compositor does not know about the window")
+    (left, top), (width, height) = window["at"], window["size"]
+    shot = into.parent / f"{into.stem}-full.png"
+    subprocess.run(
+        ["grim", "-g", f"{left},{top} {width}x{height}", str(shot)],
+        env=dict(os.environ, WAYLAND_DISPLAY=run.display),
+        capture_output=True,
+        check=True,
+    )
+    image = Image.open(shot).convert("RGB")
+    # `grim` writes device pixels and the state line is in logical ones.
+    scale = image.width / float(state["logical"].split("x")[0])
+    body_top = float(state["body_top"]) * scale
+    if cell == "size":
+        crop = (
+            round(float(state["size_x"]) * scale),
+            round(body_top),
+            round((float(state["size_x"]) + float(state["size_w"])) * scale),
+            round(body_top + float(state["row_h"]) * scale),
+        )
+    else:
+        crop = (0, round(body_top), image.width, round(body_top + float(state["body_height"]) * scale))
+    part = image.crop(crop)
+    part.save(into)
+    return part
+
+
+def ink(image: "object") -> int:
+    """How many pixels are not the background colour.
+
+    A dash is one short stroke and a size is six glyphs, so this separates them
+    by an order of magnitude without knowing anything about either.
+    """
+    background = image.getpixel((0, 0))
+    return sum(1 for pixel in image.convert("RGB").getdata() if pixel != background)
+
+
+def differing_pixels(left: "object", right: "object") -> int:
+    from PIL import ImageChops
+
+    if left.size != right.size:
+        raise Failure(f"the window changed size: {left.size} then {right.size}")
+    difference = ImageChops.difference(left, right)
+    if difference.getbbox() is None:
+        return 0
+    return sum(sum(band.histogram()[1:]) for band in difference.split())
 
 
 def expect(state: dict[str, str], **wanted) -> None:
@@ -406,6 +480,63 @@ def folder_sizes(run: Run, fixture: Path) -> None:
         raise Failure(f"{running} walks were still going after a second")
 
 
+@scenario("folder-size-without-a-refresh")
+def folder_size_without_a_refresh(run: Run, fixture: Path) -> None:
+    """What is on screen once the walks land must equal what `F5` shows.
+
+    The reported defect, and the only test here that looks at pixels. The size
+    column is the one cell whose text changes underneath a fixed row of a fixed
+    listing, and the layout cache used to key a shaped run by the row alone — so
+    a folder drew the dash it was given before the walk reported and kept it.
+    Refreshing was the workaround, because a new listing is a new set of keys,
+    which is exactly the shape of the report: *it does not display the size
+    until a refresh*.
+
+    **It needs a subtree big enough to outlive the metadata.** The shared fixture
+    does not reproduce it: three folders holding two files each are walked before
+    the first `statx` batch comes back, so the size column's first draw already
+    has a total in it and the dash is never shaped. Twenty thousand files take
+    long enough that the dash is drawn, which is the whole bug.
+    """
+    if shutil.which("grim") is None:
+        raise Skipped("grim is not installed")
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        raise Skipped("Pillow is not installed") from None
+
+    work = run.log.parent
+    run.close()
+    heavy = work / "heavy"
+    if not heavy.is_dir():
+        for bucket in range(20):
+            folder = heavy / "subtree" / f"bucket-{bucket:02d}"
+            folder.mkdir(parents=True)
+            for index in range(1000):
+                (folder / f"item-{index:04d}").write_bytes(b"." * (index % 16))
+
+    own = Run(run.display, work, heavy, [], run.instance)
+    try:
+        own.drive("sleep 4000\nkey f12\nsleep 200\n")
+        settled = own.state()
+        known, running = settled["sizes"].split("/")
+        if running != "0" or int(known) < 1:
+            raise Failure(f"the walk never finished: {known} known, {running} running")
+
+        # The model says it measured the subtree. The question this scenario
+        # exists to ask is whether the window drew what the model knows, so the
+        # answer has to come from the pixels: a dash is one short stroke and
+        # "20.5 MB" is six glyphs.
+        marks = ink(photograph(own, settled, work / "size-cell.png", cell="size"))
+        if marks < 60:
+            raise Failure(
+                f"the size cell holds {marks} marks of ink, which is a dash — the total "
+                "the walk reported was never drawn"
+            )
+    finally:
+        own.close()
+
+
 @scenario("select-all-and-clear")
 def select_all_and_clear(run: Run, fixture: Path) -> None:
     run.drive(
@@ -477,6 +608,8 @@ def main(argv: list[str]) -> int:
                 function(run, fixture)
                 print(f"  ok    {name}")
                 passed += 1
+            except Skipped as why:
+                print(f"  skip  {name}: {why}")
             except Failure as problem:
                 print(f"  FAIL  {name}: {problem}")
                 failed.append(name)

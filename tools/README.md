@@ -11,7 +11,7 @@ dependency policy the product has, applied to the thing that enforces it.
 | `dep-budget.py` | Every dependency has a row in [07-dependencies.md](../docs/07-dependencies.md); transitive counts inside budget, with the GPU stack found by reachability from the `wgpu` edge | manifests, `cargo`, `rustc` |
 | `check-invariants.py` | Banned crates, capability feature flags, crate lints, the GPU seam, ADR immutability | manifests, sources |
 | `make-listing-fixture` | Not a gate. Builds a directory of N files so the frame and listing numbers in [09-performance-budgets.md](../docs/09-performance-budgets.md) have a method that can be re-run | — |
-| `gui-test` | Not in `check`, because it needs a compositor. Drives the real window with real input through a nested Hyprland and asserts on the state `F12` prints | `Hyprland`, a release build |
+| `gui-test` | Not in `check`, because it needs a compositor. Drives the real window with real input through a nested Hyprland and asserts on the state `F12` prints, and in one scenario on the pixels | `Hyprland`, a release build; `grim` and Pillow for the pixel scenario |
 | `skerry-drive` | The input half of `gui-test`: replays a script of keys, clicks, drags and scrolls into a compositor | — |
 
 ## Testing the window itself
@@ -31,6 +31,13 @@ It found three defects on its first run, one of which no unit test could have:
 `Ctrl+A` reported ten items selected in a folder showing nine, because
 `select_all` filled the whole bitset rather than the display order and the tenth
 was a dotfile.
+
+One scenario goes further and reads the **pixels**, with `grim` and Pillow: it
+walks a twenty-thousand-file subtree, waits for the model to report the total,
+and then counts the ink in the size cell, because a dash is one stroke and
+`146 KiB` is six glyphs. It exists because the defect it covers was a shaped run
+served from a cache — every layer under the frame buffer had the right answer and
+the screen did not. It skips itself where `grim` or Pillow is missing.
 
 Each check abstains rather than guesses: with no crates yet, layering reports
 "nothing to check" and exits zero. They exist before the code so that the first

@@ -93,6 +93,15 @@ tool carries cannot hide inside it.
 
 Both are the same code generator as `wayland-protocols` and bring nothing new.
 
+One scenario looks at pixels rather than at the state line, and it needs two
+programs from outside the workspace: **`grim`**, to photograph the window through
+the nested compositor's screencopy protocol, and **Pillow**, to crop and count. It
+is worth the tooling because it is the only test in the repository that can see
+what the window actually drew — the reported defect was a shaped run served from a
+cache, so every layer below the frame buffer reported the right answer while the
+screen showed a dash. `tools/gui-test` skips that scenario when either is
+missing and says so; nothing else in the harness depends on them.
+
 ## What the accepted set actually costs
 
 Measured with `tools/dep-budget.py` on the first commit that had crates in it, at

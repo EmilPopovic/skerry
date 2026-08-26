@@ -327,6 +327,15 @@ impl App {
         }
         while !self.closing && !self.window.close_requested() {
             self.window.pump(Some(&self.waker), self.timeout());
+            // **The clock starts here, not at the painter.** Everything between
+            // this line and the submitted frame is work the user waited for:
+            // taking delivery of a 10 MB listing, writing 2,048 metadata rows,
+            // scheduling folder totals. Timing only the immediate-mode pass
+            // reports sub-millisecond frames on either side of the two most
+            // expensive things the loop does — docs/12-measurement.md, and the
+            // reason this is a parameter rather than an `Instant::now()` inside
+            // `render`.
+            let turn = Instant::now();
             self.drain_platform(&commands);
             self.drain_jobs();
             self.drain_changes();
@@ -335,7 +344,7 @@ impl App {
             self.drain_sizes();
             self.advance();
             if self.dirty {
-                self.render(&commands);
+                self.render(&commands, turn);
                 self.dirty = false;
             }
         }
@@ -778,7 +787,7 @@ impl App {
             "skerry-state path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
-body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} \
+body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
 jobs={jobs}/{panics} keys={} stats={}",
@@ -797,6 +806,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             self.theme.metrics.row_height,
             self.layout.name.x,
             self.layout.size.x,
+            self.layout.size.width,
             self.logical.width,
             self.logical.height,
             self.scale_120,
@@ -957,7 +967,7 @@ jobs={jobs}/{panics} keys={} stats={}",
         None
     }
 
-    fn render(&mut self, commands: &Registry<Self>) {
+    fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
         let physical = self.window.physical();
         if physical != self.renderer.size() {
             self.renderer.resize(physical);
@@ -986,7 +996,6 @@ jobs={jobs}/{panics} keys={} stats={}",
             measurer.update(pane, visible, jobs);
         }
 
-        let build_started = Instant::now();
         self.list.begin(physical);
 
         let Self {
@@ -1045,12 +1054,16 @@ jobs={jobs}/{panics} keys={} stats={}",
             let mut painter = Painter { list, fonts, cache, theme, scale };
             view::draw(&mut painter, pane, layout, now, &chrome, &mut diagnostics);
         }
-        let build_us = build_started.elapsed().as_micros() as u64;
+        // Everything the loop did this turn, up to the submission. The renderer's
+        // own wall time is not usable here because it contains the wait for a
+        // presentation slot, which is the compositor's pacing and not a cost —
+        // so its CPU share is added from `FrameStats` instead.
+        let turn_us = turn.elapsed().as_micros() as u64;
 
         let background = theme.palette.background;
         let stats = renderer.draw(list, fonts, background);
         self.last = stats;
-        self.frames.record(build_us + stats.cpu_us);
+        self.frames.record(turn_us + stats.cpu_us);
 
         if !self.first_frame_reported {
             self.first_frame_reported = true;
@@ -1062,7 +1075,7 @@ jobs={jobs}/{panics} keys={} stats={}",
                 window_us as f64 / 1000.0,
                 gpu_us as f64 / 1000.0,
                 font_us as f64 / 1000.0,
-                (build_us + stats.cpu_us) as f64 / 1000.0,
+                (turn_us + stats.cpu_us) as f64 / 1000.0,
                 self.adapter,
                 self.backend,
                 physical.0,

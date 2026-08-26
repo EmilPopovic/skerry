@@ -337,6 +337,52 @@ than a comment so that reintroducing the idea fails the build.
 > **Fails if:** a fast path is measured against the slow path's speed and not
 > against its output.
 
+## A clock that starts after the expensive part measures the cheap part
+
+The frame number was `build_us + cpu_us`, and the clock started at the top of the
+immediate-mode pass. Everything before it was excluded: taking delivery of a
+10 MB `Listing`, writing 2,048 metadata rows into it, scheduling folder totals —
+the two most expensive things the loop does, both of them between two frames each
+reported as sub-millisecond. The benchmark then made the exclusion permanent by
+reading the directory to completion *before* the trace, so those steps could not
+happen during it at all.
+
+Nothing about either choice was dishonest at the time; each was a local decision
+about where a function begins. Together they reported 0.445 ms for a row named
+"Keystroke to frame" and the true worst frame was **eleven times that**. Moving
+the clock to where the loop stops waiting, and starting the read underneath the
+trace, produced 0.34 ms p99 for the scroll and a second number that had never
+existed: 2.5–5.0 ms while the listing lands.
+
+The rule: **the clock starts where the user's wait starts.** For a frame loop that
+is the instant the event arrives, not the instant drawing begins. And a trace that
+never overlaps the loading it claims to cover is not a trace of that work.
+
+> **Fails if:** a frame timer starts inside the render function, or a benchmark's
+> setup does work that the measured loop does in production.
+
+## A cache key that says where, not what, serves the old string forever
+
+The layout cache keyed a shaped run by listing, row, column, weight and size —
+deliberately, because hashing twelve bytes beats hashing a filename, and the
+listing in the key is what stops row 3 of one directory from drawing row 3 of the
+previous one. What the key does not carry is the string.
+
+That is fine for a filename, which cannot change under a fixed row of a fixed
+listing. It is wrong for the two cells in this product that can: a folder total
+climbing while the walk runs, and a `Modified` cell reading `21:40` that becomes
+`26 Aug` when the clock passes midnight. Both drew the first string ever shaped
+there and never anything else. The debug assertion meant to catch exactly this
+compared `source_len`, so `1.2 GB` becoming `1.3 GB` passed it.
+
+The fix is a 64-bit fingerprint of the content stored beside the run and checked
+on every hit, inside `get_or_shape` rather than at the call site — a caller cannot
+forget a check it is not offered. Measured over a 900-frame scroll at 200,000
+entries: p50 0.191 ms before and after, p99 within run-to-run variance.
+
+> **Fails if:** a cache is keyed by position and any string at that position is
+> derived from something other than the collection the key names.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

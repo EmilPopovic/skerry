@@ -14,6 +14,13 @@ use crate::shape::ShapedRun;
 /// index, so without it entry 3 of a directory and entry 3 of the next one are
 /// the same key and the cache serves the first when asked for the second. That
 /// is not hypothetical — see `sk_model::Listing::version`.
+///
+/// **A key says where a string is, not what it is,** which is why
+/// [`LayoutCache::get_or_shape`] verifies the content of every hit. A cell's
+/// text changes underneath a fixed key twice in this product: a folder total
+/// climbs while the walk runs, and a `Modified` cell reading `21:40` becomes
+/// `26 Aug` when the clock passes midnight. Both were drawn from the first run
+/// ever shaped there, forever.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct RunKey {
     /// Which listing, from `sk_model::Listing::version`.
@@ -56,8 +63,8 @@ impl RunKey {
 /// O(1) amortized with no sweep. That matters because a sweep is a frame spike,
 /// and a frame spike is exactly what the 8 ms budget measures.
 pub struct LayoutCache {
-    live: HashMap<RunKey, ShapedRun>,
-    stale: HashMap<RunKey, ShapedRun>,
+    live: HashMap<RunKey, Cell>,
+    stale: HashMap<RunKey, Cell>,
     /// Runs keyed by their *content* rather than by a row.
     ///
     /// The row-keyed cache above cannot hold a status line: its key says which
@@ -77,6 +84,18 @@ struct Label {
     text: String,
     weight: u8,
     quarter_px: u16,
+    run: ShapedRun,
+}
+
+/// A run and a fingerprint of the string it was shaped from.
+///
+/// The fingerprint is 64 bits rather than the string itself because a cell hit
+/// happens a few thousand times a second and the point of the row cache is that
+/// it never touches the name arena. A collision draws one wrong cell and is
+/// checked for in debug builds by [`ShapedRun::source_len`]; at 64 bits over the
+/// few hundred strings a screen holds, that is not a thing that happens.
+struct Cell {
+    content: u64,
     run: ShapedRun,
 }
 
@@ -151,43 +170,53 @@ impl LayoutCache {
             .map_or_else(|| EMPTY.get_or_init(ShapedRun::default), |label| &label.run)
     }
 
-    /// The shaped run for `key`, shaping `text` on a miss.
+    /// The shaped run for `key`, shaping `text` on a miss **or on a change**.
     ///
     /// There is no `invalidate`, and there was: the key carries the listing, so a
     /// new listing simply cannot hit an old entry and eviction handles the memory.
     /// A cache with an `invalidate` is a cache with a caller who has to remember
     /// to call it, and that caller did not.
+    ///
+    /// The content check is here rather than at the call site for the same
+    /// reason. The key names a position — this row, this column — and a position
+    /// is not a promise about a string; a caller cannot forget a check it is not
+    /// offered.
     pub fn get_or_shape(&mut self, key: RunKey, text: &str, fonts: &mut Fonts) -> &ShapedRun {
-        // Cheap staleness detector for debug builds and tests. A hit whose run
-        // was shaped from a different string is the bug this key exists to make
-        // impossible; comparing lengths costs nothing and catches almost all of
-        // it without storing the string.
+        let content = content_hash(text);
+        let fresh = |cell: &Cell| cell.content == content;
+        // Cheap collision detector for debug builds and tests: a hit that passed
+        // the fingerprint but was shaped from a different string. Comparing
+        // lengths costs nothing.
         debug_assert!(
             self.live
                 .get(&key)
                 .or_else(|| self.stale.get(&key))
-                .is_none_or(|run| run.source_len == text.len()),
+                .is_none_or(|cell| !fresh(cell) || cell.run.source_len == text.len()),
             "cache hit for {key:?} was shaped from a different string than {text:?}"
         );
-        if self.live.contains_key(&key) {
+        if self.live.get(&key).is_some_and(fresh) {
             self.hits += 1;
-        } else if let Some(run) = self.stale.remove(&key) {
+        } else if self.stale.get(&key).is_some_and(fresh) {
             self.hits += 1;
-            self.live.insert(key, run);
+            if let Some(cell) = self.stale.remove(&key) {
+                self.live.insert(key, cell);
+            }
         } else {
             self.misses += 1;
             let weight =
                 if key.weight == Weight::Bold as u8 { Weight::Bold } else { Weight::Regular };
             let run = fonts.shape(text, key.px_size(), weight);
-            if self.live.len() >= self.cap {
+            // A cell whose text changed reuses its slot, so a folder total that
+            // climbs fifteen times a second does not roll a generation.
+            if !self.live.contains_key(&key) && self.live.len() >= self.cap {
                 self.generations += 1;
                 std::mem::swap(&mut self.live, &mut self.stale);
                 self.live.clear();
             }
-            self.live.insert(key, run);
+            self.live.insert(key, Cell { content, run });
         }
         // The insert above guarantees the key is present.
-        self.live.get(&key).unwrap_or(EMPTY.get_or_init(ShapedRun::default))
+        self.live.get(&key).map_or_else(|| EMPTY.get_or_init(ShapedRun::default), |cell| &cell.run)
     }
 }
 
@@ -204,6 +233,16 @@ const LABEL_CAP: usize = 256;
 fn label_hash(text: &str, weight: u8, quarter_px: u16) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in text.as_bytes().iter().chain(&[weight]).chain(&quarter_px.to_le_bytes()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+/// FNV-1a over a cell's string, to notice that it changed.
+fn content_hash(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }
@@ -273,6 +312,54 @@ mod tests {
         let second = cache.get_or_shape(key, "Makefile", &mut fonts).advance;
         assert!((first - second).abs() < f32::EPSILON);
         assert_eq!(cache.stats(), (1, 1, 0));
+    }
+
+    /// The reported defect, as a unit. A folder total climbs while the walk
+    /// runs; the row, the column and the listing do not change while it does.
+    /// Before this check the size column drew the first string ever shaped
+    /// there — a dash — and never anything else.
+    #[test]
+    fn a_cell_whose_text_changed_is_reshaped_rather_than_served_stale() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let mut cache = LayoutCache::new(64);
+        let key = RunKey::cell(1, 3, 1, Weight::Regular, 13.0);
+        let dash = cache.get_or_shape(key, "—", &mut fonts).advance;
+        let total = cache.get_or_shape(key, "1.4 GB", &mut fonts).advance;
+        assert!((dash - total).abs() > f32::EPSILON, "both shaped to {dash}");
+        assert_eq!(cache.stats().0, 0, "the changed string was served from the cache");
+    }
+
+    /// And a changed cell reuses its slot. A total that updates fifteen times a
+    /// second at forty visible rows would otherwise roll a generation every few
+    /// seconds and re-shape every name on screen with it.
+    #[test]
+    fn a_cell_that_changes_repeatedly_does_not_evict_its_neighbours() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let mut cache = LayoutCache::new(8);
+        let neighbour = RunKey::cell(1, 0, 0, Weight::Regular, 13.0);
+        cache.get_or_shape(neighbour, "quarterly-report.pdf", &mut fonts);
+        let climbing = RunKey::cell(1, 1, 1, Weight::Regular, 13.0);
+        for step in 0..200u32 {
+            cache.get_or_shape(climbing, &format!("{step} MB"), &mut fonts);
+        }
+        assert_eq!(cache.stats().2, 0, "a changing cell rolled a generation");
+        let before = cache.stats().1;
+        cache.get_or_shape(neighbour, "quarterly-report.pdf", &mut fonts);
+        assert_eq!(cache.stats().1, before, "the neighbour was evicted and re-shaped");
+    }
+
+    /// The second instance of the same mechanism: a window left open past
+    /// midnight. `format::modified` returns a clock time for today and a date
+    /// otherwise, so every `Modified` cell changes at 00:00 with nothing else
+    /// about the row changing at all.
+    #[test]
+    fn a_modified_cell_follows_the_clock_past_midnight() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let mut cache = LayoutCache::new(64);
+        let key = RunKey::cell(7, 12, 2, Weight::Regular, 13.0);
+        let today = cache.get_or_shape(key, "21:40", &mut fonts).advance;
+        let yesterday = cache.get_or_shape(key, "26 Aug", &mut fonts).advance;
+        assert!((today - yesterday).abs() > f32::EPSILON, "both shaped to {today}");
     }
 
     #[test]
