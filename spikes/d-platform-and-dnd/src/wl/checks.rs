@@ -21,7 +21,14 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn make() -> Self {
-        let dir = std::env::temp_dir().join(format!("skerry-spike-d-{}", std::process::id()));
+        // `SPIKE_D_FIXTURE_DIR` exists because a sandboxed peer cannot read
+        // `/tmp` at all — a snap gets a private one — so a drag of a `/tmp` path
+        // to a confined target is refused for a reason that has nothing to do
+        // with the protocol.
+        let base = std::env::var_os("SPIKE_D_FIXTURE_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!("skerry-spike-d-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("dest")).expect("fixture");
         let mut uris = Vec::new();
         for name in ["dragged-one.txt", "dragged-two.txt"] {
@@ -842,9 +849,33 @@ pub fn window_geometry_of(pid: u32) -> Option<(i64, i64, i64, i64)> {
     None
 }
 
+/// The same lookup keyed by the compositor's window address. Needed for a peer
+/// that reuses an already-running process — `firefox --new-window` opens a window
+/// belonging to a pid that was there before, so the pid identifies the browser
+/// and not the window.
+pub fn window_geometry_of_addr(addr: &str) -> Option<(i64, i64, i64, i64)> {
+    let json = hyprctl_clients()?;
+    for chunk in json.split("\"address\"") {
+        if !chunk.trim_start().starts_with(&format!(": \"{addr}\"")) {
+            continue;
+        }
+        let at = numbers_after(chunk, "\"at\": [")?;
+        let size = numbers_after(chunk, "\"size\": [")?;
+        return Some((at.0, at.1, size.0, size.1));
+    }
+    None
+}
+
 /// The middle of a peer's content area, pushed below a header bar or tab strip.
 pub fn drop_point_of(pid: u32) -> Option<(u32, u32)> {
-    let (x, y, w, h) = window_geometry_of(pid)?;
+    content_middle(window_geometry_of(pid)?)
+}
+
+pub fn drop_point_of_addr(addr: &str) -> Option<(u32, u32)> {
+    content_middle(window_geometry_of_addr(addr)?)
+}
+
+fn content_middle((x, y, w, h): (i64, i64, i64, i64)) -> Option<(u32, u32)> {
     Some(((x + w / 2).max(0) as u32, (y + h / 2 + h / 8).max(0) as u32))
 }
 

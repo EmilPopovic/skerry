@@ -128,7 +128,9 @@ fn dnd_source(rest: &[String]) -> bool {
     // window is up, because mapping it re-tiles the workspace and moves the peer.
     let spec = rest.first().cloned().unwrap_or_default();
     let target_pid = spec.strip_prefix("pid:").and_then(|p| p.parse::<u32>().ok());
-    let explicit = if target_pid.is_some() {
+    let target_addr = spec.strip_prefix("addr:").map(str::to_owned);
+    let keyed = target_pid.is_some() || target_addr.is_some();
+    let explicit = if keyed {
         None
     } else {
         Some((
@@ -136,7 +138,7 @@ fn dnd_source(rest: &[String]) -> bool {
             rest.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0),
         ))
     };
-    let label = rest.get(if target_pid.is_some() { 1 } else { 2 }).cloned().unwrap_or_else(|| "unnamed".into());
+    let label = rest.get(if keyed { 1 } else { 2 }).cloned().unwrap_or_else(|| "unnamed".into());
     let (_conn, mut queue, mut app) = wl::App::connect();
     let qh = queue.handle();
     header(&format!("drag to {spec} — {label}"));
@@ -147,13 +149,14 @@ fn dnd_source(rest: &[String]) -> bool {
     app.redraw(&qh);
     app.pump(&mut queue, Duration::from_millis(600));
 
-    let target = match (explicit, target_pid) {
-        (Some(p), _) => Some(p),
-        (None, Some(pid)) => wl::checks::drop_point_of(pid),
+    let target = match (&explicit, target_pid, &target_addr) {
+        (Some(p), _, _) => Some(*p),
+        (None, Some(pid), _) => wl::checks::drop_point_of(pid),
+        (None, None, Some(a)) => wl::checks::drop_point_of_addr(a),
         _ => None,
     };
     let Some((x, y)) = target else {
-        eprintln!("no drop point: pid {target_pid:?} has no window");
+        eprintln!("no drop point: {spec} has no window");
         std::process::exit(1);
     };
     println!("  drop point   {x},{y}");
