@@ -99,6 +99,43 @@ struct Desktop {
     apps: Applications,
 }
 
+/// Starts the job that reads `globs2` and `mimeinfo.cache`.
+///
+/// A few thousand lines across two files, read off the loop so the first frame
+/// does not wait for them and the UI thread never opens one.
+fn read_desktop_databases(
+    jobs: &Jobs,
+    waker: &sk_util::Waker,
+) -> Receiver<std::sync::Arc<Desktop>> {
+    let (sender, receiver) = mpsc::channel();
+    let wake = waker.handle();
+    jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+        let loaded =
+            std::sync::Arc::new(Desktop { mime: MimeDatabase::load(), apps: Applications::load() });
+        if sender.send(loaded).is_ok() {
+            wake.wake();
+        }
+    });
+    receiver
+}
+
+/// What a launch job came back with.
+///
+/// The child comes back too, because it still has to be reaped and only the
+/// frame loop owns the [`Launcher`] that does that.
+struct Launched {
+    notice: String,
+    child: Option<std::process::Child>,
+}
+
+/// Where a pasted location went, and whether it was one.
+enum Pasted {
+    /// A directory to open.
+    Folder(PathBuf),
+    /// The clipboard held something else, or nothing.
+    NotAFolder,
+}
+
 /// The application.
 ///
 /// **The field order is load-bearing.** `renderer` is declared before `window`
@@ -144,16 +181,22 @@ pub struct App {
     /// `None` for the first few milliseconds. Loaded on a job because `globs2`
     /// and `mimeinfo.cache` are files, and rule 1 does not have an exception for
     /// files that are small.
-    desktop: Option<Box<Desktop>>,
-    desktop_rx: Receiver<Box<Desktop>>,
+    /// `Arc`, not `Box`, because a launch job borrows it: resolving a type
+    /// opens the file and resolving a handler reads `.desktop` files across
+    /// every XDG data directory, and neither belongs on the frame loop.
+    desktop: Option<std::sync::Arc<Desktop>>,
+    desktop_rx: Receiver<std::sync::Arc<Desktop>>,
     launcher: Launcher,
+    /// Launches that have started, or failed to.
+    launched_rx: Receiver<Launched>,
+    launched_tx: std::sync::mpsc::Sender<Launched>,
     /// An open asked for before the databases arrived.
     open_owed: Option<PathBuf>,
     /// Something to tell the person, shown in the status line.
     notice: Option<(String, Instant)>,
     /// Bytes read from a peer's clipboard, once the job that read them is done.
-    paste_rx: Receiver<Vec<u8>>,
-    paste_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    paste_rx: Receiver<Pasted>,
+    paste_tx: std::sync::mpsc::Sender<Pasted>,
     layout: Layout,
     frames: Frames,
     last: FrameStats,
@@ -194,32 +237,22 @@ impl App {
         // single-digit milliseconds, so overlapping them does not make the first
         // frame sooner — it makes the first frame contain the directory instead
         // of an empty list.
-        let waker = Waker::new()
-            .map_err(|error| Problem::plain(ProblemKind::NoDisplay, format!("eventfd: {error}")))?;
+        let waker = Waker::new().map_err(|error| {
+            Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
+        })?;
         let (sender, updates) = mpsc::channel();
         let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
         let mut pane = Pane::new(options.path);
         pane.reload(&jobs);
 
-        // The association databases are a few thousand lines across two files.
-        // Read on a job, so the first frame does not wait for them and the UI
-        // thread never opens one.
-        let (desktop_tx, desktop_rx) = mpsc::channel();
-        {
-            let wake = waker.handle();
-            jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-                let loaded =
-                    Box::new(Desktop { mime: MimeDatabase::load(), apps: Applications::load() });
-                if desktop_tx.send(loaded).is_ok() {
-                    wake.wake();
-                }
-            });
-        }
+        let desktop_rx = read_desktop_databases(&jobs, &waker);
 
         let (paste_tx, paste_rx) = mpsc::channel();
+        let (launched_tx, launched_rx) = mpsc::channel();
         let (watch_sender, changes) = mpsc::channel();
-        let watcher = sk_fs::Watcher::new(watch_sender, waker.handle())
-            .map_err(|error| Problem::plain(ProblemKind::NoDisplay, format!("inotify: {error}")))?;
+        let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
+            Problem::plain(ProblemKind::OutOfResources, format!("inotify: {error}"))
+        })?;
         watcher.watch(pane.path.clone());
         let watch_target = pane.path.clone();
 
@@ -229,6 +262,10 @@ impl App {
         // which is declared after `renderer` — so the renderer is dropped first.
         let renderer = unsafe { Renderer::new(window.raw_handles(), physical) }?;
         let gpu_us = gpu_started.elapsed().as_micros();
+
+        // Beside font discovery for the same reason: both read a file that the
+        // first frame would otherwise read.
+        sk_ui::format::warm_timezone();
 
         let font_started = Instant::now();
         let fonts = Fonts::discover()?;
@@ -280,6 +317,8 @@ impl App {
             desktop: None,
             desktop_rx,
             launcher: Launcher::default(),
+            launched_rx,
+            launched_tx,
             open_owed: None,
             notice: None,
             paste_rx,
@@ -341,6 +380,7 @@ impl App {
             self.drain_changes();
             self.drain_desktop();
             self.drain_paste();
+            self.drain_launches();
             self.drain_sizes();
             self.advance();
             if self.dirty {
@@ -426,14 +466,10 @@ impl App {
 
     /// Applies whatever came back from a clipboard read.
     fn drain_paste(&mut self) {
-        let Ok(bytes) = self.paste_rx.try_recv() else { return };
-        let text = String::from_utf8_lossy(&bytes);
-        let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
-        let path = sk_plat::decode_uri(first)
-            .or_else(|| (!first.is_empty()).then(|| PathBuf::from(first)));
-        match path.filter(|path| path.is_dir()) {
-            Some(path) => self.pane.open(path, &self.jobs),
-            None => {
+        let Ok(pasted) = self.paste_rx.try_recv() else { return };
+        match pasted {
+            Pasted::Folder(path) => self.pane.open(path, &self.jobs),
+            Pasted::NotAFolder => {
                 self.notice = Some((
                     sk_model::i18n::lookup("error.clipboard_not_a_folder").to_owned(),
                     Instant::now(),
@@ -624,7 +660,15 @@ impl App {
             let mut bytes = Vec::new();
             let mut file = std::fs::File::from(fd);
             let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
-            if sender.send(bytes).is_ok() {
+            let text = String::from_utf8_lossy(&bytes);
+            let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+            // The `is_dir` happens here, not on the loop: this is a path another
+            // application chose, and it can name a hung mount.
+            let pasted = sk_plat::decode_uri(first)
+                .or_else(|| (!first.is_empty()).then(|| PathBuf::from(first)))
+                .filter(|path| path.is_dir())
+                .map_or(Pasted::NotAFolder, Pasted::Folder);
+            if sender.send(pasted).is_ok() {
                 wake.wake();
             }
         });
@@ -657,24 +701,56 @@ impl App {
     /// double click do nothing exactly once, which is the kind of thing a person
     /// blames themselves for.
     fn launch(&mut self, path: PathBuf) {
-        let Some(desktop) = self.desktop.as_ref() else {
+        let Some(desktop) = self.desktop.clone() else {
             self.open_owed = Some(path);
             return;
         };
-        let mime = desktop.mime.of(&path, false);
-        let Some(entry) = desktop.apps.default_for(&mime) else {
-            self.notice =
-                Some((sk_model::i18n::format("error.no_handler", &[&mime]), Instant::now()));
-            return;
-        };
-        let name = entry.name.clone();
-        let started = self.launcher.open(&entry, std::slice::from_ref(&path));
-        let message = if started {
-            sk_model::i18n::format("notice.opening", &[&name])
-        } else {
-            sk_model::i18n::format("error.launch_failed", &[&name])
-        };
-        self.notice = Some((message, Instant::now()));
+        // **All of it is a job.** Typing the file opens it when the name says
+        // nothing; finding the handler reads `.desktop` files across every XDG
+        // data directory and stats every `PATH` entry for each candidate; and
+        // `spawn` is `fork` plus `exec`, which with a `pre_exec` set blocks the
+        // parent on the child's exec-status pipe. Enter on an extensionless file
+        // living on a stalled mount used to stop the window painting until the
+        // mount answered.
+        let sender = self.launched_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(self.pane.lane(), sk_util::Cancel::new(), move |_| {
+            let mime = desktop.mime.of(&path, false);
+            let launched = match desktop.apps.default_for(&mime) {
+                None => Launched {
+                    notice: sk_model::i18n::format("error.no_handler", &[&mime]),
+                    child: None,
+                },
+                Some(entry) => match Launcher::start(&entry, std::slice::from_ref(&path)) {
+                    Ok(child) => Launched {
+                        notice: sk_model::i18n::format("notice.opening", &[&entry.name]),
+                        child: Some(child),
+                    },
+                    Err(sk_desktop::launch::Refused::NoTerminal) => Launched {
+                        notice: sk_model::i18n::format("error.no_terminal", &[&entry.name]),
+                        child: None,
+                    },
+                    Err(_) => Launched {
+                        notice: sk_model::i18n::format("error.launch_failed", &[&entry.name]),
+                        child: None,
+                    },
+                },
+            };
+            if sender.send(launched).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of a launch: its notice, and the child to reap.
+    fn drain_launches(&mut self) {
+        while let Ok(launched) = self.launched_rx.try_recv() {
+            if let Some(child) = launched.child {
+                self.launcher.adopt(child);
+            }
+            self.notice = Some((launched.notice, Instant::now()));
+            self.dirty = true;
+        }
     }
 
     /// Goes to the parent directory.

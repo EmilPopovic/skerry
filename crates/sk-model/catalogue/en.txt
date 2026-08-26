@@ -38,6 +38,35 @@ error.gone = {0} is no longer there. It may have been moved or deleted.
 error.no_display = Cannot reach a display server. Set WAYLAND_DISPLAY or DISPLAY and try again.
 error.no_gpu = No usable GPU. Install a Vulkan driver, or mesa's software renderer as a fallback.
 error.no_font = No usable font found. Install a font package such as dejavu-fonts or noto-fonts.
+# Names the limit and how to raise it, because nothing else about the message
+# would tell anyone which knob to turn.
+error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
+
+# Key names, for the keyboard overlay and anywhere else a chord is shown. As
+# translatable as any other word on screen: the overlay is the discovery
+# surface, and a keyboard list half in English is not a translated build. The
+# arrows are entries too, so a language that prefers a word can have one.
+key.super = Super
+key.ctrl = Ctrl
+key.alt = Alt
+key.shift = Shift
+key.space = Space
+key.enter = Enter
+key.escape = Esc
+key.backspace = Backspace
+key.delete = Delete
+key.tab = Tab
+key.left = ←
+key.right = →
+key.up = ↑
+key.down = ↓
+key.home = Home
+key.end = End
+key.page_up = Page Up
+key.page_down = Page Down
+key.insert = Insert
+key.menu = Menu
+key.function = F{0}
 
 # Abbreviated month names. Three letters in English; not necessarily three in
 # another language, which is why they are catalogue entries and not a slice of
@@ -108,7 +137,12 @@ action.home = Home folder
 
 # Freshness. inotify does not work on NFS at all — no event and no error — so a
 # listing there is a snapshot and says so rather than implying otherwise.
-status.unwatched = · not watching for changes
+# The whole sentence, with the status text as {0}. It used to be glued on with
+# a `format!` and the separator baked into the value — which is the exact
+# construction this file's header says the discipline exists to catch.
+status.unwatched = {0} · not watching for changes
+# The frame cost on the status line. The unit is part of the string.
+status.frame_cost = {0} / {1} ms
 
 # A folder total with something missing from it: an unreadable subdirectory, or
 # one on another filesystem. The number is a lower bound and says so.
@@ -117,6 +151,9 @@ size.atleast = ≥ {0}
 # Opening a file with the application the desktop says owns it.
 error.no_handler = Nothing installed opens {0}.
 error.launch_failed = Could not start {0}.
+# The handler asked to be run inside a terminal and no terminal emulator was
+# found. Names the variable, because setting it is the fix.
+error.no_terminal = {0} needs a terminal, and none was found. Set $TERMINAL.
 notice.opening = Opening with {0}
 
 # The clipboard.
@@ -129,4 +166,9 @@ notice.copied_path = Copied {0}
 error.clipboard_not_a_folder = The clipboard does not hold a folder.
 error.no_clipboard = This compositor offers no clipboard.
 stats.capabilities = platform
+# The values in the diagnostics overlay that contain a word or a unit rather
+# than only numbers and punctuation.
+stats.value.milliseconds3 = {0} / {1} / {2} ms
+stats.value.of = {0} of {1}
+stats.value.surface = {0}×{1} at {2}%
 action.dump = Print a diagnostic report

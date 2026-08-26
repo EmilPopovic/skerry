@@ -121,6 +121,11 @@ struct State {
     primary_manager:
         Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
     clipboard: clipboard::Clipboard,
+    /// Selection writes the peer has not finished reading.
+    ///
+    /// A pipe holds 64 KiB and a whole-directory selection is megabytes, so the
+    /// tail of a transfer waits here for room rather than blocking the loop.
+    transfers: Vec<clipboard::Transfer>,
     /// An offer whose types are still arriving, before the `selection` event
     /// that adopts it.
     pending_offer: Option<wayland_client::protocol::wl_data_offer::WlDataOffer>,
@@ -252,6 +257,7 @@ impl Window {
             data_manager,
             primary_manager,
             clipboard,
+            transfers: Vec::new(),
             pending_offer: None,
             pending_types: Vec::new(),
             pending_primary_offer: None,
@@ -364,6 +370,10 @@ impl Window {
             return;
         }
 
+        // A transfer whose pipe has room since last time finishes here, before
+        // anything decides to sleep.
+        clipboard::resume_all(&mut self.state.transfers);
+
         // Anything already buffered is dispatched without touching the socket.
         match self.queue.dispatch_pending(&mut self.state) {
             Ok(dispatched) if dispatched > 0 => {
@@ -389,10 +399,18 @@ impl Window {
 
         let display = self.connection.as_fd();
         let wake_fd = wake.map(Waker::as_fd);
-        let mut fds = Vec::with_capacity(2);
+        let mut fds = Vec::with_capacity(2 + self.state.transfers.len());
         fds.push(PollFd::new(&display, PollFlags::IN));
         if let Some(fd) = &wake_fd {
             fds.push(PollFd::new(fd, PollFlags::IN));
+        }
+        // An unfinished selection write waits for room in its pipe the same way
+        // everything else here waits: in the one `poll`. No thread, no timer, and
+        // idle stays idle because a full pipe is simply not ready.
+        let waiting = fds.len();
+        let pipes: Vec<_> = self.state.transfers.iter().map(clipboard::Transfer::as_fd).collect();
+        for pipe in &pipes {
+            fds.push(PollFd::new(pipe, PollFlags::OUT));
         }
         let spec = timeout.map(to_timespec);
         let readable = rustix::event::poll(&mut fds, spec.as_ref()).unwrap_or(0);
@@ -412,11 +430,14 @@ impl Window {
         } else {
             drop(guard);
         }
-        if fds.len() > 1 && fds[1].revents().contains(PollFlags::IN) {
+        if wake_fd.is_some() && fds[1].revents().contains(PollFlags::IN) {
             if let Some(wake) = wake {
                 wake.drain();
             }
             self.state.events.push_back(Event::Woken);
+        }
+        if fds[waiting..].iter().any(|fd| !fd.revents().is_empty()) {
+            clipboard::resume_all(&mut self.state.transfers);
         }
 
         if let Err(error) = self.queue.dispatch_pending(&mut self.state) {

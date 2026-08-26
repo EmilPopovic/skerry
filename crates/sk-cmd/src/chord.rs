@@ -67,14 +67,14 @@ impl Chord {
     #[must_use]
     pub fn display(&self) -> String {
         let mut out = String::with_capacity(16);
-        for (held, name) in [
-            (self.mods.logo, "Super"),
-            (self.mods.ctrl, "Ctrl"),
-            (self.mods.alt, "Alt"),
-            (self.mods.shift, "Shift"),
+        for (held, key) in [
+            (self.mods.logo, "key.super"),
+            (self.mods.ctrl, "key.ctrl"),
+            (self.mods.alt, "key.alt"),
+            (self.mods.shift, "key.shift"),
         ] {
             if held {
-                out.push_str(name);
+                out.push_str(sk_model::i18n::lookup(key));
                 out.push(' ');
             }
         }
@@ -124,30 +124,41 @@ fn character(word: &str) -> Option<Key> {
     }
 }
 
+/// The name a person reads for one key.
+///
+/// Through the catalogue, every one of them. `Ctrl`, `Alt` and `Page Down` are
+/// as much a translated word as any other on screen — the keyboard overlay is
+/// the discovery surface rule 4 is about, and leaving it in English would leave
+/// the whole of it in English in a translated build. The arrows and `F5` are
+/// catalogue entries too, so a language that wants a word rather than a glyph
+/// can have one.
 fn key_name(key: Key) -> String {
+    fn named(key: &'static str) -> String {
+        sk_model::i18n::lookup(key).to_owned()
+    }
     match key {
-        Key::Character(' ') => "Space".to_owned(),
+        Key::Character(' ') => named("key.space"),
         Key::Character(character) => character.to_uppercase().to_string(),
         Key::Unknown(code) => format!("0x{code:x}"),
         Key::Named(name) => match name {
-            Named::Enter => "Enter".to_owned(),
-            Named::Escape => "Esc".to_owned(),
-            Named::Backspace => "Backspace".to_owned(),
-            Named::Delete => "Delete".to_owned(),
-            Named::Tab => "Tab".to_owned(),
+            Named::Enter => named("key.enter"),
+            Named::Escape => named("key.escape"),
+            Named::Backspace => named("key.backspace"),
+            Named::Delete => named("key.delete"),
+            Named::Tab => named("key.tab"),
             // Arrows, because a row of four words down the side of a keyboard
             // list is much harder to scan than a row of four arrows.
-            Named::Left => "←".to_owned(),
-            Named::Right => "→".to_owned(),
-            Named::Up => "↑".to_owned(),
-            Named::Down => "↓".to_owned(),
-            Named::Home => "Home".to_owned(),
-            Named::End => "End".to_owned(),
-            Named::PageUp => "Page Up".to_owned(),
-            Named::PageDown => "Page Down".to_owned(),
-            Named::Insert => "Insert".to_owned(),
-            Named::Menu => "Menu".to_owned(),
-            Named::Function(number) => format!("F{number}"),
+            Named::Left => named("key.left"),
+            Named::Right => named("key.right"),
+            Named::Up => named("key.up"),
+            Named::Down => named("key.down"),
+            Named::Home => named("key.home"),
+            Named::End => named("key.end"),
+            Named::PageUp => named("key.page_up"),
+            Named::PageDown => named("key.page_down"),
+            Named::Insert => named("key.insert"),
+            Named::Menu => named("key.menu"),
+            Named::Function(number) => sk_model::i18n::format("key.function", &[&number]),
         },
     }
 }

@@ -6,9 +6,18 @@
 //! after "do not block the UI thread" —
 //! [docs/04-architecture.md](../../../docs/04-architecture.md#data-layout).
 //!
-//! The listing is also the unit of the versioned snapshot the UI thread reads:
-//! it is built on a job, published whole, and never mutated while a frame is
-//! reading it.
+//! **`version` identifies the directory, not the contents.** A listing is built
+//! on a job and published whole; after that the UI thread owns it and does mutate
+//! it in place — `set_meta` writes two thousand rows at a time as `statx`
+//! returns, and `set_recursive_size` writes a folder total every time a walk
+//! reports. Neither touches `version`, and that is deliberate: the version exists
+//! so a cache key cannot confuse row 3 of this directory with row 3 of the last
+//! one, which is a question about *which listing*, not about what is in it.
+//!
+//! The doc here used to say the listing was "never mutated while a frame is
+//! reading it", which is not true and was load-bearing: it is what made
+//! `sk_text::RunKey` look sufficient without the string in it, and the size
+//! column consequently drew the first value it was ever given and never another.
 
 use crate::arena::{StrArena, StrRef};
 

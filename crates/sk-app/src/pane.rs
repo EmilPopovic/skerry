@@ -29,6 +29,14 @@ pub enum Update {
         elapsed_us: u64,
         /// Microseconds the first sort took, on the job rather than on a frame.
         sort_us: u64,
+        /// Which lane this directory's device belongs on, probed **on the job**.
+        ///
+        /// `statfs` on a suspended sshfs host blocks for the mount's timeout, and
+        /// it used to be called from `Pane::reload` — which runs on the frame
+        /// loop, on every navigation, on `F5` and on every watcher-driven
+        /// refresh. The answer is only needed for the metadata fan-out, which
+        /// does not start until this message arrives.
+        lane: Lane,
     },
     /// Metadata for one slice of the names.
     Meta(Vec<MetaRow>),
@@ -258,10 +266,6 @@ impl Pane {
         self.meta_expected = 0;
         self.meta_done = 0;
         self.meta_started = None;
-        // The lane is probed per directory, not per entry: a read on an
-        // unresponsive network mount gets one worker between all of them, and a
-        // local one gets the whole pool.
-        self.lane = sk_fs::lane_for(&self.path);
 
         let generation = self.generation;
         let path = self.path.clone();
@@ -269,7 +273,11 @@ impl Pane {
         let wake = jobs.wake.clone();
         let sort = self.sort;
         let show_hidden = self.show_hidden;
-        jobs.pool.spawn(self.lane, self.cancel.clone(), move |cancel| {
+        // One job, so `Parallel` costs at most one worker even on a mount that
+        // never answers. The lane that matters is the metadata fan-out's, and
+        // this job is what discovers it.
+        jobs.pool.spawn(Lane::Parallel, self.cancel.clone(), move |cancel| {
+            let lane = sk_fs::lane_for(&path);
             let update = match sk_fs::names(&path, cancel) {
                 Ok(found) => {
                     // The first sort happens **here**, on the job, not when the
@@ -284,6 +292,7 @@ impl Pane {
                         names: found.names,
                         elapsed_us: found.elapsed_us,
                         sort_us: started.elapsed().as_micros() as u64,
+                        lane,
                     }
                 }
                 // A cancelled read has nothing to report: the pane has already
@@ -389,11 +398,12 @@ impl Pane {
             return false;
         }
         match message.update {
-            Update::Names { listing, names, elapsed_us, sort_us } => {
+            Update::Names { listing, names, elapsed_us, sort_us, lane } => {
                 self.carry_selection(&listing);
                 self.listing = *listing;
                 self.names_us = elapsed_us;
                 self.sort_us = sort_us;
+                self.lane = lane;
                 self.restore_cursor();
                 self.dispatch_metadata(&names, jobs);
             }

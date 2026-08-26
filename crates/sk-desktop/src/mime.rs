@@ -122,6 +122,17 @@ impl MimeDatabase {
             }
             return;
         }
+        // First wins at equal weight, and a repeat only replaces a lighter one —
+        // the same rule the two maps above use. `globs2` is read once per XDG
+        // data directory, most specific first, so without this the list grew by
+        // one entry per directory per glob and `/usr/share` overrode
+        // `$XDG_DATA_HOME`.
+        if let Some(existing) = self.patterns.iter_mut().find(|it| it.glob == glob) {
+            if weight > existing.weight {
+                *existing = Pattern { weight, glob: glob.to_owned(), mime: mime.to_owned() };
+            }
+            return;
+        }
         self.patterns.push(Pattern { weight, glob: glob.to_owned(), mime: mime.to_owned() });
     }
 
@@ -146,11 +157,20 @@ impl MimeDatabase {
         if let Some((_, _, mime)) = best {
             return Some(mime);
         }
-        self.patterns
-            .iter()
-            .filter(|pattern| matches(&pattern.glob, name))
-            .max_by_key(|pattern| pattern.weight)
-            .map(|pattern| pattern.mime.as_str())
+        // Not `max_by_key`: that returns the **last** maximum, so two patterns of
+        // equal weight resolved to whichever was read last — which is
+        // `/usr/share`, the opposite of the precedence every other lookup here
+        // honours.
+        let mut best: Option<&Pattern> = None;
+        for pattern in &self.patterns {
+            if !matches(&pattern.glob, name) {
+                continue;
+            }
+            if best.is_none_or(|current| pattern.weight > current.weight) {
+                best = Some(pattern);
+            }
+        }
+        best.map(|pattern| pattern.mime.as_str())
     }
 
     /// The type of `path`, using its name and, if that fails, its first bytes.
@@ -194,41 +214,72 @@ fn sniff(path: &Path) -> Option<String> {
 /// Matches a shared-mime-info glob against a name.
 ///
 /// `*`, `?` and `[...]`, which is all the format uses. Written out rather than
-/// taken from a crate because it is twenty lines and the alternative brings a
+/// taken from a crate because it is thirty lines and the alternative brings a
 /// regex engine for four hundred patterns that are almost all `*.ext`.
+///
+/// **Iterative, with one backtrack point.** The obvious recursive form — every
+/// `*` trying every split — is exponential: measured, `*a*a…*b` against a string
+/// of twenty `a`s took 442 calls with two stars, 49,595 with five and 665,879
+/// with eight, and twelve stars against a sixty-character name did not finish in
+/// ten minutes. Both halves of that are attacker-supplied: a `globs2` line is a
+/// file anyone can drop into `~/.local/share/mime/`, and the name is a filename.
+/// The greedy form below is O(pattern × name) and needs no stack.
 fn matches(glob: &str, name: &str) -> bool {
-    fn walk(pattern: &[u8], text: &[u8]) -> bool {
-        match pattern.first() {
-            None => text.is_empty(),
-            Some(b'*') => (0..=text.len()).any(|skip| walk(&pattern[1..], &text[skip..])),
-            Some(b'?') => !text.is_empty() && walk(&pattern[1..], &text[1..]),
-            Some(b'[') => {
-                let Some(close) = pattern.iter().position(|byte| *byte == b']') else {
-                    return false;
-                };
-                let Some(first) = text.first() else { return false };
-                let set = &pattern[1..close];
-                let (negated, set) = match set.first() {
-                    Some(b'^' | b'!') => (true, &set[1..]),
-                    _ => (false, set),
-                };
-                let mut hit = false;
-                let mut index = 0;
-                while index < set.len() {
-                    if index + 2 < set.len() && set[index + 1] == b'-' {
-                        hit |= (set[index]..=set[index + 2]).contains(first);
-                        index += 3;
-                    } else {
-                        hit |= set[index] == *first;
-                        index += 1;
-                    }
-                }
-                hit != negated && walk(&pattern[close + 1..], &text[1..])
-            }
-            Some(byte) => text.first() == Some(byte) && walk(&pattern[1..], &text[1..]),
+    let (pattern, text) = (glob.as_bytes(), name.as_bytes());
+    let (mut at, mut index) = (0usize, 0usize);
+    // Where to resume from if the greedy star took too much.
+    let mut star: Option<(usize, usize)> = None;
+    while index < text.len() {
+        if let Some(next) = element(pattern, at, text[index]) {
+            at = next;
+            index += 1;
+        } else if pattern.get(at) == Some(&b'*') {
+            star = Some((at, index));
+            at += 1;
+        } else if let Some((from, taken)) = star {
+            at = from + 1;
+            index = taken + 1;
+            star = Some((from, taken + 1));
+        } else {
+            return false;
         }
     }
-    walk(glob.as_bytes(), name.as_bytes())
+    while pattern.get(at) == Some(&b'*') {
+        at += 1;
+    }
+    at == pattern.len()
+}
+
+/// Matches one pattern element against one byte.
+///
+/// Returns where the pattern continues, or `None` if it did not match — which
+/// `*` always is, because a star is not an element and is handled by the caller.
+fn element(pattern: &[u8], at: usize, byte: u8) -> Option<usize> {
+    match pattern.get(at)? {
+        b'?' => Some(at + 1),
+        b'*' => None,
+        b'[' => {
+            let close = at + pattern[at..].iter().position(|it| *it == b']')?;
+            let set = &pattern[at + 1..close];
+            let (negated, set) = match set.first() {
+                Some(b'^' | b'!') => (true, &set[1..]),
+                _ => (false, set),
+            };
+            let mut hit = false;
+            let mut cursor = 0;
+            while cursor < set.len() {
+                if cursor + 2 < set.len() && set[cursor + 1] == b'-' {
+                    hit |= (set[cursor]..=set[cursor + 2]).contains(&byte);
+                    cursor += 3;
+                } else {
+                    hit |= set[cursor] == byte;
+                    cursor += 1;
+                }
+            }
+            (hit != negated).then_some(close + 1)
+        }
+        other => (*other == byte).then_some(at + 1),
+    }
 }
 
 #[cfg(test)]
@@ -237,6 +288,65 @@ mod tests {
 
     use super::{DIRECTORY, MimeDatabase, TEXT, matches};
     use std::path::Path;
+
+    /// A `globs2` line is a file anyone can write, and a filename is what it is
+    /// matched against. The recursive matcher took 665,879 calls for eight stars
+    /// against twenty characters and did not finish at all for twelve against
+    /// sixty; this asks for twenty against a hundred and twenty.
+    #[test]
+    fn a_pathological_glob_does_not_take_exponential_time() {
+        let glob = format!("{}b", "*a".repeat(20));
+        let name = "a".repeat(120);
+        let started = std::time::Instant::now();
+        assert!(!matches(&glob, &name), "there is no b in it");
+        assert!(started.elapsed().as_millis() < 50, "twenty stars took {:?}", started.elapsed());
+    }
+
+    /// The greedy matcher has to agree with the recursive one it replaced on
+    /// everything the recursive one got right.
+    #[test]
+    fn stars_classes_and_question_marks_still_mean_what_they_meant() {
+        for (glob, name, wanted) in [
+            ("*.c", "main.c", true),
+            ("*.c", "main.cpp", false),
+            ("*", "anything", true),
+            ("", "", true),
+            ("", "x", false),
+            ("*", "", true),
+            ("a*b*c", "abc", true),
+            ("a*b*c", "aXXbYYc", true),
+            ("a*b*c", "aXXbYY", false),
+            ("?????", "abcde", true),
+            ("?????", "abcd", false),
+            ("[abc]x", "bx", true),
+            ("[abc]x", "dx", false),
+            ("[a-z]x", "qx", true),
+            ("[^a-z]x", "Qx", true),
+            ("[^a-z]x", "qx", false),
+            ("*[0-9].log", "server7.log", true),
+            ("*[0-9].log", "server.log", false),
+            ("*.tar.*", "archive.tar.gz", true),
+            ("[unclosed", "u", false),
+        ] {
+            assert_eq!(matches(glob, name), wanted, "{glob:?} against {name:?}");
+        }
+    }
+
+    /// Two data directories offering the same pattern at the same weight: the
+    /// one read first wins, which is `$XDG_DATA_HOME`. `max_by_key` returns the
+    /// last maximum and so gave `/usr/share`, silently inverting the precedence
+    /// the extension and literal paths honour.
+    #[test]
+    fn the_first_data_directory_wins_a_tie_for_patterns_too() {
+        let mut database = MimeDatabase::default();
+        database.absorb("50:text/from-xdg-data-home:*.[ch]x\n");
+        database.absorb("50:text/from-usr-share:*.[ch]x\n");
+        assert_eq!(database.by_name("a.cx"), Some("text/from-xdg-data-home"));
+
+        // And a heavier one still overrides, whichever order it arrives in.
+        database.absorb("80:text/heavier:*.[ch]x\n");
+        assert_eq!(database.by_name("a.cx"), Some("text/heavier"));
+    }
 
     fn database() -> MimeDatabase {
         let mut database = MimeDatabase::default();

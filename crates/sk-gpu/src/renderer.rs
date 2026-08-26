@@ -509,27 +509,43 @@ fn open_device(
     instance: &wgpu::Instance,
     surface: Option<&wgpu::Surface<'static>>,
 ) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue), Problem> {
-    let adapter = pollster(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        // A file manager is not a game. On a laptop with two GPUs the integrated
-        // one draws quads at the same speed and does not spin up a fan or cost
-        // an hour of battery.
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: surface,
-        force_fallback_adapter: false,
-    }))
+    let adapter = timed_out(
+        pollster(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            // A file manager is not a game. On a laptop with two GPUs the integrated
+            // one draws quads at the same speed and does not spin up a fan or cost
+            // an hour of battery.
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: surface,
+            force_fallback_adapter: false,
+        })),
+        "request_adapter",
+    )?
     .map_err(|error| Problem::plain(ProblemKind::NoGpu, format!("request_adapter: {error}")))?;
 
-    let (device, queue) = pollster(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("skerry"),
-        required_features: wgpu::Features::empty(),
-        // Downlevel defaults, raised to what this adapter offers: the limits we
-        // actually need are one vertex buffer and two 2048-pixel textures, and
-        // asking for less is what makes the GL fallback work at all.
-        required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-        ..Default::default()
-    }))
+    let (device, queue) = timed_out(
+        pollster(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("skerry"),
+            required_features: wgpu::Features::empty(),
+            // Downlevel defaults, raised to what this adapter offers: the limits we
+            // actually need are one vertex buffer and two 2048-pixel textures, and
+            // asking for less is what makes the GL fallback work at all.
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        })),
+        "request_device",
+    )?
     .map_err(|error| Problem::plain(ProblemKind::NoGpu, format!("request_device: {error}")))?;
     Ok((adapter, device, queue))
+}
+
+/// Turns a missed [`SETUP_DEADLINE`] into a `Problem` that names what stalled.
+fn timed_out<T>(value: Option<T>, what: &str) -> Result<T, Problem> {
+    value.ok_or_else(|| {
+        Problem::plain(
+            ProblemKind::NoGpu,
+            format!("{what} did not answer in {}s", SETUP_DEADLINE.as_secs()),
+        )
+    })
 }
 
 fn glyph_quad(placed: Placed, pen_x: f32, baseline_y: f32, color: u32) -> Quad {
@@ -793,21 +809,46 @@ fn as_bytes<T: Copy>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) }
 }
 
+/// How long a setup future may stay pending before it is a hang, not a wait.
+///
+/// The whole device open measures 19–25 ms on Vulkan
+/// ([docs/09](../../../docs/09-performance-budgets.md)), so two seconds is two
+/// orders of magnitude of headroom. The deadline is not there to be reached; it
+/// is there so that a `wgpu` version or a backend which returns `Pending` from
+/// one of these is a refusal with a message rather than a core at 100% with no
+/// way out — the same shape as the idle-CPU bug docs/09 already records.
+const SETUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Blocks on a `wgpu` future without an async runtime.
 ///
 /// [ADR 0005](../../../docs/adr/0005-no-async-runtime.md) forbids the runtime,
 /// and this is why it costs nothing: `wgpu`'s three setup futures are the only
 /// ones in the program, they resolve immediately on a native backend, and a
 /// spinning thread during start-up is a better answer than an executor.
-fn pollster<F: std::future::Future>(future: F) -> F::Output {
+///
+/// `None` when [`SETUP_DEADLINE`] passes. The waker is a no-op, so polling is
+/// the only way this can ever make progress; after the first few hundred passes
+/// it yields rather than spins, because by then the answer is not coming from
+/// this core.
+fn pollster<F: std::future::Future>(future: F) -> Option<F::Output> {
     use std::task::{Context, Poll, Waker};
+    let deadline = std::time::Instant::now() + SETUP_DEADLINE;
     let mut future = std::pin::pin!(future);
     let mut context = Context::from_waker(Waker::noop());
+    let mut passes = 0u32;
     loop {
         if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
-            return value;
+            return Some(value);
         }
-        std::hint::spin_loop();
+        passes += 1;
+        if passes < 256 {
+            std::hint::spin_loop();
+            continue;
+        }
+        if std::time::Instant::now() > deadline {
+            return None;
+        }
+        std::thread::yield_now();
     }
 }
 
@@ -815,7 +856,7 @@ fn pollster<F: std::future::Future>(future: F) -> F::Output {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{as_bytes, clamp_scissor, glyph_quad, pollster};
+    use super::{SETUP_DEADLINE, as_bytes, clamp_scissor, glyph_quad, pollster};
     use crate::Rect;
     use crate::atlas::Placed;
 
@@ -850,6 +891,30 @@ mod tests {
 
     #[test]
     fn a_ready_future_resolves_without_an_executor() {
-        assert_eq!(pollster(std::future::ready(7)), 7);
+        assert_eq!(pollster(std::future::ready(7)), Some(7));
+    }
+
+    /// The waker is a no-op, so a future that never resolves can only be polled
+    /// forever. Without the deadline, start-up became a hot spin on one core
+    /// with no way out — and the claim that `wgpu`'s setup futures resolve
+    /// immediately is a claim about a dependency's internals with nothing
+    /// enforcing it.
+    #[test]
+    fn a_future_that_never_resolves_gives_up_rather_than_spinning_forever() {
+        struct Never;
+        impl std::future::Future for Never {
+            type Output = ();
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<()> {
+                std::task::Poll::Pending
+            }
+        }
+        let started = std::time::Instant::now();
+        assert_eq!(pollster(Never), None);
+        let waited = started.elapsed();
+        assert!(waited >= SETUP_DEADLINE, "gave up after {waited:?}");
+        assert!(waited < SETUP_DEADLINE * 2, "took {waited:?} to give up");
     }
 }

@@ -23,18 +23,66 @@ pub struct Launcher {
     started: u64,
 }
 
-impl Launcher {
-    /// Starts `entry` on `paths`.
-    ///
-    /// Returns whether the process was created — not whether the application
-    /// liked what it was given, which is between the user and the application.
-    pub fn open(&mut self, entry: &DesktopEntry, paths: &[PathBuf]) -> bool {
-        let Some(argv) = expand(&entry.exec, paths) else { return false };
-        let Some((program, arguments)) = argv.split_first() else { return false };
+/// Why a launch did not happen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// The `Exec` line does not name a program — it is field codes only, so the
+    /// first argument would be the user's own file. "Open this" would become
+    /// "run this", which is a `.desktop` file anybody can drop into
+    /// `~/.local/share/applications`.
+    NotAProgram,
+    /// `Terminal=true` and no terminal emulator could be found.
+    NoTerminal,
+    /// `fork`/`exec` failed.
+    Failed,
+}
 
-        let mut command = Command::new(program);
+/// Terminal emulators to try for a `Terminal=true` entry, in order.
+///
+/// There is no specification for this and no D-Bus interface that answers it, so
+/// it is a list — the same shape as the list every other file manager carries.
+/// `$TERMINAL` comes first because it is the only part a user can set. Every one
+/// of these takes the command after `-e`.
+const TERMINALS: &[&str] =
+    &["x-terminal-emulator", "foot", "kitty", "alacritty", "wezterm", "konsole", "xterm"];
+
+impl Launcher {
+    /// Starts `entry` on `paths` and takes ownership of the child.
+    pub fn open(&mut self, entry: &DesktopEntry, paths: &[PathBuf]) -> bool {
+        match Self::start(entry, paths) {
+            Ok(child) => {
+                self.adopt(child);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Starts `entry` on `paths`, without needing the launcher.
+    ///
+    /// **This is what runs on a job.** `Command::spawn` is `fork` plus `exec`,
+    /// and with a `pre_exec` set the parent blocks on the child's exec-status
+    /// pipe — so a handler whose binary lives on a stalled mount stops the frame
+    /// loop. The caller hands the child back with [`Launcher::adopt`] so it can
+    /// still be reaped.
+    pub fn start(entry: &DesktopEntry, paths: &[PathBuf]) -> Result<Child, Refused> {
+        let argv = expand(&entry.exec, paths).ok_or(Refused::NotAProgram)?;
+        let (program, arguments) = argv.split_first().ok_or(Refused::NotAProgram)?;
+
+        let mut command = if entry.terminal {
+            // `Terminal=true` was parsed and then dropped, so `nvim.desktop` or
+            // `htop.desktop` reported "Opening Neovim" and nothing appeared —
+            // the notice actively told the user it had worked.
+            let emulator = find_terminal().ok_or(Refused::NoTerminal)?;
+            let mut command = Command::new(emulator);
+            command.arg("-e").arg(program).args(arguments);
+            command
+        } else {
+            let mut command = Command::new(program);
+            command.args(arguments);
+            command
+        };
         command
-            .args(arguments)
             // A launched application inherits nothing: its output would otherwise
             // land in whatever terminal started the file manager, interleaved
             // with ours.
@@ -51,15 +99,13 @@ impl Launcher {
                 Ok(())
             });
         }
+        command.spawn().map_err(|_| Refused::Failed)
+    }
 
-        match command.spawn() {
-            Ok(child) => {
-                self.running.push(child);
-                self.started += 1;
-                true
-            }
-            Err(_) => false,
-        }
+    /// Takes a child started by [`Launcher::start`], so it is reaped.
+    pub fn adopt(&mut self, child: Child) {
+        self.running.push(child);
+        self.started += 1;
     }
 
     /// Collects any application that has exited.
@@ -85,8 +131,16 @@ impl Launcher {
 /// with `%` is deprecated and dropped, which the specification requires.
 #[must_use]
 pub fn expand(exec: &str, paths: &[PathBuf]) -> Option<Vec<String>> {
+    let tokens = split(exec)?;
+    // **The program cannot come from a path.** `Exec=%f` expands to the file the
+    // user asked to open, and `argv[0]` is what gets executed — so "open this
+    // document" becomes "run this document", from a `.desktop` file anyone can
+    // write into `~/.local/share/applications`.
+    if tokens.first().is_none_or(|token| is_field_code(token)) {
+        return None;
+    }
     let mut argv = Vec::new();
-    for token in split(exec)? {
+    for token in tokens {
         match token.as_str() {
             "%f" | "%u" => {
                 if let Some(first) = paths.first() {
@@ -101,6 +155,30 @@ pub fn expand(exec: &str, paths: &[PathBuf]) -> Option<Vec<String>> {
         }
     }
     (!argv.is_empty()).then_some(argv)
+}
+
+/// Whether a token is a field code rather than a word.
+fn is_field_code(token: &str) -> bool {
+    token.len() == 2 && token.starts_with('%') && !token.ends_with('%')
+}
+
+/// The first terminal emulator on `PATH`, `$TERMINAL` first.
+fn find_terminal() -> Option<PathBuf> {
+    let named =
+        std::env::var_os("TERMINAL").map(PathBuf::from).filter(|it| !it.as_os_str().is_empty());
+    let candidates = named.into_iter().chain(TERMINALS.iter().map(PathBuf::from));
+    for candidate in candidates {
+        if candidate.is_absolute() {
+            return candidate.is_file().then_some(candidate);
+        }
+        let found = std::env::var_os("PATH").map(|path| {
+            std::env::split_paths(&path).map(|dir| dir.join(&candidate)).find(|it| it.is_file())
+        });
+        if let Some(Some(found)) = found {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// Splits an `Exec` line the way the specification says to.
@@ -219,6 +297,26 @@ mod tests {
     #[test]
     fn a_double_percent_is_a_literal_percent() {
         assert_eq!(expand("app 100%% %f", &paths(&["/a/x"])).unwrap()[1], "100%");
+    }
+
+    /// `Exec=%f` expands to the user's own file, and `argv[0]` is what runs.
+    /// "Open this document" would become "run this document", from a `.desktop`
+    /// file anyone can write into `~/.local/share/applications`.
+    #[test]
+    fn an_exec_line_that_is_only_field_codes_names_no_program() {
+        for exec in ["%f", "%F", "%u", "%U", "%f %F"] {
+            assert_eq!(
+                expand(exec, &[PathBuf::from("/home/emil/report.pdf")]),
+                None,
+                "{exec:?} turned a document into a program"
+            );
+        }
+        // A literal that merely starts with a percent is still a program: `%%`
+        // is an escaped percent, not a field code.
+        assert_eq!(
+            expand("%%viewer %f", &[PathBuf::from("/a/b")]),
+            Some(vec!["%viewer".to_owned(), "/a/b".to_owned()])
+        );
     }
 
     #[test]

@@ -78,6 +78,18 @@ pub fn modified(epoch_seconds: i64, now: i64) -> String {
     format!("{} {} {}", when.day, month_name(when.month), when.year)
 }
 
+/// Reads the timezone database, once, wherever it is called.
+///
+/// glibc initialises the timezone lazily on the first `localtime_r`, and that
+/// first call is an `openat("/etc/localtime")` and two reads — verified with
+/// `strace`, and only the first call. Small, cheap warm, and a syscall on the
+/// frame loop all the same; rule 1 has no exemption for files that are small.
+/// Called at start-up so the frame that draws the first `Modified` cell is not
+/// the one that pays for it.
+pub fn warm_timezone() {
+    let _ = local(0);
+}
+
 struct Parts {
     year: i32,
     month: u8,

@@ -23,7 +23,6 @@
 //! rule 1's 8 ms because the read was somewhere else. Here the read end is handed
 //! to the caller, which puts it on a job.
 
-use std::io::Write as _;
 use std::os::fd::{AsFd, OwnedFd};
 
 use wayland_client::protocol::{
@@ -283,18 +282,69 @@ impl super::Window {
     }
 }
 
-/// Writes `bytes` to a pipe the peer will read from.
+/// A transfer to a peer that has not finished.
 ///
-/// A pipe holds 64 KiB, and a thousand selected paths is about 50 KiB, so the
-/// write completes here in every case that occurs. When it does not — a peer that
-/// asked and then stopped reading — the rest goes to a short-lived thread rather
-/// than to the frame loop, because a full pipe blocks until the peer drains it
-/// and the peer may never do so.
-pub(super) fn send_to(fd: OwnedFd, bytes: &[u8]) {
-    // A failure part-way through means the peer asked and then went away, which
-    // is not an error anybody can act on: there is nothing to finish and nobody
-    // to tell.
-    let _ = std::fs::File::from(fd).write_all(bytes);
+/// A pipe holds 64 KiB. `Ctrl+A` in a directory the budgets are written for —
+/// 200,000 entries — builds a `text/uri-list` of several megabytes, so the
+/// overflow case is not exotic, it is the case the product is measured on.
+pub(super) struct Transfer {
+    fd: OwnedFd,
+    bytes: Vec<u8>,
+    written: usize,
+}
+
+impl Transfer {
+    /// Writes what fits and reports whether there is more.
+    fn resume(&mut self) -> bool {
+        while self.written < self.bytes.len() {
+            match rustix::io::write(&self.fd, &self.bytes[self.written..]) {
+                Ok(0) => return false,
+                Ok(count) => self.written += count,
+                Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => return true,
+                // The peer asked and then went away. There is nothing to finish
+                // and nobody to tell.
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// The descriptor to wait on for room in the pipe.
+    pub(super) fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+/// Starts writing `bytes` to a pipe the peer will read from.
+///
+/// **Never blocks.** This runs inside `wl_data_source::Send`, which is dispatched
+/// from the frame loop, and a full pipe blocks until the peer drains it — a peer
+/// that asks for the selection and then reads slowly, or never, would otherwise
+/// hold the window still, `xdg_wm_base.ping` included, until the compositor gave
+/// up on it. What does not fit is parked and finished by `Window::pump`, which
+/// waits on the pipe for room alongside the display connection.
+pub(super) fn send_to(pending: &mut Vec<Transfer>, fd: OwnedFd, bytes: &[u8]) {
+    let flags = rustix::fs::fcntl_getfl(&fd).unwrap_or(rustix::fs::OFlags::empty());
+    if rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK).is_err() {
+        return;
+    }
+    let mut transfer = Transfer { fd, bytes: Vec::new(), written: 0 };
+    // The common case writes everything and allocates nothing: the copy only
+    // happens for the remainder, and only when there is one.
+    match rustix::io::write(&transfer.fd, bytes) {
+        Ok(count) if count >= bytes.len() => return,
+        Ok(count) => transfer.bytes = bytes[count..].to_vec(),
+        Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => transfer.bytes = bytes.to_vec(),
+        Err(_) => return,
+    }
+    if transfer.resume() {
+        pending.push(transfer);
+    }
+}
+
+/// Finishes what it can of every parked transfer, keeping the rest.
+pub(super) fn resume_all(pending: &mut Vec<Transfer>) {
+    pending.retain_mut(Transfer::resume);
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +374,24 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 state.clipboard.offer = id;
                 state.clipboard.offer_types = std::mem::take(&mut state.pending_types);
                 state.pending_offer = None;
+            }
+            // A drag entered the window. An offer is adopted by *either*
+            // `selection` or `enter`, so the one parked above belongs to this
+            // drag and to nobody else — and until there is a drop target, saying
+            // so and destroying it is the honest answer. Leaving it parked leaked
+            // one server-side object per drag across the window.
+            wl_data_device::Event::Enter { id, .. } => {
+                state.pending_types.clear();
+                state.pending_offer = None;
+                if let Some(offer) = id {
+                    offer.destroy();
+                }
+            }
+            wl_data_device::Event::Leave => {
+                state.pending_types.clear();
+                if let Some(offer) = state.pending_offer.take() {
+                    offer.destroy();
+                }
             }
             _ => {}
         }
@@ -365,8 +433,11 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                     .published
                     .as_ref()
                     .and_then(|content| content.bytes_for(&mime_type))
-                    .unwrap_or_default();
-                send_to(fd, bytes);
+                    .unwrap_or_default()
+                    // Copied rather than borrowed: the bytes and the pending list
+                    // are both fields of the same `State`.
+                    .to_vec();
+                send_to(&mut state.transfers, fd, &bytes);
             }
             wl_data_source::Event::Cancelled => {
                 // Somebody else took the clipboard. Ours is no longer the
@@ -446,8 +517,9 @@ impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()> 
                     .published_primary
                     .as_ref()
                     .and_then(|content| content.bytes_for(&mime_type))
-                    .unwrap_or_default();
-                send_to(fd, bytes);
+                    .unwrap_or_default()
+                    .to_vec();
+                send_to(&mut state.transfers, fd, &bytes);
             }
             zwp_primary_selection_source_v1::Event::Cancelled => {
                 if state.clipboard.primary_source.as_ref() == Some(source) {
@@ -494,8 +566,65 @@ const _: Option<wl_seat::WlSeat> = None;
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Content, encode_uri};
+    use super::{Content, Transfer, encode_uri, resume_all, send_to};
+    use std::io::Read as _;
     use std::path::PathBuf;
+    use std::time::Instant;
+
+    /// The selection the budgets are written for is bigger than a pipe.
+    ///
+    /// `Ctrl+A` in 200,000 entries builds a `text/uri-list` of several megabytes;
+    /// a pipe holds 64 KiB. This used to be a `write_all` inside the dispatch
+    /// handler, which is the frame loop — so a peer that asked and then read
+    /// slowly held the window still, `xdg_wm_base.ping` included, until the
+    /// compositor gave up on it. Watched failing with the `write_all` restored,
+    /// this test does not finish.
+    #[test]
+    fn a_selection_larger_than_a_pipe_does_not_block_the_caller() {
+        let (read, write) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+        let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|index| (index % 251) as u8).collect();
+
+        let mut pending: Vec<Transfer> = Vec::new();
+        let started = Instant::now();
+        send_to(&mut pending, write, &payload);
+        assert!(
+            started.elapsed().as_millis() < 200,
+            "the write blocked for {:?} with nobody reading",
+            started.elapsed()
+        );
+        assert_eq!(pending.len(), 1, "a transfer that cannot finish has to be parked");
+
+        // And it does finish, once somebody reads.
+        let mut got = Vec::new();
+        let mut file = std::fs::File::from(read);
+        let mut chunk = vec![0u8; 64 * 1024];
+        while got.len() < payload.len() {
+            resume_all(&mut pending);
+            match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => got.extend_from_slice(&chunk[..count]),
+                Err(error) => panic!("read: {error}"),
+            }
+        }
+        assert_eq!(got, payload, "the peer got something other than what was published");
+        assert!(pending.is_empty(), "a finished transfer stayed parked");
+    }
+
+    /// A peer that asks and then closes must not leave a transfer waiting for
+    /// room that will never come.
+    #[test]
+    fn a_transfer_to_a_peer_that_left_is_dropped_rather_than_kept() {
+        let (read, write) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+        drop(read);
+        // Rust's runtime ignores `SIGPIPE`, so the write returns `EPIPE` rather
+        // than killing the process.
+        let mut pending: Vec<Transfer> = Vec::new();
+        send_to(&mut pending, write, &vec![0u8; 4 * 1024 * 1024]);
+        resume_all(&mut pending);
+        assert!(pending.is_empty(), "a transfer to a closed pipe was kept");
+    }
 
     #[test]
     fn a_path_with_a_space_or_a_hash_survives_the_uri_list() {

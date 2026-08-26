@@ -55,23 +55,46 @@ pub struct Candidate {
 #[must_use]
 pub fn scan() -> Vec<Candidate> {
     let mut found = Vec::with_capacity(512);
+    let mut visited = std::collections::HashSet::with_capacity(64);
     for root in roots() {
-        walk(&root, 0, &mut found);
+        walk(&root, 0, &mut visited, &mut found);
     }
     found
 }
 
 const MAX_DEPTH: u32 = 4;
 
-fn walk(directory: &Path, depth: u32, found: &mut Vec<Candidate>) {
+/// Walks `directory`, **following symlinks**, with a visited set for the loops.
+///
+/// It used to open with `NOFOLLOW` and to recurse only into entries whose
+/// `d_type` was `Directory`, which meant a font directory that is itself a
+/// symlink was skipped in silence: `open` returned `ELOOP` and the early return
+/// was indistinguishable from "not there". That is exactly what home-manager's
+/// `fonts.fontconfig` produces for `~/.local/share/fonts` — a link into the Nix
+/// store — and with the UI faces missing the binary refuses to start.
+///
+/// A device-and-inode set bounds the loops that `NOFOLLOW` used to bound.
+/// `MAX_DEPTH` stays as the second bound, because fan-out costs opens even when
+/// nothing repeats.
+fn walk(
+    directory: &Path,
+    depth: u32,
+    visited: &mut std::collections::HashSet<(u64, u64)>,
+    found: &mut Vec<Candidate>,
+) {
     if depth > MAX_DEPTH {
         return;
     }
     // `getdents64` rather than `read_dir`, per the crate lint: `d_type` answers
     // file-versus-directory without a `statx` per entry, which over a font tree
     // of a few thousand names is the whole cost of this walk.
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
     let Ok(fd) = rustix::fs::open(directory, flags, Mode::empty()) else { return };
+    if let Ok(stat) = rustix::fs::fstat(&fd)
+        && !visited.insert((stat.st_dev, stat.st_ino))
+    {
+        return;
+    }
     let Ok(dir) = Dir::read_from(&fd) else { return };
     for entry in dir.flatten() {
         let name = entry.file_name().to_bytes();
@@ -81,12 +104,20 @@ fn walk(directory: &Path, depth: u32, found: &mut Vec<Candidate>) {
         let Ok(name) = std::str::from_utf8(name) else { continue };
         let path = directory.join(name);
         match entry.file_type() {
-            FileType::Directory => walk(&path, depth + 1, found),
-            FileType::RegularFile | FileType::Symlink => {
+            FileType::Directory => walk(&path, depth + 1, visited, found),
+            FileType::RegularFile => {
                 if let Some(token) = font_token(name) {
                     found.push(Candidate { path, token });
                 }
             }
+            // `d_type` says "symlink" and nothing about what it points at. A
+            // name that looks like a font is taken as one; anything else is
+            // tried as a directory, which costs one `open` that returns
+            // `ENOTDIR` when it is not.
+            FileType::Symlink => match font_token(name) {
+                Some(token) => found.push(Candidate { path, token }),
+                None => walk(&path, depth + 1, visited, found),
+            },
             _ => {}
         }
     }
@@ -151,7 +182,67 @@ pub fn pick<'a>(candidates: &'a [Candidate], wanted: &[&str]) -> Option<&'a Cand
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Candidate, font_token, pick};
+    use super::{Candidate, font_token, pick, walk};
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn scratch(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("skerry-fonts-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// home-manager's `fonts.fontconfig` makes `~/.local/share/fonts` a symlink
+    /// into the Nix store. With `NOFOLLOW`, `open` returned `ELOOP` and the
+    /// early return was indistinguishable from "there is no such directory" —
+    /// so the UI faces were missing and the binary refused to start.
+    #[test]
+    fn a_font_directory_that_is_a_symlink_is_walked() {
+        let root = scratch("symlink");
+        let real = root.join("store");
+        std::fs::create_dir_all(real.join("truetype")).unwrap();
+        std::fs::write(real.join("truetype/NotoSans-Regular.ttf"), b"not a font").unwrap();
+        let link = root.join("fonts");
+        if std::os::unix::fs::symlink(&real, &link).is_err() {
+            return;
+        }
+
+        let mut found = Vec::new();
+        walk(&link, 0, &mut HashSet::new(), &mut found);
+        assert_eq!(
+            found.iter().map(|it| it.token.as_str()).collect::<Vec<_>>(),
+            vec!["notosansregular"],
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// And a subdirectory that is a symlink, which is the other half: `d_type`
+    /// says `Symlink` and says nothing about the target.
+    #[test]
+    fn a_symlinked_subdirectory_is_walked_and_a_loop_does_not_hang() {
+        let root = scratch("loop");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(root.join("real/DejaVuSans.ttf"), b"not a font").unwrap();
+        if std::os::unix::fs::symlink(root.join("real"), root.join("linked")).is_err() {
+            return;
+        }
+        // Straight back to the top: bounded by the visited set, not by depth.
+        if std::os::unix::fs::symlink(&root, root.join("real/again")).is_err() {
+            return;
+        }
+
+        let mut found = Vec::new();
+        walk(&root, 0, &mut HashSet::new(), &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "found {:?}",
+            found.iter().map(|it| &it.path).collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_token_ignores_punctuation_and_case() {

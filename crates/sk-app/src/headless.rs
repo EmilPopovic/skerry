@@ -50,8 +50,9 @@ impl Session {
         );
         let renderer = Renderer::offscreen(physical)?;
         let fonts = Fonts::discover()?;
-        let waker = Waker::new()
-            .map_err(|error| Problem::plain(ProblemKind::NoDisplay, format!("eventfd: {error}")))?;
+        let waker = Waker::new().map_err(|error| {
+            Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
+        })?;
         let (sender, updates) = mpsc::channel();
         let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
         Ok(Self {

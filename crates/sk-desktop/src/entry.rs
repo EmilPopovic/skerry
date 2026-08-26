@@ -74,7 +74,12 @@ impl DesktopEntry {
 
         let id = path.file_name()?.to_string_lossy().into_owned();
         Some(Self {
-            name: localized(&fields, "Name").unwrap_or(&id).to_owned(),
+            // `Name=` with nothing after it is present and empty, which is not
+            // a name — the notice read "Opening " with a space and a full stop.
+            name: localized(&fields, "Name")
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(&id)
+                .to_owned(),
             id,
             path: path.to_path_buf(),
             exec: exec.to_owned(),

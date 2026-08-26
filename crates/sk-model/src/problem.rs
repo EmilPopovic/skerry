@@ -27,6 +27,15 @@ pub enum ProblemKind {
     NoGpu,
     /// No usable font in any of the searched directories.
     NoFont,
+    /// A per-user kernel resource is exhausted: inotify instances or watches,
+    /// or file descriptors.
+    ///
+    /// Its own kind because the advice is different from every other kind here
+    /// and is the only thing that helps. Spike C measured **99.99% of the watch
+    /// budget already consumed** on two of three machines, so this is not a
+    /// hypothetical error path — and it used to be reported as `NoDisplay`,
+    /// which told the user to set `WAYLAND_DISPLAY`.
+    OutOfResources,
 }
 
 impl ProblemKind {
@@ -37,6 +46,7 @@ impl ProblemKind {
             Self::NoDisplay => "error.no_display",
             Self::NoGpu => "error.no_gpu",
             Self::NoFont => "error.no_font",
+            Self::OutOfResources => "error.out_of_resources",
         }
     }
 }

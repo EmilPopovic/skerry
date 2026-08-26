@@ -425,8 +425,7 @@ fn status(
     } else {
         i18n::format("status.counts.none", &[&format::grouped(rows)])
     };
-    let left =
-        if chrome.watching { left } else { format!("{left} {}", i18n::lookup("status.unwatched")) };
+    let left = if chrome.watching { left } else { i18n::format("status.unwatched", &[&left]) };
     let style = TextStyle::new(metrics.header_size, theme.palette.dim);
     line(painter, &left, style, metrics.gutter, layout.status.width * 0.6, baseline);
 
@@ -435,7 +434,7 @@ fn status(
     // pacing rather than cost.
     let p50 = f64::from(diagnostics.frames.percentile(0.5)) / 1000.0;
     let p99 = f64::from(diagnostics.frames.percentile(0.99)) / 1000.0;
-    let right = format!("{p50:.2} / {p99:.2} ms");
+    let right = i18n::format("status.frame_cost", &[&format!("{p50:.2}"), &format!("{p99:.2}")]);
     let style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
     line(painter, &right, style, 0.0, layout.status.width - metrics.gutter, baseline);
 }
@@ -509,10 +508,19 @@ fn stats_overlay(
     let last = diagnostics.last;
 
     let rows: [(&str, String); 11] = [
-        (i18n::lookup("stats.frame"), format!("{p50:.2} / {p99:.2} / {worst:.2} ms")),
+        (
+            i18n::lookup("stats.frame"),
+            i18n::format(
+                "stats.value.milliseconds3",
+                &[&format!("{p50:.2}"), &format!("{p99:.2}"), &format!("{worst:.2}")],
+            ),
+        ),
         (
             i18n::lookup("stats.budget"),
-            format!("{} of {}", format::grouped(over as usize), format::grouped(frames as usize)),
+            i18n::format(
+                "stats.value.of",
+                &[&format::grouped(over as usize), &format::grouped(frames as usize)],
+            ),
         ),
         (i18n::lookup("stats.quads"), format!("{} · {}", format::grouped(last.quads), last.draws)),
         (
@@ -531,11 +539,13 @@ fn stats_overlay(
         ),
         (
             i18n::lookup("stats.listing"),
-            format!(
-                "{:.1} / {:.1} / {:.1} ms",
-                pane.names_us as f64 / 1000.0,
-                pane.meta_us as f64 / 1000.0,
-                pane.sort_us as f64 / 1000.0
+            i18n::format(
+                "stats.value.milliseconds3",
+                &[
+                    &format!("{:.1}", pane.names_us as f64 / 1000.0),
+                    &format!("{:.1}", pane.meta_us as f64 / 1000.0),
+                    &format!("{:.1}", pane.sort_us as f64 / 1000.0),
+                ],
             ),
         ),
         (
@@ -544,11 +554,13 @@ fn stats_overlay(
         ),
         (
             i18n::lookup("stats.surface"),
-            format!(
-                "{}×{} at {}%",
-                diagnostics.physical.0,
-                diagnostics.physical.1,
-                diagnostics.scale_120 * 100 / 120
+            i18n::format(
+                "stats.value.surface",
+                &[
+                    &diagnostics.physical.0,
+                    &diagnostics.physical.1,
+                    &(diagnostics.scale_120 * 100 / 120),
+                ],
             ),
         ),
         (i18n::lookup("stats.capabilities"), diagnostics.capabilities.to_owned()),
