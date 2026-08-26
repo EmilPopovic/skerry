@@ -355,7 +355,20 @@ hardware-independent — and dropped 35,616 in silence.
 | Recovery | laptop | homelab | **Pi 5** |
 | --- | --- | --- | --- |
 | rescan the 4,000 directories touched | 132 ms | 148 ms | 701 ms |
-| **rescan all 21,338, as correctness requires** | 331 ms | 569 ms | **1,234 ms** |
+| rescan all 21,338 | 331 ms | 569 ms | **1,234 ms** |
+| **prune on directory mtime, then read what moved** | **96 ms** | **184 ms** | **411 ms** |
+
+**Pruning is the recovery to build.** A directory's mtime moves whenever an entry
+is created, deleted or renamed in it, so `statx` on every directory says which can
+be skipped — and it found all 4,000 changed directories with **zero false
+negatives on all three machines.** The stat pass alone is 62 ms on a Pi, so for a
+*localised* burst — a `git checkout` in one subtree, which is the common case —
+recovery approaches the bar rather than exceeding it by an order of magnitude.
+
+It is sound for *structure* only: mtime does not move when a file already in the
+directory is modified, so a lost `MODIFY` or `ATTRIB` event stays lost. Recovering
+the columns needs a re-`statx` of entries in the directories actually on screen,
+which is a tiny set. Neither half is a correct recovery alone; together they are.
 
 **The surviving-event set is misleading, not merely insufficient.** 16,384 events
 arrived from 316 watches, so "rescan what we heard from" covers 316 of the 4,000
@@ -369,7 +382,7 @@ and the dropped events are gone.
 | Notification latency | < 1 ms | 10 ms | inotify event delivered after a single create; measured at 0.063 ms on a Pi 5 |
 | Bulk external change fully reflected | < 100 ms per 5,000 entries | 250 ms | Wall clock from the start of an external `rm -rf`; bounded by the kernel's unlink rate, ~50 files/ms on a Pi 5 |
 | Overflow recovery *begins* | < 100 ms | 250 ms | First rescanned directory repainted, visible pane first |
-| Overflow recovery completes | < 2 s per 1M entries | 5 s | Full rescan of watched directories, progressive and cancellable; measured at 1,234 ms on a Pi 5 |
+| Overflow recovery completes | < 2 s per 1M entries | 5 s | mtime-pruned rescan of watched directories, progressive and cancellable; measured at 411 ms on a Pi 5, against 1,234 ms unpruned |
 | Watch budget consumed | ≤ 40% of `max_user_watches` for one tree | 80% | Read the limit at runtime; 21,338 directories per million files is 34% of 62,164 |
 
 ## On measuring frame time honestly

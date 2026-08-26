@@ -185,6 +185,61 @@ directories a burst reaches and then drops everything else in silence. **A recov
 that rescans "the directories we heard from" covers 316 of 4,000 and reports
 itself finished.**
 
+### Recovering by pruning on directory mtime
+
+A full rescan is the only *correct* recovery, and it is 1,234 ms on a Pi. There is
+a cheaper one that is correct about the thing it claims.
+
+A directory's mtime moves whenever an entry is created, deleted or renamed in it.
+So `statx` every directory — cheap — and re-read only the ones that moved.
+
+| | laptop | homelab | **Pi 5** |
+| --- | --- | --- | --- |
+| baseline: 21,338 directory mtimes | 20 ms | 38 ms | **62 ms** |
+| changed directories detected | 4,000 / 4,000 | 4,000 / 4,000 | **4,000 / 4,000** |
+| false negatives | **0** | **0** | **0** |
+| stat pass | 19 ms | 38 ms | 62 ms |
+| read the changed directories | 76 ms | 146 ms | 349 ms |
+| **recovery total** | **96 ms** | **184 ms** | **411 ms** |
+| full rescan, for comparison | 233 ms | 564 ms | 882 ms |
+| speedup | 2.4× | **3.1×** | **2.1×** |
+
+**Zero false negatives on all three machines**, and the recovery drops from
+882 ms to 411 ms on the Pi — from 8.8× the latency bar to 4.1×. Still outside it,
+and no longer in a different category.
+
+**The ratio here is pessimistic.** This burst changed 18.7% of the tree's
+directories; a real `git checkout` or `npm install` is localised to one subtree,
+where the changed fraction is a percent or two and pruning approaches the cost of
+the stat pass alone — **62 ms on a Pi, inside the bar.**
+
+**What it is sound for, precisely.** Directory mtime tracks *structural* change:
+entries appearing, disappearing, being renamed. It does not move when a file
+already in the directory is written to or `chmod`ed, so a lost `MODIFY` or
+`ATTRIB` event stays lost. **It recovers the listing's shape, not every column in
+it.** The columns are recoverable separately by re-`statx`ing the entries of the
+handful of directories actually on screen, which is a tiny set — so the two halves
+compose into a correct recovery, and neither half alone is one.
+
+### As close as ext4 gets to an MFT
+
+Worth stating alongside, because it is the question this spike kept running into.
+
+**An NTFS MFT record contains the filename** — `$FILE_NAME` is an attribute of the
+record — so reading the MFT yields paths. **An ext4 inode has no name field at
+all.** Names exist only in `ext4_dir_entry_2` structures inside directory data
+blocks.
+
+So there is nothing on ext4 that "reading the index" could give us. Building a
+path index means reading directory blocks, which is the work `getdents64` already
+does; reading them raw off the device would make the access sequential rather than
+VFS-mediated, a constant factor at the cost of root and filesystem-specific
+parsing. `STATX_CHANGE_COOKIE`, which would be a per-inode change counter, is not
+in this kernel's headers — checked, not assumed.
+
+**Directory mtime is the closest thing available: a change filter the kernel
+maintains for free, sound for structure and silent about content.**
+
 ## Verdict
 
 **Go on inotify, with two things that need designing rather than tuning.**
@@ -192,7 +247,7 @@ itself finished.**
 | Condition | Result |
 | --- | --- |
 | An external `rm -rf` or `git checkout` reflected within 100 ms | **PASS for the case measured** — 40 ms on a Pi for 2,000 files — and **fails at scale**: the figure is dominated by the deletion at ~50 files/ms, so a 30,000-file `node_modules` is ~600 ms |
-| No lost entries after a forced overflow | **PASS only via a full rescan**, which is **1,234 ms on a Pi** — 12× the latency bar |
+| No lost entries after a forced overflow | **PASS.** A full rescan is 1,234 ms on a Pi; **mtime pruning is 411 ms with zero false negatives**, and ~62 ms for a localised burst |
 | The watch budget documented as a number | **21,338 directories per million-file tree = 34% of a per-user budget that is 60,793–65,536 depending on the machine's memory, and is shared with every other application** |
 
 ### `fanotify` is still the wrong answer, and now the cost is priced
@@ -235,8 +290,11 @@ family as overflow recovery: progressive, visible, and not instantaneous.
    **And the limit must be read, never assumed.** It is 65,536, 62,164 and 60,793
    on the three machines measured, because the kernel derives it from available
    memory. Any code with 65,536 in it is wrong on two of these three.
-2. **Overflow recovery cannot meet the latency bar, so it must not pretend to.**
-   331 ms on a laptop, 569 ms on a four-core VM, **1,234 ms on a Pi.** A rescan that blocks the listing for a
+2. **Overflow recovery cannot meet the latency bar for a tree-wide burst, so it
+   must not pretend to.** Pruning on directory mtime gets a Pi from 882 ms to
+   **411 ms** with zero false negatives, and to roughly the 62 ms stat pass when
+   the burst is localised — which is the common case. A tree-wide burst is still
+   outside the bar. A rescan that blocks the listing for a
    second is a frozen window; one that silently rescans the wrong subset is a lie.
    What the measurement supports is a *visible, progressive, cancellable* rescan —
    the same machinery rule 1 already requires for a first listing — with the panes
