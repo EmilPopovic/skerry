@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Build a directory of N files, for the frame and listing measurements.
+
+    tools/make-listing-fixture /tmp/skerry-200k 200000
+
+Exists so the numbers in docs/09-performance-budgets.md have a method that can be
+re-run rather than a directory that happened to be on one machine. The names are
+seeded, so two runs on two machines sort the same way and the collation cost is
+comparable; the sizes vary so the size column is not one repeated string in the
+layout cache.
+
+A tmpfs fixture is RAM: 200,000 files is about 1 GB. Delete it when the number is
+recorded.
+"""
+
+from __future__ import annotations
+
+import os
+import random
+import sys
+
+WORDS = (
+    "report", "image", "backup", "render", "chunk", "module", "index", "frame",
+    "sample", "segment", "archive", "draft",
+)
+EXTENSIONS = ("txt", "png", "rs", "md", "tar.gz", "log", "json", "webp")
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print(__doc__)
+        return 2
+    root, count = argv[1], int(argv[2])
+    os.makedirs(root, exist_ok=True)
+    # Seeded, so the name distribution is the same on every machine.
+    random.seed(7)
+    for index in range(count):
+        name = f"{random.choice(WORDS)}-{index:06d}.{random.choice(EXTENSIONS)}"
+        with open(os.path.join(root, name), "wb") as handle:
+            handle.write(b"x" * (index % 97))
+    print(f"{count} files in {root}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

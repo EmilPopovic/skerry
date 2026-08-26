@@ -1,0 +1,21 @@
+[package]
+name = "sk-plat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Read by tools/check-layering.py. A crate may depend on lower levels only.
+[package.metadata.skerry]
+level = 1
+
+[dependencies]
+sk-model = { workspace = true }
+sk-util = { workspace = true }
+rustix = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+xkbcommon = { workspace = true }
+
+[lints]
+workspace = true

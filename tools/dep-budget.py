@@ -22,14 +22,21 @@ from _common import ROOT, Report, load, main, manifests, nothing_to_check, rel
 POLICY = ROOT / "docs" / "07-dependencies.md"
 
 # From the budget table in docs/09-performance-budgets.md.
-BUDGET_NON_GPU = 25
+#
+# The non-GPU figure is a **ratchet at the measured floor**, not a guess. 25 was
+# written before any crate existed and is two below what the four tier-0
+# dependencies plus the two Wayland protocol crates actually cost; the derivation
+# is in docs/09-performance-budgets.md. Raising it requires a row in
+# docs/07-dependencies.md and a re-measure in the same commit, which is the only
+# thing that makes the number a gate rather than a preference.
+BUDGET_NON_GPU = 27
 BUDGET_TOTAL = 120
 
 # The crate whose graph is the shipping binary's graph.
 PRODUCT = "skerry"
 
-# Direct dependencies that are the GPU stack. Only the entry points belong here:
-# what the stack drags in is discovered from the graph, not guessed from names.
+# The crates that are the GPU stack's entry points. What the stack drags in is
+# discovered from the graph, not guessed from names.
 GPU_ENTRY_POINTS = ("wgpu", "naga")
 
 
@@ -39,15 +46,22 @@ def documented() -> set[str]:
     return set(re.findall(r"`([a-z0-9][a-z0-9_-]*)`", POLICY.read_text()))
 
 
+def internal_names() -> set[str]:
+    """Every workspace member. These are not dependencies and are not budgeted."""
+    found = set()
+    for manifest in manifests(spikes=False):
+        name = load(manifest).get("package", {}).get("name")
+        if name:
+            found.add(name)
+    return found
+
+
 def declared() -> dict[str, list[str]]:
     """External dependency name → the manifests that declare it."""
-    internal = set()
+    internal = internal_names()
     raw: dict[str, list[str]] = {}
     for manifest in manifests(spikes=False):
         parsed = load(manifest)
-        name = parsed.get("package", {}).get("name")
-        if name:
-            internal.add(name)
         for table in ("dependencies", "build-dependencies"):
             for dep in parsed.get(table, {}):
                 raw.setdefault(dep, []).append(rel(manifest))
@@ -72,11 +86,12 @@ def run() -> int:
         report.note("cargo metadata unavailable — counts not checked")
         return report.finish()
 
-    everything, non_gpu = split
+    everything, non_gpu, internal = split
     total, outside = len(everything), len(non_gpu)
     report.note(
-        f"{total} transitive crates, {outside} outside the GPU stack "
-        f"({total - outside} reachable only through it)"
+        f"{total} external transitive crates, {outside} outside the GPU stack "
+        f"({total - outside} reachable only through it); "
+        f"{internal} workspace crates, which are not dependencies"
     )
     if outside > BUDGET_NON_GPU:
         report.fail("Cargo.lock", f"{outside} non-GPU crates exceeds the budget of {BUDGET_NON_GPU}")
@@ -93,16 +108,27 @@ def run() -> int:
     return report.finish()
 
 
-def _partition() -> tuple[set[str], set[str]] | None:
-    """All crate names in the product's graph, and those outside the GPU stack.
+def _partition() -> tuple[set[str], set[str], int] | None:
+    """External crates in the product's graph, those outside the GPU stack, and
+    the number of workspace crates.
 
-    The GPU stack is the set reachable *only* through a GPU entry point, not the
-    set whose names begin with one. Measured on Spike A's tree, the name-prefix
-    version left `ash`, `glow`, `gpu-alloc`, `gpu-descriptor`, `khronos-egl`,
-    `spirv`, `renderdoc-sys`, `codespan-reporting`, `hexf-parse` and about fifteen
-    more on the wrong side of the line — 6 crates counted as GPU where the honest
-    figure is around 50, which would have failed the 25-crate non-GPU budget on
-    the first commit that added `wgpu`.
+    Three things this gets right that the obvious version does not, each learned
+    by the obvious version being wrong:
+
+    1. **The GPU stack is found by reachability, not by name.** Measured on Spike
+       A's tree, the name-prefix version left `ash`, `glow`, `gpu-alloc`,
+       `gpu-descriptor`, `khronos-egl`, `spirv`, `renderdoc-sys`,
+       `codespan-reporting`, `hexf-parse` and about fifteen more on the wrong side
+       of the line — 6 crates counted as GPU where the honest figure is around 50.
+    2. **An entry point is looked for anywhere in the graph, not only among the
+       product's direct dependencies.** `skerry` depends on `sk-app`, which
+       depends on `sk-gpu`, which depends on `wgpu`. Filtering the *root's* direct
+       edges therefore excluded nothing at all, and the first run against a real
+       workspace reported 86 non-GPU crates against a budget of 25.
+    3. **Workspace members are not dependencies.** Rule 10 budgets what we take
+       on from outside. Counting our own twelve crates against it would mean the
+       crate table in docs/04-architecture.md consumes half the budget before a
+       single external crate is chosen.
 
     A crate reachable from both sides counts as non-GPU, because it is one we
     would carry anyway. That direction is deliberate: it stops the GPU stack from
@@ -118,13 +144,41 @@ def _partition() -> tuple[set[str], set[str]] | None:
     if root is None or root not in nodes:
         return None
 
-    edges = {i: _normal_deps(node) for i, node in nodes.items()}
-    direct = edges.get(root, [])
-    outside_entries = [d for d in direct if not names.get(d, "").startswith(GPU_ENTRY_POINTS)]
+    compiler_only = _proc_macros(meta)
+    edges = {
+        i: [d for d in _normal_deps(node) if d not in compiler_only]
+        for i, node in nodes.items()
+    }
+    internal = internal_names()
 
-    everything = _reachable(direct, edges)
-    non_gpu = _reachable(outside_entries, edges)
-    return ({names[i] for i in everything}, {names[i] for i in non_gpu})
+    everything = _reachable(edges.get(root, []), edges)
+    # The same walk with every edge *into* a GPU entry point cut. What is left is
+    # what we would carry with no renderer at all.
+    trimmed = {
+        source: [d for d in targets if not names.get(d, "").startswith(GPU_ENTRY_POINTS)]
+        for source, targets in edges.items()
+    }
+    non_gpu = _reachable(trimmed.get(root, []), trimmed)
+
+    external = {names[i] for i in everything} - internal
+    return (external, {names[i] for i in non_gpu} - internal, len(internal))
+
+
+def _proc_macros(meta: dict) -> set[str]:
+    """Packages that run in the compiler rather than in the binary.
+
+    Excluded for the same reason dev and build edges are: they are not in the
+    shipped graph. Measured here, that is `bytemuck_derive` and the `syn`,
+    `quote`, `proc-macro2`, `unicode-ident` chain beneath it — five crates, zero
+    bytes of `skerry`, and the source of a `syn` duplicate that is neither ours
+    to resolve nor present at run time.
+    """
+    found = set()
+    for package in meta.get("packages", []):
+        kinds = {kind for target in package.get("targets", []) for kind in target.get("kind", [])}
+        if "proc-macro" in kinds:
+            found.add(package["id"])
+    return found
 
 
 def _normal_deps(node: dict) -> list[str]:

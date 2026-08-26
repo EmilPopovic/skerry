@@ -6,8 +6,26 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**Phase 0 is over. All six spikes resolved, none of them said no, and the next
-artifact is `crates/` — M0, the platform layer.**
+**M0, in progress. There is a window on screen.** Nine crates, 131 tests, every
+gate green, and a Details view over a real directory at a **0.445 ms frame p99
+with 200,000 entries in it**. What is done and what is owed:
+[08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the
+three budget rows currently missed:
+[09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
+
+Two things about working on this code that are not obvious from reading it:
+
+- **`--bench` and `--capture` need no display server**, and they run the same
+  immediate-mode pass, renderer and glyph atlas the window does. Use them. Four
+  of the six defects M0 found were found by looking at a captured PNG or reading
+  a benchmark line, not by running the window.
+- **Everything above `sk-plat` works in logical pixels; everything below the
+  `Painter` works in device pixels**, and the conversion happens in exactly one
+  place. Mixing them produces arithmetic that is correct at 100% and wrong
+  everywhere else — which is how one baseline ended up four thousand pixels below
+  the window.
+
+Phase 0's six spikes are all resolved and none of them said no:
 
 | | | |
 | --- | --- | --- |
@@ -25,7 +43,10 @@ measurements after the code is thrown away. Use `/spike`.
 **Read [docs/12-measurement.md](docs/12-measurement.md) before taking a number.**
 Every rule in it was learned by getting one wrong here, and three of them cost a
 day each: load contamination is worth 6×, a single per-core multiplier is not a
-portability model, and a gate nobody has watched fail is decoration.
+portability model, and a gate nobody has watched fail is decoration. M0 added
+three more, and each began as a green test: an assertion between two derived
+numbers passed while both were 13× wrong, a per-frame budget counted the wrong
+quantity, and an accelerator disagreed with the order it was accelerating.
 
 Phase 0 moved the architecture in eight places, listed in
 [docs/08-roadmap.md](docs/08-roadmap.md#what-phase-0-changed-in-the-plan). Two
@@ -77,6 +98,7 @@ arguments. The full reasoning is one link away; do not re-derive it in review.
 | Invariant | Fails if | Where |
 | --- | --- | --- |
 | The UI thread issues zero filesystem syscalls | any frame exceeds 8 ms with a mount hung mid-listing | rule 1 |
+| The frame loop sleeps on descriptors, never on a timer | `skerry` accrues any CPU with an idle window | rule 1, [09](docs/09-performance-budgets.md#what-m0-measured) |
 | Dependencies point strictly downward through the levels | `tools/check-layering.py` reports an edge | [04](docs/04-architecture.md#layers) |
 | No GLib, GTK, Qt, KIO, GVfs, GStreamer, libdbus — ever | any appears in the graph | rule 9, [06](docs/06-portability.md) |
 | One job pool for the process; no async runtime, no `rayon` | a second scheduler enters the workspace | [ADR 0005](docs/adr/0005-no-async-runtime.md) |

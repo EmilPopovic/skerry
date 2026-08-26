@@ -215,6 +215,56 @@ no is usually the one nobody thought to install.
 > **Fails if:** every filesystem, compositor, driver or peer in a matrix supports
 > everything under test. That is a matrix of one case wearing several hats.
 
+## An assertion between two derived numbers can pass while both are wrong
+
+`sk-text`'s metrics test asserted `ascent > 0` and
+`line_height >= ascent + descent`. Both held. Both were **thirteen times too
+large**, because `swash`'s `linear_scale` takes a ratio and had been handed a
+pixel size — and the two sides of the comparison were wrong by the same factor,
+so the relationship between them survived. Every baseline in the program landed
+about four thousand pixels below the window, the suite was green, and the window
+rendered no text at all.
+
+The rule: **assert against the input, not against a sibling of the output.** The
+test now checks the ascent against the size it asked for — `ascent > size * 0.5`
+and `ascent < size * 1.5` — which cannot be satisfied by a units error.
+
+> **Fails if:** every assertion in a test compares two values the code under test
+> produced.
+
+## A bound has to be on the quantity that runs out
+
+The glyph atlas bounded uploads at **128 glyphs per frame**, to keep a cold cache
+from monopolising a frame. Opening the statistics overlay needs about 350 new
+glyphs, so two frames uploaded 256 of them and drew the remaining hundred as
+blanks — text with holes in it, because an atlas *entry* exists as soon as a glyph
+is rasterized and only the texels were late.
+
+The count was never the scarce resource. A glyph mask at 13 px is about sixty
+bytes; the case the bound exists for is a thousand colour emoji at 4 KiB each. The
+budget is now **256 KiB per frame**, which is four thousand text glyphs and still
+refuses 4 MiB of emoji.
+
+> **Fails if:** a per-frame budget counts items whose cost varies by two orders of
+> magnitude.
+
+## An accelerator has to agree with the thing it accelerates
+
+[Spike F](../spikes/f-index-and-search/README.md) proposed an eight-byte prefix
+key to make a name sort read sequentially, with the full comparison repairing
+ties. Implemented against natural-order collation, it reordered the listing: the
+key compares `img10.png` against `img2.png` as `1` against `2` and returns, and
+the tiebreak is never consulted. Natural order is not lexical order, so no lexical
+key can be its first pass.
+
+This is not a bug that a benchmark finds. It is a bug that a correctness test
+finds, and only if the fixture contains two names that differ in a digit run.
+`the_prefix_key_cannot_accelerate_a_natural_order_sort` is kept as a test rather
+than a comment so that reintroducing the idea fails the build.
+
+> **Fails if:** a fast path is measured against the slow path's speed and not
+> against its output.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

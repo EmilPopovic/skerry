@@ -3,9 +3,22 @@
 A file manager for Linux, written in Rust, built on the premise that a file manager
 is a **latency product and an interaction-design product** — not a feature checklist.
 
-Status: **planning.** No code yet. Everything in this repository is design work.
-The next artifact to exist is a throwaway spike, not a crate skeleton
-(see [docs/08-roadmap.md](docs/08-roadmap.md)).
+Status: **M0, in progress.** Phase 0's six spikes are resolved and there is a window
+on screen: nine crates, a Wayland platform layer, a GPU renderer, real text shaping,
+and a Details view over a real directory. What is done and what is owed is in
+[docs/08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer).
+
+```
+cargo run --release -- ~/Downloads      # a window; F1 lists the keyboard
+cargo run --release -- --bench 900 /usr/lib     # a scripted scroll, timed
+cargo run --release -- --capture frame.png --scale 125 /usr/lib
+```
+
+The last two need no display server, which is the point of them: the renderer is
+inspectable and measurable in CI. At 200,000 entries the frame p99 is **0.445 ms**
+against an 8 ms budget, and an idle window uses **no CPU at all** — the numbers, the
+method, and the three budget rows that are currently missed are in
+[docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 ## The thesis in one paragraph
 

@@ -133,6 +133,27 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > The most expensive milestone and the one with the least to show. It is first because
 > every later milestone sits on it and because Spike D has already de-risked it.
 
+**In progress. The workspace exists and there is a window on screen.** Nine crates,
+131 tests, every gate green. What "the least to show" turned out to mean in practice:
+the milestone with nothing visible would also have been the milestone with nothing
+*measurable*, so the first artifact carries enough of M1 to put a real directory in a
+real window — which is what produced the numbers in
+[09-performance-budgets.md](09-performance-budgets.md#what-m0-measured) and the four
+defects they exposed.
+
+| Done | Owed |
+| --- | --- |
+| Wayland windowing, `xdg_shell`, server-side decoration negotiation | **X11**, and the whole of `x11rb` |
+| Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change | The 1×1 pre-map probe that would make **frame 1** right and not just frame 2 |
+| Keyboard through `xkbcommon`, with key repeat implemented client-side | **Clipboard, primary selection, drag-and-drop, IME** — the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
+| Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
+| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | A headless compositor fixture and input-trace replay in CI |
+| Offscreen rendering and PNG capture — the golden-frame harness, minus the references | The reference images, the perceptual diff, and llvmpipe in CI |
+| `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8) |
+
+The three capabilities left are the expensive ones, and Spike D already knows what
+each of them costs and which four ordering invariants they have to hold.
+
 ### M1 · 4 wk — Walking skeleton
 One window, one pane, Details view over the columnar store. Navigation, sorting, selection,
 rubber-band, scrolling, icons from the real theme, inotify refresh. Accessibility tree and
@@ -205,7 +226,8 @@ Spike A returned its number: the differentiator is reachable on this stack, with
 headroom on the frame budget and the GPU consuming 0.02 ms of an 8 ms frame. The plan above
 is sound and the rest is ordinary engineering.
 
-**Phase 0 is over. The next artifact is `crates/` — M0, the platform layer.**
+**Phase 0 is over and `crates/` exists.** M0 is in progress; what is done and what
+is owed is in the M0 section above.
 
 All six spikes are resolved and none of them said no. What they changed is listed above:
 eight architectural moves, two known-unmet budget rows, and a set of invariants that M0
@@ -221,7 +243,11 @@ compositor bug. M3 owes the copy engine's two, from
 `copy_file_range` per extent, and a placement fallback chain. Both sets are already
 written as tests; what M0 and M3 have to do is not delete them.
 
-Six measurements are still owed and none blocks M0:
+Six measurements are still owed. One of them now blocks a budget row rather than a
+milestone — see the sort row in
+[09-performance-budgets.md](09-performance-budgets.md#what-m0-measured), which needs
+an MSD string radix over the name arena and cannot use the prefix key Spike F
+proposed.
 
 - **An Intel integrated GPU** for Spike A. Absent from every machine available, and the
   most common Linux GPU.

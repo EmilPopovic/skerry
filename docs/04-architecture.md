@@ -26,6 +26,17 @@ level 1   sk-plat  sk-fs      sk-text
 level 0   sk-model  sk-util
 ```
 
+**Two things moved between the level-0 crates on the first commit that had
+callers**, and the layering check is why. The bump arena and the bitset were
+`sk-util`'s in the first draft; each turned out to have exactly one consumer —
+the arena backs `Listing`'s name column and the bitset backs `Selection` — so
+leaving them there made `sk-model` depend on `sk-util`, which is a sideways edge
+inside level 0 that `tools/check-layering.py` refuses. The refusal was right:
+they are not general-purpose containers, they *are* the data layout, and a
+general-purpose container crate would undo it. The string catalogue moved the
+same way and for a plainer reason: every level above needs `t!`, and level 0 is
+the only place all of them can reach.
+
 Why these seams and not others: each boundary is where a *different kind of failure*
 lives. Level 1 crates own everything that can fail because the outside world is hostile —
 a vanishing mount, a broken font, a compositor missing a protocol. Level 2 crates own
@@ -48,8 +59,8 @@ manifests either.
 
 | Crate | Owns | Explicitly does not own |
 | --- | --- | --- |
-| `sk-model` | `Entry`, `EntryId`, `PathRef`, `Selection`, `SortKey`, `ViewMode`, error types shared across levels | Any I/O, any allocation strategy, any UI concept |
-| `sk-util` | Bump arenas, string interning, small vectors, bitsets, the job pool and its cancellation tokens | Domain types |
+| `sk-model` | `EntryId`, the columnar `Listing`, `Selection`, `Sort`, natural-order collation, the string catalogue, and `Problem` — the error type that carries a message a human can act on | Any I/O, any UI concept |
+| `sk-util` | The one job pool, its cancellation tokens, and the eventfd a finished job wakes the frame loop with | Domain types |
 | `sk-plat` | Wayland and X11 protocol handling, keyboard mapping, pointer and gesture input, clipboard, drag-and-drop as both source and target, IME, monitors and fractional scaling, window lifecycle | Drawing anything |
 | `sk-fs` | `getdents64` enumeration, batched `statx`, the watcher, the operation engine (copy/move/rename/create/trash), xattr and ACL preservation, mount state | Deciding *what* to enumerate, or why |
 | `sk-text` | Font discovery, shaping, line layout, the layout cache, glyph rasterization | The glyph atlas (that is GPU memory, so `sk-gpu`) |
@@ -234,7 +245,10 @@ window. Snapshots are versioned and reference-counted; a scroll in progress keep
 the snapshot it started with, so results arriving mid-gesture never make the list jump.
 
 One job pool for the whole process, in `sk-util`, with cancellation tokens and per-device
-queues — parallel on NVMe, serialized on rotational disks and network mounts. One pool, not
+queues — parallel on NVMe, serialized on rotational disks and network mounts. The lane
+is chosen by a runtime probe in `sk-fs::device`: the filesystem magic from `statfs`
+identifies NFS, CIFS, 9p and FUSE, and `/sys/dev/block/MAJOR:MINOR/queue/rotational`
+answers the rest. It runs once per directory, not once per entry. One pool, not
 two: a second thread pool (a `rayon` global, an async runtime's blocking pool) means
 uncoordinated oversubscription, which is a latency bug that only appears under load.
 See [ADR 0005](adr/0005-no-async-runtime.md).
@@ -277,6 +291,16 @@ This is what makes sorting and filtering a million entries a memory-bandwidth pr
 instead of a pointer-chasing one, and it is the most important decision after "don't block
 the UI thread". Selection as a bitset makes "select all, then deselect 200" instant and
 makes the selection cheap to snapshot.
+
+**A sort of any size runs off the frame loop.** M0 measured a 200,000-entry
+reorder at 150 ms, which is not a frame; the first sort therefore happens inside
+the job that read the directory, and a later re-sort above 8,192 entries runs on
+a job over a *clone* of the listing and sends back only the permutation. The
+threshold is measured rather than chosen: 6,167 entries reorder in 7.1 ms, inside
+one frame and cheaper than a round trip through the pool. Cloning is what makes
+the job possible at all — the pane cannot lend out a listing that `statx` results
+are still landing on — and the permutation stays valid because an `EntryId` is an
+index into arrays that only grow at the end.
 
 **Sort keys are derived once at listing time — and [Spike F](../spikes/f-index-and-search/README.md#sorting-misses-its-target-and-the-architectures-stated-reason-is-wrong)
 measured that this is worth 3%, not the order of magnitude an earlier revision of this

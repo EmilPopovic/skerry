@@ -1,0 +1,95 @@
+# The English catalogue. One `key = value` per line; `#` starts a comment.
+#
+# Every user-visible string in Skerry resolves through here from the first
+# commit — not because localization is an early priority, but because
+# retrofitting string extraction across twelve crates costs weeks, and because
+# the discipline catches sentences assembled by concatenation, which cannot be
+# translated.
+#
+# `{0}`, `{1}` are positional and may be reordered by a translation.
+
+app.name = Skerry
+
+# Column headers, Details view.
+column.name = Name
+column.size = Size
+column.modified = Modified
+
+# The status line. Numbers are positional so a translation can reorder them.
+status.counts = {0} items, {1} selected
+status.counts.none = {0} items
+status.loading = Reading {0}…
+status.empty = This folder is empty
+status.filtered = {0} of {1} items match “{2}”
+
+# Sizes. A file manager writes these thousands of times per session, so the
+# unit is a separate string rather than concatenated onto a number.
+size.bytes = {0} B
+size.kib = {0} KiB
+size.mib = {0} MiB
+size.gib = {0} GiB
+size.tib = {0} TiB
+size.dir = —
+
+# Errors reaching a human say what happened and what to do, and are separate
+# from the debug chain that goes to the log.
+error.unreadable = Cannot read {0}. Check that you have permission to open it.
+error.gone = {0} is no longer there. It may have been moved or deleted.
+error.no_display = Cannot reach a display server. Set WAYLAND_DISPLAY or DISPLAY and try again.
+error.no_gpu = No usable GPU. Install a Vulkan driver, or mesa's software renderer as a fallback.
+error.no_font = No usable font found. Install a font package such as dejavu-fonts or noto-fonts.
+
+# Abbreviated month names. Three letters in English; not necessarily three in
+# another language, which is why they are catalogue entries and not a slice of
+# the full name.
+month.jan = Jan
+month.feb = Feb
+month.mar = Mar
+month.apr = Apr
+month.may = May
+month.jun = Jun
+month.jul = Jul
+month.aug = Aug
+month.sep = Sep
+month.oct = Oct
+month.nov = Nov
+month.dec = Dec
+
+# Actions. One entry per binding in `sk_app::keys::BINDINGS`; the help overlay
+# and the key handler read the same table, and a test asserts they agree.
+action.cursor_up = Move up
+action.cursor_down = Move down
+action.extend_up = Extend selection up
+action.extend_down = Extend selection down
+action.page_up = Page up
+action.page_down = Page down
+action.top = First item
+action.bottom = Last item
+action.open = Open
+action.parent = Parent folder
+action.select_all = Select all
+action.clear_selection = Clear selection
+action.toggle_hidden = Show hidden files
+action.reload = Reload
+action.toggle_theme = Light / dark
+action.show_keys = This list
+action.show_stats = Frame statistics
+action.sort_name = Sort by name
+action.sort_size = Sort by size
+action.sort_modified = Sort by date
+action.type_ahead = Jump to a name
+
+# Chrome.
+chrome.hint = F1 keys · F2 stats
+keys.title = Keyboard
+keys.typing = Type any letters
+stats.title = Frames
+stats.frame = frame p50 / p99 / worst
+stats.budget = over 8 ms
+stats.quads = quads · draws
+stats.glyphs = glyphs cached · rasterized
+stats.atlas = atlas coverage / colour
+stats.shaping = shaped runs · hits / misses
+stats.listing = names / metadata / sort
+stats.pool = pool workers · jobs
+stats.surface = surface

@@ -1,0 +1,89 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/sk-util",
+    "crates/sk-model",
+    "crates/sk-plat",
+    "crates/sk-text",
+    "crates/sk-fs",
+    "crates/sk-gpu",
+    "crates/sk-ui",
+    "crates/sk-app",
+    "bin/skerry",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+
+[workspace.dependencies]
+sk-util = { path = "crates/sk-util" }
+sk-model = { path = "crates/sk-model" }
+sk-plat = { path = "crates/sk-plat" }
+sk-text = { path = "crates/sk-text" }
+sk-fs = { path = "crates/sk-fs" }
+sk-gpu = { path = "crates/sk-gpu" }
+sk-ui = { path = "crates/sk-ui" }
+sk-app = { path = "crates/sk-app" }
+
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "event", "mm", "process", "time"] }
+# `system` selects the libwayland backend, which is what gives us a real
+# `*mut wl_display` for the GPU surface; `dlopen` loads it at run time so the
+# binary still starts on a machine that has X11 and no Wayland.
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+xkbcommon = "0.9"
+# Only for `localtime_r`. Already in the graph through `rustix` and
+# `xkbcommon`, so it costs no crates — see docs/07-dependencies.md.
+libc = "0.2"
+swash = "0.2"
+wgpu = { version = "27", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+
+# One lint set for the workspace, so a rule is argued once. The per-crate
+# `deny(unwrap_used, expect_used)` stays in each lib.rs because
+# tools/check-invariants.py reads it there.
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+rust_2018_idioms = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Device-pixel arithmetic converts between u32, i32 and f32 on nearly every
+# line of the renderer and the layout code, and every value is bounded by a
+# surface dimension. Denying these would mean a `try_into().unwrap_or()` per
+# coordinate, which is noise that hides the arithmetic that matters.
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+# `sk_text::text::Layout` reads better than `sk_text::Layout` at the call site.
+module_name_repetitions = "allow"
+# Errors carry a user-facing message by policy (docs/04, error policy); a prose
+# `# Errors` section on top of that is duplication, not documentation.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# A modifier set is four booleans by definition, and a bitflags type for four
+# bits would be less readable at every call site.
+struct_excessive_bools = "allow"
+# `wayland-client`'s `Dispatch` signature carries a `&()` user-data parameter on
+# every impl; spelling it `(): &()` in eleven places is noise.
+ignored_unit_patterns = "allow"
+# A colour is written `0xRRGGBB` everywhere in the world, and `0x00RR_GGBB` is
+# not an improvement on it.
+unusual_byte_groupings = "allow"
+unreadable_literal = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
+
+# The frame budget is 8 ms. A debug build of the renderer cannot hold it, so the
+# dependencies that do arithmetic per pixel are optimized even in dev builds —
+# our own crates stay unoptimized so a backtrace is still readable.
+[profile.dev.package."*"]
+opt-level = 2

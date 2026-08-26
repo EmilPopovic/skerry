@@ -1,0 +1,16 @@
+[package]
+name = "sk-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Read by tools/check-layering.py. A crate may depend on lower levels only.
+[package.metadata.skerry]
+level = 0
+
+[dependencies]
+rustix = { workspace = true }
+
+[lints]
+workspace = true

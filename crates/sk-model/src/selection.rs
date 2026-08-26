@@ -1,0 +1,192 @@
+//! One selection, with the same semantics in every view — rule 8.
+//!
+//! Selection is over [`EntryId`], not over display rows, so re-sorting or
+//! toggling hidden files keeps what the user had selected. Range operations take
+//! the rows from the caller, because "everything between here and there" is a
+//! question about what is on screen and only the view knows that.
+
+use crate::bitset::BitSet;
+
+use crate::listing::EntryId;
+
+/// What is selected, plus the two positions a keyboard needs.
+#[derive(Clone, Default, Debug)]
+pub struct Selection {
+    bits: BitSet,
+    /// The entry a range extends from. Set by a plain click or an arrow key,
+    /// kept by a shift-click, which is what makes shift-click-then-shift-click
+    /// grow one range instead of two.
+    anchor: Option<EntryId>,
+    /// The entry the focus ring is on. Distinct from the selection because
+    /// `Ctrl`+arrow moves it without changing what is selected.
+    cursor: Option<EntryId>,
+}
+
+impl Selection {
+    /// Resizes to a listing of `len` entries, clearing anything out of range.
+    ///
+    /// Called when a new listing is published. A cursor that no longer exists is
+    /// dropped rather than clamped, because clamping silently moves the focus
+    /// ring to an unrelated file.
+    pub fn fit(&mut self, len: usize) {
+        self.bits.resize(len);
+        self.anchor = self.anchor.filter(|id| id.index() < len);
+        self.cursor = self.cursor.filter(|id| id.index() < len);
+    }
+
+    /// Whether `id` is selected.
+    #[must_use]
+    pub fn contains(&self, id: EntryId) -> bool {
+        self.bits.contains(id.index())
+    }
+
+    /// How many entries are selected.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.bits.count()
+    }
+
+    /// Whether nothing is selected.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bits.count() == 0
+    }
+
+    /// Every selected entry, in listing order.
+    pub fn iter(&self) -> impl Iterator<Item = EntryId> + '_ {
+        self.bits.iter().map(|index| EntryId(index as u32))
+    }
+
+    /// The entry the focus ring is on.
+    #[must_use]
+    pub fn cursor(&self) -> Option<EntryId> {
+        self.cursor
+    }
+
+    /// Moves the focus ring without changing the selection.
+    pub fn set_cursor(&mut self, id: Option<EntryId>) {
+        self.cursor = id;
+    }
+
+    /// Selects only `id`, and makes it the anchor and the cursor.
+    pub fn replace_with(&mut self, id: EntryId) {
+        self.bits.clear();
+        self.bits.insert(id.index());
+        self.anchor = Some(id);
+        self.cursor = Some(id);
+    }
+
+    /// Adds or removes `id`, moving the anchor and the cursor to it.
+    pub fn toggle(&mut self, id: EntryId) {
+        self.bits.toggle(id.index());
+        self.anchor = Some(id);
+        self.cursor = Some(id);
+    }
+
+    /// Selects everything between the anchor and `id`, given the display order.
+    ///
+    /// `rows` maps a display position to an entry. With no anchor this behaves
+    /// as a plain click, which is what a shift-click into an empty selection
+    /// should do.
+    pub fn extend_to(&mut self, id: EntryId, rows: &[EntryId]) {
+        let Some(anchor) = self.anchor else {
+            self.replace_with(id);
+            return;
+        };
+        let (Some(from), Some(to)) = (position(rows, anchor), position(rows, id)) else {
+            self.replace_with(id);
+            return;
+        };
+        self.bits.clear();
+        for row in from.min(to)..=from.max(to) {
+            if let Some(entry) = rows.get(row) {
+                self.bits.insert(entry.index());
+            }
+        }
+        self.cursor = Some(id);
+    }
+
+    /// Selects everything.
+    pub fn select_all(&mut self) {
+        self.bits.fill();
+    }
+
+    /// Selects nothing, keeping the cursor where it is.
+    pub fn clear(&mut self) {
+        self.bits.clear();
+        self.anchor = None;
+    }
+}
+
+fn position(rows: &[EntryId], id: EntryId) -> Option<usize> {
+    rows.iter().position(|row| *row == id)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::Selection;
+    use crate::listing::EntryId;
+
+    fn rows(count: u32) -> Vec<EntryId> {
+        (0..count).map(EntryId).collect()
+    }
+
+    #[test]
+    fn a_click_replaces_and_a_ctrl_click_accumulates() {
+        let mut selection = Selection::default();
+        selection.fit(10);
+        selection.replace_with(EntryId(3));
+        assert_eq!(selection.count(), 1);
+        selection.toggle(EntryId(5));
+        assert_eq!(selection.count(), 2);
+        selection.toggle(EntryId(5));
+        assert_eq!(selection.count(), 1);
+        assert_eq!(selection.cursor(), Some(EntryId(5)));
+    }
+
+    #[test]
+    fn a_shift_click_grows_one_range_rather_than_two() {
+        let mut selection = Selection::default();
+        selection.fit(10);
+        let rows = rows(10);
+        selection.replace_with(EntryId(2));
+        selection.extend_to(EntryId(5), &rows);
+        assert_eq!(selection.iter().collect::<Vec<_>>(), (2..=5).map(EntryId).collect::<Vec<_>>());
+        selection.extend_to(EntryId(7), &rows);
+        assert_eq!(selection.iter().collect::<Vec<_>>(), (2..=7).map(EntryId).collect::<Vec<_>>());
+        selection.extend_to(EntryId(0), &rows);
+        assert_eq!(selection.iter().collect::<Vec<_>>(), (0..=2).map(EntryId).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_shift_click_with_no_anchor_behaves_as_a_click() {
+        let mut selection = Selection::default();
+        selection.fit(10);
+        selection.extend_to(EntryId(4), &rows(10));
+        assert_eq!(selection.count(), 1);
+        assert!(selection.contains(EntryId(4)));
+    }
+
+    #[test]
+    fn select_all_then_deselect_is_the_operation_the_bitset_exists_for() {
+        let mut selection = Selection::default();
+        selection.fit(100_000);
+        selection.select_all();
+        for index in 0..200 {
+            selection.toggle(EntryId(index));
+        }
+        assert_eq!(selection.count(), 100_000 - 200);
+    }
+
+    #[test]
+    fn refitting_to_a_shorter_listing_drops_a_cursor_that_no_longer_exists() {
+        let mut selection = Selection::default();
+        selection.fit(10);
+        selection.replace_with(EntryId(9));
+        selection.fit(5);
+        assert_eq!(selection.cursor(), None, "not clamped to an unrelated file");
+        assert_eq!(selection.count(), 0);
+    }
+}

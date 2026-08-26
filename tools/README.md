@@ -10,6 +10,7 @@ dependency policy the product has, applied to the thing that enforces it.
 | `check-layering.py` | Crate dependency edges point strictly downward; `--diagram` prints the level diagram | manifests |
 | `dep-budget.py` | Every dependency has a row in [07-dependencies.md](../docs/07-dependencies.md); transitive counts inside budget, with the GPU stack found by reachability from the `wgpu` edge | manifests, `cargo`, `rustc` |
 | `check-invariants.py` | Banned crates, capability feature flags, crate lints, the GPU seam, ADR immutability | manifests, sources |
+| `make-listing-fixture` | Not a gate. Builds a directory of N files so the frame and listing numbers in [09-performance-budgets.md](../docs/09-performance-budgets.md) have a method that can be re-run | — |
 
 Each check abstains rather than guesses: with no crates yet, layering reports
 "nothing to check" and exits zero. They exist before the code so that the first
@@ -47,10 +48,23 @@ reachability from the `wgpu` and `naga` edges of the product's graph, read out o
 It used to match on name prefixes, which put `ash`, `glow`, `gpu-alloc`,
 `gpu-descriptor`, `khronos-egl`, `spirv`, `renderdoc-sys`, `codespan-reporting`
 and about fifteen more on the wrong side: 6 crates classified as GPU where the
-honest figure is around 50. Measured on a workspace carrying `wgpu`, `swash`,
-`rustix`, `bitflags`, `thiserror` and `smallvec`, the difference is a non-GPU
-count of **21** against a budget of 25, rather than a spurious failure at 63.
+honest figure is around 50.
 
 A crate reachable from both the GPU stack and our own code counts as **non-GPU**,
 because it is one we would carry anyway. That direction is deliberate: it stops
 the GPU stack from concealing our own dependencies.
+
+Two more things it learned from meeting a real workspace, both of which reported
+a number that was not wrong so much as about the wrong thing:
+
+- **An entry point is looked for anywhere in the graph, not only among the
+  product's direct dependencies.** `skerry` depends on `sk-app`, which depends on
+  `sk-gpu`, which depends on `wgpu` — so filtering the *root's* direct edges
+  excluded nothing at all, and the first run against real crates reported 86
+  non-GPU crates against a budget of 25.
+- **Workspace members and proc-macro crates are excluded.** Neither is in the
+  shipped binary, which is what the row is about; the check already excluded dev
+  and build edges on exactly that reasoning. Nine of that 86 were our own crates,
+  and five more were `bytemuck_derive` and the `syn` chain beneath it — which was
+  also the source of a reported `syn` duplicate that exists only because `swash`
+  and `wgpu` pin different major versions of a compile-time crate.

@@ -35,6 +35,7 @@ row is a review blocker.
 | `thiserror` | Error enums. Zero runtime cost, no tree. |
 | `serde` + `toml` | Config and state. The one place where hand-rolling is worse for users, because error messages matter. |
 | `bitflags`, `memchr`, `smallvec` | Each a single file's worth of well-tested primitive. |
+| `libc` | One function: `localtime_r`. A local time is a timezone database, a DST history and a leap-second table, and the machine already has all three; the alternative is parsing TZif ourselves or taking a date-time crate. It is already in the graph through `rustix` and `xkbcommon`, so it adds **zero** crates to the count. Confined to `sk-ui::format`. |
 
 ## Tier 2 — accepted with a stated exit
 
@@ -42,7 +43,7 @@ row is a review blocker.
 | --- | --- | --- |
 | `zbus` | D-Bus for FileManager1, udisks2 and portals. Correct SASL, marshalling and name handling for free. | It brings an async executor, which sits uneasily with [ADR 0005](adr/0005-no-async-runtime.md). It is confined to `sk-desktop` on its own thread. If it turns out to be the largest single chunk of the dependency tree, replace it with an in-house client — the protocol is a Unix socket, `EXTERNAL` auth and a marshaller, roughly 1,500 lines. |
 | `accesskit` | AT-SPI without becoming an AT-SPI expert. | None expected; the alternative is no accessibility, which is not an option. |
-| `wayland-client`, `x11rb` | Protocol plumbing and code generation. The *policy* above them — DnD, clipboard, IME, scaling — is ours, which is the point of [ADR 0002](adr/0002-own-platform-layer.md). | None expected. |
+| `wayland-client`, `wayland-protocols`, `x11rb` | Protocol plumbing and code generation. The *policy* above them — DnD, clipboard, IME, scaling — is ours, which is the point of [ADR 0002](adr/0002-own-platform-layer.md). `wayland-client` is taken with `system` and `dlopen`: the first gives a real `wl_display` pointer for the GPU surface, the second loads `libwayland-client` at run time so an X11-only machine still starts. That second feature is rule 9 as a build decision and it costs three crates — see the table below. | None expected. |
 
 ## What we write ourselves, on purpose
 
@@ -78,11 +79,58 @@ This is the same boundary that rule 1 and the security model already wanted. Get
 dependency isolation from it is the argument that makes it obviously correct rather than
 merely defensible.
 
+## What the accepted set actually costs
+
+Measured with `tools/dep-budget.py` on the first commit that had crates in it, at
+M0 on Wayland. Each row is the set reachable **only** through that dependency,
+excluding workspace members and proc-macro crates — neither is in the binary,
+which is what the row is about.
+
+| Dependency | Subtree | What is in it |
+| --- | --- | --- |
+| `rustix` | 5 | `rustix`, `bitflags`, `errno`, `libc`, `linux-raw-sys` |
+| `swash` | 8 | `swash`, `skrifa`, `read-fonts`, `font-types`, `bytemuck`, `zeno`, `yazi`, `once_cell` |
+| `xkbcommon` | 4 | `xkbcommon`, `xkeysym`, `memmap2`, `libc` |
+| `wayland-client` + `wayland-protocols` | 17 | the two, plus `wayland-backend`, `wayland-sys`, `downcast-rs`, `scoped-tls`, `smallvec`, `log`, and `dlib` + `libloading` + `cfg-if` for `dlopen` |
+| **Union, deduplicated** | **27** | the non-GPU budget below |
+
+Two numbers here are worth stating plainly rather than leaving implied.
+
+**The 25 in the table below was two too small, and it was a guess.** It was
+written before a single crate existed. The four tier-0 dependencies were each
+accepted by an ADR that priced them in prose and not in crates, and their union
+with the protocol crates is 27. The gate is now a **ratchet at the measured
+value**: raising it needs a row here and a re-measure in the same commit. A
+budget nobody has measured is decoration; a ratchet fails on the next addition
+that arrives without an argument.
+
+**`dlopen` costs three of the 27 and is not negotiable for a number.** Linking
+`libwayland-client` at load time would put the count at 24 and inside the
+original budget — and would make the binary refuse to start on an X11-only
+machine that has no Wayland libraries, which is verbatim the failure condition
+rule 9 names. Loading it at run time *is* the capability probe
+[ADR 0007](adr/0007-runtime-capability-detection.md) requires.
+
+Two things the count deliberately excludes, both for the same reason the existing
+check already excludes build and dev edges — they are not in the shipped binary:
+
+- **Workspace members.** Counting our own crates against a dependency budget
+  would mean the crate table in [04-architecture.md](04-architecture.md) consumes
+  a third of the budget before an external crate is chosen. The first run against
+  a real workspace reported 86 against a budget of 25, and 9 of those were ours.
+- **Proc-macro crates.** `bytemuck_derive` and the `syn`/`quote`/`proc-macro2`
+  chain under it run in the compiler. Excluding them also removes a reported
+  `syn` duplicate that exists only because `swash` and `wgpu` pin different major
+  versions of a compile-time crate.
+
+`x11rb` has not landed yet, and M0 is not finished without it. When it does, that
+commit raises the ratchet to the number it measures.
+
 ## Budgets and enforcement
 
 | Gate | Limit | Tool |
 | --- | --- | --- |
-| Transitive crates, main binary excluding the GPU stack | **25** | `cargo tree` in `tools/dep-budget.py` |
+| Transitive crates, main binary excluding the GPU stack | **27**, ratcheted at the measured value | `cargo tree` in `tools/dep-budget.py`; excludes workspace members and proc-macro crates |
 | Transitive crates, main binary total | **120** | same — the GPU stack dominates; if it exceeds this, [ADR 0003](adr/0003-wgpu-first-backend.md)'s revisit trigger fires |
 | Duplicate versions of any crate | **0** | `cargo tree --duplicates` |
 | C toolchain required for `skerry` | **no** | Clean-container build in CI |

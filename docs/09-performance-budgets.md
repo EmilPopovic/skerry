@@ -41,6 +41,84 @@ Not performance, but they run in the same CI stage and fail the build the same w
 | Adversarial filenames render and round-trip | A fixture directory: RTL, combining marks, emoji, 255-byte names, embedded newlines, invalid UTF-8 |
 | Golden frames at 100/125/150/200% | Perceptual diff against references, on llvmpipe |
 
+## What M0 measured
+
+The first commit with crates in it. Measured on a 24-thread 2024 laptop with an
+AMD Radeon 890M on RADV, under Hyprland at 125%, on a warm page cache and an idle
+machine — **not** the reference machine, so these are necessary and not
+sufficient, the same caveat Spike A carries. Reproduced with `skerry --bench`,
+which renders a scripted scroll offscreen through the same immediate-mode pass,
+the same renderer and the same glyph atlas the window uses.
+
+| Row | Target | Measured | Verdict |
+| --- | --- | --- | --- |
+| Cold start to first frame | < 80 ms | **92.5 ms best, 122.6 ms median** of 12, plus one 2,654 ms outlier | **missed**, see below |
+| Keystroke to frame | < 8 ms | frame p99 **0.445 ms** median of 5 runs at 200,000 entries | met |
+| Open a 10k-entry directory | < 30 ms | **23.9 ms** to a sorted, painted listing | met |
+| Scroll a large listing | < 8 ms/frame | p99 **0.408–0.562 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% | met at 200,000; 1M unmeasured |
+| Sort a large listing | < 120 ms at 1M | **150.2 ms** median at 200,000, on a job | **missed**, see below |
+| Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window | met |
+| RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
+| RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |
+| Stripped binary | < 20 MB | **6.25 MB** | met |
+| Transitive crates (non-GPU) | ≤ 27 | **27** | met, and see [07-dependencies.md](07-dependencies.md) for why the figure moved |
+
+Four of those rows are worth more than a cell.
+
+**The frame budget is not close.** 200,000 entries scroll at a 0.445 ms p99
+against 8 ms, and the number does not move with the entry count: 154 entries
+measure 0.454 ms and 10,000 measure 0.560 ms. That is the virtualized list doing
+exactly what it exists to do — the loop runs once per *visible* row, about forty
+times, whatever the directory holds. The worst single frame across every
+configuration measured is 2.6 ms.
+
+**Cold start misses, and 67–113 ms of it is the Vulkan loader.** Attributed:
+`wgpu::Instance::new` is 67–113 ms, `request_device` 19–25 ms, surface
+configuration 2–3 ms, and shader plus pipeline creation **1.3–2.2 ms**. Our own
+code is 8 ms of the total — the window is 2–4 ms and font discovery is 2.5 ms.
+Asking for `VULKAN | GL` together instead of Vulkan-then-GL cost an extra 60 ms,
+because it initialized an EGL display for an adapter that was never used; fixing
+that took the total from 195 ms to 122 ms. What is left is the loader enumerating
+ICDs and layers, which is not ours to make faster. The remaining options are a
+persisted pipeline cache and presenting a first frame from a software buffer while
+the device opens, and neither is M0's. The 2,654 ms outlier appeared once in
+twelve runs and once more after a rebuild; it is recorded rather than explained.
+
+**The 1M sort budget is missed by an order of magnitude, and now for a known
+reason.** 150 ms at 200,000 entries extrapolates to roughly 1.4 s at a million.
+[Spike F](../spikes/f-index-and-search/README.md) measured 152 ms for a million
+names and proposed an eight-byte prefix key with a radix pass. **That key cannot
+work for this comparison**, and the counterexample is a test in
+`sk_model::collate`: natural order is not lexical order, so a lexical key decides
+`img10.png` against `img2.png` before the tiebreak runs, and decides it wrongly.
+An MSD string radix over the name arena — which Spike F named and did not measure
+— is now the only path to that row. Two things reduce the harm meanwhile: the
+first sort runs inside the directory-reading job, and a re-sort above 8,192
+entries runs on a job over a clone, so the UI thread never blocks on it.
+
+**The RSS target is below the driver's floor.** 116.3 MB with 154 entries on
+screen is what the process costs before any of our data exists, and 10,000
+entries add 1.3 MB to it. This is the same shape as Spike A's finding, where the
+NVIDIA proprietary driver's floor was 332 MB against a 300 MB bar. The marginal
+cost is the number under our control and it is 100 bytes an entry.
+
+### The two numbers that were wrong before they were right
+
+Both are recorded because each was a *measurement* that read as a success.
+
+**Idle CPU measured 100% of one core**, against a row that reads 0.0%. The frame
+loop blocks in `poll` on the display socket and the job pool's eventfd — and an
+eventfd that is signalled and never read stays readable, so `poll` returned
+immediately, forever. The fix is one `read`; the interesting part is that
+`sk_plat::Window::pump` now takes the whole `Waker` rather than its descriptor,
+so the drain cannot be the caller's job to remember.
+
+**The `statx` pass ran on one thread**, at 186.3 ms for 200,000 entries. Spike B
+had already measured the answer — spreading it across the pool is 3.4× on a
+four-core Pi — and the first version of `sk-fs` simply did not do it. Fanned out
+in 2,048-name slices: **20.4 ms**, which is **9.1×** on 24 workers. A spike's
+finding is not implemented because it was written down.
+
 ## What Spike A measured
 
 [Spike A](../spikes/a-million-rows/README.md) is resolved, so four rows above are
@@ -69,6 +147,17 @@ windowed code does:
 | Gate | Method |
 | --- | --- |
 | Surface matches screen | Every frame is drawn at the compositor's reported scale, into a surface of the window's physical size. Any frame that is not is one the compositor resampled. Asserted per frame, not sampled |
+
+**M0 satisfies that gate from the second frame and not the first.** `sk-plat`
+derives the surface size from the integer numerator the compositor sends and
+reconfigures on every change, so a mapped window is always drawn at its physical
+size. But Hyprland does not send `wp_fractional_scale_v1.preferred_scale` until
+the surface is *mapped*, and a surface is mapped by its first buffer — so frame 1
+is drawn at 120/120 and frame 2 onward at the real 150/120. One frame, and it is
+the frame nobody sees. The fix is to map a 1×1 transparent `wl_shm` buffer before
+the GPU surface exists and wait briefly for the scale; it is written down here
+rather than done, because it is a protocol trick and this milestone had not
+measured whether it is needed.
 
 That row is `sk-plat`'s to satisfy, and Spike D must cover scale negotiation
 explicitly — see [ADR 0002](adr/0002-own-platform-layer.md) and Spike A's

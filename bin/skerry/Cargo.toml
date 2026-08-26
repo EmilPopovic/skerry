@@ -1,0 +1,21 @@
+[package]
+name = "skerry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Level 5: the binary. Nothing depends on it, so it may reach anywhere below.
+[package.metadata.skerry]
+level = 5
+
+[[bin]]
+name = "skerry"
+path = "src/main.rs"
+
+[dependencies]
+sk-app = { workspace = true }
+sk-util = { workspace = true }
+
+[lints]
+workspace = true
