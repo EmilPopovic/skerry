@@ -313,6 +313,12 @@ impl Pane {
         }
     }
 
+    /// Which pool lane this directory's device belongs on.
+    #[must_use]
+    pub fn lane(&self) -> Lane {
+        self.lane
+    }
+
     /// Cancels everything this pane started.
     ///
     /// Called when the window closes: a directory read of a million entries must

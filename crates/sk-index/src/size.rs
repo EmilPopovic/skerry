@@ -29,7 +29,7 @@
 //! known — and it costs one channel message every few frames instead of a
 //! spinner that means nothing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -65,10 +65,25 @@ pub struct Progress {
 
 /// Walks `root` and reports its total, as it goes and once at the end.
 ///
-/// Runs on a job. `cancel` is checked per directory, so navigating away from a
-/// listing stops every measurement it started rather than finishing them for
-/// nobody.
+/// Runs on a job. `cancel` is checked per directory, so a walk the caller has
+/// stopped caring about stops rather than finishing for nobody.
 pub fn measure(root: &Path, cancel: &Cancel, report: &mut impl FnMut(Progress)) {
+    measure_every(root, cancel, REPORT_EVERY, report);
+}
+
+/// As [`measure`], with the reporting interval given.
+///
+/// Exists so the partial-report path can be tested. With the interval fixed at
+/// 64 ms, a test fixture small enough to be a test finishes in one report and the
+/// assertion about *climbing* is vacuously true — which is a test that can only
+/// pass, and [docs/12-measurement.md](../../../docs/12-measurement.md) has a rule
+/// about those.
+pub fn measure_every(
+    root: &Path,
+    cancel: &Cancel,
+    interval: Duration,
+    report: &mut impl FnMut(Progress),
+) {
     let Some(device) = device_of(root) else {
         report(Progress { complete: true, partial: true, ..Progress::default() });
         return;
@@ -76,7 +91,7 @@ pub fn measure(root: &Path, cancel: &Cancel, report: &mut impl FnMut(Progress)) 
 
     let mut progress = Progress::default();
     let mut pending = vec![root.to_path_buf()];
-    let mut next_report = Instant::now() + REPORT_EVERY;
+    let mut next_report = Instant::now() + interval;
 
     // Depth-first with an explicit stack rather than recursion: a directory tree
     // is attacker-controlled depth, and a deep one must not be a stack overflow.
@@ -89,7 +104,7 @@ pub fn measure(root: &Path, cancel: &Cancel, report: &mut impl FnMut(Progress)) 
             progress.partial = true;
         }
         if Instant::now() >= next_report {
-            next_report = Instant::now() + REPORT_EVERY;
+            next_report = Instant::now() + interval;
             report(progress);
         }
     }
@@ -160,9 +175,10 @@ fn device_of(path: &Path) -> Option<u64> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Progress, measure};
+    use super::{Progress, measure, measure_every};
     use sk_util::Cancel;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     fn fixture(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("skerry-size-{}-{label}", std::process::id()));
@@ -206,14 +222,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The number climbs while the walk is running, and only the last report is
+    /// the complete one.
+    ///
+    /// Driven with a zero interval so a fixture small enough to be a test still
+    /// produces partial reports. At the real 64 ms this fixture finishes in one
+    /// report, `reports[..0]` is empty, and every assertion about climbing is
+    /// vacuously true — which is a test that can only pass, and the whole point
+    /// of the mechanism under test is the reports before the last one.
     #[test]
     fn the_number_climbs_and_the_last_report_is_the_complete_one() {
         let root = fixture("climb");
         let mut reports = Vec::new();
-        measure(&root, &Cancel::new(), &mut |progress| reports.push(progress));
-        assert!(!reports.is_empty());
+        measure_every(&root, &Cancel::new(), Duration::ZERO, &mut |progress| {
+            reports.push(progress);
+        });
+        assert!(reports.len() >= 4, "four directories produced {} reports", reports.len());
+
         let last = reports[reports.len() - 1];
         assert!(last.complete, "the final report is the complete one");
+        assert_eq!(last.bytes, 1000);
         assert!(
             reports[..reports.len() - 1].iter().all(|progress| !progress.complete),
             "only the last report is complete"
@@ -221,6 +249,10 @@ mod tests {
         assert!(
             reports.windows(2).all(|pair| pair[0].bytes <= pair[1].bytes),
             "the total went down: {reports:?}"
+        );
+        assert!(
+            reports[..reports.len() - 1].iter().any(|progress| progress.bytes > 0),
+            "no partial report ever carried a number"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -312,7 +344,8 @@ mod tests {
 ///   of the per-user watch budget for one `node_modules`.
 pub struct Sizes {
     known: HashMap<PathBuf, Progress>,
-    running: HashSet<PathBuf>,
+    /// Walks in flight, each with the token that stops it.
+    running: HashMap<PathBuf, Cancel>,
     concurrent: usize,
 }
 
@@ -320,7 +353,7 @@ impl Sizes {
     /// A cache that runs at most `concurrent` walks at once.
     #[must_use]
     pub fn new(concurrent: usize) -> Self {
-        Self { known: HashMap::new(), running: HashSet::new(), concurrent: concurrent.max(1) }
+        Self { known: HashMap::new(), running: HashMap::new(), concurrent: concurrent.max(1) }
     }
 
     /// What is known about a folder, complete or not.
@@ -329,21 +362,43 @@ impl Sizes {
         self.known.get(path).copied()
     }
 
-    /// Claims `path` for a walk, if one is worth starting and there is room.
+    /// Claims `path` for a walk, returning the token that stops it.
     ///
     /// The cap is why this can say no to something it has never seen: scrolling
     /// through a directory of three hundred folders must not start three hundred
     /// recursive walks. A refusal is not final — the caller asks again on the
     /// next frame, and the next frame arrives because something else reported.
-    pub fn claim(&mut self, path: &Path) -> bool {
-        if self.running.contains(path) || self.running.len() >= self.concurrent {
-            return false;
+    pub fn claim(&mut self, path: &Path) -> Option<Cancel> {
+        if self.running.contains_key(path) || self.running.len() >= self.concurrent {
+            return None;
         }
         if self.known.get(path).is_some_and(|progress| progress.complete) {
-            return false;
+            return None;
         }
-        self.running.insert(path.to_path_buf());
-        true
+        let cancel = Cancel::new();
+        self.running.insert(path.to_path_buf(), cancel.clone());
+        Some(cancel)
+    }
+
+    /// Stops every walk that is not a child of `parent`.
+    ///
+    /// The rule is **what you are looking at wins**. Walks are deliberately not
+    /// cancelled when you navigate — one that finishes after you have left still
+    /// fills the cache, and coming back is then instant — but they must not go on
+    /// holding the slots the new directory needs. Without this, arriving anywhere
+    /// while a large tree was still being walked showed a dash against every
+    /// folder until that tree finished, which for a source checkout is minutes.
+    ///
+    /// A sibling scrolled off screen is left alone: it is in the directory being
+    /// looked at, and scrolling back should not restart it.
+    pub fn retain_under(&mut self, parent: &Path) {
+        self.running.retain(|path, cancel| {
+            let keep = path.parent() == Some(parent);
+            if !keep {
+                cancel.cancel();
+            }
+            keep
+        });
     }
 
     /// Records what a walk found. A complete report releases its slot.
@@ -362,7 +417,9 @@ impl Sizes {
     /// Forgets everything, so the next look measures again.
     pub fn forget_all(&mut self) {
         self.known.clear();
-        self.running.clear();
+        for (_, cancel) in self.running.drain() {
+            cancel.cancel();
+        }
     }
 
     /// Folders known, and walks running.
@@ -386,7 +443,7 @@ mod cache_tests {
     #[test]
     fn a_total_is_remembered_by_path_and_survives_everything_else() {
         let mut sizes = Sizes::new(4);
-        assert!(sizes.claim(Path::new("/a/one")));
+        assert!(sizes.claim(Path::new("/a/one")).is_some());
         sizes.record(Path::new("/a/one"), total(100, true));
         assert_eq!(sizes.get(Path::new("/a/one")).map(|it| it.bytes), Some(100));
         assert_eq!(sizes.get(Path::new("/a/two")), None);
@@ -395,17 +452,17 @@ mod cache_tests {
     #[test]
     fn a_folder_already_measured_is_not_measured_again() {
         let mut sizes = Sizes::new(4);
-        assert!(sizes.claim(Path::new("/a/one")));
+        assert!(sizes.claim(Path::new("/a/one")).is_some());
         sizes.record(Path::new("/a/one"), total(100, true));
-        assert!(!sizes.claim(Path::new("/a/one")), "a complete total was re-walked");
+        assert!(sizes.claim(Path::new("/a/one")).is_none(), "a complete total was re-walked");
     }
 
     #[test]
     fn an_incomplete_total_keeps_its_slot_and_may_be_resumed_after_it_is_released() {
         let mut sizes = Sizes::new(4);
-        assert!(sizes.claim(Path::new("/a/one")));
+        assert!(sizes.claim(Path::new("/a/one")).is_some());
         sizes.record(Path::new("/a/one"), total(50, false));
-        assert!(!sizes.claim(Path::new("/a/one")), "already running");
+        assert!(sizes.claim(Path::new("/a/one")).is_none(), "already running");
         assert_eq!(sizes.stats(), (1, 1));
 
         sizes.record(Path::new("/a/one"), total(100, true));
@@ -415,19 +472,19 @@ mod cache_tests {
     #[test]
     fn the_cap_defers_rather_than_refusing_forever() {
         let mut sizes = Sizes::new(2);
-        assert!(sizes.claim(Path::new("/a/one")));
-        assert!(sizes.claim(Path::new("/a/two")));
-        assert!(!sizes.claim(Path::new("/a/three")), "the cap held");
+        assert!(sizes.claim(Path::new("/a/one")).is_some());
+        assert!(sizes.claim(Path::new("/a/two")).is_some());
+        assert!(sizes.claim(Path::new("/a/three")).is_none(), "the cap held");
 
         sizes.record(Path::new("/a/one"), total(1, true));
-        assert!(sizes.claim(Path::new("/a/three")), "a finished walk freed a slot");
+        assert!(sizes.claim(Path::new("/a/three")).is_some(), "a finished walk freed a slot");
     }
 
     /// A number a person is reading must not go backwards.
     #[test]
     fn a_late_partial_report_does_not_undo_a_larger_one() {
         let mut sizes = Sizes::new(4);
-        sizes.claim(Path::new("/a/one"));
+        let _ = sizes.claim(Path::new("/a/one"));
         sizes.record(Path::new("/a/one"), total(900, false));
         sizes.record(Path::new("/a/one"), total(100, false));
         assert_eq!(sizes.get(Path::new("/a/one")).map(|it| it.bytes), Some(900));
@@ -438,13 +495,40 @@ mod cache_tests {
         assert_eq!(sizes.get(Path::new("/a/one")).map(|it| it.bytes), Some(50));
     }
 
+    /// The reported defect. Walks are no longer cancelled when you navigate, so
+    /// that a result finishing after you have left still fills the cache — but
+    /// they must not go on holding the slots that the folder you are *looking at*
+    /// needs. Every folder in the new directory showed a dash until the walks
+    /// from the old one finished, which for a large tree is minutes.
+    #[test]
+    fn walks_left_behind_do_not_hold_the_slots_of_the_folder_being_looked_at() {
+        let mut sizes = Sizes::new(2);
+        assert!(sizes.claim(Path::new("/old/one")).is_some());
+        assert!(sizes.claim(Path::new("/old/two")).is_some());
+
+        // The user navigates. Nothing in the new directory can start.
+        assert!(sizes.claim(Path::new("/new/one")).is_none(), "the cap was already full");
+
+        sizes.retain_under(Path::new("/new"));
+        assert!(sizes.claim(Path::new("/new/one")).is_some(), "the slots were never released");
+        assert!(sizes.claim(Path::new("/new/two")).is_some());
+    }
+
+    #[test]
+    fn a_folder_scrolled_out_of_view_in_the_same_directory_keeps_walking() {
+        let mut sizes = Sizes::new(4);
+        assert!(sizes.claim(Path::new("/here/one")).is_some());
+        sizes.retain_under(Path::new("/here"));
+        assert_eq!(sizes.stats().1, 1, "a sibling was cancelled for scrolling past it");
+    }
+
     #[test]
     fn forgetting_makes_everything_measurable_again() {
         let mut sizes = Sizes::new(4);
-        sizes.claim(Path::new("/a/one"));
+        let _ = sizes.claim(Path::new("/a/one"));
         sizes.record(Path::new("/a/one"), total(100, true));
         sizes.forget_all();
         assert_eq!(sizes.get(Path::new("/a/one")), None);
-        assert!(sizes.claim(Path::new("/a/one")));
+        assert!(sizes.claim(Path::new("/a/one")).is_some());
     }
 }

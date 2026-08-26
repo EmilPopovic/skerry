@@ -38,19 +38,12 @@ pub(crate) struct Measurer {
     sender: Sender<(PathBuf, Progress)>,
     reports: Receiver<(PathBuf, Progress)>,
     wake: WakeHandle,
-    /// One token for every walk, cancelled when the window closes.
-    ///
-    /// Not on navigation: a walk that finishes after you have left still fills
-    /// the cache, and coming back is then instant. Cancelled on exit because
-    /// dropping the pool joins its workers, and a worker three minutes into a
-    /// tree would hold the process open for all of it.
-    cancel: Cancel,
 }
 
 impl Measurer {
     pub fn new(wake: WakeHandle) -> Self {
         let (sender, reports) = mpsc::channel();
-        Self { sizes: Sizes::new(CONCURRENT), sender, reports, wake, cancel: Cancel::new() }
+        Self { sizes: Sizes::new(CONCURRENT), sender, reports, wake }
     }
 
     /// Puts known totals on the visible rows, and starts walks for the rest.
@@ -59,6 +52,12 @@ impl Measurer {
     /// makes a new listing show what is already known immediately: the cache is
     /// the truth and the listing is a view of it.
     pub fn update(&mut self, pane: &mut Pane, rows: Range<usize>, jobs: &Jobs) {
+        // What you are looking at wins. Walks started in a directory you have
+        // left keep running — their results still fill the cache — but they give
+        // up their slots, or arriving anywhere while a source checkout was being
+        // walked would show a dash against every folder until it finished.
+        self.sizes.retain_under(&pane.path);
+
         for row in rows {
             let Some(id) = pane.listing.at(row) else { continue };
             if !pane.listing.flags(id).has(Flags::DIR) {
@@ -73,16 +72,19 @@ impl Measurer {
                     progress.partial,
                 );
             }
-            if self.sizes.claim(&path) {
-                self.spawn(path, jobs);
+            if let Some(cancel) = self.sizes.claim(&path) {
+                self.spawn(path, cancel, pane.lane(), jobs);
             }
         }
     }
 
-    fn spawn(&self, path: PathBuf, jobs: &Jobs) {
+    fn spawn(&self, path: PathBuf, cancel: Cancel, lane: Lane, jobs: &Jobs) {
         let sender = self.sender.clone();
         let wake = self.wake.clone();
-        jobs.pool.spawn(Lane::Parallel, self.cancel.clone(), move |cancel| {
+        // The pane's lane, not always the parallel one: on a network mount or a
+        // rotational disk, eight concurrent recursive walks is the worst thing
+        // this program could ask a device to do.
+        jobs.pool.spawn(lane, cancel, move |cancel| {
             sk_index::measure(&path, cancel, &mut |progress| {
                 if sender.send((path.clone(), progress)).is_err() {
                     cancel.cancel();
@@ -118,8 +120,11 @@ impl Measurer {
     }
 
     /// Stops every walk. Called before the pool is dropped.
-    pub fn stop(&self) {
-        self.cancel.cancel();
+    ///
+    /// Dropping the pool joins its workers, and a worker three minutes into a
+    /// directory tree would hold the process open for all of it.
+    pub fn stop(&mut self) {
+        self.sizes.forget_all();
     }
 }
 
@@ -285,6 +290,36 @@ mod tests {
         measure_all(&mut measurer, &mut pane, &harness.jobs);
         assert_eq!(total_of(&pane, "sub"), Some((300, true)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The reported defect, at the level a person meets it: arriving in a
+    /// directory while the previous one's walks are still running must not leave
+    /// every folder showing a dash.
+    #[test]
+    fn arriving_somewhere_new_measures_it_even_if_the_old_walks_are_running() {
+        let old = fixture("old");
+        let new = fixture("new");
+        let (harness, mut measurer) = Harness::new();
+
+        // Fill every slot with walks belonging to the old directory.
+        for index in 0..16 {
+            std::fs::create_dir_all(old.join(format!("filler-{index}"))).unwrap();
+        }
+        let mut pane = Pane::new(old.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+        let rows = 0..pane.listing.rows();
+        measurer.update(&mut pane, rows, &harness.jobs);
+
+        // Navigate before they finish.
+        pane.open(new.clone(), &harness.jobs);
+        harness.settle(&mut pane);
+        measure_all(&mut measurer, &mut pane, &harness.jobs);
+
+        assert_eq!(total_of(&pane, "sub"), Some((300, true)));
+        assert_eq!(total_of(&pane, "other"), Some((400, true)));
+        let _ = std::fs::remove_dir_all(&old);
+        let _ = std::fs::remove_dir_all(&new);
     }
 
     #[test]
