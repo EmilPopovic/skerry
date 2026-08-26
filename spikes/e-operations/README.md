@@ -133,10 +133,14 @@ find, every fault case. The same binary's output on the other two machines is in
 [runs/matrix-homelab.txt](runs/matrix-homelab.txt) and
 [runs/matrix-pi.txt](runs/matrix-pi.txt).
 
-**37 pass, 0 fail, 6 limitations, 3 owed, of 46 checks.** Every limitation is a
-property of NTFS, and every one of the three owed is the same missing filesystem.
+**Seven filesystems: 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks**
+([runs/matrix-privileged.txt](runs/matrix-privileged.txt)). Unprivileged, on three
+filesystems, it is 37 pass, 0 fail, 6 limitations, 3 owed of 46
+([runs/matrix-yoga.txt](runs/matrix-yoga.txt)). Every limitation is a property of
+the filesystem, named with its errno; every owed check is a filesystem that cannot
+share extents, which is not a defect.
 
-### Two of the bar's three conditions are met
+### All three of the bar's conditions are met
 
 **Zero data loss across the matrix.** Byte-exact on every filesystem, including
 across a filesystem boundary, including a 1 GiB sparse file that stays 12 KiB,
@@ -161,17 +165,21 @@ separately — the destination had room for eight of twenty equal files:
 0 incomplete; 0 temporary files left
 ```
 
-**Reflink measurably instant on btrfs and xfs.** The measurement is free space,
-not time, because time at this size measures page cache:
+**Reflink measurably instant on btrfs and xfs.** The primary measurement is free
+space, because that is what extent sharing *is*; once both copies are flushed the
+time says the same thing:
 
-```
-192 MiB on xfs: FICLONE consumed 0 KiB of free space;
-                a true byte copy of the same file consumed 196,608 KiB
-```
+| 192 MiB | space consumed | time |
+| --- | --- | --- |
+| `FICLONE` on btrfs | **0 KiB** | **2.0 ms** |
+| a true byte copy | 196,608 KiB | 123.4 ms |
+| `FICLONE` on xfs | **0 KiB** | **0.9 ms** |
+| a true byte copy | 196,608 KiB | 94.3 ms |
 
-Zero against the whole file. `copy_file_range` is excluded from the control
-because on both of these filesystems it *is* a clone — which is finding 6 below,
-and the reason the first version of this check measured 0x.
+Zero against the whole file, and 62× on btrfs and 105× faster on xfs.
+`copy_file_range` is excluded from the control because on both of these
+filesystems it *is* a clone — finding 6 below, and the reason the first version of
+this check measured 0x.
 
 ### The structural decision that makes the ENOSPC claim provable
 
@@ -399,11 +407,12 @@ Also owed:
 
 ## Verdict
 
-**Go, with the reflink condition owed and one command away.**
+**Go.** All three conditions of the bar are met, on seven filesystems.
 
-Two of the bar's three conditions are met, exactly and repeatably. The third names
-a filesystem no machine here can create without root, and [with-root.sh](with-root.sh)
-is written so that measuring it costs one password rather than a day.
+Zero data loss across the matrix. `ENOSPC` failing at byte 307,200 with no
+destination name and nothing left behind, and at the tree level too. And reflink
+instant on both filesystems that can do it — 0 KiB of free space against 192 MiB,
+in 2.0 ms against 123.4 ms.
 
 Nothing failed. Every one of the six limitations is a property of NTFS that the
 engine detects and reports rather than papering over, and the distinction between

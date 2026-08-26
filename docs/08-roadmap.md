@@ -23,7 +23,7 @@ there is a codebase to rewrite.**
 | [B](../spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
 | [C](../spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
 | [D](../spikes/d-platform-and-dnd/README.md) | **Go, three things to design.** Files land on disk from a drag we start; every Wayland pair passes and two of the peers pass on X11 too; four compositor limitations are documented and three of them report no error at all. `winit` reaches 5 of 9 capabilities, so [ADR 0002](adr/0002-own-platform-layer.md) is Accepted rather than pending |
-| [E](../spikes/e-operations/README.md) | **Go, reflink owed.** 37 pass, 0 fail, 6 limitations of 46 checks; `ENOSPC` clean at an exact byte. Four defects found that would have shipped. The reflink condition needs btrfs, which needs root — [with-root.sh](../spikes/e-operations/with-root.sh) is one command |
+| [E](../spikes/e-operations/README.md) | **Go.** All three conditions met on seven filesystems: 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks. `ENOSPC` clean at an exact byte; reflink consumes 0 KiB against 192 MiB. **Eight** defects found by a check failing |
 | [F](../spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
 
 **Spike F is not one of the original five.** It exists because
@@ -111,8 +111,8 @@ integrity after each. This spike becomes the permanent torture matrix.
 > **Bar:** zero data loss across the matrix · `ENOSPC` handled cleanly mid-copy with no
 > partial file left behind · reflink measurably instant on btrfs.
 
-**Resolved: Go, with the reflink condition owed.** Two of the three conditions are met
-exactly; the third needs btrfs, and no machine available can create one without root.
+**Resolved: Go.** All three conditions are met, on seven filesystems — ext4, tmpfs, btrfs,
+xfs, exFAT, vfat and NTFS, plus five injected faults.
 Full result in [e-operations](../spikes/e-operations/README.md). Unlike every other spike
 its code stays: the matrix is a CI job today, it discovers what to test rather than being
 told, and it ships a filesystem that fails at an exact offset on demand.
@@ -234,5 +234,6 @@ Six measurements are still owed and none blocks M0:
   rather than Wayland's, and mutter and kwin would say which.
 - **Dolphin**, for the Qt half of rule 5. Konsole and Qt Designer stand in for it today,
   and KIO's drop handling is its own dialect.
-- **btrfs and xfs**, for Spike E's reflink condition, plus exFAT and NFS. One command with
-  a password: `sudo ./spikes/e-operations/with-root.sh`.
+- **NFS**, the one filesystem in Spike E's list still unmeasured: `exportfs` is not installed
+  on any machine here, and its failure modes are unlike the others — no hardlink guarantees
+  worth trusting, and a server that can disappear mid-copy.

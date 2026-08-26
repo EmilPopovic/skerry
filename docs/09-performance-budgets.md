@@ -449,7 +449,7 @@ now has a test behind it.
 | A 1 GiB sparse file with 12 KiB of data, copied | no growth | **12 KiB → 12 KiB** | the extent map from `SEEK_HOLE`/`SEEK_DATA` and `st_blocks`, not a byte comparison — a byte comparison passes while the file grows 87,000× |
 | `ENOSPC` mid-copy | no partial file | **fails at byte 307,200 of 1,048,576; the destination name does not exist** | a FUSE filesystem that refuses the 307,201st byte, every time |
 | Move within a filesystem | a rename | **0.011 ms** | `renameat2`, with `EXDEV` as the only reliable test of whether two paths share a filesystem |
-| Reflink instant on btrfs | measurable | **owed** | `FICLONE` is refused by every filesystem this machine can create |
+| Reflink instant on btrfs | measurable | **0 KiB of free space for a 192 MiB clone, in 2.0 ms against 123.4 ms** | free space before and after, with both copies flushed. `copy_file_range` is excluded from the control because on btrfs and xfs it *is* a clone |
 
 ### The row that now has a test
 
@@ -459,6 +459,16 @@ It now has 46 checks, and the number that matters is not 37 passes — it is tha
 [the spike](../spikes/e-operations/README.md#four-things-this-changed-three-of-them-in-our-own-code).
 Two of them pass a byte-for-byte comparison. One of them copies nothing at all to
 an external drive.
+
+### Why the reflink measurement is space and not time
+
+Time at this size measures page cache. Free space measures extent sharing, which
+is what a reflink *is* — and it is the number a user cares about, because the
+question a file manager answers with it is "will this fit".
+
+The check requires the **control** to consume at least half the file before it will
+call anything a pass. Without that it passed on btrfs with `0 KiB` against `0 KiB`,
+because btrfs delays allocation and the comparison was `0 * 8 < 1`.
 
 ### Why the ENOSPC number is exact
 

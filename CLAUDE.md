@@ -15,7 +15,7 @@ artifact is `crates/` — M0, the platform layer.**
 | [B](spikes/b-enumeration/README.md) | `getdents64` + batched `statx` | **Go**, but sits *on* the 1 s bar on a Pi 5 |
 | [C](spikes/c-watching/README.md) | inotify at scale | **Go**, three things to design |
 | [D](spikes/d-platform-and-dnd/README.md) | platform layer and drag-and-drop | **Go**, and three limitations report no error at all |
-| [E](spikes/e-operations/README.md) | operation engine correctness | **Go**, reflink owed; four defects found that would have shipped |
+| [E](spikes/e-operations/README.md) | operation engine correctness | **Go**, all three conditions on seven filesystems; eight defects found that would have shipped |
 | [F](spikes/f-index-and-search/README.md) | index and flattened search | **Go on the index**; sorting misses its budget |
 
 Spikes live in [spikes/](spikes/), are exempt from the layering, lint and

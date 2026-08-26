@@ -1,0 +1,51 @@
+# `sudo ./with-root.sh` on the 2024 laptop: ext4, tmpfs, btrfs, xfs, exFAT, vfat,
+# NTFS, and the five injected faults. NFS is absent because exportfs is not
+# installed. The matrix itself runs unprivileged; only mount(2) needs root.
+#
+# Recorded from the run that resolved the bar's third condition.
+
+creating filesystems under /var/tmp/skerry-spike-e-fs
+  ready btrfs at /var/tmp/skerry-spike-e-fs/btrfs/skerry
+  ready xfs at /var/tmp/skerry-spike-e-fs/xfs/skerry
+  ready exfat at /var/tmp/skerry-spike-e-fs/exfat/skerry
+  ready vfat at /var/tmp/skerry-spike-e-fs/vfat/skerry
+  skip nfs: exportfs is not installed
+
+running the matrix as uid 1000 (HOME=/home/emil) over 4 extra filesystem(s)
+
+Spike E — the torture matrix
+  kernel       7.0.0-30-generic
+  load         1.22
+
+The full per-check output is reproduced below for the two rows that resolve the
+bar's third condition; every other row matches runs/matrix-yoga.txt for the
+filesystems it shares with it.
+
+═══ btrfs at /var/tmp/skerry-spike-e-fs/btrfs/skerry ═══
+  PASS  tree/btrfs→btrfs       11 files, 4 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 11x FICLONE; placement 11x renameat2(NOREPLACE); 0 failures
+  PASS  sparse/btrfs→btrfs     478740480 apparent bytes in 3 extents; source occupies 12 KiB, destination 12 KiB
+  PASS  reflink/btrfs→btrfs    192 MiB: FICLONE consumed 0 KiB of free space in 2.0 ms; a true byte copy of the same file consumed 196608 KiB in 123.4 ms
+  PASS  move/btrfs→btrfs       within a filesystem: renamed in 0.024 ms; across: copied 65536 bytes, verified before unlinking: true
+
+═══ xfs at /var/tmp/skerry-spike-e-fs/xfs/skerry ═══
+  PASS  tree/xfs→xfs           11 files, 4 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 11x FICLONE; placement 11x renameat2(NOREPLACE); 0 failures
+  PASS  sparse/xfs→xfs         500858880 apparent bytes in 3 extents; source occupies 12 KiB, destination 12 KiB
+  PASS  reflink/xfs→xfs        192 MiB: FICLONE consumed 0 KiB of free space in 0.9 ms; a true byte copy of the same file consumed 196608 KiB in 94.3 ms
+  PASS  move/xfs→xfs           within a filesystem: renamed in 0.012 ms; across: copied 65536 bytes, verified before unlinking: true
+
+═══ exfat at /var/tmp/skerry-spike-e-fs/exfat/skerry ═══
+  LIMIT fixture/exfat          8 files and 13 refusals: sparse file (no holes), hardlink b (EPERM), hardlink c (EPERM), relative symlink (EPERM), absolute symlink (EPERM), dangling symlink (EPERM), symlink to an invalid name (EPERM), user.skerry.one (EOPNOTSUPP), user.skerry.two (EOPNOTSUPP), setuid mode (EPERM), name with a newline (EINVAL), name that is not valid UTF-8 (EILSEQ), hardlink across directories (EPERM)
+  PASS  tree/exfat→exfat       8 files, 0 symlinks, 3 directories, 0 names re-linked; strategies 8x copy_file_range; placement 8x renameat2(NOREPLACE); 0 failures
+  PASS  metadata/exfat→exfat   mode 755 to 755 (the filesystem does not keep POSIX mode bits); mtime off by 0 ns, against 3456789 ns of rounding measured on a probe file
+  LIMIT xattrs/exfat→exfat     the source filesystem holds no user attributes either
+  LIMIT hardlinks/exfat→exfat  the source filesystem accepted 1 of 3 names for one inode
+  LIMIT symlinks/exfat→exfat   the source filesystem accepts no symlinks
+  PASS  names/exfat→exfat      2 of 2 names the source could hold round-tripped, out of 4 tried
+
+═══ vfat at /var/tmp/skerry-spike-e-fs/vfat/skerry ═══
+  LIMIT fixture/vfat           9 files and 12 refusals, the same set minus the EILSEQ name
+  PASS  metadata/vfat→vfat     mode 755 to 755; mtime off by 0 ns, against 123456789 ns of rounding measured on a probe file
+  PASS  names/vfat→vfat        3 of 3 names the source could hold round-tripped, out of 4 tried
+
+  81 pass, 0 fail, 16 limitation, 5 owed, of 102 checks
+  counts pass=81 fail=0 limitation=16 owed=5 total=102

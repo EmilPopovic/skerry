@@ -681,16 +681,18 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
     };
     let clone_cost = free_before.saturating_sub(free_after_clone);
     let copy_cost = free_after_clone.saturating_sub(free_after_copy);
+    let speedup = p.elapsed.as_secs_f64() / c.elapsed.as_secs_f64().max(1e-9);
     let evidence = format!(
         "{} MiB: FICLONE consumed {} KiB of free space in {:.1} ms; a true byte copy of the same \
-         file consumed {} KiB in {:.1} ms. copy_file_range on this filesystem is itself a clone, \
-         so it is excluded from the control; the time is similar because both fit in page cache, \
-         and the space is the measurement",
+         file consumed {} KiB in {:.1} ms — {speedup:.0}x faster for {}. copy_file_range is \
+         itself a clone here, so it is excluded from the control, and both copies are flushed \
+         before the space is read",
         SIZE / (1 << 20),
         clone_cost / 1024,
         c.elapsed.as_secs_f64() * 1000.0,
         copy_cost / 1024,
         p.elapsed.as_secs_f64() * 1000.0,
+        if clone_cost == 0 { "no space at all".to_string() } else { format!("{}x less space", copy_cost / clone_cost.max(1)) }
     );
     // Both halves have to hold, and the second one is what keeps the first
     // honest: a clone that costs nothing proves nothing unless the control
