@@ -99,3 +99,45 @@ That last row is the whole theming policy: read the system's light/dark preferen
 accent colour, ship a strong opinionated default, and offer a colour-scheme file. Skerry
 does not chase a GTK or Qt theme, because matching a toolkit's look requires adopting the
 toolkit.
+
+## What three compositors actually did
+
+Measured by running the product under each. Two of them are headless fixtures
+started by `tools/gui-test` and by hand; the third is the session this was
+developed on. The point of the table is that every row was a surprise to
+somebody.
+
+| | Hyprland | `kwin_wayland --virtual` | `gnome-shell --headless` |
+| --- | --- | --- | --- |
+| `wp_fractional_scale_v1` | yes | yes | yes |
+| `wp_viewporter` | yes | yes | yes |
+| `zxdg_decoration_manager_v1` | yes, and grants server-side | yes, and grants server-side | **not advertised at all** |
+| `wl_data_device_manager` | yes | yes | yes |
+| `zwp_primary_selection_device_manager_v1` | yes, but see below | yes | yes |
+| `zwp_text_input_manager_v3` | yes | yes, and v1 and v2 | yes |
+| `zwp_input_method_manager_v2` | yes | no | no |
+| `zwp_virtual_keyboard_manager_v1` | yes | **no** | no |
+| `zwlr_virtual_pointer_manager_v1` | yes | **no** | no |
+
+Four things follow that were not obvious before running it:
+
+- **GNOME has no decoration manager**, so the window has no title bar, no close
+  button and no resize edges there. Client-side decorations are not a nicety for
+  one desktop; they are the difference between a usable window and an unusable
+  one on the most common Linux desktop. This is the largest single gap the
+  product has today.
+- **Only Hyprland can be driven by a test.** The virtual-keyboard and
+  virtual-pointer protocols are wlroots', and neither KWin nor mutter implements
+  them, so the input-replay fixture is Hyprland-only and the other two are
+  checked by hand.
+- **A headless seat has no pointer**, and both KWin and mutter present one. The
+  capability probe reports `pointer` absent and the program runs; a client that
+  assumed a pointer exists would not.
+- **Hyprland discards a primary-selection write** unless `middle_click_paste` is
+  on, silently, with no error — which is Spike D's finding and remains a
+  documented limitation with no fallback.
+
+Owed: none of this is a real GNOME *session*. Under a nested, headless mutter the
+GL renderer refuses the drawing surface's dmabuf — `failed to import supplied
+dmabufs` — and kills the connection. That may be the nested software path rather
+than anything about GNOME, and the way to find out is a real session on this GPU.

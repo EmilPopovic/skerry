@@ -143,6 +143,14 @@ struct State {
     reported: Option<((u32, u32), u32)>,
     configured: bool,
     close_requested: bool,
+    /// Why the connection died, if it did.
+    ///
+    /// A protocol error is not recoverable: every later dispatch fails the same
+    /// way. Without recording it the frame loop spun on a dead socket, printing
+    /// the library's complaint on every pass and never exiting — measured under a
+    /// nested mutter whose GL renderer refused the swapchain's dmabuf, where the
+    /// program burned a core until it was killed.
+    fatal: Option<String>,
     events: VecDeque<Event>,
 }
 
@@ -254,6 +262,7 @@ impl Window {
             reported: None,
             configured: false,
             close_requested: false,
+            fatal: None,
             events: VecDeque::new(),
         };
 
@@ -317,10 +326,20 @@ impl Window {
         }
     }
 
-    /// Whether the compositor or the user has asked the window to close.
+    /// Whether the window should stop: the user asked, or the connection died.
     #[must_use]
     pub fn close_requested(&self) -> bool {
-        self.state.close_requested
+        self.state.close_requested || self.state.fatal.is_some()
+    }
+
+    /// Why the connection died, if it did.
+    ///
+    /// `None` for an ordinary close. A caller that ignores this exits silently on
+    /// a compositor error, which is the difference between "you closed it" and
+    /// "it vanished" — and only one of those is worth telling somebody about.
+    #[must_use]
+    pub fn failure(&self) -> Option<&str> {
+        self.state.fatal.as_deref()
     }
 
     /// Blocks until something happens, then queues everything that did.
@@ -337,17 +356,33 @@ impl Window {
     /// the descriptor and leaving the drain to the caller is an API where that
     /// bug is one forgotten line away, so the API does not offer it.
     pub fn pump(&mut self, wake: Option<&Waker>, timeout: Option<Duration>) {
-        let _ = self.queue.flush();
+        if self.state.fatal.is_some() {
+            return;
+        }
+        if let Err(error) = self.queue.flush() {
+            self.state.fatal = Some(format!("flush: {error}"));
+            return;
+        }
 
         // Anything already buffered is dispatched without touching the socket.
-        if self.queue.dispatch_pending(&mut self.state).unwrap_or(0) > 0 {
-            self.after_dispatch();
-            return;
+        match self.queue.dispatch_pending(&mut self.state) {
+            Ok(dispatched) if dispatched > 0 => {
+                self.after_dispatch();
+                return;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.state.fatal = Some(format!("dispatch: {error}"));
+                return;
+            }
         }
 
         let timeout = shorter(timeout, self.state.seat.next_repeat_in());
         let Some(guard) = self.queue.prepare_read() else {
-            let _ = self.queue.dispatch_pending(&mut self.state);
+            if let Err(error) = self.queue.dispatch_pending(&mut self.state) {
+                self.state.fatal = Some(format!("dispatch: {error}"));
+                return;
+            }
             self.after_dispatch();
             return;
         };
@@ -363,7 +398,17 @@ impl Window {
         let readable = rustix::event::poll(&mut fds, spec.as_ref()).unwrap_or(0);
 
         if readable > 0 && fds[0].revents().contains(PollFlags::IN) {
-            let _ = guard.read();
+            match guard.read() {
+                Ok(_) => {}
+                // Another reader took the events first. There is no other reader
+                // here, and it is not an error in any case.
+                Err(wayland_client::backend::WaylandError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    self.state.fatal = Some(format!("read: {error}"));
+                    return;
+                }
+            }
         } else {
             drop(guard);
         }
@@ -374,7 +419,10 @@ impl Window {
             self.state.events.push_back(Event::Woken);
         }
 
-        let _ = self.queue.dispatch_pending(&mut self.state);
+        if let Err(error) = self.queue.dispatch_pending(&mut self.state) {
+            self.state.fatal = Some(format!("dispatch: {error}"));
+            return;
+        }
         self.after_dispatch();
     }
 

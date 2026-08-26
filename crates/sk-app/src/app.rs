@@ -100,9 +100,17 @@ struct Desktop {
 }
 
 /// The application.
+///
+/// **The field order is load-bearing.** `renderer` is declared before `window`
+/// because Rust drops fields in declaration order, and the drawing surface holds
+/// raw pointers into the compositor objects the window owns. With the window
+/// first, a clean exit freed the `wl_surface` and then asked the renderer to tear
+/// down a surface built on it: measured, that is a segmentation fault on the way
+/// out, and it hid for as long as it did because every test killed the process
+/// with a signal instead of letting it close.
 pub struct App {
-    window: Window,
     renderer: Renderer,
+    window: Window,
     fonts: Fonts,
     cache: LayoutCache,
     list: DrawList,
@@ -248,8 +256,8 @@ impl App {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
             layout: Layout::compute(logical, &theme.metrics),
-            window,
             renderer,
+            window,
             fonts,
             // Two generations of 4096 runs: a 4K screen at the smallest useful
             // row height holds about 2,200 rows, so one full screen of three
@@ -299,7 +307,11 @@ impl App {
     }
 
     /// Runs until the window closes.
-    pub fn run(&mut self) {
+    ///
+    /// Returns why, if it was not the user's doing: a compositor that goes away
+    /// takes the connection with it, and every later dispatch fails the same way,
+    /// so there is nothing to recover to.
+    pub fn run(&mut self) -> Option<String> {
         // The registry lives here rather than in `App`, so that running a command
         // can take `&mut App` without the registry being part of what is
         // borrowed. It is built once; a command's `run` is a plain function
@@ -327,6 +339,7 @@ impl App {
                 self.dirty = false;
             }
         }
+        self.window.failure().map(str::to_owned)
     }
 
     /// How long the loop may sleep.

@@ -67,13 +67,25 @@ fn main() -> std::process::ExitCode {
     let outcome = match (capture, bench) {
         (Some(file), _) => {
             sk_app::capture(&Capture { file, path, logical, scale_120, dark, keys, stats })
+                .map(|()| true)
         }
-        (None, Some(frames)) => sk_app::bench(&Bench { path, logical, scale_120, frames }),
-        (None, None) => App::new(Options { path, dark, stats, started }).map(|mut app| app.run()),
+        (None, Some(frames)) => {
+            sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
+        }
+        (None, None) => App::new(Options { path, dark, stats, started }).map(|mut app| {
+            // A compositor that goes away is not the user closing the window, and
+            // the difference is worth a line on the way out.
+            if let Some(failure) = app.run() {
+                eprintln!("skerry: the display server went away — {failure}");
+                return false;
+            }
+            true
+        }),
     };
 
     match outcome {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(true) => std::process::ExitCode::SUCCESS,
+        Ok(false) => std::process::ExitCode::FAILURE,
         Err(problem) => {
             // Both halves, to the two places they belong: the message a person
             // can act on, and the chain that explains it to us.

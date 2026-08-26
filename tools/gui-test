@@ -58,7 +58,17 @@ def sockets() -> set[str]:
     return {p.name for p in runtime.glob("wayland-*") if p.name.count("-") == 1}
 
 
-def start_compositor(work: Path) -> tuple[subprocess.Popen, str]:
+def instances() -> set[str]:
+    """The Hyprland instances that exist, by signature.
+
+    A nested compositor gets its own, and `hyprctl` needs it to talk to that one
+    rather than to the session the tests must not touch.
+    """
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000")) / "hypr"
+    return {p.name for p in runtime.glob("*")} if runtime.is_dir() else set()
+
+
+def start_compositor(work: Path) -> tuple[subprocess.Popen, str, str]:
     config = work / "hypr.conf"
     config.write_text(
         # No bars, no animations, no rounding: the window under test should be
@@ -74,7 +84,7 @@ def start_compositor(work: Path) -> tuple[subprocess.Popen, str]:
         "    middle_click_paste = true\n"
         "}\n"
     )
-    before = sockets()
+    before, before_instances = sockets(), instances()
     process = subprocess.Popen(
         ["Hyprland", "--config", str(config)],
         stdout=(work / "compositor.log").open("w"),
@@ -86,7 +96,8 @@ def start_compositor(work: Path) -> tuple[subprocess.Popen, str]:
         new = sockets() - before
         if new:
             time.sleep(1.5)
-            return process, sorted(new)[0]
+            fresh = instances() - before_instances
+            return process, sorted(new)[0], (sorted(fresh)[0] if fresh else "")
         if process.poll() is not None:
             raise Failure("the nested compositor exited; see compositor.log")
         time.sleep(0.2)
@@ -101,7 +112,15 @@ def start_compositor(work: Path) -> tuple[subprocess.Popen, str]:
 class Run:
     """A window, and the state it reported."""
 
-    def __init__(self, display: str, work: Path, path: Path, arguments: list[str]):
+    def __init__(
+        self,
+        display: str,
+        work: Path,
+        path: Path,
+        arguments: list[str],
+        instance: str = "",
+    ):
+        self.instance = instance
         self.log = work / "app.log"
         self.err = work / "app.err"
         environment = dict(os.environ, WAYLAND_DISPLAY=display)
@@ -145,6 +164,25 @@ class Run:
         if not found:
             raise Failure("the window reported no state at all")
         return found[index]
+
+    def ask_to_close(self) -> int:
+        """Has the compositor ask the window to close, the way a person would.
+
+        Not a signal. A signal skips every destructor, and the one time this ran
+        for real it turned up a segmentation fault on the way out that a week of
+        signal-killed tests had hidden.
+        """
+        if not self.instance:
+            raise Failure("no compositor instance to ask")
+        subprocess.run(
+            ["hyprctl", "dispatch", "closewindow", "class:dev.skerry.Skerry"],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+        )
+        try:
+            return self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise Failure("the window ignored a close request") from None
 
     def close(self) -> None:
         if self.process.poll() is None:
@@ -387,6 +425,16 @@ def copy_to_clipboard(run: Run, fixture: Path) -> None:
         raise Failure(f"copying said {state.get('notice')!r}")
 
 
+@scenario("clean-close")
+def clean_close(run: Run, fixture: Path) -> None:
+    run.drive("sleep 800\n")
+    code = run.ask_to_close()
+    if code < 0:
+        raise Failure(f"closing the window killed it with signal {-code}")
+    if code != 0:
+        raise Failure(f"closing the window exited {code}: {run.err.read_text()[-300:]}")
+
+
 @scenario("no-cpu-when-idle")
 def no_cpu_when_idle(run: Run, fixture: Path) -> None:
     run.drive("sleep 1500\n")  # let the folder walks finish
@@ -416,7 +464,7 @@ def main(argv: list[str]) -> int:
     compositor = None
     passed, failed = 0, []
     try:
-        compositor, display = start_compositor(work)
+        compositor, display, instance = start_compositor(work)
         print(f"nested compositor on {display}")
         fixture = make_fixture(work)
 
@@ -425,7 +473,7 @@ def main(argv: list[str]) -> int:
                 continue
             run = None
             try:
-                run = Run(display, work, fixture, [])
+                run = Run(display, work, fixture, [], instance)
                 function(run, fixture)
                 print(f"  ok    {name}")
                 passed += 1
