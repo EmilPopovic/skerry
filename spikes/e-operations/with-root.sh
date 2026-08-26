@@ -28,6 +28,11 @@ if [ ! -x "$BIN" ]; then
 fi
 RUN_UID=${SUDO_UID:-$(id -u)}
 RUN_GID=${SUDO_GID:-$(id -g)}
+# `setpriv` changes the uid and not the environment, so `$HOME` still points at
+# root's home. The matrix looks for a directory under `$HOME` to find the root
+# filesystem, so without this the ext4 target disappears from a `sudo` run.
+RUN_HOME=$(getent passwd "$RUN_UID" | cut -d: -f6)
+RUN_HOME=${RUN_HOME:-/tmp}
 
 mounted=()
 loops=()
@@ -48,9 +53,39 @@ targets=()
 
 # btrfs needs about 110 MiB, xfs about 300 MiB. The images are sparse, so the
 # size costs nothing until it is used.
+#
+# FAT-family filesystems have no concept of ownership: every file belongs to
+# whoever the mount says, and `chown` on them fails with EPERM even as root. So
+# the owner is a *mount option* there, and getting that wrong is how the first
+# version of this script produced two filesystems that the matrix then could not
+# write to — and silently skipped.
+mount_opts() {
+  case $1 in
+    exfat|vfat) echo "loop,uid=$RUN_UID,gid=$RUN_GID,umask=022" ;;
+    *)          echo "loop" ;;
+  esac
+}
+
+needs_chown() {
+  case $1 in exfat|vfat) return 1 ;; *) return 0 ;; esac
+}
+
+package_for() {
+  case $1 in
+    btrfs) echo "btrfs-progs" ;;
+    xfs)   echo "xfsprogs" ;;
+    exfat) echo "exfatprogs" ;;
+    vfat)  echo "dosfstools" ;;
+    *)     echo "the package providing mkfs.$1" ;;
+  esac
+}
+
 make_fs() {
   local fs=$1 size=$2; shift 2
-  command -v "mkfs.$fs" >/dev/null || { echo "  skip $fs: no mkfs.$fs"; return; }
+  if ! command -v "mkfs.$fs" >/dev/null; then
+    echo "  skip $fs: no mkfs.$fs — install $(package_for "$fs")"
+    return
+  fi
   local img="$WORK/$fs.img" mnt="$WORK/$fs"
   truncate -s "$size" "$img" || return
   if ! "mkfs.$fs" "$@" "$img" >/dev/null 2>&1; then
@@ -58,14 +93,27 @@ make_fs() {
     return
   fi
   mkdir -p "$mnt"
-  if ! mount -o loop "$img" "$mnt" 2>/dev/null; then
+  if ! mount -o "$(mount_opts "$fs")" "$img" "$mnt" 2>/dev/null; then
     echo "  skip $fs: mount refused"
     return
   fi
   mounted+=("$mnt")
   local dir="$mnt/skerry"
-  mkdir -p "$dir"
-  chown "$RUN_UID:$RUN_GID" "$dir"
+  if ! mkdir -p "$dir"; then
+    echo "  skip $fs: could not create a directory on the mount"
+    return
+  fi
+  if needs_chown "$fs"; then
+    chown "$RUN_UID:$RUN_GID" "$dir" || { echo "  skip $fs: chown failed"; return; }
+  fi
+  # The matrix runs unprivileged, so a directory it cannot write to is a target
+  # that will be reported as a failure rather than tested. Check here, where the
+  # reason is still known.
+  if ! setpriv --reuid "$RUN_UID" --regid "$RUN_GID" --clear-groups \
+       test -w "$dir"; then
+    echo "  skip $fs: mounted, but uid $RUN_UID cannot write to it"
+    return
+  fi
   targets+=("$dir")
   echo "  ready $fs at $dir"
 }
@@ -100,14 +148,17 @@ else
 fi
 
 if [ ${#targets[@]} -eq 0 ]; then
-  echo "no additional filesystem could be created" >&2
+  echo >&2
+  echo "no additional filesystem could be created." >&2
+  echo "the reflink condition needs btrfs or xfs:  apt install btrfs-progs xfsprogs" >&2
   exit 1
 fi
 
 echo
-echo "running the matrix as uid $RUN_UID over ${#targets[@]} extra filesystem(s)"
+echo "running the matrix as uid $RUN_UID (HOME=$RUN_HOME) over ${#targets[@]} extra filesystem(s)"
 echo
-setpriv --reuid "$RUN_UID" --regid "$RUN_GID" --clear-groups "$BIN" run "${targets[@]}"
+setpriv --reuid "$RUN_UID" --regid "$RUN_GID" --clear-groups \
+  env HOME="$RUN_HOME" "$BIN" run "${targets[@]}"
 rc=$?
 
 # The NFS export outlives the mount, so it is removed explicitly.

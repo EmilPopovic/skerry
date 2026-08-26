@@ -257,6 +257,24 @@ by a check failing, and every one of them would have shipped.
    a directory as though it were a file. `FileType::from_raw_mode` masks with
    `S_IFMT`; doing it by hand did not.
 
+A fifth came out of the first `sudo ./with-root.sh` run on a machine that was not
+mine, and it is the worst of them:
+
+5. **A target that could not be used was silently skipped.** Under `sudo`,
+   `setpriv` changes the uid and not the environment, so `$HOME` still pointed at
+   root's home and the ext4 target vanished. The exFAT and vfat mounts printed
+   `ready` and then vanished too, because `chown` fails with `EPERM` on a
+   FAT-family filesystem — ownership there is a *mount option*, not a property of
+   a file. The run reported **24 pass, 0 fail** over two filesystems while three
+   of the four it had been asked for were not tested at all.
+
+   `discover` now returns everything it could not use, with the reason, and a
+   directory that was **named** and cannot be used is a `FAIL` rather than a
+   footnote — because somebody asked for that filesystem to be tested. This is
+   [12-measurement.md](../../docs/12-measurement.md)'s "a test that can only pass
+   has measured nothing" arriving in the one place I had not looked for it: not in
+   a check, but in the list of things to check.
+
 Two more findings are about the destination rather than about us, and both belong
 in `sk-fs`:
 
@@ -279,8 +297,14 @@ Spikes B, C and F have `mkfs.btrfs` *and* `mkfs.xfs` installed; what is missing 
 `mkfs`, mount, run the matrix as the *invoking* user, unmount, clean up:
 
 ```
+sudo apt install btrfs-progs xfsprogs     # this laptop has neither
 cargo build --release && sudo ./with-root.sh
 ```
+
+`mkfs.btrfs` and `mkfs.xfs` are **not installed on this laptop**, so root alone
+changes nothing here — the missing piece is the tool, not the privilege. Both
+remote machines already have them, which makes `sudo ./with-root.sh` on either of
+those the shortest path to the reflink number.
 
 It runs the matrix as the unprivileged user on purpose: root can set any extended
 attribute and write any file, so the "report what could not be preserved" paths

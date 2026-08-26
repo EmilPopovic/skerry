@@ -299,7 +299,14 @@ fn kernel() -> String {
 
 fn probe_mode(extra: &[String]) {
     header("filesystem capabilities");
-    for t in probe::discover(extra) {
+    let (targets, skipped) = probe::discover(extra);
+    for s in &skipped {
+        println!("  {} — SKIPPED: {}", s.dir.display(), s.reason);
+    }
+    if !skipped.is_empty() {
+        println!();
+    }
+    for t in targets {
         let c = &t.caps;
         println!("  {}", t.label);
         println!("    reflink            {}", probe::describe(&c.reflink));
@@ -322,12 +329,23 @@ fn run_mode(args: &[String]) {
     let strict = args.iter().any(|a| a == "--strict");
     let extra: Vec<String> = args.iter().filter(|a| !a.starts_with("--")).cloned().collect();
     header(if strict { "the torture matrix (strict)" } else { "the torture matrix" });
-    let targets = probe::discover(&extra);
+    let (targets, skipped) = probe::discover(&extra);
+    let mut report = report::Report::default();
+    // A directory that was named and cannot be used is a failure of the run, not
+    // a footnote: somebody asked for that filesystem to be tested.
+    for s in &skipped {
+        let evidence = format!("{}: {}", s.dir.display(), s.reason);
+        if s.named {
+            report.fail("target", evidence);
+        } else {
+            report.owed("target", evidence);
+        }
+    }
     if targets.is_empty() {
         eprintln!("no writable filesystem found");
+        println!("  {}", report.summary());
         std::process::exit(1);
     }
-    let mut report = report::Report::default();
     // One fixture per source filesystem, then one pair per destination. The
     // same-filesystem pairs come first because a cross-filesystem failure is only
     // interesting once the simple case works.

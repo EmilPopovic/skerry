@@ -180,48 +180,74 @@ fn time_residue(fd: &rustix::fd::OwnedFd) -> u64 {
     (123_456_789 - got_ns).unsigned_abs()
 }
 
+/// A directory that was asked for and could not be used, with the reason.
+pub struct Skipped {
+    pub dir: PathBuf,
+    pub reason: String,
+    /// True when the caller named this directory explicitly. A built-in candidate
+    /// that is absent is uninteresting; one the caller asked for is not.
+    pub named: bool,
+}
+
 /// Directories worth testing on this machine, one per distinct filesystem, plus
 /// anything the caller names. Discovery rather than a list: the point of this
 /// spike is to be re-runnable on a machine with filesystems this one does not
 /// have.
-pub fn discover(extra: &[String]) -> Vec<Target> {
+///
+/// Everything it *cannot* use is returned too. The first version of this silently
+/// skipped a directory it could not create, and a run under `sudo` — where `$HOME`
+/// still points at root's home and the loopback mounts are owned by root — lost
+/// ext4, exFAT and vfat without printing a word. A target that was asked for and
+/// quietly dropped is the exact failure `12-measurement.md` calls a test that can
+/// only pass.
+pub fn discover(extra: &[String]) -> (Vec<Target>, Vec<Skipped>) {
     let mut seen = Vec::new();
     let mut out = Vec::new();
+    let mut skipped = Vec::new();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let candidates: Vec<PathBuf> = [
+    let builtin: Vec<PathBuf> = [
         format!("{home}/skerry-spike-e"),
         "/tmp/skerry-spike-e".into(),
         "/dev/shm/skerry-spike-e".into(),
     ]
     .iter()
     .map(PathBuf::from)
-    .chain(extra.iter().map(PathBuf::from))
     .collect();
 
-    for dir in candidates {
-        if std::fs::create_dir_all(&dir).is_err() {
+    let candidates: Vec<(PathBuf, bool)> = builtin
+        .into_iter()
+        .map(|p| (p, false))
+        .chain(extra.iter().map(|e| (PathBuf::from(e), true)))
+        .collect();
+
+    for (dir, named) in candidates {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            skipped.push(Skipped { dir, reason: format!("cannot create the directory: {e}"), named });
             continue;
         }
+        // Creatable is not the same as writable: a directory owned by root under a
+        // loopback mount is both.
+        let probe_file = dir.join(".skerry-writable");
+        if let Err(e) = std::fs::write(&probe_file, b"x") {
+            skipped.push(Skipped { dir, reason: format!("not writable: {e}"), named });
+            continue;
+        }
+        let _ = std::fs::remove_file(&probe_file);
+
         let fstype = fstype_of(&dir);
-        // One target per filesystem *type* for the built-in candidates; a caller
-        // who names a directory explicitly gets it regardless, because two
-        // mounts of the same type can still behave differently.
-        let named = !dir.starts_with(&home) && !dir.starts_with("/tmp") && !dir.starts_with("/dev/shm");
         if !named && seen.contains(&fstype) {
             let _ = std::fs::remove_dir(&dir);
             continue;
         }
         seen.push(fstype.clone());
         match capabilities(&dir) {
-            Ok(caps) => out.push(Target {
-                label: format!("{fstype} at {}", dir.display()),
-                dir,
-                caps,
-            }),
-            Err(_) => continue,
+            Ok(caps) => out.push(Target { label: format!("{fstype} at {}", dir.display()), dir, caps }),
+            Err(e) => {
+                skipped.push(Skipped { dir, reason: format!("capability probe failed: {e}"), named })
+            }
         }
     }
-    out
+    (out, skipped)
 }
 
 pub fn describe(r: &Result<(), Errno>) -> String {
