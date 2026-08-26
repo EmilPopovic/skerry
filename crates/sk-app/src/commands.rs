@@ -25,6 +25,7 @@ pub fn registry() -> Registry<App> {
     navigate(&mut registry);
     select(&mut registry);
     view(&mut registry);
+    file(&mut registry);
     help(&mut registry);
     registry
 }
@@ -217,6 +218,38 @@ fn view(registry: &mut Registry<App>) {
             keys: &["alt+3"],
             enabled: |_| true,
             run: |app: &mut App| app.sort_by(SortColumn::Modified),
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// The clipboard.
+fn file(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "file.copy",
+            name: "action.copy",
+            group: Group::File,
+            keys: &["ctrl+c"],
+            enabled: |app: &App| app.pane.listing.rows() > 0,
+            run: App::copy_selection,
+        },
+        CommandSpec {
+            id: "file.copy_path",
+            name: "action.copy_path",
+            group: Group::File,
+            keys: &["ctrl+shift+c"],
+            enabled: |app: &App| app.pane.listing.rows() > 0,
+            run: App::copy_path,
+        },
+        CommandSpec {
+            id: "file.paste_location",
+            name: "action.paste_location",
+            group: Group::File,
+            keys: &["ctrl+v"],
+            enabled: |_| true,
+            run: App::paste_location,
         },
     ] {
         registry.add(spec);

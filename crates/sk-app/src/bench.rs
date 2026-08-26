@@ -14,19 +14,17 @@
 //! [`sk_gpu::FrameStats`].
 
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use sk_gpu::{DrawList, FrameStats, Renderer};
-use sk_model::{Problem, ProblemKind};
+use sk_gpu::{DrawList, FrameStats};
+use sk_model::Problem;
 use sk_plat::Size;
-use sk_text::{Fonts, LayoutCache};
+use sk_text::LayoutCache;
 use sk_ui::{Painter, Theme};
-use sk_util::{Pool, Waker};
 
 use crate::frames::{BUDGET_US, Frames};
+use crate::headless::Session;
 use crate::layout::Layout;
-use crate::pane::Jobs;
 use crate::view::{self, Chrome, Diagnostics};
 
 /// What to measure.
@@ -43,20 +41,8 @@ pub struct Bench {
 
 /// Runs the trace and prints the result.
 pub fn run(request: &Bench) -> Result<(), Problem> {
-    let physical = (
-        (request.logical.0 * request.scale_120).div_ceil(120).max(1),
-        (request.logical.1 * request.scale_120).div_ceil(120).max(1),
-    );
-    let scale = request.scale_120 as f32 / 120.0;
-
-    let mut renderer = Renderer::offscreen(physical)?;
-    let mut fonts = Fonts::discover()?;
-    let waker = Waker::new()
-        .map_err(|error| Problem::plain(ProblemKind::NoDisplay, format!("eventfd: {error}")))?;
-    let (sender, updates) = mpsc::channel();
-    let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
-
-    let (mut pane, read_ms) = crate::capture::read_fully(&request.path, &jobs, &updates);
+    let mut session = Session::open(request.logical, request.scale_120)?;
+    let (mut pane, read_ms) = session.read_fully(&request.path);
 
     let theme = Theme::dark();
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
@@ -87,33 +73,39 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
         pane.scroll.to(position * span + f32::from(u8::try_from(frame % 7).unwrap_or(0)) * 0.37);
 
         let started = Instant::now();
-        list.begin(physical);
-        let (finished, panics) = jobs.pool.stats();
+        list.begin(session.physical);
         let mut diagnostics = Diagnostics {
             frames: &mut frames,
             last: stats,
-            atlas: renderer.atlas_stats(),
+            atlas: session.renderer.atlas_stats(),
             shaping: (cache.len(), 0, 0),
-            pool: (jobs.pool.width(), finished, panics),
-            adapter: renderer.adapter(),
-            backend: renderer.backend(),
-            physical,
+            pool: session.pool_stats(),
+            adapter: session.renderer.adapter(),
+            backend: session.renderer.backend(),
+            physical: session.physical,
             scale_120: request.scale_120,
+            capabilities: "offscreen",
         };
         {
             let mut painter = Painter {
                 list: &mut list,
-                fonts: &mut fonts,
+                fonts: &mut session.fonts,
                 cache: &mut cache,
                 theme: &theme,
-                scale,
+                scale: session.scale,
             };
-            let chrome =
-                Chrome { keys: None, stats: false, typed: None, band: None, watching: true };
+            let chrome = Chrome {
+                keys: None,
+                stats: false,
+                typed: None,
+                band: None,
+                watching: true,
+                notice: None,
+            };
             view::draw(&mut painter, &pane, &layout, now, &chrome, &mut diagnostics);
         }
         let build_us = started.elapsed().as_micros() as u64;
-        stats = renderer.draw(&mut list, &mut fonts, theme.palette.background);
+        stats = session.renderer.draw(&mut list, &mut session.fonts, theme.palette.background);
         worst_quads = worst_quads.max(stats.quads);
         rasterized += stats.rasterized;
 
@@ -147,16 +139,16 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
     println!(
         "{:>10}  {worst_quads} quads worst · {} glyphs cached · {rasterized} rasterized over the trace",
         "frame",
-        renderer.atlas_stats().0,
+        session.renderer.atlas_stats().0,
     );
     println!(
         "{:>10}  {}×{} at {}% · {} on {}",
         "surface",
-        physical.0,
-        physical.1,
+        session.physical.0,
+        session.physical.1,
         request.scale_120 * 100 / 120,
-        renderer.adapter(),
-        renderer.backend(),
+        session.renderer.adapter(),
+        session.renderer.backend(),
     );
     Ok(())
 }

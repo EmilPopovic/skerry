@@ -5,9 +5,10 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sk_cmd::Registry;
+use sk_desktop::{Applications, Launcher, MimeDatabase};
 use sk_gpu::{DrawList, FrameStats, Renderer};
 use sk_model::{Flags, Problem, ProblemKind, SortColumn};
-use sk_plat::{Button, Event, Point, Size, Window, WindowConfig};
+use sk_plat::{Button, Content, Event, Point, Selection, Size, Window, WindowConfig};
 use sk_text::{Fonts, LayoutCache};
 use sk_ui::{Painter, Theme};
 use sk_util::{Pool, Waker};
@@ -24,6 +25,12 @@ use crate::view::{self, Chrome, Diagnostics};
 /// coming back to the keyboard starts a fresh jump rather than extending an
 /// abandoned one.
 const TYPE_AHEAD_WINDOW: Duration = Duration::from_secs(1);
+
+/// How long a message stays in the status line.
+///
+/// Four seconds: long enough to read a sentence, short enough that it is gone
+/// before it becomes furniture.
+const NOTICE_WINDOW: Duration = Duration::from_secs(4);
 
 /// The soonest a change notification may cause another read.
 ///
@@ -50,6 +57,33 @@ pub struct Options {
     pub stats: bool,
     /// When the process started, for the cold-start measurement.
     pub started: Instant,
+}
+
+/// The platform capabilities that were found, as one line.
+///
+/// [ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md) says
+/// capabilities are probed and never compiled in. A probe nobody can see is a
+/// probe nobody can debug, so the answer goes on screen under `F2`.
+fn describe(found: &sk_plat::Capabilities) -> String {
+    [
+        ("fractional", found.fractional_scale),
+        ("viewport", found.viewporter),
+        ("decorations", found.server_side_decorations),
+        ("keyboard", found.keyboard),
+        ("pointer", found.pointer),
+        ("clipboard", found.clipboard),
+        ("primary", found.primary_selection),
+    ]
+    .into_iter()
+    .filter_map(|(name, present)| present.then_some(name))
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
+/// The freedesktop databases, read together on one job.
+struct Desktop {
+    mime: MimeDatabase,
+    apps: Applications,
 }
 
 /// The application.
@@ -79,6 +113,24 @@ pub struct App {
     refresh_owed: bool,
     /// Whether the watcher managed to arm on the current directory.
     watching: bool,
+    /// The platform capabilities found at start-up, as one line.
+    capabilities: String,
+
+    /// The freedesktop databases, once the job that reads them has finished.
+    ///
+    /// `None` for the first few milliseconds. Loaded on a job because `globs2`
+    /// and `mimeinfo.cache` are files, and rule 1 does not have an exception for
+    /// files that are small.
+    desktop: Option<Box<Desktop>>,
+    desktop_rx: Receiver<Box<Desktop>>,
+    launcher: Launcher,
+    /// An open asked for before the databases arrived.
+    open_owed: Option<PathBuf>,
+    /// Something to tell the person, shown in the status line.
+    notice: Option<(String, Instant)>,
+    /// Bytes read from a peer's clipboard, once the job that read them is done.
+    paste_rx: Receiver<Vec<u8>>,
+    paste_tx: std::sync::mpsc::Sender<Vec<u8>>,
     layout: Layout,
     frames: Frames,
     last: FrameStats,
@@ -126,6 +178,22 @@ impl App {
         let mut pane = Pane::new(options.path);
         pane.reload(&jobs);
 
+        // The association databases are a few thousand lines across two files.
+        // Read on a job, so the first frame does not wait for them and the UI
+        // thread never opens one.
+        let (desktop_tx, desktop_rx) = mpsc::channel();
+        {
+            let wake = waker.handle();
+            jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+                let loaded =
+                    Box::new(Desktop { mime: MimeDatabase::load(), apps: Applications::load() });
+                if desktop_tx.send(loaded).is_ok() {
+                    wake.wake();
+                }
+            });
+        }
+
+        let (paste_tx, paste_rx) = mpsc::channel();
         let (watch_sender, changes) = mpsc::channel();
         let watcher = sk_fs::Watcher::new(watch_sender, waker.handle())
             .map_err(|error| Problem::plain(ProblemKind::NoDisplay, format!("inotify: {error}")))?;
@@ -149,6 +217,7 @@ impl App {
         let theme = if options.dark { Theme::dark() } else { Theme::light() };
         let logical = window.logical();
         let scale_120 = window.scale_120();
+        let capabilities = describe(window.capabilities());
         let now = Instant::now();
         Ok(Self {
             adapter: renderer.adapter().to_owned(),
@@ -173,6 +242,14 @@ impl App {
             refreshed: Instant::now(),
             refresh_owed: false,
             watching: true,
+            capabilities,
+            desktop: None,
+            desktop_rx,
+            launcher: Launcher::default(),
+            open_owed: None,
+            notice: None,
+            paste_rx,
+            paste_tx,
             frames: Frames::new(),
             last: FrameStats::default(),
             pending: Vec::with_capacity(64),
@@ -215,6 +292,8 @@ impl App {
             self.drain_platform(&commands);
             self.drain_jobs();
             self.drain_changes();
+            self.drain_desktop();
+            self.drain_paste();
             self.advance();
             if self.dirty {
                 self.render(&commands);
@@ -239,6 +318,7 @@ impl App {
             (!self.typed.is_empty())
                 .then(|| TYPE_AHEAD_WINDOW.saturating_sub(self.typed_at.elapsed())),
             self.refresh_owed.then(|| REFRESH_FLOOR.saturating_sub(self.refreshed.elapsed())),
+            self.notice.as_ref().map(|(_, at)| NOTICE_WINDOW.saturating_sub(at.elapsed())),
         ];
         deadlines.into_iter().flatten().min()
     }
@@ -288,6 +368,36 @@ impl App {
         self.dirty = true;
     }
 
+    /// Applies whatever came back from a clipboard read.
+    fn drain_paste(&mut self) {
+        let Ok(bytes) = self.paste_rx.try_recv() else { return };
+        let text = String::from_utf8_lossy(&bytes);
+        let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+        let path = sk_plat::decode_uri(first)
+            .or_else(|| (!first.is_empty()).then(|| PathBuf::from(first)));
+        match path.filter(|path| path.is_dir()) {
+            Some(path) => self.pane.open(path, &self.jobs),
+            None => {
+                self.notice = Some((
+                    sk_model::i18n::lookup("error.clipboard_not_a_folder").to_owned(),
+                    Instant::now(),
+                ));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Takes delivery of the freedesktop databases, once.
+    fn drain_desktop(&mut self) {
+        if let Ok(loaded) = self.desktop_rx.try_recv() {
+            self.desktop = Some(loaded);
+            if let Some(path) = self.open_owed.take() {
+                self.launch(path);
+            }
+            self.dirty = true;
+        }
+    }
+
     fn advance(&mut self) {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame).as_secs_f32();
@@ -308,6 +418,11 @@ impl App {
         let armed = self.watcher.armed();
         if armed != self.watching {
             self.watching = armed;
+            self.dirty = true;
+        }
+        self.launcher.reap();
+        if self.notice.as_ref().is_some_and(|(_, at)| at.elapsed() > NOTICE_WINDOW) {
+            self.notice = None;
             self.dirty = true;
         }
     }
@@ -372,9 +487,118 @@ impl App {
     // registry holds function pointers and nothing else.
     // ------------------------------------------------------------------
 
-    /// Opens the focused entry, if it is something that opens.
+    /// Opens the focused entry: a directory in this window, a file in whatever
+    /// the desktop says owns it.
     pub(crate) fn open_focused(&mut self) {
-        self.pane.open_focused(&self.jobs);
+        if self.pane.open_focused(&self.jobs) {
+            return;
+        }
+        let Some(id) = self.pane.focused() else { return };
+        let path = self.pane.path.join(self.pane.listing.name(id));
+        self.launch(path);
+    }
+
+    /// Puts the selected paths on the clipboard.
+    pub(crate) fn copy_selection(&mut self) {
+        let paths = self.selected_paths();
+        let Some(first) = paths.first().cloned() else { return };
+        if !self.window.capabilities().clipboard {
+            self.notice =
+                Some((sk_model::i18n::lookup("error.no_clipboard").to_owned(), Instant::now()));
+            return;
+        }
+        let count = paths.len();
+        self.window.set_selection(Selection::Clipboard, Content::paths(&paths));
+        // The primary selection too, so a middle click in a terminal pastes what
+        // was just copied. Hyprland discards this silently unless
+        // `misc:middle_click_paste` is on, which is a documented limitation with
+        // no fallback and no way to detect.
+        self.window.set_selection(Selection::Primary, Content::paths(&paths));
+        let message = if count == 1 {
+            let name = first.file_name().map(|name| name.to_string_lossy().into_owned());
+            sk_model::i18n::format("notice.copied_one", &[&name.unwrap_or_default()])
+        } else {
+            sk_model::i18n::format("notice.copied", &[&count])
+        };
+        self.notice = Some((message, Instant::now()));
+    }
+
+    /// Puts the focused entry's full path on the clipboard as plain text.
+    pub(crate) fn copy_path(&mut self) {
+        let paths = self.selected_paths();
+        let Some(path) = paths.first() else { return };
+        let text = path.to_string_lossy().into_owned();
+        self.window.set_selection(Selection::Clipboard, Content::text(&text));
+        self.window.set_selection(Selection::Primary, Content::text(&text));
+        self.notice =
+            Some((sk_model::i18n::format("notice.copied_path", &[&text]), Instant::now()));
+    }
+
+    /// Reads the clipboard and, if it names a folder, goes there.
+    ///
+    /// The read happens on a job: the peer writes to the pipe whenever it likes
+    /// and may never write at all, and waiting for it here is rule 1's canonical
+    /// failure with a different cause.
+    pub(crate) fn paste_location(&mut self) {
+        // The type the peer prefers, of the ones we can make sense of.
+        let wanted = ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+        let offered = self.window.clipboard().offered().to_vec();
+        let Some(mime) = wanted.iter().find(|want| offered.iter().any(|have| have == *want)) else {
+            self.notice = Some((
+                sk_model::i18n::lookup("error.clipboard_not_a_folder").to_owned(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        let sender = self.paste_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let mut bytes = Vec::new();
+            let mut file = std::fs::File::from(fd);
+            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            if sender.send(bytes).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// The full paths of what is selected, or of the cursor if nothing is.
+    fn selected_paths(&self) -> Vec<PathBuf> {
+        let listing = &self.pane.listing;
+        let mut paths: Vec<PathBuf> =
+            self.pane.selection.iter().map(|id| self.pane.path.join(listing.name(id))).collect();
+        if let Some(id) = self.pane.focused().filter(|_| paths.is_empty()) {
+            paths.push(self.pane.path.join(listing.name(id)));
+        }
+        paths
+    }
+
+    /// Starts the application that owns `path`.
+    ///
+    /// Deferred if the databases have not arrived yet, which is a window of a few
+    /// milliseconds after start-up. Dropping the request instead would make a
+    /// double click do nothing exactly once, which is the kind of thing a person
+    /// blames themselves for.
+    fn launch(&mut self, path: PathBuf) {
+        let Some(desktop) = self.desktop.as_ref() else {
+            self.open_owed = Some(path);
+            return;
+        };
+        let mime = desktop.mime.of(&path, false);
+        let Some(entry) = desktop.apps.default_for(&mime) else {
+            self.notice =
+                Some((sk_model::i18n::format("error.no_handler", &[&mime]), Instant::now()));
+            return;
+        };
+        let name = entry.name.clone();
+        let started = self.launcher.open(&entry, std::slice::from_ref(&path));
+        let message = if started {
+            sk_model::i18n::format("notice.opening", &[&name])
+        } else {
+            sk_model::i18n::format("error.launch_failed", &[&name])
+        };
+        self.notice = Some((message, Instant::now()));
     }
 
     /// Goes to the parent directory.
@@ -660,6 +884,8 @@ impl App {
             backend,
             scale_120,
             watching,
+            notice,
+            capabilities,
             ..
         } = self;
 
@@ -671,6 +897,7 @@ impl App {
             typed: (!typed.is_empty()).then_some(typed.as_str()),
             band: *band,
             watching: *watching,
+            notice: notice.as_ref().map(|(message, _)| message.as_str()),
         };
         let atlas = renderer.atlas_stats();
         let (hits, misses, _) = cache.stats();
@@ -687,6 +914,7 @@ impl App {
             backend,
             physical,
             scale_120: *scale_120,
+            capabilities,
         };
 
         {

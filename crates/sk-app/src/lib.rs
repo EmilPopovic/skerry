@@ -27,6 +27,7 @@ mod bench;
 mod capture;
 mod commands;
 mod frames;
+mod headless;
 mod keys;
 mod layout;
 mod pane;

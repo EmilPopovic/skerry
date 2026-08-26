@@ -113,3 +113,19 @@ status.unwatched = · not watching for changes
 # A folder total with something missing from it: an unreadable subdirectory, or
 # one on another filesystem. The number is a lower bound and says so.
 size.atleast = ≥ {0}
+
+# Opening a file with the application the desktop says owns it.
+error.no_handler = Nothing installed opens {0}.
+error.launch_failed = Could not start {0}.
+notice.opening = Opening with {0}
+
+# The clipboard.
+action.copy = Copy
+action.copy_path = Copy the path as text
+action.paste_location = Go to the copied folder
+notice.copied = Copied {0} items
+notice.copied_one = Copied {0}
+notice.copied_path = Copied {0}
+error.clipboard_not_a_folder = The clipboard does not hold a folder.
+error.no_clipboard = This compositor offers no clipboard.
+stats.capabilities = platform

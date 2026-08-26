@@ -145,14 +145,33 @@ defects they exposed.
 | --- | --- |
 | Wayland windowing, `xdg_shell`, server-side decoration negotiation | **X11**, and the whole of `x11rb` |
 | Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change | The 1×1 pre-map probe that would make **frame 1** right and not just frame 2 |
-| Keyboard through `xkbcommon`, with key repeat implemented client-side | **Clipboard, primary selection, drag-and-drop, IME** — the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
+| Keyboard through `xkbcommon`, with key repeat implemented client-side | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
+| **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural | A paste that pastes *files*, which needs M3's operation engine |
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | A headless compositor fixture and input-trace replay in CI |
 | Offscreen rendering, PNG capture, and a comparable glyph stream — the golden-frame harness minus its references | The reference images, the perceptual diff, and llvmpipe in CI |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8) |
 
-The three capabilities left are the expensive ones, and Spike D already knows what
-each of them costs and which four ordering invariants they have to hold.
+The two capabilities left are the expensive ones, and Spike D already knows what
+each of them costs and which ordering invariants they have to hold. Drag-and-drop
+is deliberately after X11: XDND has five actions where Wayland has three, and an
+API designed against one dialect would be wrong in a way that is expensive to
+correct.
+
+**Four things arrived ahead of their milestone**, each into the crate the table
+in [04-architecture.md](04-architecture.md#crate-responsibilities) already names
+for it, because each one is what a person reaches for on the first day of
+dogfooding:
+
+| Pulled forward | From | Why now |
+| --- | --- | --- |
+| `sk-fs::watch` — inotify | M1 | A listing that goes stale is a listing you cannot trust, and Spike C had already resolved the design |
+| `sk-cmd` — the command registry | M6 | Rule 2 is one of the eight expensive-to-undo invariants, and its cost grows with every command added before it |
+| `sk-desktop` — MIME, `.desktop`, launch | M7 | A file manager that cannot open a file is a directory listing |
+| `sk-index::size` — recursive folder totals | M4 | A folder with no size is a folder you have to open to understand |
+
+None of them brought a dependency: every parser is ours, which is what
+[07-dependencies.md](07-dependencies.md) said it would cost and what it did cost.
 
 ### M1 · 4 wk — Walking skeleton
 One window, one pane, Details view over the columnar store. Navigation, sorting, selection,

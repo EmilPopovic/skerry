@@ -4,8 +4,10 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **M0, in progress.** Phase 0's six spikes are resolved and there is a window
-on screen: nine crates, a Wayland platform layer, a GPU renderer, real text shaping,
-and a Details view over a real directory. What is done and what is owed is in
+on screen: twelve crates, a Wayland platform layer, a GPU renderer, real text shaping,
+and a Details view over a real directory that stays live under inotify, shows folder
+totals as they are computed, opens files in whatever the desktop says owns them, and
+copies to the clipboard. What is done and what is owed is in
 [docs/08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer).
 
 ```

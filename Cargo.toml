@@ -7,6 +7,7 @@ members = [
     "crates/sk-text",
     "crates/sk-fs",
     "crates/sk-cmd",
+    "crates/sk-desktop",
     "crates/sk-gpu",
     "crates/sk-index",
     "crates/sk-ui",
@@ -27,12 +28,13 @@ sk-plat = { path = "crates/sk-plat" }
 sk-text = { path = "crates/sk-text" }
 sk-fs = { path = "crates/sk-fs" }
 sk-cmd = { path = "crates/sk-cmd" }
+sk-desktop = { path = "crates/sk-desktop" }
 sk-gpu = { path = "crates/sk-gpu" }
 sk-index = { path = "crates/sk-index" }
 sk-ui = { path = "crates/sk-ui" }
 sk-app = { path = "crates/sk-app" }
 
-rustix = { version = "1.1", default-features = false, features = ["std", "fs", "event", "mm", "process", "time"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "event", "mm", "pipe", "process", "time"] }
 # `system` selects the libwayland backend, which is what gives us a real
 # `*mut wl_display` for the GPU surface; `dlopen` loads it at run time so the
 # binary still starts on a machine that has X11 and no Wayland.

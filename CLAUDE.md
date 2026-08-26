@@ -6,9 +6,11 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress. There is a window on screen.** Nine crates, 131 tests, every
-gate green, and a Details view over a real directory at a **0.445 ms frame p99
-with 200,000 entries in it**. What is done and what is owed:
+**M0, in progress, and something you can use for an afternoon.** Twelve crates,
+204 tests, every gate green: a Details view over a real directory at a **0.445 ms
+frame p99 with 200,000 entries in it**, live under inotify, with folder totals,
+Back and Forward, a command registry behind every key, files that open in the
+application the desktop says owns them, and the clipboard. What is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the
 three budget rows currently missed:
 [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).

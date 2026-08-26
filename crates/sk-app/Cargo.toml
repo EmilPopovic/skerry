@@ -13,6 +13,7 @@ level = 4
 sk-util = { workspace = true }
 sk-model = { workspace = true }
 sk-cmd = { workspace = true }
+sk-desktop = { workspace = true }
 sk-fs = { workspace = true }
 sk-text = { workspace = true }
 sk-gpu = { workspace = true }

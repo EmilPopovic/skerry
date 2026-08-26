@@ -32,6 +32,8 @@ pub struct Chrome<'a> {
     pub typed: Option<&'a str>,
     /// The rubber-band rectangle, while one is being dragged.
     pub band: Option<(Point, Point)>,
+    /// Something to tell the person, which replaces the counts while it is up.
+    pub notice: Option<&'a str>,
     /// Whether changes to this directory are being watched.
     ///
     /// `false` on a filesystem inotify does not cover — every NFS mount — and the
@@ -60,6 +62,12 @@ pub struct Diagnostics<'a> {
     pub physical: (u32, u32),
     /// The compositor's scale, over 120.
     pub scale_120: u32,
+    /// Which platform capabilities were found at run time.
+    ///
+    /// [ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md) says
+    /// capabilities are probed and never compiled in. A probe nobody can see is
+    /// a probe nobody can debug, so the answer is on screen.
+    pub capabilities: &'a str,
 }
 
 /// Draws one frame.
@@ -408,7 +416,9 @@ fn status(
 
     let rows = pane.listing.rows();
     let selected = pane.selection.count();
-    let left = if pane.loading {
+    let left = if let Some(notice) = chrome.notice {
+        notice.to_owned()
+    } else if pane.loading {
         i18n::format("status.loading", &[&format::grouped(rows)])
     } else if selected > 0 {
         i18n::format("status.counts", &[&format::grouped(rows), &format::grouped(selected)])
@@ -498,7 +508,7 @@ fn stats_overlay(
     let (workers, jobs, panics) = diagnostics.pool;
     let last = diagnostics.last;
 
-    let rows: [(&str, String); 10] = [
+    let rows: [(&str, String); 11] = [
         (i18n::lookup("stats.frame"), format!("{p50:.2} / {p99:.2} / {worst:.2} ms")),
         (
             i18n::lookup("stats.budget"),
@@ -541,6 +551,7 @@ fn stats_overlay(
                 diagnostics.scale_120 * 100 / 120
             ),
         ),
+        (i18n::lookup("stats.capabilities"), diagnostics.capabilities.to_owned()),
         (diagnostics.backend, diagnostics.adapter.to_owned()),
     ];
 
@@ -643,11 +654,18 @@ mod tests {
             backend: "",
             physical: (1250, 775),
             scale_120: 150,
+            capabilities: "",
         };
         {
             let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
-            let chrome =
-                Chrome { keys: None, stats: false, typed: None, band: None, watching: true };
+            let chrome = Chrome {
+                keys: None,
+                stats: false,
+                typed: None,
+                band: None,
+                watching: true,
+                notice: None,
+            };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test
             // is looking for.

@@ -16,6 +16,7 @@
 //! * A selection may only be set with a serial from a real input event, so the
 //!   serials are kept per device rather than one "latest" value.
 
+pub mod clipboard;
 mod seat;
 
 use std::collections::VecDeque;
@@ -27,11 +28,14 @@ use rustix::event::{PollFd, PollFlags};
 use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_compositor, wl_output, wl_registry, wl_seat, wl_surface};
+use wayland_client::protocol::{
+    wl_compositor, wl_data_device_manager, wl_output, wl_registry, wl_seat, wl_surface,
+};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
 };
+use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_manager_v1;
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
@@ -85,6 +89,13 @@ pub struct Capabilities {
     pub keyboard: bool,
     /// A pointer is present on the seat.
     pub pointer: bool,
+    /// `wl_data_device_manager`: the clipboard, and later drag-and-drop.
+    pub clipboard: bool,
+    /// `zwp_primary_selection_device_manager_v1`. Present here does **not** mean
+    /// usable: Hyprland advertises it and silently discards `set_selection`
+    /// unless `misc:middle_click_paste` is on, which Spike D found by
+    /// elimination because nothing reports it.
+    pub primary_selection: bool,
     /// Every advertised global with its version, so "why did that not work" has
     /// an answer that does not need a second run.
     pub advertised: Vec<(String, u32)>,
@@ -106,6 +117,18 @@ struct State {
 
     capabilities: Capabilities,
     seat: Seat,
+    data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    primary_manager:
+        Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+    clipboard: clipboard::Clipboard,
+    /// An offer whose types are still arriving, before the `selection` event
+    /// that adopts it.
+    pending_offer: Option<wayland_client::protocol::wl_data_offer::WlDataOffer>,
+    pending_types: Vec<String>,
+    pending_primary_offer: Option<
+        wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1,
+    >,
+    pending_primary_types: Vec<String>,
 
     /// The compositor's scale as a numerator over 120.
     ///
@@ -152,6 +175,23 @@ impl Window {
             bind(&globals, &handle, 1..=1);
         let decorations: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1> =
             bind(&globals, &handle, 1..=1);
+        let data_manager: Option<wl_data_device_manager::WlDataDeviceManager> =
+            bind(&globals, &handle, 3..=3);
+        let primary_manager: Option<
+            zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
+        > = bind(&globals, &handle, 1..=1);
+
+        // **Before the first commit.** A data device created after the first
+        // keyboard `enter` never learns the current selection, and the symptom is
+        // an empty clipboard with nothing reporting an error — which is exactly
+        // how Spike D lost an afternoon.
+        let mut clipboard = clipboard::Clipboard::default();
+        if let Some(manager) = &data_manager {
+            clipboard.device = Some(manager.get_data_device(&wl_seat, &handle, ()));
+        }
+        if let Some(manager) = &primary_manager {
+            clipboard.primary_device = Some(manager.get_device(&wl_seat, &handle, ()));
+        }
 
         let surface = compositor.create_surface(&handle, ());
         // The order below is the invariant, not a style: both objects exist
@@ -188,6 +228,8 @@ impl Window {
             server_side_decorations: false,
             keyboard: false,
             pointer: false,
+            clipboard: data_manager.is_some(),
+            primary_selection: primary_manager.is_some(),
             advertised,
         };
 
@@ -199,6 +241,13 @@ impl Window {
             decoration,
             capabilities,
             seat: Seat::new(&wl_seat, &handle),
+            data_manager,
+            primary_manager,
+            clipboard,
+            pending_offer: None,
+            pending_types: Vec::new(),
+            pending_primary_offer: None,
+            pending_primary_types: Vec::new(),
             scale_120: 120,
             fallback_scale: 1,
             logical: config.logical,

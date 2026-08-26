@@ -10,10 +10,11 @@
 //!
 //! # What is here and what is owed
 //!
-//! Wayland windowing, input and scale are here. **X11, clipboard, drag-and-drop
-//! and IME are not yet**, and M0 is not finished without them; Spike D proved
-//! each of them against real GTK and Qt peers, and the ordering invariants it
-//! found are recorded in [`wayland`].
+//! Wayland windowing, input, scale, the clipboard and the primary selection are
+//! here. **X11, drag-and-drop and IME are not yet**, and M0 is not finished
+//! without them; Spike D proved each of them against real GTK and Qt peers, and
+//! the ordering invariants it found are recorded in [`wayland`] and in
+//! [`wayland::clipboard`].
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 // `missing_docs` and `clippy::pedantic` are warned workspace-wide from the lint
@@ -25,4 +26,5 @@ pub mod keys;
 pub mod wayland;
 
 pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size};
+pub use wayland::clipboard::{Clipboard, Content, Selection, decode_uri};
 pub use wayland::{Capabilities, RawHandles, Window, WindowConfig};
