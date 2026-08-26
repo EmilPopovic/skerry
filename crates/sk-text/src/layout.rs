@@ -7,11 +7,18 @@ use crate::shape::ShapedRun;
 
 /// Identifies a shaped run by what it is for rather than by its text.
 ///
-/// A lookup is then a hash of eight bytes instead of a hash of a filename, and
+/// A lookup is then a hash of twelve bytes instead of a hash of a filename, and
 /// the arena is not touched at all on a hit.
+///
+/// **The listing is part of the key and is not optional.** An `EntryId` is an
+/// index, so without it entry 3 of a directory and entry 3 of the next one are
+/// the same key and the cache serves the first when asked for the second. That
+/// is not hypothetical — see `sk_model::Listing::version`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct RunKey {
-    /// Which entry in the listing.
+    /// Which listing, from `sk_model::Listing::version`.
+    pub listing: u32,
+    /// Which entry in that listing.
     pub entry: u32,
     /// Which column of that entry.
     pub column: u8,
@@ -23,10 +30,11 @@ pub struct RunKey {
 }
 
 impl RunKey {
-    /// A key for one cell.
+    /// A key for one cell of one listing.
     #[must_use]
-    pub fn cell(entry: u32, column: u8, weight: Weight, px_size: f32) -> Self {
+    pub fn cell(listing: u32, entry: u32, column: u8, weight: Weight, px_size: f32) -> Self {
         Self {
+            listing,
             entry,
             column,
             weight: weight as u8,
@@ -105,15 +113,6 @@ impl LayoutCache {
         (self.hits, self.misses, self.generations)
     }
 
-    /// Drops everything.
-    ///
-    /// Called when a new listing is published: the keys are entry indices, and
-    /// entry 4 in the new listing is a different file.
-    pub fn invalidate(&mut self) {
-        self.live.clear();
-        self.stale.clear();
-    }
-
     /// The shaped run for a string, keyed by the string itself.
     ///
     /// For chrome — a path, a column header, a status line, a help entry. Cheap
@@ -153,7 +152,23 @@ impl LayoutCache {
     }
 
     /// The shaped run for `key`, shaping `text` on a miss.
+    ///
+    /// There is no `invalidate`, and there was: the key carries the listing, so a
+    /// new listing simply cannot hit an old entry and eviction handles the memory.
+    /// A cache with an `invalidate` is a cache with a caller who has to remember
+    /// to call it, and that caller did not.
     pub fn get_or_shape(&mut self, key: RunKey, text: &str, fonts: &mut Fonts) -> &ShapedRun {
+        // Cheap staleness detector for debug builds and tests. A hit whose run
+        // was shaped from a different string is the bug this key exists to make
+        // impossible; comparing lengths costs nothing and catches almost all of
+        // it without storing the string.
+        debug_assert!(
+            self.live
+                .get(&key)
+                .or_else(|| self.stale.get(&key))
+                .is_none_or(|run| run.source_len == text.len()),
+            "cache hit for {key:?} was shaped from a different string than {text:?}"
+        );
         if self.live.contains_key(&key) {
             self.hits += 1;
         } else if let Some(run) = self.stale.remove(&key) {
@@ -203,20 +218,57 @@ mod tests {
     use crate::fonts::{Fonts, Weight};
 
     #[test]
-    fn a_key_distinguishes_weight_column_and_size() {
-        let base = RunKey::cell(7, 0, Weight::Regular, 13.0);
-        assert_ne!(base, RunKey::cell(7, 1, Weight::Regular, 13.0));
-        assert_ne!(base, RunKey::cell(7, 0, Weight::Bold, 13.0));
-        assert_ne!(base, RunKey::cell(7, 0, Weight::Regular, 16.25));
-        assert_eq!(base, RunKey::cell(7, 0, Weight::Regular, 13.0));
+    fn a_key_distinguishes_listing_weight_column_and_size() {
+        let base = RunKey::cell(1, 7, 0, Weight::Regular, 13.0);
+        assert_ne!(base, RunKey::cell(1, 7, 1, Weight::Regular, 13.0));
+        assert_ne!(base, RunKey::cell(1, 7, 0, Weight::Bold, 13.0));
+        assert_ne!(base, RunKey::cell(1, 7, 0, Weight::Regular, 16.25));
+        assert_eq!(base, RunKey::cell(1, 7, 0, Weight::Regular, 13.0));
         assert!((base.px_size() - 13.0).abs() < f32::EPSILON);
+    }
+
+    /// The reported defect, as a unit: the same row of two different listings is
+    /// two different keys. Without this, navigating into a subdirectory drew the
+    /// parent's names in the child's rows.
+    #[test]
+    fn the_same_row_of_two_listings_is_two_keys() {
+        let first = RunKey::cell(41, 3, 0, Weight::Regular, 13.0);
+        let second = RunKey::cell(42, 3, 0, Weight::Regular, 13.0);
+        assert_ne!(first, second);
+    }
+
+    /// And the cache actually serves them apart, which is the property the key
+    /// exists for.
+    #[test]
+    fn a_new_listing_cannot_hit_the_previous_listings_run() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let mut cache = LayoutCache::new(64);
+        let parent = cache
+            .get_or_shape(
+                RunKey::cell(1, 3, 0, Weight::Regular, 13.0),
+                "emil_popovic.pdf",
+                &mut fonts,
+            )
+            .advance;
+        let child = cache
+            .get_or_shape(
+                RunKey::cell(2, 3, 0, Weight::Regular, 13.0),
+                "Vernii.kicad_pro",
+                &mut fonts,
+            )
+            .advance;
+        assert!(
+            (parent - child).abs() > f32::EPSILON,
+            "two different strings shaped to the same width: {parent} and {child}"
+        );
+        assert_eq!(cache.stats().0, 0, "neither lookup was a hit");
     }
 
     #[test]
     fn a_second_lookup_is_a_hit_and_costs_no_shaping() {
         let Ok(mut fonts) = Fonts::discover() else { return };
         let mut cache = LayoutCache::new(64);
-        let key = RunKey::cell(1, 0, Weight::Regular, 13.0);
+        let key = RunKey::cell(1, 1, 0, Weight::Regular, 13.0);
         let first = cache.get_or_shape(key, "Makefile", &mut fonts).advance;
         let second = cache.get_or_shape(key, "Makefile", &mut fonts).advance;
         assert!((first - second).abs() < f32::EPSILON);
@@ -228,7 +280,7 @@ mod tests {
         let Ok(mut fonts) = Fonts::discover() else { return };
         let mut cache = LayoutCache::new(8);
         for entry in 0..40u32 {
-            cache.get_or_shape(RunKey::cell(entry, 0, Weight::Regular, 13.0), "x", &mut fonts);
+            cache.get_or_shape(RunKey::cell(1, entry, 0, Weight::Regular, 13.0), "x", &mut fonts);
         }
         let (_, _, generations) = cache.stats();
         assert!(generations >= 4, "{generations} generations for 40 runs at a cap of 8");
@@ -240,10 +292,10 @@ mod tests {
     fn a_run_that_fell_out_of_live_is_promoted_rather_than_reshaped() {
         let Ok(mut fonts) = Fonts::discover() else { return };
         let mut cache = LayoutCache::new(4);
-        let key = RunKey::cell(0, 0, Weight::Regular, 13.0);
+        let key = RunKey::cell(1, 0, 0, Weight::Regular, 13.0);
         cache.get_or_shape(key, "kept", &mut fonts);
         for entry in 1..5u32 {
-            cache.get_or_shape(RunKey::cell(entry, 0, Weight::Regular, 13.0), "x", &mut fonts);
+            cache.get_or_shape(RunKey::cell(1, entry, 0, Weight::Regular, 13.0), "x", &mut fonts);
         }
         let (_, misses_before, _) = cache.stats();
         cache.get_or_shape(key, "kept", &mut fonts);

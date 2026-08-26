@@ -467,3 +467,153 @@ impl Pane {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Jobs, Pane};
+    use sk_model::EntryId;
+    use sk_util::{Pool, Waker};
+    use std::path::{Path, PathBuf};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    struct Harness {
+        jobs: Jobs,
+        updates: mpsc::Receiver<super::Message>,
+        _waker: Waker,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let waker = Waker::new().expect("eventfd");
+            let (sender, updates) = mpsc::channel();
+            let jobs = Jobs { pool: Pool::with_width(4), wake: waker.handle(), sender };
+            Self { jobs, updates, _waker: waker }
+        }
+
+        /// Applies updates until the pane says it is done, or the deadline.
+        fn settle(&self, pane: &mut Pane) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match self.updates.recv_timeout(Duration::from_millis(20)) {
+                    Ok(message) => {
+                        pane.apply(message, &self.jobs);
+                    }
+                    Err(_) if !pane.loading => break,
+                    Err(_) => {}
+                }
+            }
+            // Drain anything that landed while the last slice was applied.
+            while let Ok(message) = self.updates.try_recv() {
+                pane.apply(message, &self.jobs);
+            }
+        }
+    }
+
+    fn names_of(pane: &Pane) -> Vec<String> {
+        (0..pane.listing.rows())
+            .filter_map(|row| pane.listing.at(row))
+            .map(|id| pane.listing.name(id).to_owned())
+            .collect()
+    }
+
+    fn fixture(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("skerry-nav-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        for name in ["parent-one.txt", "parent-two.txt", "parent-three.txt"] {
+            std::fs::write(root.join(name), b"p").unwrap();
+        }
+        for name in ["child-a.txt", "child-b.txt", "child-c.txt", "child-d.txt"] {
+            std::fs::write(root.join("sub").join(name), b"c").unwrap();
+        }
+        root
+    }
+
+    /// Entering a directory shows that directory, and nothing from the one it
+    /// was entered from.
+    #[test]
+    fn navigating_into_a_directory_replaces_the_listing_entirely() {
+        let root = fixture("into");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        let parent = names_of(&pane);
+        assert_eq!(
+            parent,
+            vec!["sub", "parent-one.txt", "parent-three.txt", "parent-two.txt",],
+            "the parent listing is wrong before navigation even happens"
+        );
+
+        let sub = (0..pane.listing.len())
+            .map(|index| EntryId(index as u32))
+            .find(|id| pane.listing.name(*id) == "sub")
+            .expect("sub");
+        pane.selection.replace_with(sub);
+        assert!(pane.open_focused(&harness.jobs), "sub is a directory");
+        harness.settle(&mut pane);
+
+        assert_eq!(pane.path, root.join("sub"));
+        assert_eq!(
+            names_of(&pane),
+            vec!["child-a.txt", "child-b.txt", "child-c.txt", "child-d.txt",]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// And going back up shows the parent, with the cursor on what was left.
+    #[test]
+    fn going_up_shows_the_parent_and_lands_the_cursor_on_the_child() {
+        let root = fixture("up");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.join("sub"));
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+        assert_eq!(names_of(&pane).len(), 4);
+
+        pane.go_up(&harness.jobs);
+        harness.settle(&mut pane);
+        assert_eq!(pane.path, root);
+        assert_eq!(
+            names_of(&pane),
+            vec!["sub", "parent-one.txt", "parent-three.txt", "parent-two.txt",]
+        );
+        let cursor = pane.selection.cursor().expect("a cursor on the folder we came out of");
+        assert_eq!(pane.listing.name(cursor), "sub");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two navigations in a row, with no settling between them: the second one
+    /// wins and the first leaves nothing behind.
+    #[test]
+    fn a_second_navigation_before_the_first_lands_discards_the_first() {
+        let root = fixture("race");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        pane.open(root.join("sub"), &harness.jobs);
+        harness.settle(&mut pane);
+
+        assert_eq!(
+            names_of(&pane),
+            vec!["child-a.txt", "child-b.txt", "child-c.txt", "child-d.txt",]
+        );
+        assert_eq!(pane.listing.len(), 4, "no entries from the abandoned read");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_that_is_gone_reports_a_problem_and_an_empty_listing() {
+        let harness = Harness::new();
+        let mut pane = Pane::new(Path::new("/nonexistent-skerry-nav").to_path_buf());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+        assert!(pane.problem.is_some());
+        assert_eq!(pane.listing.rows(), 0);
+        assert!(!pane.loading);
+    }
+}

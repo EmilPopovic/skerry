@@ -92,8 +92,10 @@ impl std::ops::BitOr for Flags {
 /// original, and the resulting permutation is still valid because an `EntryId`
 /// never moves. A 200,000-entry listing is about 10 MB and clones in 2 ms, which
 /// is the price of not sorting on the UI thread.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Debug)]
 pub struct Listing {
+    /// Which listing this is — see [`Listing::version`].
+    version: u32,
     names: StrArena,
     name: Vec<StrRef>,
     size: Vec<u64>,
@@ -105,11 +107,33 @@ pub struct Listing {
     pending: usize,
 }
 
+/// Hands out a distinct version to every listing ever built in this process.
+///
+/// This exists to make one class of bug impossible rather than remembered. An
+/// `EntryId` is an index, so entry 3 of one directory and entry 3 of the next are
+/// different files with the same id — and anything that caches per entry, which
+/// is the whole point of the text layout cache, will serve the first when asked
+/// for the second. It happened: navigating into a subdirectory drew two of its
+/// four rows with the parent's names and the parent's sizes, and the cache had a
+/// doc comment saying exactly when to invalidate it and no caller that did.
+///
+/// A version in the cache key removes the choice. It wraps after four billion
+/// listings, by which point a stale entry would have had to survive four billion
+/// of them, which a two-generation cache of a few thousand runs cannot.
+static NEXT_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+impl Default for Listing {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl Listing {
     /// An empty listing with room for `capacity` entries.
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
+            version: NEXT_VERSION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             // 24 bytes per name is the mean over /usr on this machine; the arena
             // grows if that is wrong and the guess costs one reallocation.
             names: StrArena::with_capacity(capacity * 24),
@@ -151,6 +175,15 @@ impl Listing {
             self.pending -= 1;
         }
         self.flags[index] = self.flags[index].without(Flags::META_PENDING) | extra;
+    }
+
+    /// Which listing this is.
+    ///
+    /// Distinct for every listing built in this process, and part of the text
+    /// layout cache's key — see [`NEXT_VERSION`].
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        self.version
     }
 
     /// How many entries the directory held.

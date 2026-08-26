@@ -210,6 +210,19 @@ impl DrawList {
         self.items.is_empty()
     }
 
+    /// Every glyph the frame will draw, in order, with its pen position.
+    ///
+    /// The hook a golden-frame test and a staleness test use: a frame's text can
+    /// be compared without a GPU and without a display server. It is what makes
+    /// "a warm cache draws the same frame as a cold one" an assertion rather than
+    /// a hope.
+    pub fn glyphs(&self) -> impl Iterator<Item = (GlyphKey, f32, f32)> + '_ {
+        self.items.iter().filter_map(|item| match item {
+            Item::Glyph { key, x, y, .. } => Some((*key, *x, *y)),
+            Item::Quad(_) => None,
+        })
+    }
+
     /// Starts a clip region, intersected with whatever is already in force.
     pub fn push_clip(&mut self, rect: Rect) {
         self.close_group();

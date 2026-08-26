@@ -27,6 +27,11 @@ pub struct ShapedRun {
     pub glyphs: Vec<ShapedGlyph>,
     /// Total advance in device pixels.
     pub advance: f32,
+    /// Bytes of the string this was shaped from.
+    ///
+    /// Kept so the layout cache can `debug_assert` that a hit was shaped from the
+    /// string it is being asked about. Four bytes against a `Vec` of glyphs.
+    pub source_len: usize,
 }
 
 impl ShapedRun {
@@ -139,7 +144,7 @@ impl Fonts {
             }
         }
 
-        ShapedRun { advance: pen, glyphs }
+        ShapedRun { advance: pen, glyphs, source_len: text.len() }
     }
 }
 

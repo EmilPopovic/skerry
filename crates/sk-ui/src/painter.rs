@@ -324,11 +324,10 @@ fn emit(
 
 /// The cache key for the ellipsis at one size.
 ///
-/// `u32::MAX` as the entry index: a listing cannot hold that many entries — the
-/// index is a `u32` and the name arena would have to be larger than a `u32` can
-/// address — so it cannot collide with a real row.
+/// Listing zero, which `sk_model::Listing` never hands out — its counter starts
+/// at one — so this cannot collide with any cell of any real listing.
 fn ellipsis_key(px_size: f32) -> RunKey {
-    RunKey::cell(u32::MAX, 0, Weight::Regular, px_size)
+    RunKey::cell(0, 0, 0, Weight::Regular, px_size)
 }
 
 #[cfg(test)]
@@ -338,11 +337,14 @@ mod tests {
     use super::ellipsis_key;
     use sk_text::{RunKey, Weight};
 
+    /// `sk_model::Listing`'s version counter starts at one, so listing zero is
+    /// reserved and nothing real can collide with the ellipsis.
     #[test]
     fn the_ellipsis_key_cannot_collide_with_a_row() {
         let ellipsis = ellipsis_key(13.0);
-        assert_ne!(ellipsis, RunKey::cell(0, 0, Weight::Regular, 13.0));
-        assert_ne!(ellipsis, RunKey::cell(u32::MAX - 1, 0, Weight::Regular, 13.0));
+        assert!(sk_model::Listing::default().version() >= 1, "listing zero is reserved");
+        assert_ne!(ellipsis, RunKey::cell(1, 0, 0, Weight::Regular, 13.0));
+        assert_ne!(ellipsis, RunKey::cell(u32::MAX, 0, 0, Weight::Regular, 13.0));
         assert_eq!(ellipsis, ellipsis_key(13.0), "and it is stable at one size");
         assert_ne!(ellipsis, ellipsis_key(16.25), "and distinct across sizes");
     }

@@ -215,6 +215,38 @@ no is usually the one nobody thought to install.
 > **Fails if:** every filesystem, compositor, driver or peer in a matrix supports
 > everything under test. That is a matrix of one case wearing several hats.
 
+## Every unit test can pass while the frame is wrong
+
+Entering a subdirectory drew four rows: two of the child's files, and two of the
+*parent's* — with the parent's names and the parent's sizes. Reported by the one
+person using it, on the first directory they opened.
+
+Nothing was wrong with the code the tests covered. The pane read the right
+directory, published the right listing, sorted it correctly, and discarded the
+abandoned read's updates; four tests said so, including one driving the reporter's
+own directories through the real thread pool. The defect was one level up: the
+text layout cache is keyed by *entry index*, an `EntryId` is an index, and entry 3
+of one directory is a different file from entry 3 of the next. Rows that hit the
+warm cache drew the previous listing's text. The cache had an `invalidate` method
+whose doc comment said exactly when to call it, and no caller.
+
+Two things came out of it, and the second is the transferable one.
+
+**The fix was to delete the choice, not to make it.** The listing's identity is
+now part of the cache key, so a new listing cannot hit an old entry and there is
+nothing to remember. `invalidate` is gone. This is the same shape as the eventfd
+that was never drained: both were APIs where correctness depended on a caller
+remembering one line, and both were fixed by making the line unnecessary.
+
+**The assertion that catches it is about frames, not units:** *a warm cache draws
+the same frame as a cold one.* Render, navigate, render again with the same cache
+and again with a fresh one, and compare the glyph streams. It needs no GPU and no
+display server — `DrawList::glyphs()` exists for it — and it catches any staleness
+anywhere in the layout pipeline, including the next one nobody has thought of.
+
+> **Fails if:** the only tests of a drawing path are tests of the things it draws
+> *from*.
+
 ## An assertion between two derived numbers can pass while both are wrong
 
 `sk-text`'s metrics test asserted `ascent > 0` and

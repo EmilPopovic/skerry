@@ -148,7 +148,7 @@ defects they exposed.
 | Keyboard through `xkbcommon`, with key repeat implemented client-side | **Clipboard, primary selection, drag-and-drop, IME** — the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | A headless compositor fixture and input-trace replay in CI |
-| Offscreen rendering and PNG capture — the golden-frame harness, minus the references | The reference images, the perceptual diff, and llvmpipe in CI |
+| Offscreen rendering, PNG capture, and a comparable glyph stream — the golden-frame harness minus its references | The reference images, the perceptual diff, and llvmpipe in CI |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8) |
 
 The three capabilities left are the expensive ones, and Spike D already knows what

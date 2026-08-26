@@ -235,6 +235,7 @@ fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row
     let ring = painter.px(1.0).round().max(1.0);
     let icon_size = 16.0;
     let text_px = painter.px(metrics.text_size);
+    let listing = pane.listing.version();
 
     {
         let Some(id) = pane.listing.at(row) else { return };
@@ -280,7 +281,7 @@ fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row
         let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
         let name_box = painter.rect(layout.name.x, 0.0, layout.name.width - 10.0, 0.0);
         painter.cell(
-            RunKey::cell(id.0, COLUMN_NAME, Weight::Regular, text_px),
+            RunKey::cell(listing, id.0, COLUMN_NAME, Weight::Regular, text_px),
             pane.listing.name(id),
             name_box,
             baseline,
@@ -304,7 +305,7 @@ fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row
             };
             let box_rect = painter.rect(layout.size.x, 0.0, layout.size.width - 12.0, 0.0);
             painter.cell(
-                RunKey::cell(id.0, COLUMN_SIZE, Weight::Regular, text_px),
+                RunKey::cell(listing, id.0, COLUMN_SIZE, Weight::Regular, text_px),
                 &text,
                 box_rect,
                 baseline,
@@ -317,7 +318,7 @@ fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row
             let box_rect =
                 painter.rect(layout.modified.x + 12.0, 0.0, layout.modified.width - 12.0, 0.0);
             painter.cell(
-                RunKey::cell(id.0, COLUMN_MODIFIED, Weight::Regular, text_px),
+                RunKey::cell(listing, id.0, COLUMN_MODIFIED, Weight::Regular, text_px),
                 &text,
                 box_rect,
                 baseline,
@@ -553,4 +554,141 @@ fn panel(painter: &mut Painter<'_>, area: Area) {
 fn fill(painter: &mut Painter<'_>, area: Area, color: Color) {
     let rect = painter.rect(area.x, area.y, area.width, area.height);
     painter.list.rect(rect, color, 0.0);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Chrome, Diagnostics, draw};
+    use crate::frames::Frames;
+    use crate::layout::Layout;
+    use crate::pane::{Jobs, Pane};
+    use sk_gpu::{DrawList, FrameStats};
+    use sk_plat::Size;
+    use sk_text::{Fonts, LayoutCache};
+    use sk_ui::{Painter, Theme};
+    use sk_util::{Pool, Waker};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// The glyphs a frame would draw, as something comparable.
+    ///
+    /// Bit patterns rather than floats: two frames are the same frame only if
+    /// every glyph lands on exactly the same coordinate, and "close enough" is
+    /// not a property this test is about.
+    fn frame_of(
+        pane: &Pane,
+        theme: &Theme,
+        fonts: &mut Fonts,
+        cache: &mut LayoutCache,
+    ) -> Vec<(sk_text::GlyphKey, u32, u32)> {
+        let logical = Size::new(1000.0, 620.0);
+        let layout = Layout::compute(logical, &theme.metrics);
+        let mut list = DrawList::default();
+        list.begin((1250, 775));
+        let mut frames = Frames::new();
+        let mut diagnostics = Diagnostics {
+            frames: &mut frames,
+            last: FrameStats::default(),
+            atlas: (0, 0.0, 0.0),
+            shaping: (0, 0, 0),
+            pool: (0, 0, 0),
+            adapter: "",
+            backend: "",
+            physical: (1250, 775),
+            scale_120: 150,
+        };
+        {
+            let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
+            let chrome = Chrome { keys: false, stats: false, typed: None, band: None };
+            // A fixed timestamp: the Modified column is relative to "now", and a
+            // clock that ticks between two frames is not the difference this test
+            // is looking for.
+            draw(&mut painter, pane, &layout, 1_787_000_000, &chrome, &mut diagnostics);
+        }
+        list.glyphs().map(|(key, x, y)| (key, x.to_bits(), y.to_bits())).collect()
+    }
+
+    fn settle(pane: &mut Pane, jobs: &Jobs, updates: &mpsc::Receiver<crate::pane::Message>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match updates.recv_timeout(Duration::from_millis(20)) {
+                Ok(message) => {
+                    pane.apply(message, jobs);
+                }
+                Err(_) if !pane.loading => break,
+                Err(_) => {}
+            }
+        }
+        while let Ok(message) = updates.try_recv() {
+            pane.apply(message, jobs);
+        }
+    }
+
+    fn fixture() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("skerry-view-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        for name in ["alpha-parent.txt", "beta-parent.txt", "gamma-parent.txt"] {
+            std::fs::write(root.join(name), b"parent").unwrap();
+        }
+        for name in ["one-child.txt", "two-child.txt", "three-child.txt", "four-child.txt"] {
+            std::fs::write(root.join("sub").join(name), b"child").unwrap();
+        }
+        root
+    }
+
+    /// The invariant that catches any staleness in the text layout cache, at the
+    /// level where the reported defect actually lived: **a warm cache draws the
+    /// same frame as a cold one.**
+    ///
+    /// The defect was that the cache key was the entry index and nothing else, so
+    /// after navigating into a subdirectory two of its four rows were drawn with
+    /// the parent's names and the parent's sizes. Every unit test passed. This is
+    /// the assertion that does not.
+    #[test]
+    fn a_warm_cache_draws_the_same_frame_as_a_cold_one_after_navigating() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let root = fixture();
+        let waker = Waker::new().expect("eventfd");
+        let (sender, updates) = mpsc::channel();
+        let jobs = Jobs { pool: Pool::with_width(4), wake: waker.handle(), sender };
+        let theme = Theme::dark();
+
+        let mut warm = LayoutCache::new(4096);
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&jobs);
+        settle(&mut pane, &jobs, &updates);
+
+        // Draw the parent, which fills the cache with the parent's rows.
+        let parent = frame_of(&pane, &theme, &mut fonts, &mut warm);
+        assert!(!parent.is_empty(), "the parent drew no text at all");
+
+        let sub = (0..pane.listing.len())
+            .map(|index| sk_model::EntryId(index as u32))
+            .find(|id| pane.listing.name(*id) == "sub")
+            .expect("sub");
+        pane.selection.replace_with(sub);
+        assert!(pane.open_focused(&jobs));
+        settle(&mut pane, &jobs, &updates);
+
+        let with_warm_cache = frame_of(&pane, &theme, &mut fonts, &mut warm);
+        let mut cold = LayoutCache::new(4096);
+        let with_cold_cache = frame_of(&pane, &theme, &mut fonts, &mut cold);
+
+        assert_eq!(
+            with_warm_cache.len(),
+            with_cold_cache.len(),
+            "a warm cache drew a different number of glyphs than a cold one"
+        );
+        assert_eq!(
+            with_warm_cache, with_cold_cache,
+            "a warm cache drew a different frame than a cold one — the layout \
+             cache served a previous listing's rows"
+        );
+        assert_ne!(with_warm_cache, parent, "the child frame is the parent frame");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
