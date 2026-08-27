@@ -461,7 +461,7 @@ fn tool_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_>)
             Tool::Back => arrow(painter, centre, ink, Direction::Left),
             Tool::Forward => arrow(painter, centre, ink, Direction::Right),
             Tool::Parent => arrow(painter, centre, ink, Direction::Up),
-            Tool::Reload => reload(painter, centre, ink, hovered && enabled),
+            Tool::Reload => reload(painter, centre, ink),
         }
     }
 }
@@ -496,27 +496,40 @@ fn arrow(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color, at: Directio
     }
 }
 
-/// A circular arrow: a ring, a gap cut out of it, and a head on the gap.
+/// A circular arrow: an arc, and a head where the arc ends.
 ///
-/// The gap is painted in the colour behind the button rather than left out,
-/// because a stroked rounded rectangle cannot be a partial arc — and a full ring
-/// with a triangle stuck on it reads as a circle with a triangle stuck on it.
-fn reload(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color, hovered: bool) {
+/// The arc is the ring **drawn around a hole** rather than a ring with the hole
+/// painted over it. A clip is an intersection, so leaving a quadrant out means
+/// two clipped passes — which is three lines more than painting the gap in the
+/// background colour, and the reason to prefer it is that there is no background
+/// colour: the button is chrome underneath and a translucent hover tint on top,
+/// and an "erase" that has to know which was a mark that did not erase.
+///
+/// The head goes at twelve o'clock pointing right, because that is where a
+/// clockwise arc ends and which way it is travelling when it gets there. The
+/// first version put it outside the ring at half past one, where it read as a
+/// circle with a flag on it.
+fn reload(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
     const SIZE: f32 = 11.0;
-    let theme = *painter.theme;
     let (x, y) = centre;
     let half = SIZE / 2.0;
     let ring = painter.rect(x - half, y - half, SIZE, SIZE);
-    painter.list.stroke(ring, ink, painter.px(half), painter.snap(1.5).max(1.0));
-
-    let behind = if hovered {
-        theme.palette.chrome.mix(theme.palette.button_hover, 1.0)
-    } else {
-        theme.palette.chrome
-    };
-    let gap = painter.rect(x + 1.0, y - half - 1.0, half + 2.0, half - 1.0);
-    painter.list.rect(gap, behind, 0.0);
-    painter.triangle(x + half - 3.0, y - half - 1.0, 6.0, 5.5, ink, Direction::Right);
+    let weight = painter.snap(1.5).max(1.0);
+    for (left, top, width, height) in [
+        // Everything left of centre, and the right side from a third of the way
+        // up: together they are the ring minus a wedge from twelve o'clock to
+        // about half past one, which is as much of a gap as the head needs.
+        (x - half - 1.0, y - half - 1.0, half + 1.0, SIZE + 2.0),
+        (x, y - half * 0.35, half + 1.0, SIZE),
+    ] {
+        let clip = painter.rect(left, top, width, height);
+        painter.list.push_clip(clip);
+        painter.list.stroke(ring, ink, painter.px(half), weight);
+        painter.list.pop_clip();
+    }
+    // Base on the ring at twelve o'clock, apex to the right: where a clockwise
+    // arc ends, and which way it is travelling when it gets there.
+    painter.triangle(x - 1.5, y - half - 2.0, 5.0, 5.5, ink, Direction::Right);
 }
 
 /// Minimise, maximise and close, drawn rather than taken from an icon theme.
@@ -690,8 +703,14 @@ fn row_at(
         let directory = flags.has(Flags::DIR);
         let broken = flags.has(Flags::BROKEN);
 
+        // Across the whole row, metadata columns included: a selection that
+        // stops at the name column selects a name, and what was selected is a
+        // file. It used to start at the *window's* left edge and run for the
+        // list's width, which was invisible until the sidebar moved the list —
+        // and then the pill began under the sidebar and stopped short of the
+        // size column by exactly the sidebar's width.
         let pill = painter.rect(
-            metrics.gutter * 0.5,
+            layout.body.x + metrics.gutter * 0.5,
             top + 1.0,
             layout.body.width - metrics.gutter,
             metrics.row_height - 2.0,

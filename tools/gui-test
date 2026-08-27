@@ -789,6 +789,11 @@ def sidebar_places(run: Run, fixture: Path) -> None:
         raise Failure("the sidebar is not open")
 
     scan_sidebar(run, state, "Home")
+    # **And nothing in the list is hovered.** The sidebar is at the same height
+    # as every row, so a hit test told only a `y` lit the row beside the place
+    # the pointer was actually over.
+    expect(run.state(), hover="-1", hover_name="")
+
     run.drive("click\nsleep 900\nkey f12\nsleep 200\n")
     expect(run.state(), path=os.environ["HOME"])
 

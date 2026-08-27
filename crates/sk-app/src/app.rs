@@ -1537,9 +1537,24 @@ jobs={jobs}/{panics} keys={} stats={}",
             // band and the hover disagreed for the length of the gesture.
             self.dirty = true;
         }
+        // **Inside the list, not merely at the same height as it.** `row_at` is
+        // told a `y` and answers about rows; the sidebar is at the same `y` as
+        // every row of the list, so hovering a place lit the row beside it.
+        // **Inside the list, not merely at the same height as it.** `row_at` is
+        // told a `y` and answers about rows; the sidebar is at the same `y` as
+        // every row of the list, so hovering a place lit the row beside it.
         let row = self
             .layout
-            .row_at(position.y, self.pane.scroll.offset(), self.theme.metrics.row_height)
+            .body
+            .contains(position.x, position.y)
+            .then(|| {
+                self.layout.row_at(
+                    position.y,
+                    self.pane.scroll.offset(),
+                    self.theme.metrics.row_height,
+                )
+            })
+            .flatten()
             .filter(|row| *row < self.pane.listing.rows());
         if self.pane.hover != row {
             self.pane.hover = row;
