@@ -182,7 +182,13 @@ fn path_bar(
     // relative.
     let root = widths.first().copied().unwrap_or_default();
     let mut first = 1;
-    let mut total = root;
+    // The `… /` mark has a width of its own and the fitting never counted it, so
+    // an elided bar overflowed by exactly that much. Reserved up front: it costs
+    // one component's worth of room in the case where there is already not
+    // enough, which is the case it exists for.
+    let mut total = root
+        + crumb_width(painter, i18n::lookup("chrome.crumb_elided"), metrics.path_size, false)
+        + CRUMB_PAD;
     for index in (1..names.len()).rev() {
         if total + widths[index] > available && index > 1 {
             first = index + 1;

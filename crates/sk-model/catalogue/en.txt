@@ -112,6 +112,9 @@ action.parent = Parent folder
 action.select_all = Select all
 action.clear_selection = Clear selection
 action.filter = Filter the list
+action.minimize = Minimise the window
+action.maximize = Maximise or restore
+action.close = Close the window
 action.toggle_hidden = Show hidden files
 action.reload = Reload
 action.toggle_theme = Light / dark
@@ -142,6 +145,7 @@ group.navigate = Go
 group.select = Select
 group.view = View
 group.file = File
+group.window = Window
 group.help = Help
 
 # Commands added with the registry.

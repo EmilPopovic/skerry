@@ -419,17 +419,22 @@ impl Window {
     ///
     /// The serial has to come from a real button press: it is the protocol's way
     /// of saying a window cannot start dragging itself.
-    pub fn start_move(&self) {
-        if let Some(serial) = self.state.seat.button_serial {
-            self.state.toplevel._move(self.state.seat.seat(), serial);
-        }
+    /// Returns whether the compositor was asked — a press with no serial behind
+    /// it is not a grab the protocol will accept, and the caller has to do
+    /// something else with it rather than swallow it.
+    #[must_use = "a refused grab is a press the caller still has to account for"]
+    pub fn start_move(&self) -> bool {
+        let Some(serial) = self.state.seat.button_serial else { return false };
+        self.state.toplevel._move(self.state.seat.seat(), serial);
+        true
     }
 
-    /// Starts an interactive resize from `edge`.
-    pub fn start_resize(&self, edge: Edge) {
-        if let Some(serial) = self.state.seat.button_serial {
-            self.state.toplevel.resize(self.state.seat.seat(), serial, edge.as_protocol());
-        }
+    /// Starts an interactive resize from `edge`. Returns whether it was asked.
+    #[must_use = "a refused grab is a press the caller still has to account for"]
+    pub fn start_resize(&self, edge: Edge) -> bool {
+        let Some(serial) = self.state.seat.button_serial else { return false };
+        self.state.toplevel.resize(self.state.seat.seat(), serial, edge.as_protocol());
+        true
     }
 
     /// Maximizes or restores.
@@ -864,12 +869,14 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                         _ => {}
                     }
                 }
+                // Into `incoming` only, like every other configure input: the
+                // `xdg_surface.configure` that ends the sequence is what makes
+                // any of it true. Writing `shell` here as well let a compositor
+                // add or remove a title-bar button before the size it belongs
+                // with had been applied.
                 state.incoming.can_maximize = maximize;
                 state.incoming.can_minimize = minimize;
                 state.incoming.can_show_menu = menu;
-                state.shell.can_maximize = maximize;
-                state.shell.can_minimize = minimize;
-                state.shell.can_show_menu = menu;
             }
             xdg_toplevel::Event::Close => state.close_requested = true,
             _ => {}

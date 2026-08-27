@@ -26,6 +26,7 @@ pub fn registry() -> Registry<App> {
     select(&mut registry);
     view(&mut registry);
     file(&mut registry);
+    window(&mut registry);
     help(&mut registry);
     registry
 }
@@ -173,6 +174,46 @@ fn select(registry: &mut Registry<App>) {
             keys: &["escape"],
             enabled: |_| true,
             run: App::clear,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// The window itself.
+///
+/// **Rule 2**: every action is one entry in one registry. These three are the
+/// title bar on a desktop that draws no decorations, and a title bar whose
+/// buttons the keyboard overlay cannot list and the palette cannot find is three
+/// actions that exist only for a pointer. Their `enabled` reads the same
+/// `wm_capabilities` answer the layout uses to decide whether to draw them.
+fn window(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "window.minimize",
+            name: "action.minimize",
+            group: Group::Window,
+            // The chords GNOME and KDE both use for these, so a person who has
+            // met either already knows them.
+            keys: &["super+h"],
+            enabled: |app: &App| app.window_state().can_minimize,
+            run: App::minimize_window,
+        },
+        CommandSpec {
+            id: "window.maximize",
+            name: "action.maximize",
+            group: Group::Window,
+            keys: &["super+up"],
+            enabled: |app: &App| app.window_state().can_maximize,
+            run: App::toggle_maximized,
+        },
+        CommandSpec {
+            id: "window.close",
+            name: "action.close",
+            group: Group::Window,
+            keys: &["ctrl+w", "ctrl+q"],
+            enabled: |_| true,
+            run: App::close_window,
         },
     ] {
         registry.add(spec);

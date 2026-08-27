@@ -802,6 +802,28 @@ impl App {
     // registry holds function pointers and nothing else.
     // ------------------------------------------------------------------
 
+    /// What the compositor last said the window is.
+    #[must_use]
+    pub(crate) fn window_state(&self) -> sk_plat::WindowState {
+        self.window_state
+    }
+
+    /// Minimises, where the compositor has such a thing.
+    pub(crate) fn minimize_window(&mut self) {
+        self.window.minimize();
+    }
+
+    /// Maximises, or restores if it is already maximized.
+    pub(crate) fn toggle_maximized(&mut self) {
+        self.window.set_maximized(!self.window_state.maximized);
+    }
+
+    /// Asks the window to close, as the title bar's button and `wl_toplevel`'s
+    /// own close event both do.
+    pub(crate) fn close_window(&mut self) {
+        self.window.request_close();
+    }
+
     /// Opens the filter, or closes and clears it if it is already open.
     pub(crate) fn toggle_filter(&mut self) {
         if self.filtering {
@@ -1200,17 +1222,23 @@ jobs={jobs}/{panics} keys={} stats={}",
         // border overlaps the top-right corner where the close button is, and a
         // window whose corner cannot be grabbed is a window that cannot be
         // resized diagonally.
-        if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical) {
-            self.window.start_resize(edge);
+        // Only if the compositor took it: a press with no serial behind it is
+        // not a grab the protocol accepts, and swallowing it would make the
+        // top six pixels of the list a dead band.
+        if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical)
+            && self.window.start_resize(edge)
+        {
             return;
         }
         if let Some(button) = self.layout.button_at(position.x, position.y) {
+            // The same methods the registry's `window.*` commands run. The
+            // `enabled` predicate is not consulted here because it cannot fail:
+            // the layout draws no button for an action `wm_capabilities` did not
+            // offer, so there is nothing at this point to press.
             match button {
-                crate::layout::Button::Minimize => self.window.minimize(),
-                crate::layout::Button::Maximize => {
-                    self.window.set_maximized(!self.window_state.maximized);
-                }
-                crate::layout::Button::Close => self.window.request_close(),
+                crate::layout::Button::Minimize => self.minimize_window(),
+                crate::layout::Button::Maximize => self.toggle_maximized(),
+                crate::layout::Button::Close => self.close_window(),
             }
             return;
         }
@@ -1226,9 +1254,12 @@ jobs={jobs}/{panics} keys={} stats={}",
             // A double click on a title bar toggles maximize everywhere else, so
             // it does here.
             if clicks >= 2 {
-                self.window.set_maximized(!self.window_state.maximized);
+                self.toggle_maximized();
             } else {
-                self.window.start_move();
+                // Nothing to fall through to: the title bar holds no rows, and
+                // the breadcrumbs were tested above. A refused grab is a press
+                // that does nothing, which is what it looked like anyway.
+                let _ = self.window.start_move();
             }
             return;
         }

@@ -762,6 +762,22 @@ def own_frame_close_button(run: Run, fixture: Path) -> None:
         own.close()
 
 
+@scenario("window-close-command")
+def window_close_command(run: Run, fixture: Path) -> None:
+    """`Ctrl+W` closes the window, and it is the same action as the button.
+
+    Rule 2: every action is one entry in one registry. A title-bar button only a
+    pointer can reach is an action outside it — invisible to the keyboard
+    overlay, unbindable, and unfindable by the palette when there is one.
+    """
+    run.drive("sleep 400\nkey ctrl+w\nsleep 500\n")
+    code = run.process.wait(timeout=10)
+    if code < 0:
+        raise Failure(f"Ctrl+W killed it with signal {-code}")
+    if code != 0:
+        raise Failure(f"Ctrl+W exited {code}: {run.err.read_text()[-300:]}")
+
+
 @scenario("own-frame-maximize")
 def own_frame_maximize(run: Run, fixture: Path) -> None:
     """The maximise button is where the layout says it is, and works.

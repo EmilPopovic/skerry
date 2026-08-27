@@ -22,6 +22,13 @@ pub enum Group {
     View,
     /// Acting on files.
     File,
+    /// The window itself: minimise, maximise, close.
+    ///
+    /// A group of its own because it is the only one whose commands are not
+    /// about files, and because on a desktop that draws no decorations these
+    /// three *are* the title bar — so they have to be findable and bindable
+    /// like everything else rather than living in a pointer handler.
+    Window,
     /// Finding out what the program can do.
     Help,
 }
@@ -34,6 +41,7 @@ impl Group {
             Self::Navigate => "group.navigate",
             Self::Select => "group.select",
             Self::View => "group.view",
+            Self::Window => "group.window",
             Self::File => "group.file",
             Self::Help => "group.help",
         }
