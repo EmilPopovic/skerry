@@ -15,7 +15,7 @@ use sk_util::{Pool, Waker};
 
 use crate::frames::Frames;
 use crate::keys;
-use crate::layout::{Frame, Layout};
+use crate::layout::{Area, Frame, Layout};
 use crate::pane::{Jobs, Message, Pane};
 use crate::sizes::Measurer;
 use crate::view::{self, Chrome, Diagnostics};
@@ -199,6 +199,44 @@ impl Background {
     }
 }
 
+/// The renderer and the faces, and what each of them cost to open.
+struct Drawing {
+    renderer: Renderer,
+    fonts: Fonts,
+    physical: (u32, u32),
+    gpu_us: u128,
+    font_us: u128,
+}
+
+/// Opens the GPU and finds the faces.
+///
+/// The two most expensive things in a cold start after the Vulkan loader itself,
+/// which is why each is timed separately and reported on the first frame.
+fn open_drawing(window: &Window) -> Result<Drawing, Problem> {
+    let gpu_started = Instant::now();
+    let physical = window.physical();
+    // The GPU the *compositor* is on, when it and the machine disagree about
+    // which that is. On a hybrid laptop a buffer from the wrong one cannot be
+    // imported and the connection dies at start-up.
+    let render_device = window.capabilities().render_device_ids();
+    // SAFETY: the handles come from `window`, which the caller owns and declares
+    // after its renderer — so the renderer is dropped first.
+    let renderer = unsafe { Renderer::new(window.raw_handles(), physical, render_device) }?;
+    let gpu_us = gpu_started.elapsed().as_micros();
+
+    // Beside font discovery for the same reason: both read a file that the first
+    // frame would otherwise read.
+    sk_ui::format::warm_timezone();
+
+    let font_started = Instant::now();
+    let fonts = Fonts::discover()?;
+    let font_us = font_started.elapsed().as_micros();
+    if !fonts.missing().is_empty() {
+        eprintln!("skerry: font chain is short — no {}", fonts.missing().join(", "));
+    }
+    Ok(Drawing { renderer, fonts, physical, gpu_us, font_us })
+}
+
 /// Prints every interface the compositor advertises, when asked.
 ///
 /// [ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md) says
@@ -337,6 +375,8 @@ pub struct App {
     measurer: Measurer,
     /// The list of places down the left.
     sidebar: crate::sidebar::Sidebar,
+    /// The undo stack, the operation in flight, and the name being typed.
+    edits: crate::edit::Edits,
 
     /// The freedesktop databases, once the job that reads them has finished.
     ///
@@ -367,6 +407,15 @@ pub struct App {
     hovered_tool: Option<crate::layout::Tool>,
     /// The hit regions the last frame produced.
     hits: crate::view::Hits,
+    /// The context menu, while one is open.
+    menu: Option<crate::menu::Menu>,
+    /// A menu a command asked for, and where it goes.
+    ///
+    /// A command's `run` is `fn(&mut App)` and the rows come from the registry,
+    /// which is not part of an `App` — so the keyboard's way of opening a menu
+    /// leaves the request here and [`App::handle`] builds it, which is the one
+    /// place a menu is ever constructed.
+    menu_wanted: Option<(Point, &'static [&'static [&'static str]])>,
     /// Bytes read from a peer's clipboard, once the job that read them is done.
     paste_rx: Receiver<Pasted>,
     paste_tx: std::sync::mpsc::Sender<Pasted>,
@@ -430,34 +479,14 @@ impl App {
         } = background;
         let watch_target = pane.path.clone();
 
-        let gpu_started = Instant::now();
-        let physical = window.physical();
-        // SAFETY: the handles come from `window`, which this struct owns and
-        // which is declared after `renderer` — so the renderer is dropped first.
-        // The GPU the *compositor* is on, when it and the machine disagree about
-        // which that is. On a hybrid laptop a buffer from the wrong one cannot
-        // be imported and the connection dies at start-up.
-        let render_device = window.capabilities().render_device_ids();
-        let renderer = unsafe { Renderer::new(window.raw_handles(), physical, render_device) }?;
-        let gpu_us = gpu_started.elapsed().as_micros();
-
-        // Beside font discovery for the same reason: both read a file that the
-        // first frame would otherwise read.
-        sk_ui::format::warm_timezone();
-
-        let font_started = Instant::now();
-        let fonts = Fonts::discover()?;
-        let font_us = font_started.elapsed().as_micros();
-        if !fonts.missing().is_empty() {
-            eprintln!("skerry: font chain is short — no {}", fonts.missing().join(", "));
-        }
-
+        let Drawing { renderer, fonts, physical, gpu_us, font_us } = open_drawing(&window)?;
         let theme = if options.dark { Theme::dark() } else { Theme::light() };
         let logical = window.logical();
         let scale_120 = window.scale_120();
         let capabilities = describe(&window);
         report_globals(&window);
         let measurer = Measurer::new(waker.handle());
+        let edits = crate::edit::Edits::new(waker.handle());
         let now = Instant::now();
         Ok(Self {
             adapter: renderer.adapter().to_owned(),
@@ -485,6 +514,7 @@ impl App {
             capabilities,
             measurer,
             sidebar,
+            edits,
             desktop: None,
             desktop_rx,
             launcher: Launcher::default(),
@@ -497,6 +527,8 @@ impl App {
             hovered_crumb: None,
             hovered_tool: None,
             hits: crate::view::Hits::default(),
+            menu: None,
+            menu_wanted: None,
             paste_rx,
             paste_tx,
             frames: Frames::new(),
@@ -558,6 +590,7 @@ impl App {
             self.drain_desktop();
             self.drain_paste();
             self.drain_launches();
+            self.drain_edits();
             if self.sidebar.drain() {
                 self.dirty = true;
             }
@@ -605,11 +638,18 @@ impl App {
     }
 
     fn drain_jobs(&mut self) {
-        let Self { updates, pane, jobs, dirty, .. } = self;
-        while let Ok(message) = updates.try_recv() {
-            if pane.apply(message, jobs) {
-                *dirty = true;
+        let mut landed = false;
+        {
+            let Self { updates, pane, jobs, dirty, .. } = self;
+            while let Ok(message) = updates.try_recv() {
+                if pane.apply(message, jobs) {
+                    *dirty = true;
+                    landed = true;
+                }
             }
+        }
+        if landed && self.edits.name_after_load.is_some() && !self.pane.loading {
+            self.name_when_it_arrives();
         }
     }
 
@@ -754,10 +794,7 @@ impl App {
                     self.press(*position, *clicks, mods.ctrl, mods.shift, commands);
                 }
                 Button::Primary => self.release(),
-                // The compositor's own window menu, which is where "always on
-                // top" and "move to workspace" live. Ours to offer and not ours
-                // to draw.
-                Button::Secondary if *pressed => self.frame_menu(*position),
+                Button::Secondary if *pressed => self.open_menu(*position),
                 _ => {}
             },
             Event::Scroll { delta, precise, .. } => {
@@ -766,9 +803,35 @@ impl App {
             }
             Event::KeyUp(_) | Event::Woken => {}
         }
+        self.settle_menu(commands);
+    }
+
+    /// Builds the menu somebody asked for.
+    ///
+    /// Every event ends here, which is what makes this the only construction
+    /// site: the pointer and the keyboard both leave a request rather than a
+    /// menu, so the two paths cannot drift into two different menus.
+    fn settle_menu(&mut self, commands: &Registry<Self>) {
+        let Some((at, groups)) = self.menu_wanted.take() else { return };
+        self.menu = crate::menu::build(groups, commands, at, |id| {
+            commands.find(id).is_some_and(|command| commands.enabled(command, self))
+        });
+        self.dirty = true;
     }
 
     fn key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) {
+        // An open menu takes the keyboard first, and gives back everything it
+        // has no use for.
+        if self.menu.is_some() && self.menu_key(event, commands) {
+            return;
+        }
+        // A name being typed takes the keyboard before anything else, and takes
+        // more of it than the filter does: `Delete` is bound to Move to Trash,
+        // and a rename field where `Delete` deletes the file is a field nobody
+        // will ever use twice.
+        if self.edits.naming.is_some() && self.name_key(event) {
+            return;
+        }
         // The filter takes the keyboard while it is open, before the registry
         // sees it: a filter you cannot type the letter `h` into because `Ctrl+H`
         // is bound is not a filter. Bare characters only, so every chord still
@@ -792,6 +855,85 @@ impl App {
             }
             self.dirty = true;
         }
+    }
+
+    /// Where the name field is, so a press inside it is not a press outside it.
+    ///
+    /// The same rectangle `view::name_field` draws, from the same numbers — the
+    /// alternative is two rectangles that agree until one of them is edited.
+    fn naming_field(&self) -> Area {
+        let Some(naming) = self.edits.naming.as_ref() else { return Area::default() };
+        crate::view::name_field(
+            &self.layout,
+            &self.theme.metrics,
+            naming.row,
+            self.pane.scroll.offset(),
+        )
+    }
+
+    /// Puts the caret where a click inside the name field landed.
+    ///
+    /// Measured by shaping, not by dividing the width by the character count: a
+    /// click halfway along `étude` is not halfway along its bytes. The text
+    /// starts six logical pixels inside the box, which is where
+    /// `view::name_field_at` draws it — the one number the two share.
+    fn place_caret(&mut self, x: f32) {
+        let Some(naming) = self.edits.naming.as_mut() else { return };
+        let field = crate::view::name_field(
+            &self.layout,
+            &self.theme.metrics,
+            naming.row,
+            self.pane.scroll.offset(),
+        );
+        let scale = self.window.scale();
+        // The colour is not read: only the weight and the size decide an advance.
+        let style = sk_ui::TextStyle::new(self.theme.metrics.text_size, self.theme.palette.text);
+        naming.caret = sk_ui::caret_offset(
+            &mut self.cache,
+            &mut self.fonts,
+            &naming.text,
+            style,
+            style.size * scale,
+            (x - field.x - 6.0) * scale,
+        );
+        self.dirty = true;
+    }
+
+    /// Feeds one key to the name being typed. Returns whether it was consumed.
+    ///
+    /// **Everything a field needs, and nothing else.** Enter commits, Escape
+    /// abandons, the arrows and Home and End move the caret, Backspace and
+    /// Delete remove a character, and a bare character types one. Every other
+    /// chord falls through, so `Ctrl+Z` still undoes and `F1` still opens the
+    /// keyboard list from inside the field.
+    fn name_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
+        use sk_plat::{Key, Named};
+        let Some(naming) = self.edits.naming.as_mut() else { return false };
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Enter) => self.commit_name(),
+            Key::Named(Named::Escape) => {
+                self.edits.stop_naming();
+                self.dirty = true;
+            }
+            Key::Named(Named::Backspace) if bare => naming.backspace(),
+            Key::Named(Named::Delete) if bare => naming.delete(),
+            Key::Named(Named::Left) if bare => naming.step(false),
+            Key::Named(Named::Right) if bare => naming.step(true),
+            Key::Named(Named::Home) if bare => naming.jump(false),
+            Key::Named(Named::End) if bare => naming.jump(true),
+            // Readline's, and every terminal's, and the only way to clear this
+            // field in one key: there is no selection in it, so renaming
+            // `holiday-2024-portugal.jpeg` to anything else was twenty-six
+            // presses of Backspace.
+            Key::Character('u') if event.mods.ctrl => naming.clear_before_caret(),
+            _ => match keys::typed_text(event) {
+                Some(text) => naming.insert(text),
+                None => return false,
+            },
+        }
+        self.dirty = true;
+        true
     }
 
     /// Feeds one key to the open filter. Returns whether it was consumed.
@@ -857,6 +999,114 @@ impl App {
     /// own close event both do.
     pub(crate) fn close_window(&mut self) {
         self.window.request_close();
+    }
+
+    /// Whether an operation is in flight, so a second one is not started.
+    #[must_use]
+    pub(crate) fn busy(&self) -> bool {
+        self.edits.busy()
+    }
+
+    /// Whether there is anything to undo, and nothing in flight.
+    #[must_use]
+    pub(crate) fn can_undo(&self) -> bool {
+        !self.edits.busy() && self.edits.history.can_undo()
+    }
+
+    /// Whether there is anything to redo, and nothing in flight.
+    #[must_use]
+    pub(crate) fn can_redo(&self) -> bool {
+        !self.edits.busy() && self.edits.history.can_redo()
+    }
+
+    /// Makes a folder here, and names it once it exists.
+    ///
+    /// Created first and named second, which is what Windows and Nautilus both
+    /// do: there has to be a row before there is somewhere to type. The name it
+    /// gets in between is a real name — press Escape and the folder is called
+    /// `New folder`, which is what a person expects and is one `Ctrl+Z` from
+    /// gone.
+    pub(crate) fn new_folder(&mut self) {
+        let parent = self.pane.path.clone();
+        self.edits.new_directory(parent, &self.jobs);
+        self.edits.name_after_load = Some(String::new());
+    }
+
+    /// Starts renaming whatever the cursor is on.
+    pub(crate) fn start_rename(&mut self) {
+        let Some(id) = self.pane.focused() else { return };
+        let Some(row) = self.pane.listing.row_of(id) else { return };
+        let name = self.pane.listing.name(id).to_owned();
+        self.pane.scroll.reveal(
+            row as f32 * self.theme.metrics.row_height,
+            (row + 1) as f32 * self.theme.metrics.row_height,
+            self.layout.body.height,
+        );
+        self.edits.naming = Some(crate::edit::Naming {
+            row,
+            path: self.pane.path.join(&name),
+            // The caret at the end rather than the whole name selected: there is
+            // no selection in this field yet, and a caret at the end is the one
+            // position from which every edit is reachable with the keys that
+            // exist.
+            caret: name.len(),
+            text: name,
+        });
+        self.dirty = true;
+    }
+
+    /// Commits the name being typed, if it changed.
+    fn commit_name(&mut self) {
+        let Some(naming) = self.edits.naming.take() else { return };
+        self.dirty = true;
+        let unchanged =
+            naming.path.file_name().is_some_and(|current| current.to_string_lossy() == naming.text);
+        if unchanged || naming.text.is_empty() {
+            return;
+        }
+        self.edits.rename(naming.path, naming.text, &self.jobs);
+    }
+
+    /// Moves what is selected to the trash.
+    pub(crate) fn trash_selection(&mut self) {
+        let paths = self.selected_paths();
+        // One at a time: the queue with honest progress is M3's and this is not
+        // it. What a person selects here is a handful of files, and each one is
+        // its own undo entry — so the first goes now and the rest are owed.
+        let Some(first) = paths.first().cloned() else { return };
+        // The cursor leaves the doomed row now rather than when the listing
+        // comes back: a person deleting four files presses Delete four times,
+        // and a cursor that lands nowhere makes the second press do nothing at
+        // all — `enabled` reads `focused`.
+        self.step_off_the_cursor();
+        if paths.len() > 1 {
+            self.notice = Some((
+                sk_model::i18n::format("notice.one_at_a_time", &[&paths.len()]),
+                Instant::now(),
+            ));
+        }
+        self.edits.trash(first, &self.jobs);
+    }
+
+    /// Moves the cursor to the row after the one it is on, or the one before it
+    /// where there is no after.
+    fn step_off_the_cursor(&mut self) {
+        let Some(row) = self.pane.cursor_row() else { return };
+        let last = self.pane.listing.rows().saturating_sub(1);
+        let next = if row < last { row + 1 } else { row.saturating_sub(1) };
+        if next != row {
+            self.pane.cursor_to(next, false);
+        }
+    }
+
+    /// Takes the most recent change back.
+    pub(crate) fn undo(&mut self) {
+        self.edits.undo(&self.jobs);
+    }
+
+    /// Does the most recently undone change again.
+    pub(crate) fn redo(&mut self) {
+        self.edits.redo(&self.jobs);
     }
 
     /// Shows or hides the list of places.
@@ -1037,6 +1287,39 @@ impl App {
         });
     }
 
+    /// Starts renaming the row a just-finished operation asked for.
+    ///
+    /// A folder is made and then named, and there is a directory read between the
+    /// two: this is the far side of it.
+    fn name_when_it_arrives(&mut self) {
+        if self.edits.name_after_load.take().is_none() {
+            return;
+        }
+        self.start_rename();
+    }
+
+    /// Takes delivery of a finished mutation.
+    fn drain_edits(&mut self) {
+        let Some(landed) = self.edits.drain() else { return };
+        let message = match landed {
+            crate::edit::Landed::Notice(message, subject) => {
+                // The listing does not know yet — the watcher will bring it in
+                // within a quarter of a second — so the name to land the cursor
+                // on is remembered rather than looked up.
+                if let Some(path) = subject
+                    && let Some(name) = path.file_name()
+                {
+                    self.pane.select_after(name.to_string_lossy().into_owned());
+                }
+                self.pane.refresh(&self.jobs);
+                message
+            }
+            crate::edit::Landed::Failed(message) => message,
+        };
+        self.notice = Some((message, Instant::now()));
+        self.dirty = true;
+    }
+
     /// Takes delivery of a launch: its notice, and the child to reap.
     fn drain_launches(&mut self) {
         while let Ok(launched) = self.launched_rx.try_recv() {
@@ -1175,8 +1458,18 @@ impl App {
     // The path, the cursor and the notice are printed with `Debug` on purpose:
     // this line is machine-read, and `Debug`'s quoting and escaping is what makes
     // a filename containing a space or a quote parseable at the other end.
-    #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
     pub(crate) fn dump(&mut self) {
+        // Two halves and one line: the listing's state and the chrome's
+        // geometry. Split because between them they name fifty things and one
+        // function that names fifty things is a function nobody reads — and
+        // joined because `tools/gui-test` parses `skerry-state` as one record.
+        println!("skerry-state {} {}", self.listing_state(), self.chrome_state());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
+    /// What the pane is showing.
+    #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
+    fn listing_state(&mut self) -> String {
         let cursor = self
             .pane
             .selection
@@ -1192,64 +1485,15 @@ impl App {
             .unwrap_or_default();
         let (known, running) = self.measurer.stats();
         let (jobs, panics) = self.jobs.pool.stats();
-        let frame = if self.window.needs_own_frame() { "own" } else { "server" };
-        let frame_hover = match self.hovered_button {
-            Some(crate::layout::Button::Minimize) => "minimize",
-            Some(crate::layout::Button::Maximize) => "maximize",
-            Some(crate::layout::Button::Close) => "close",
-            None => "none",
-        };
-        let maximized = self.window_state.maximized;
-        // The centre of the close button, so a test can aim at it without a copy
-        // of the metrics it is testing.
-        let close = self.layout.buttons[2];
-        let close_x = close.x + close.width / 2.0;
-        let filtering = self.filtering;
-        let filter = self.pane.filter.clone();
-        // The four are laid out from x=0, this wide each, so one number lets a
-        // test aim at any of them without a copy of the metric.
-        let tool_w = self.layout.tools[0].width;
-        let tool_hover = match self.hovered_tool {
-            Some(crate::layout::Tool::Back) => "back",
-            Some(crate::layout::Tool::Forward) => "forward",
-            Some(crate::layout::Tool::Parent) => "parent",
-            Some(crate::layout::Tool::Reload) => "reload",
-            None => "none",
-        };
-        let sidebar_w = self.layout.sidebar.width;
-        let sidebar_top = self.layout.sidebar.y;
-        let places = self.sidebar.len();
-        let place_hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
-        let place_name = self
-            .sidebar
-            .hover
-            .and_then(|index| self.sidebar.at(index))
-            .map(|entry| entry.label.clone())
-            .unwrap_or_default();
-        let crumbs = self.hits.crumbs.len();
-        let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
-        // The middle of the crumb one level up, which is the one a test clicks.
-        let parent_crumb_x = self
-            .hits
-            .crumbs
-            .len()
-            .checked_sub(2)
-            .and_then(|index| self.hits.crumbs.get(index))
-            .map_or(0.0, |area| area.x + area.width / 2.0);
-        println!(
-            "skerry-state path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
+        let naming = self.edits.naming.as_ref().map(|it| it.text.clone()).unwrap_or_default();
+        let naming_row =
+            self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
+        format!(
+            "path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
-body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
-frame={frame} frame_hover={frame_hover} maximized={maximized} close_x={close_x:.1} \
-crumbs={crumbs} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
-tool_w={tool_w:.1} tool_hover={tool_hover} \
-sidebar_w={sidebar_w:.1} sidebar_top={sidebar_top:.1} places={places} \
-place_hover={place_hover} place_name={place_name:?} \
-filtering={filtering} filter={filter:?} \
-logical={:.0}x{:.0} scale_120={} \
-frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
-jobs={jobs}/{panics} keys={} stats={}",
+naming={naming:?} naming_row={naming_row} undo={} redo={} busy={} \
+filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
             self.pane.show_hidden,
@@ -1260,12 +1504,90 @@ jobs={jobs}/{panics} keys={} stats={}",
             self.pane.loading,
             self.watching,
             self.notice.as_ref().map(|(message, _)| message.as_str()).unwrap_or_default(),
+            self.edits.history.can_undo(),
+            self.edits.history.can_redo(),
+            self.edits.busy(),
+            self.filtering,
+            self.pane.filter,
+        )
+    }
+
+    /// Where everything is, so a scenario can aim at it without a copy of the
+    /// metrics it is testing.
+    fn chrome_state(&mut self) -> String {
+        let frame = if self.window.needs_own_frame() { "own" } else { "server" };
+        let frame_hover = match self.hovered_button {
+            Some(crate::layout::Button::Minimize) => "minimize",
+            Some(crate::layout::Button::Maximize) => "maximize",
+            Some(crate::layout::Button::Close) => "close",
+            None => "none",
+        };
+        let close = self.layout.buttons[2];
+        let close_x = close.x + close.width / 2.0;
+        // The four navigation buttons are laid out from x=0, this wide each.
+        let tool_w = self.layout.tools[0].width;
+        let tool_hover = match self.hovered_tool {
+            Some(crate::layout::Tool::Back) => "back",
+            Some(crate::layout::Tool::Forward) => "forward",
+            Some(crate::layout::Tool::Parent) => "parent",
+            Some(crate::layout::Tool::Reload) => "reload",
+            None => "none",
+        };
+        let place_hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let place_name = self
+            .sidebar
+            .hover
+            .and_then(|index| self.sidebar.at(index))
+            .map(|entry| entry.label.clone())
+            .unwrap_or_default();
+        let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let menu = self.menu.as_ref();
+        let menu_rows = menu.map_or(0, |menu| menu.items.len());
+        let menu_active = menu
+            .and_then(|menu| menu.active)
+            .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let menu_id = menu.and_then(super::menu::Menu::active_id).unwrap_or_default();
+        // The middle of each menu row, so a scenario can aim at one by name
+        // rather than by arithmetic over constants it would have to copy.
+        let menu_aim = menu.map_or_else(String::new, |menu| {
+            menu.items
+                .iter()
+                .zip(&self.hits.menu)
+                .map(|(item, area)| {
+                    format!("{}@{:.0}:{:.0}", item.id, area.x + 20.0, area.y + area.height / 2.0)
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        // The middle of the crumb one level up, which is the one a test clicks.
+        let parent_crumb_x = self
+            .hits
+            .crumbs
+            .len()
+            .checked_sub(2)
+            .and_then(|index| self.hits.crumbs.get(index))
+            .map_or(0.0, |area| area.x + area.width / 2.0);
+        format!(
+            "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
+frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
+crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
+menu={menu_rows} menu_active={menu_active} menu_id={menu_id:?} menu_aim={menu_aim:?} \
+tool_w={tool_w:.1} tool_hover={tool_hover} \
+sidebar_w={:.1} sidebar_top={:.1} places={} \
+place_hover={place_hover} place_name={place_name:?} \
+logical={:.0}x{:.0} scale_120={} \
+frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.layout.body.y,
             self.layout.body.height,
             self.theme.metrics.row_height,
             self.layout.name.x,
             self.layout.size.x,
             self.layout.size.width,
+            self.window_state.maximized,
+            self.hits.crumbs.len(),
+            self.layout.sidebar.width,
+            self.layout.sidebar.y,
+            self.sidebar.len(),
             self.logical.width,
             self.logical.height,
             self.scale_120,
@@ -1275,8 +1597,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             self.frames.budget().1,
             self.show_keys,
             self.show_stats,
-        );
-        let _ = std::io::Write::flush(&mut std::io::stdout());
+        )
     }
 
     fn reveal_cursor(&mut self) {
@@ -1298,6 +1619,19 @@ jobs={jobs}/{panics} keys={} stats={}",
         commands: &Registry<Self>,
     ) {
         self.pointer = position;
+        if self.menu.is_some() {
+            self.menu_press(position, commands);
+            return;
+        }
+        // A press outside the field commits, which is what every other text
+        // field on the desktop does.
+        if self.edits.naming.is_some() {
+            if self.naming_field().contains(position.x, position.y) {
+                self.place_caret(position.x);
+                return;
+            }
+            self.commit_name();
+        }
         // The frame comes first, and the resize border before the buttons: the
         // border overlaps the top-right corner where the close button is, and a
         // window whose corner cannot be grabbed is a window that cannot be
@@ -1305,7 +1639,7 @@ jobs={jobs}/{panics} keys={} stats={}",
         // Only if the compositor took it: a press with no serial behind it is
         // not a grab the protocol accepts, and swallowing it would make the
         // top six pixels of the list a dead band.
-        if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical)
+        if let Some(edge) = self.layout.edge_at(position.x, position.y)
             && self.window.start_resize(edge)
         {
             return;
@@ -1330,14 +1664,8 @@ jobs={jobs}/{panics} keys={} stats={}",
             return;
         }
         if let Some(button) = self.layout.button_at(position.x, position.y) {
-            // The same methods the registry's `window.*` commands run. The
-            // `enabled` predicate is not consulted here because it cannot fail:
-            // the layout draws no button for an action `wm_capabilities` did not
-            // offer, so there is nothing at this point to press.
-            match button {
-                crate::layout::Button::Minimize => self.minimize_window(),
-                crate::layout::Button::Maximize => self.toggle_maximized(),
-                crate::layout::Button::Close => self.close_window(),
+            if let Some(id) = commands.find(button.command()) {
+                commands.run(id, self);
             }
             return;
         }
@@ -1377,11 +1705,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             return;
         }
 
-        let row = self
-            .layout
-            .row_at(position.y, self.pane.scroll.offset(), self.theme.metrics.row_height)
-            .filter(|row| *row < self.pane.listing.rows());
-        let Some(row) = row else {
+        let Some(row) = self.row_under(position) else {
             // Empty space: clear, and be ready to rubber-band.
             self.pane.selection.clear();
             self.pane.selection.set_cursor(None);
@@ -1429,7 +1753,7 @@ jobs={jobs}/{panics} keys={} stats={}",
         if self.thumb_grab.is_some() {
             return sk_plat::Cursor::Grabbing;
         }
-        if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical) {
+        if let Some(edge) = self.layout.edge_at(position.x, position.y) {
             return sk_plat::Cursor::Resize(edge);
         }
         if self.crumb_at(position).is_some()
@@ -1492,14 +1816,150 @@ jobs={jobs}/{panics} keys={} stats={}",
 
     /// The compositor's own window menu, which is where "always on top" and
     /// "move to workspace" live. Ours to offer and not ours to draw.
-    fn frame_menu(&mut self, position: Point) {
+    /// Asks for the context menu the pointer is over.
+    ///
+    /// **The menu acts on what it points at.** A secondary click on a row the
+    /// selection does not hold takes the selection first, which is what every
+    /// file manager does and the only behaviour under which "Move to Trash" is
+    /// safe to have on a menu at all.
+    fn open_menu(&mut self, position: Point) {
+        // The title bar's menu is the compositor's, which is where "always on
+        // top" and "move to workspace" live. Ours to offer and not ours to draw.
         if self.layout.drag.contains(position.x, position.y) {
             self.window.show_window_menu(position);
+            return;
         }
+        if self.edits.naming.is_some() {
+            self.commit_name();
+        }
+        let row = self.row_under(position);
+        if let Some(id) = row.and_then(|row| self.pane.listing.at(row))
+            && !self.pane.selection.contains(id)
+        {
+            self.pane.selection.replace_with(id);
+        }
+        let groups = if row.is_some() { crate::menu::ON_ROW } else { crate::menu::ON_BACKGROUND };
+        self.menu_wanted = Some((position, groups));
+    }
+
+    /// Opens the context menu from the keyboard, or closes an open one.
+    ///
+    /// At the cursor row rather than at the pointer, because a keyboard user's
+    /// attention is on the cursor and the pointer may be on another monitor.
+    pub(crate) fn toggle_menu(&mut self) {
+        if self.menu.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        let height = self.theme.metrics.row_height;
+        let at = match self.pane.cursor_row() {
+            Some(row) => {
+                let top = self.layout.body.y + row as f32 * height - self.pane.scroll.offset();
+                Point::new(self.layout.name.x, (top + height).max(self.layout.body.y))
+            }
+            None => Point::new(self.layout.body.x + 8.0, self.layout.body.y + 8.0),
+        };
+        let groups = if self.pane.cursor_row().is_some() {
+            crate::menu::ON_ROW
+        } else {
+            crate::menu::ON_BACKGROUND
+        };
+        self.menu_wanted = Some((at, groups));
+    }
+
+    /// Which listing row is under a point, or `None` outside the list.
+    fn row_under(&self, position: Point) -> Option<usize> {
+        if !self.layout.body.contains(position.x, position.y) {
+            return None;
+        }
+        self.layout
+            .row_at(position.y, self.pane.scroll.offset(), self.theme.metrics.row_height)
+            .filter(|row| *row < self.pane.listing.rows())
+    }
+
+    /// Which menu row is under a point, if a menu is open.
+    fn menu_at(&self, position: Point) -> Option<usize> {
+        self.menu.as_ref()?;
+        self.hits.menu.iter().position(|area| area.contains(position.x, position.y))
+    }
+
+    /// A press while a menu is open: it runs a row, or it dismisses.
+    ///
+    /// **A dismissing press does nothing else.** The click that closes a menu
+    /// must not also land on the row underneath it — which is what every menu on
+    /// the desktop does, and the difference between closing a menu and trashing
+    /// the file the menu was over.
+    fn menu_press(&mut self, position: Point, commands: &Registry<Self>) {
+        let chosen = self
+            .menu_at(position)
+            .and_then(|row| self.menu.as_ref()?.items.get(row))
+            .filter(|item| item.enabled)
+            .map(|item| item.id);
+        self.menu = None;
+        self.dirty = true;
+        if let Some(id) = chosen.and_then(|id| commands.find(id)) {
+            commands.run(id, self);
+        }
+    }
+
+    /// One key to an open menu. Returns whether it was consumed.
+    ///
+    /// Anything else closes the menu and falls through, so the menu never traps
+    /// the keyboard: `F1` from an open menu opens the keyboard list, the way it
+    /// does from everywhere else.
+    fn menu_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let Some(menu) = self.menu.as_mut() else { return false };
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.menu = None,
+            Key::Named(Named::Down) if bare => menu.step(true),
+            Key::Named(Named::Up) if bare => menu.step(false),
+            Key::Named(Named::Enter) => {
+                let chosen = menu.active_id();
+                self.menu = None;
+                if let Some(id) = chosen.and_then(|id| commands.find(id)) {
+                    commands.run(id, self);
+                }
+            }
+            _ => {
+                // **The diagnostic report passes through every mode, this one
+                // included.** A report that cannot be taken while a menu is open
+                // cannot describe the menu, and it is the only way the GUI
+                // harness can see one at all. Asked of the registry rather than
+                // matched on the key, so rebinding the report does not quietly
+                // make the menu opaque again.
+                let diagnostic = commands
+                    .resolve(event)
+                    .and_then(|id| commands.describe(id))
+                    .is_some_and(|command| command.id == "help.dump");
+                if diagnostic {
+                    return false;
+                }
+                // Anything else dismisses, and dismisses only: a key that
+                // closes a menu must not also act behind it, which is the rule
+                // the pointer already follows.
+                self.menu = None;
+                self.dirty = true;
+            }
+        }
+        self.dirty = true;
+        true
     }
 
     fn moved(&mut self, position: Point) {
         self.pointer = position;
+        // An open menu is over everything, so nothing under it hovers: a row
+        // lighting up behind a menu reads as a click that will land there.
+        if self.menu.is_some() {
+            let row = self.menu_at(position);
+            if self.menu.as_mut().is_some_and(|menu| menu.hover(row)) {
+                self.dirty = true;
+            }
+            let cursor = if row.is_some() { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow };
+            self.window.set_cursor(cursor);
+            return;
+        }
         let over = self.layout.button_at(position.x, position.y);
         if self.hovered_button != over {
             self.hovered_button = over;
@@ -1681,10 +2141,12 @@ jobs={jobs}/{panics} keys={} stats={}",
             hovered_crumb,
             hovered_tool,
             sidebar,
+            edits,
             filtering,
             desktop,
             window_state,
             hits,
+            menu,
             ..
         } = self;
 
@@ -1702,10 +2164,12 @@ jobs={jobs}/{panics} keys={} stats={}",
             hovered_tool: *hovered_tool,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,
+            naming: edits.naming.as_ref(),
             tools,
             filtering: *filtering,
             types: desktop.as_deref().map(|it| &it.mime),
             window: *window_state,
+            menu: menu.as_ref(),
         };
         let now = clock_seconds();
         let mut diagnostics = diagnostics_for(

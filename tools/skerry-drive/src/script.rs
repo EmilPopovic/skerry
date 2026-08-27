@@ -239,7 +239,7 @@ fn keycode(name: &str) -> Option<u32> {
         ("9", 10),
         ("0", 11),
     ];
-    const NAMED: [(&str, u32); 23] = [
+    const NAMED: [(&str, u32); 22] = [
         ("escape", 1),
         ("esc", 1),
         ("backspace", 14),
@@ -260,12 +260,26 @@ fn keycode(name: &str) -> Option<u32> {
         ("insert", 110),
         ("delete", 111),
         ("period", 52),
-        // Punctuation the product binds. `/` opens the filter, so a scenario has
-        // to be able to press it; the other two are here because a keycode table
-        // with one punctuation key in it is a table somebody will trip over.
         ("slash", 53),
-        ("/", 53),
         ("minus", 12),
+    ];
+    /// Every key a US layout produces without Shift, as the character itself, so
+    /// `text my-file.txt` types a filename rather than refusing one. The shifted
+    /// half — `_`, `~`, `!` — is deliberately absent: it needs Shift held, which
+    /// `character_action` only does for letters, and refusing it with the message
+    /// it already has beats typing the wrong character.
+    const PUNCTUATION: [(&str, u32); 11] = [
+        ("-", 12),
+        ("=", 13),
+        ("[", 26),
+        ("]", 27),
+        (";", 39),
+        ("'", 40),
+        ("`", 41),
+        ("\\", 43),
+        (",", 51),
+        (".", 52),
+        ("/", 53),
     ];
 
     if let Some(number) = name.strip_prefix('f').and_then(|rest| rest.parse::<u32>().ok()) {
@@ -281,6 +295,7 @@ fn keycode(name: &str) -> Option<u32> {
         .iter()
         .chain(DIGITS.iter())
         .chain(NAMED.iter())
+        .chain(PUNCTUATION.iter())
         .find(|(key, _)| *key == name)
         .map(|(_, code)| *code)
 }

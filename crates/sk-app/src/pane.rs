@@ -403,11 +403,15 @@ impl Pane {
     /// a file appearing must not move the cursor or scroll the view, because the
     /// person may be reading a row at the time. The cursor is restored by name.
     pub fn refresh(&mut self, jobs: &Jobs) {
+        // **A name already asked for wins over the cursor's own.** It used to be
+        // the other way round, and an operation then landed the cursor nowhere:
+        // a rename asks for the new name and refreshes, the cursor was still on
+        // the old one, and the old one no longer exists — so `restore_cursor`
+        // found nothing and the row a person had just named lost the focus ring.
         self.select_after_load = self
-            .selection
-            .cursor()
-            .map(|id| self.listing.name(id).to_owned())
-            .or_else(|| self.select_after_load.take());
+            .select_after_load
+            .take()
+            .or_else(|| self.selection.cursor().map(|id| self.listing.name(id).to_owned()));
         // The scroll is left exactly as it is. It used to be read and written
         // back, which looks like a no-op and is not: `Scroll::to` sets the
         // animation's *target*, so a refresh arriving mid-fling stopped the
@@ -563,6 +567,15 @@ impl Pane {
     pub fn sort_by(&mut self, column: SortColumn, jobs: &Jobs) {
         self.sort = self.sort.toggled(column);
         self.reorder(jobs);
+    }
+
+    /// Puts the cursor on `name` once the next listing lands.
+    ///
+    /// What an operation wants: the folder just made, or the thing that just came
+    /// back out of the trash. The listing does not contain it yet — the watcher
+    /// brings it in — so the answer is remembered rather than looked up.
+    pub fn select_after(&mut self, name: String) {
+        self.select_after_load = Some(name);
     }
 
     /// What the display order is currently derived from.

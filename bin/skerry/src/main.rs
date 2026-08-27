@@ -20,6 +20,7 @@ fn main() -> std::process::ExitCode {
     let mut dark = true;
     let mut stats = false;
     let mut keys = false;
+    let mut menu = false;
     let mut own_frame = false;
     let mut no_sidebar = false;
     let mut capture = None;
@@ -33,6 +34,7 @@ fn main() -> std::process::ExitCode {
             "--light" => dark = false,
             "--stats" => stats = true,
             "--keys" => keys = true,
+            "--menu" => menu = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
             "--capture" => match arguments.next() {
@@ -76,6 +78,7 @@ fn main() -> std::process::ExitCode {
             scale_120,
             dark,
             keys,
+            menu,
             stats,
             own_frame,
             sidebar: !no_sidebar,
@@ -140,6 +143,7 @@ skerry [OPTIONS] [PATH]
   --light          use the light palette
   --stats          show the frame statistics overlay
   --keys           show the keyboard overlay
+  --menu           show the context menu, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,

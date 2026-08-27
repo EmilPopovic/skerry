@@ -22,6 +22,12 @@ pub enum Group {
     View,
     /// Acting on files.
     File,
+    /// Taking an action back.
+    ///
+    /// Its own group because undo and redo are about the *history* rather than
+    /// about a file, and because a menu that lists them under File puts them
+    /// next to the thing they might be undoing.
+    Edit,
     /// The window itself: minimise, maximise, close.
     ///
     /// A group of its own because it is the only one whose commands are not
@@ -41,6 +47,7 @@ impl Group {
             Self::Navigate => "group.navigate",
             Self::Select => "group.select",
             Self::View => "group.view",
+            Self::Edit => "group.edit",
             Self::Window => "group.window",
             Self::File => "group.file",
             Self::Help => "group.help",

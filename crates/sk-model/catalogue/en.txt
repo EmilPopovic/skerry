@@ -34,6 +34,19 @@ size.gib = {0} GiB
 size.tib = {0} TiB
 size.dir = —
 
+# The name a new folder gets before anyone types one. Windows and Nautilus both
+# use this wording, so it is what a person expects to see appear.
+name.new_folder = New folder
+
+# What the status line says after a mutation. Short, because it is replacing the
+# item count for a few seconds and the item count is what a person wants back.
+# More than one thing was selected and only the first was acted on. The queue
+# that does the rest is M3's; saying so is better than silently doing one.
+notice.one_at_a_time = One of {0}. A queue for the rest is not built yet.
+notice.done = Done
+notice.undone = Undone
+notice.redone = Redone
+
 # Errors reaching a human say what happened and what to do, and are separate
 # from the debug chain that goes to the log.
 error.unreadable = Cannot read {0}. Check that you have permission to open it.
@@ -128,14 +141,20 @@ action.open = Open
 action.parent = Parent folder
 action.select_all = Select all
 action.clear_selection = Clear selection
+action.new_folder = New folder
+action.rename = Rename
+action.trash = Move to Trash
+action.undo = Undo
+action.redo = Redo
 action.filter = Filter the list
+action.menu = Show the menu
 action.minimize = Minimise the window
 action.maximize = Maximise or restore
 action.close = Close the window
 action.toggle_hidden = Show hidden files
 action.reload = Reload
 action.toggle_theme = Light / dark
-action.show_keys = This list
+action.show_keys = Keyboard shortcuts
 action.show_stats = Frame statistics
 action.sort_name = Sort by name
 action.sort_size = Sort by size
@@ -143,7 +162,7 @@ action.sort_modified = Sort by date
 action.type_ahead = Jump to a name
 
 # Chrome.
-chrome.hint = F1 keys · F2 stats
+chrome.hint = F1 keys · F12 report
 keys.title = Keyboard
 keys.typing = Type any letters
 stats.title = Frames
@@ -162,6 +181,7 @@ group.navigate = Go
 group.select = Select
 group.view = View
 group.file = File
+group.edit = Edit
 group.window = Window
 group.help = Help
 

@@ -188,10 +188,12 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,
+                naming: None,
                 tools: [true, true, true, true],
                 filtering: false,
                 types: Some(&types),
                 window: sk_plat::WindowState::default(),
+                menu: None,
             };
             view::draw(
                 &mut painter,

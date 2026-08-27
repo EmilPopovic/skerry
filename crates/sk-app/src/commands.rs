@@ -26,6 +26,7 @@ pub fn registry() -> Registry<App> {
     select(&mut registry);
     view(&mut registry);
     file(&mut registry);
+    edit(&mut registry);
     window(&mut registry);
     help(&mut registry);
     registry
@@ -180,6 +181,56 @@ fn select(registry: &mut Registry<App>) {
     }
 }
 
+/// Making, naming and removing things — and taking any of it back.
+fn edit(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "file.new_folder",
+            name: "action.new_folder",
+            group: Group::File,
+            keys: &["ctrl+shift+n"],
+            enabled: |app: &App| !app.busy(),
+            run: App::new_folder,
+        },
+        CommandSpec {
+            id: "file.rename",
+            name: "action.rename",
+            group: Group::File,
+            // F2 in every file manager on every desktop, which is why the frame
+            // statistics moved off it.
+            keys: &["f2"],
+            enabled: |app: &App| app.pane.focused().is_some() && !app.busy(),
+            run: App::start_rename,
+        },
+        CommandSpec {
+            id: "file.trash",
+            name: "action.trash",
+            group: Group::File,
+            keys: &["delete"],
+            enabled: |app: &App| app.pane.focused().is_some() && !app.busy(),
+            run: App::trash_selection,
+        },
+        CommandSpec {
+            id: "edit.undo",
+            name: "action.undo",
+            group: Group::Edit,
+            keys: &["ctrl+z"],
+            enabled: |app: &App| app.can_undo(),
+            run: App::undo,
+        },
+        CommandSpec {
+            id: "edit.redo",
+            name: "action.redo",
+            group: Group::Edit,
+            keys: &["ctrl+shift+z", "ctrl+y"],
+            enabled: |app: &App| app.can_redo(),
+            run: App::redo,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
 /// The window itself.
 ///
 /// **Rule 2**: every action is one entry in one registry. These three are the
@@ -233,6 +284,16 @@ fn view(registry: &mut Registry<App>) {
             keys: &["ctrl+f", "/"],
             enabled: |app: &App| !app.pane.listing.is_empty(),
             run: App::toggle_filter,
+        },
+        CommandSpec {
+            id: "view.menu",
+            name: "action.menu",
+            group: Group::View,
+            // The key on a keyboard that has one, and the chord for the
+            // keyboards that do not — which is every laptop made this decade.
+            keys: &["menu", "shift+f10"],
+            enabled: |_| true,
+            run: App::toggle_menu,
         },
         CommandSpec {
             id: "view.sidebar",
@@ -343,7 +404,10 @@ fn help(registry: &mut Registry<App>) {
             id: "help.stats",
             name: "action.show_stats",
             group: Group::Help,
-            keys: &["f2"],
+            // **Not F2**, which every file manager on every desktop uses for
+            // rename. A diagnostic overlay does not get to keep the key a
+            // person's hands already know.
+            keys: &["f8"],
             enabled: |_| true,
             run: App::toggle_stats,
         },
@@ -351,6 +415,55 @@ fn help(registry: &mut Registry<App>) {
         registry.add(spec);
     }
 }
+
+/// Commands a pointer reaches without going through a menu, and where.
+///
+/// Read by `every_command_can_be_reached_without_a_keyboard`. The toolbar and
+/// the window buttons are asked rather than listed, so renaming the command
+/// behind a button fails the test instead of quietly emptying it.
+#[cfg(test)]
+fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
+    let mut reach: Vec<(&'static str, &'static str)> = Vec::new();
+    for tool in crate::layout::Tool::ALL {
+        reach.push((tool.command(), "a navigation button"));
+    }
+    for button in crate::layout::Button::ALL {
+        reach.push((button.command(), "a window button"));
+    }
+    for id in ["view.sort_name", "view.sort_size", "view.sort_modified"] {
+        reach.push((id, "a column header"));
+    }
+    reach.push(("go.open", "a double click on a row"));
+    reach.push(("view.menu", "the secondary pointer button"));
+    reach.push(("select.none", "a click on empty space"));
+    reach.push(("go.home", "the sidebar's Home row"));
+    for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND] {
+        for id in groups.iter().flat_map(|group| group.iter()) {
+            reach.push((id, "the context menu"));
+        }
+    }
+    reach
+}
+
+/// The commands a pointer is not expected to reach, and why.
+///
+/// **Every entry is a reason, not an exception.** Eight of them are cursor
+/// movement, where the pointer's equivalent is clicking the row it would have
+/// moved to — a menu item that moves a selection down one is furniture nobody
+/// would use. The last two are diagnostics for a bug report.
+#[cfg(test)]
+const POINTER_EXEMPT: &[(&str, &str)] = &[
+    ("select.up", "a pointer moves the cursor by clicking the row"),
+    ("select.down", "a pointer moves the cursor by clicking the row"),
+    ("select.extend_up", "a pointer extends a selection by shift-clicking"),
+    ("select.extend_down", "a pointer extends a selection by shift-clicking"),
+    ("select.page_up", "a pointer pages with the scroll wheel and the thumb"),
+    ("select.page_down", "a pointer pages with the scroll wheel and the thumb"),
+    ("select.top", "a pointer reaches the top by dragging the thumb"),
+    ("select.bottom", "a pointer reaches the bottom by dragging the thumb"),
+    ("help.dump", "a diagnostic for a bug report, not an action on a file"),
+    ("help.stats", "a diagnostic for a bug report, not an action on a file"),
+];
 
 /// The keyboard overlay's rows: what to press, and what it does.
 ///
@@ -374,7 +487,7 @@ pub fn overlay_rows(registry: &Registry<App>) -> Vec<(String, String)> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{overlay_rows, registry};
+    use super::{POINTER_EXEMPT, overlay_rows, pointer_surfaces, registry};
 
     /// Rule 2 and rule 4 as one assertion: the whole set is sound, every command
     /// has a name a person can read, and no two of them fight over a key.
@@ -410,6 +523,42 @@ mod tests {
         assert_eq!(keys_of("go.forward"), "Alt →");
         assert!(keys_of("go.parent").contains("Alt ↑"));
         assert!(keys_of("go.parent").contains("Backspace"));
+    }
+
+    /// The other half of the promise the keyboard half already keeps: every
+    /// command is reachable with a pointer alone, or is listed above with the
+    /// reason why a pointer has a better way of doing that particular thing.
+    #[test]
+    fn every_command_can_be_reached_without_a_keyboard() {
+        let registry = registry();
+        let reach = pointer_surfaces();
+        for command in registry.iter() {
+            let by = reach.iter().find(|(id, _)| *id == command.id).map(|(_, where_)| *where_);
+            let exempt = POINTER_EXEMPT.iter().find(|(id, _)| *id == command.id);
+            assert!(
+                by.is_some() || exempt.is_some(),
+                "`{}` has no pointer at all: put it on a menu in `menu.rs`, on a button, \
+                 or in `POINTER_EXEMPT` with the reason a pointer does not need it",
+                command.id
+            );
+            assert!(
+                by.is_none() || exempt.is_none(),
+                "`{}` is both reachable by {} and exempt — one of the two is stale",
+                command.id,
+                by.unwrap_or_default()
+            );
+        }
+    }
+
+    /// A menu row whose identifier the registry does not have is drawn as
+    /// nothing at all, which is a menu that silently loses an entry.
+    #[test]
+    fn every_menu_row_and_every_exemption_names_a_real_command() {
+        let registry = registry();
+        let named = pointer_surfaces().into_iter().chain(POINTER_EXEMPT.iter().copied());
+        for (id, _) in named {
+            assert!(registry.find(id).is_some(), "`{id}` is not a command");
+        }
     }
 
     #[test]

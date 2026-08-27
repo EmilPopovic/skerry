@@ -304,6 +304,29 @@ and `ascent < size * 1.5` — which cannot be satisfied by a units error.
 > **Fails if:** every assertion in a test compares two values the code under test
 > produced.
 
+## A test that documents the defect is worse than no test
+
+`Chord::matches` compared a bound character to a pressed one exactly, and xkb
+applies Shift before the event arrives — so `Ctrl+Shift+N` came through as `N`,
+the binding was written `n`, and **three commands were bound to chords no
+keyboard can produce**: New folder, Copy the path as text, and Redo. Two had no
+other key. Nothing in the interface hinted at it; the keyboard overlay read the
+chord out of the registry and displayed `Ctrl Shift N` correctly.
+
+The reason it lasted was a test named
+`shift_counts_for_a_named_key_and_not_for_a_character`, which asserted that
+`Ctrl+Shift+A` runs Select All. That is true of the code and false of the
+product, and a green test with a confident name is the most expensive comment in
+a repository: it is read as a decision that has already been examined.
+
+The rule: **a test asserts what the product promises, not what the code does.**
+The replacement states the rule in both directions — two chords for a letter, one
+for punctuation — and a second test presses the three chords as xkb actually
+sends them.
+
+> **Fails if:** a test's name asserts a design decision that nobody outside the
+> function it tests would recognise.
+
 ## A bound has to be on the quantity that runs out
 
 The glyph atlas bounded uploads at **128 glyphs per frame**, to keep a cold cache

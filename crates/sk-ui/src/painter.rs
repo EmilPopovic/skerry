@@ -60,6 +60,43 @@ impl TextStyle {
     }
 }
 
+/// Which byte offset in `text` is nearest `want` device pixels from its start.
+///
+/// Measured by shaping prefixes, which is O(characters) shapings for one click on
+/// one filename — and correct where arithmetic over glyph advances is not,
+/// because a cluster is not a character and a ligature is not two. Nothing here
+/// runs per frame.
+///
+/// A free function rather than only a [`Painter`] method because the caller that
+/// needs it most is an event handler, which has the cache and the faces and no
+/// frame to draw into.
+#[must_use]
+pub fn caret_offset(
+    cache: &mut LayoutCache,
+    fonts: &mut Fonts,
+    text: &str,
+    style: TextStyle,
+    px_size: f32,
+    want: f32,
+) -> usize {
+    if want <= 0.0 {
+        return 0;
+    }
+    let mut best = (0usize, f32::MAX);
+    for (offset, _) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+        let advance = if offset == 0 {
+            0.0
+        } else {
+            cache.get_or_shape_label(&text[..offset], style.weight, px_size, fonts).advance
+        };
+        let distance = (advance - want).abs();
+        if distance < best.1 {
+            best = (offset, distance);
+        }
+    }
+    best.0
+}
+
 /// Everything one frame's drawing needs, borrowed for the length of the frame.
 pub struct Painter<'a> {
     /// The frame being built.
@@ -148,6 +185,12 @@ impl Painter<'_> {
         align: Align,
     ) -> f32 {
         self.draw(Source::Cell(key), text, box_rect, baseline, color, align)
+    }
+
+    /// Which byte offset in `text` a click at `x` is nearest.
+    #[must_use]
+    pub fn caret_at(&mut self, text: &str, style: TextStyle, from: f32, x: f32) -> usize {
+        caret_offset(self.cache, self.fonts, text, style, self.px(style.size), x - from)
     }
 
     /// Draws a chrome string — a path, a header, a status line — keyed by its

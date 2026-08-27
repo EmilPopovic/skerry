@@ -58,6 +58,11 @@ FRAMES = [
     # a golden frame of it would either be flaky or would have to mask the only
     # thing it shows. The keyboard overlay covers "an overlay draws correctly"
     # and its content comes from the command registry, which does not vary.
+    # The context menu, which is the whole of the pointer's way into the command
+    # registry: eleven rows, three of them dimmed, four dividers and a
+    # highlight. Its width is the width of its widest shaped row, so this is
+    # also the only frame that would catch that measurement drifting.
+    ("context-menu", ["--size", "900x520", "--scale", "125", "--menu"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

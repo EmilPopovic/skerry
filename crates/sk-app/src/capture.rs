@@ -57,6 +57,8 @@ pub struct Capture {
     pub keys: bool,
     /// Whether to draw the statistics overlay.
     pub stats: bool,
+    /// Whether to draw the context menu.
+    pub menu: bool,
     /// Whether to draw the sidebar.
     pub sidebar: bool,
     /// Whether to draw the window frame the program draws for itself.
@@ -65,6 +67,24 @@ pub struct Capture {
     /// frame — the one GNOME requires, with its three buttons and its resize
     /// band — has no golden coverage at all.
     pub own_frame: bool,
+}
+
+/// The background menu, in the state a fresh window would have it in.
+///
+/// Nothing has been done, so Undo and Redo are dimmed, and nothing has been
+/// copied, so Paste is. Stated rather than asked because a capture has no `App`
+/// for the registry to ask — the same trade the navigation buttons' `tools`
+/// makes, for the same reason. Highlighted, because that is the state a pointer
+/// holds a menu in for as long as it is open.
+fn sample_menu(layout: &Layout) -> Option<crate::menu::Menu> {
+    let at = sk_plat::Point::new(layout.body.x + 140.0, layout.body.y + 96.0);
+    let mut menu =
+        crate::menu::build(crate::menu::ON_BACKGROUND, &crate::commands::registry(), at, |id| {
+            !matches!(id, "edit.undo" | "edit.redo" | "file.paste_location")
+        })?;
+    menu.step(true);
+    menu.step(true);
+    Some(menu)
 }
 
 /// Walks every visible folder to completion, so the frame is reproducible.
@@ -149,6 +169,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().cast_signed());
 
+    let menu = request.menu.then(|| sample_menu(&layout)).flatten();
+
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
     // so a capture is never an image with holes in the text.
@@ -193,6 +215,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,
+                naming: None,
                 // What a freshly opened directory looks like: nowhere to go
                 // back to, nowhere forward, a parent and a reload. Hardcoded
                 // because a capture has no history — and it is the state worth
@@ -207,6 +230,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                     can_minimize: true,
                     ..sk_plat::WindowState::default()
                 },
+                menu: menu.as_ref(),
             };
             view::draw(
                 &mut painter,

@@ -75,6 +75,24 @@ impl<T> History<T> {
         true
     }
 
+    /// The change an undo would revert, without touching the stack.
+    ///
+    /// For a caller whose revert is a **job**: it reads the entry here, hands a
+    /// copy to the pool, and calls [`History::undo`] when the answer comes back.
+    /// What makes that safe rather than the half-done shape this API exists to
+    /// avoid is that the caller does not start a second operation while one is in
+    /// flight — so the entry `undo` pops is the entry `peek_undo` returned.
+    #[must_use]
+    pub fn peek_undo(&self) -> Option<&T> {
+        self.done.last()
+    }
+
+    /// The change a redo would apply again, without touching the stack.
+    #[must_use]
+    pub fn peek_redo(&self) -> Option<&T> {
+        self.undone.last()
+    }
+
     /// Whether there is anything to undo.
     #[must_use]
     pub fn can_undo(&self) -> bool {
@@ -183,6 +201,22 @@ mod tests {
         assert!(history.undo(|_| true));
         assert!(history.redo(|entry| Some(*entry)));
         assert_eq!(history.entries().count(), 3);
+    }
+
+    /// What a caller whose revert is a job does: read, hand a copy to the pool,
+    /// and settle the stack when the answer arrives.
+    #[test]
+    fn peeking_does_not_move_anything() {
+        let mut history = History::new(4);
+        history.record("one");
+        history.record("two");
+        assert_eq!(history.peek_undo(), Some(&"two"));
+        assert_eq!(history.peek_undo(), Some(&"two"), "peeking twice moved it");
+        assert_eq!(history.peek_redo(), None);
+
+        assert!(history.undo(|entry| *entry == "two"));
+        assert_eq!(history.peek_undo(), Some(&"one"));
+        assert_eq!(history.peek_redo(), Some(&"two"));
     }
 
     #[test]

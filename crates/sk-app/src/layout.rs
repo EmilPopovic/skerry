@@ -33,6 +33,11 @@ impl Area {
 /// Every region of the window.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Layout {
+    /// The window, in logical pixels. Kept because a region that has to stay
+    /// inside the window — a context menu, a resize band — needs the whole of it
+    /// and not a rectangle in it, and reconstructing it from the status strip is
+    /// arithmetic that is right until the window is shorter than its own chrome.
+    pub window: Size,
     /// The path bar.
     pub path: Area,
     /// The list of places down the left, or empty when it is closed or shed.
@@ -191,6 +196,19 @@ pub enum Button {
 impl Button {
     /// The three, in the order they are laid out.
     pub const ALL: [Self; 3] = [Self::Minimize, Self::Maximize, Self::Close];
+
+    /// The command each one runs, for the same reason [`Tool::command`] exists:
+    /// the button and the chord are one action, and a press goes through the
+    /// registry so that a compositor which offers no minimise cannot be
+    /// minimised by clicking where the button would have been.
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Minimize => "window.minimize",
+            Self::Maximize => "window.maximize",
+            Self::Close => "window.close",
+        }
+    }
 }
 
 impl Layout {
@@ -289,6 +307,7 @@ impl Layout {
 
         let (icon, name, size_column, modified) = columns(body, metrics);
         Self {
+            window: size,
             path,
             sidebar: aside,
             header,
@@ -332,7 +351,8 @@ impl Layout {
     /// when they aim at a corner, and a band that reports `Right` there makes
     /// the corner unusable.
     #[must_use]
-    pub fn edge_at(&self, x: f32, y: f32, size: Size) -> Option<Edge> {
+    pub fn edge_at(&self, x: f32, y: f32) -> Option<Edge> {
+        let size = self.window;
         let band = self.resize_border;
         if band <= 0.0 {
             return None;
@@ -449,15 +469,15 @@ mod tests {
             Frame::Own { edges: true, minimize: true, maximize: true },
             false,
         );
-        assert_eq!(layout.edge_at(1.0, 1.0, size), Some(Edge::TopLeft));
-        assert_eq!(layout.edge_at(799.0, 1.0, size), Some(Edge::TopRight));
-        assert_eq!(layout.edge_at(1.0, 599.0, size), Some(Edge::BottomLeft));
-        assert_eq!(layout.edge_at(799.0, 599.0, size), Some(Edge::BottomRight));
-        assert_eq!(layout.edge_at(400.0, 1.0, size), Some(Edge::Top));
-        assert_eq!(layout.edge_at(400.0, 599.0, size), Some(Edge::Bottom));
-        assert_eq!(layout.edge_at(1.0, 300.0, size), Some(Edge::Left));
-        assert_eq!(layout.edge_at(799.0, 300.0, size), Some(Edge::Right));
-        assert_eq!(layout.edge_at(400.0, 300.0, size), None);
+        assert_eq!(layout.edge_at(1.0, 1.0), Some(Edge::TopLeft));
+        assert_eq!(layout.edge_at(799.0, 1.0), Some(Edge::TopRight));
+        assert_eq!(layout.edge_at(1.0, 599.0), Some(Edge::BottomLeft));
+        assert_eq!(layout.edge_at(799.0, 599.0), Some(Edge::BottomRight));
+        assert_eq!(layout.edge_at(400.0, 1.0), Some(Edge::Top));
+        assert_eq!(layout.edge_at(400.0, 599.0), Some(Edge::Bottom));
+        assert_eq!(layout.edge_at(1.0, 300.0), Some(Edge::Left));
+        assert_eq!(layout.edge_at(799.0, 300.0), Some(Edge::Right));
+        assert_eq!(layout.edge_at(400.0, 300.0), None);
     }
 
     /// A maximized or tiled window has no edges to pull, and an invisible band
@@ -473,7 +493,7 @@ mod tests {
             false,
         );
         assert!(fixed.resize_border <= 0.0);
-        assert_eq!(fixed.edge_at(1.0, 1.0, size), None);
+        assert_eq!(fixed.edge_at(1.0, 1.0), None);
         assert!(fixed.buttons[2].width > 0.0, "a tiled window still has to close");
     }
 

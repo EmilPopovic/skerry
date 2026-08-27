@@ -58,6 +58,22 @@ impl Change {
             Self::Trashed { original, .. } => original,
         }
     }
+
+    /// Where the file is once this change has been **reverted**, if anywhere.
+    ///
+    /// The other end of [`Change::subject`], and the row a cursor belongs on
+    /// after an undo: undoing a rename leaves the file under the name it had
+    /// before, and undoing a trash puts it back where it was. `Created` has no
+    /// answer — the point of undoing it is that there is nothing left to point
+    /// at.
+    #[must_use]
+    pub fn origin(&self) -> Option<&Path> {
+        match self {
+            Self::Created { .. } => None,
+            Self::Renamed { from, .. } => Some(from),
+            Self::Trashed { original, .. } => Some(original),
+        }
+    }
 }
 
 /// Makes a directory called `name` inside `parent`.

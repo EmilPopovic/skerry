@@ -11,8 +11,10 @@ use sk_plat::{Point, WindowState};
 use sk_text::Weight;
 use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format, visible_rows};
 
+use crate::edit::Naming;
 use crate::frames::{BUDGET_US, Frames};
 use crate::layout::{Area, Button, Layout, Tool};
+use crate::menu::Menu;
 use crate::pane::Pane;
 use crate::sidebar::{Entry, Mark, Section};
 
@@ -56,6 +58,8 @@ pub struct Chrome<'a> {
     pub places: &'a [Section],
     /// The sidebar row under the pointer.
     pub hovered_place: Option<usize>,
+    /// The name being typed, if one is.
+    pub naming: Option<&'a Naming>,
     /// Whether each of the four navigation buttons can run right now, from the
     /// command registry rather than from a second copy of the same question.
     pub tools: [bool; 4],
@@ -66,6 +70,8 @@ pub struct Chrome<'a> {
     pub types: Option<&'a MimeDatabase>,
     /// What the compositor says the window is, for the frame the window draws.
     pub window: WindowState,
+    /// The context menu, while one is open.
+    pub menu: Option<&'a Menu>,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -83,6 +89,12 @@ pub struct Hits {
     /// One rectangle per sidebar row, in the flattened order the model uses, so
     /// the index a click reports is an index into it.
     pub places: Vec<Area>,
+    /// One rectangle per open context-menu row, in the menu's own order.
+    ///
+    /// The menu's width is the width of its widest shaped row, so this is the
+    /// same story as the breadcrumbs': the rectangle is known where the text is
+    /// measured, and the next event tests against it.
+    pub menu: Vec<Area>,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -138,6 +150,12 @@ pub fn draw(
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, layout, typed);
+    }
+    // Last, so it is over everything: a menu under the statistics overlay is a
+    // menu whose rows cannot be read or aimed at.
+    match chrome.menu {
+        Some(menu) => context_menu(painter, layout, menu, hits),
+        None => hits.menu.clear(),
     }
 }
 
@@ -301,9 +319,134 @@ fn crumb_names(pane: &Pane) -> Vec<String> {
 
 /// How wide a breadcrumb's text is, in logical pixels.
 fn crumb_width(painter: &mut Painter<'_>, name: &str, size: f32, bold: bool) -> f32 {
+    text_width(painter, name, size, bold)
+}
+
+/// How wide a string is when shaped at `size`, in logical pixels.
+///
+/// Shaped and not estimated from a character count: a component whose width is
+/// guessed is a component that overlaps its neighbour in one script and leaves a
+/// hole in another. The run comes out of the same cache the draw will use, so
+/// measuring first costs a hash lookup.
+fn text_width(painter: &mut Painter<'_>, text: &str, size: f32, bold: bool) -> f32 {
     let px_size = painter.px(size);
     let weight = if bold { Weight::Bold } else { Weight::Regular };
-    painter.cache.get_or_shape_label(name, weight, px_size, painter.fonts).advance / painter.scale
+    painter.cache.get_or_shape_label(text, weight, px_size, painter.fonts).advance / painter.scale
+}
+
+/// The context menu, over everything else.
+///
+/// **Width from the widest row, never a constant.** Every string here is
+/// translated and a chord's display name is longer in some languages than the
+/// command's; a fixed width ellipsizes Move to Trash in exactly the locale
+/// nobody testing it reads.
+fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &mut Hits) {
+    use crate::menu::{DIVIDER, INSET, SPACING, STEP, WIDTH};
+
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let widest = menu
+        .items
+        .iter()
+        .map(|item| {
+            let name = text_width(painter, &item.name, metrics.text_size, false);
+            let keys = text_width(painter, &item.keys, metrics.header_size, true);
+            name + if keys > 0.0 { SPACING + keys } else { 0.0 }
+        })
+        .fold(0.0f32, f32::max);
+    let width = (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1);
+    let area = crate::menu::place(menu.at, width, crate::menu::height(&menu.items), layout.window);
+    panel(painter, area);
+
+    hits.menu.clear();
+    let tops: Vec<f32> = crate::menu::row_tops(&menu.items, area).collect();
+    for (index, (item, top)) in menu.items.iter().zip(tops).enumerate() {
+        hits.menu.push(Area { x: area.x, y: top, width: area.width, height: STEP });
+        if item.starts_group {
+            let y = top - DIVIDER / 2.0;
+            painter.hairline(area.x + INSET, y, area.width - INSET * 2.0, theme.palette.divider);
+        }
+        let highlighted = menu.active == Some(index);
+        if highlighted {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let (name_colour, keys_colour) = match (item.enabled, highlighted) {
+            (false, _) => (theme.palette.dim.with_alpha(110), theme.palette.dim.with_alpha(80)),
+            (true, true) => (theme.palette.selected_text, theme.palette.selected_text),
+            (true, false) => (theme.palette.text, theme.palette.dim),
+        };
+        let baseline = painter.baseline(top, STEP, metrics.text_size);
+        let inner = area.width - INSET * 2.0;
+        let keys_width = text_width(painter, &item.keys, metrics.header_size, true);
+        let name_style = TextStyle::new(metrics.text_size, name_colour);
+        let x = area.x + INSET;
+        line(painter, &item.name, name_style, x, inner - keys_width - SPACING * 0.5, baseline);
+        let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
+        line(painter, &item.keys, keys_style, x, inner, baseline);
+    }
+}
+
+/// The name being typed, drawn over the row it belongs to.
+fn name_field_at(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    naming: &Naming,
+    top: f32,
+    baseline: f32,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    // `name_field` derives the row's top from an index and a scroll offset; here
+    // the top is already in hand, so the one rectangle is taken from it and only
+    // its `y` replaced. Both callers still read the same width and inset.
+    let area = Area { y: top + 2.0, ..name_field(layout, &metrics, naming.row, 0.0) };
+    let box_rect = painter.rect(area.x, area.y, area.width, area.height);
+    painter.list.rect(box_rect, theme.palette.background, painter.px(metrics.radius));
+    painter.list.stroke(
+        box_rect,
+        theme.palette.accent,
+        painter.px(metrics.radius),
+        painter.snap(1.0).max(1.0),
+    );
+
+    let style = TextStyle::new(metrics.text_size, theme.palette.text);
+    let inner = painter.rect(area.x + 6.0, 0.0, area.width - 12.0, 0.0);
+    painter.label(&naming.text, style, inner, baseline);
+
+    // The caret is measured by shaping what is before it, which is the only
+    // answer that survives a ligature or a combining mark.
+    let before = &naming.text[..naming.caret.min(naming.text.len())];
+    let advance = if before.is_empty() {
+        0.0
+    } else {
+        let px_size = painter.px(style.size);
+        painter.cache.get_or_shape_label(before, style.weight, px_size, painter.fonts).advance
+    };
+    let caret = sk_gpu::Rect::new(
+        painter.snap(area.x + 6.0) + advance,
+        painter.snap(area.y + 3.0),
+        painter.snap(1.5).max(1.0),
+        painter.px(area.height - 6.0),
+    );
+    painter.list.rect(caret, theme.palette.accent, 0.0);
+}
+
+/// Where the name field goes for a row: the name column, at that row's height.
+///
+/// A free function because both the drawing and the hit test need it, and two
+/// rectangles computed separately are two rectangles that agree until one of
+/// them is edited.
+#[must_use]
+pub fn name_field(layout: &Layout, metrics: &sk_ui::Metrics, row: usize, offset: f32) -> Area {
+    let top = layout.body.y + row as f32 * metrics.row_height - offset;
+    Area {
+        x: layout.name.x - 4.0,
+        y: top + 2.0,
+        width: (layout.name.width + metrics.size_column * 0.5)
+            .min(layout.body.right() - layout.name.x + 4.0),
+        height: metrics.row_height - 4.0,
+    }
 }
 
 /// The colour of the mark at the head of a row, from the file's kind.
@@ -647,7 +790,7 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
     let rows = pane.listing.rows();
     let range = visible_rows(pane.scroll.offset(), layout.body.height, metrics.row_height, rows);
     for row in range {
-        row_at(painter, pane, layout, now, row, chrome.types);
+        row_at(painter, pane, layout, now, row, chrome.types, chrome.naming);
     }
 
     if rows == 0 && !pane.loading {
@@ -686,6 +829,7 @@ fn row_at(
     now: i64,
     row: usize,
     types: Option<&MimeDatabase>,
+    naming: Option<&Naming>,
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -752,6 +896,14 @@ fn row_at(
         }
 
         let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
+        if let Some(naming) = naming.filter(|naming| naming.row == row) {
+            // The field replaces the name and the metadata columns both: they
+            // describe the file this row *was*, and a size beside a name being
+            // changed is a fact about something that is about to stop existing
+            // under that name.
+            name_field_at(painter, layout, naming, top, baseline);
+            return;
+        }
         let name_box = painter.rect(layout.name.x, 0.0, layout.name.width - 10.0, 0.0);
         painter.cell(
             RunKey::cell(listing, id.0, COLUMN_NAME, Weight::Regular, text_px),
@@ -933,14 +1085,34 @@ fn type_ahead(painter: &mut Painter<'_>, layout: &Layout, typed: &str) {
     line(painter, typed, style, area.x + 16.0, area.width - 32.0, baseline);
 }
 
+/// How tall a row of the keyboard list may be, and how short it may become
+/// before a column is added instead.
+const MAX_KEY_STEP: f32 = 24.0;
+const MIN_KEY_STEP: f32 = 17.0;
+
 fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, String)]) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let step = 24.0;
-    let per_column = entries.len().max(1).div_ceil(2);
+    // **The shape follows the window, not the other way round.** Two columns and
+    // a fixed row height were hardcoded, and the overlay grows by a row every
+    // time a command is added: five arrived with the operations and the last six
+    // fell off the bottom of the screen — a keyboard list that cannot be read
+    // being the one surface rule 4 is about.
+    //
+    // Rows are given up before columns are added, because a column costs width
+    // and width is what the labels need: "Extend selection down" ellipsized into
+    // the next column's keys the first time this had three of them.
+    let chrome = 76.0;
+    let available = (layout.body.height - 16.0 - chrome).max(chrome);
+    let count = entries.len().max(1);
+    let columns = (1..=4)
+        .find(|columns| count.div_ceil(*columns) as f32 * MIN_KEY_STEP <= available)
+        .unwrap_or(4);
+    let per_column = count.div_ceil(columns);
+    let step = MAX_KEY_STEP.min(available / per_column as f32).max(MIN_KEY_STEP);
 
-    let width = 660.0_f32.min(layout.body.width - 40.0);
-    let height = per_column as f32 * step + 76.0;
+    let width = (340.0 * columns as f32).min(layout.body.width - 40.0);
+    let height = per_column as f32 * step + chrome;
     let area = Area {
         x: ((layout.body.width - width) / 2.0).max(0.0),
         y: (layout.body.y + (layout.body.height - height) / 2.0).max(layout.body.y + 8.0),
@@ -953,18 +1125,18 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
     line(painter, i18n::lookup("keys.title"), style, area.x + 20.0, area.width - 40.0, baseline);
 
-    let column_width = (area.width - 40.0) / 2.0;
+    let column_width = (area.width - 40.0) / columns as f32;
     for (index, (keys, label)) in entries.iter().enumerate() {
         let x = area.x + 20.0 + (index / per_column) as f32 * column_width;
         let y = area.y + 52.0 + (index % per_column) as f32 * step;
         let baseline = painter.baseline(y, step, metrics.text_size);
         let keys_style = TextStyle::new(metrics.header_size, theme.palette.accent).bold();
-        line(painter, keys, keys_style, x, column_width * 0.38, baseline);
+        line(painter, keys, keys_style, x, column_width * 0.40, baseline);
         let label_style = TextStyle::new(metrics.text_size, theme.palette.text);
         // The label gets the rest of the column minus a gutter, because the
         // longest entry — "Extend selection down" — was being ellipsized into
         // the next column's keys in the first capture of this overlay.
-        line(painter, label, label_style, x + column_width * 0.40, column_width * 0.54, baseline);
+        line(painter, label, label_style, x + column_width * 0.42, column_width * 0.56, baseline);
     }
 }
 
@@ -1162,10 +1334,12 @@ mod tests {
                 hovered_tool: None,
                 places: &[],
                 hovered_place: None,
+                naming: None,
                 tools: [true, true, true, true],
                 filtering: false,
                 types: None,
                 window: sk_plat::WindowState::default(),
+                menu: None,
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test

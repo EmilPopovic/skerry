@@ -407,8 +407,8 @@ def expect(state: dict[str, str], **wanted) -> None:
 # --------------------------------------------------------------------------
 
 
-def make_fixture(root: Path) -> Path:
-    fixture = root / "fixture"
+def make_fixture(root: Path, name: str = "fixture") -> Path:
+    fixture = root / name
     shutil.rmtree(fixture, ignore_errors=True)
     for name in ("alpha", "beta", "gamma"):
         (fixture / name).mkdir(parents=True)
@@ -424,8 +424,17 @@ def make_fixture(root: Path) -> Path:
 SCENARIOS = {}
 
 
-def scenario(name):
+def scenario(name, fresh: bool = False):
+    """Registers a scenario.
+
+    `fresh` gives it a fixture of its own and an `XDG_DATA_HOME` of its own —
+    both required of anything that changes the directory it is looking at, since
+    every other scenario counts the rows in the shared one, and since the Trash
+    a test fills must not be the Trash the person running it has.
+    """
+
     def register(function):
+        function.fresh = fresh
         SCENARIOS[name] = function
         return function
 
@@ -469,6 +478,20 @@ def keyboard_back_forward(run: Run, fixture: Path) -> None:
     back, forward = run.states()[:2]
     expect(back, path=str(fixture))
     expect(forward, path=str(fixture / "alpha"))
+
+
+@scenario("keyboard-extend-selection")
+def keyboard_extend_selection(run: Run, fixture: Path) -> None:
+    """Shift and an arrow, which is the only Shift chord the program binds.
+
+    Its own scenario because nothing else here holds a modifier that the
+    *compositor* has to report rather than the key event carrying: a driver whose
+    Shift never arrives would pass every other scenario in this file.
+    """
+    run.drive(
+        "sleep 500\nkey down\nkey shift+down\nkey shift+down\nsleep 250\nkey f12\nsleep 200\n"
+    )
+    expect(run.state(), selected="3", cursor="gamma")
 
 
 @scenario("hidden-and-sort")
@@ -610,7 +633,10 @@ def type_ahead(run: Run, fixture: Path) -> None:
 def overlays(run: Run, fixture: Path) -> None:
     run.drive(
         "sleep 400\nkey f1\nsleep 200\nkey f12\n"
-        "key f2\nsleep 200\nkey f12\n"
+        # F8, not F2: the frame statistics moved off the key every file manager
+        # on every desktop uses for rename, and this scenario was renaming a
+        # file while asserting about an overlay.
+        "key f8\nsleep 200\nkey f12\n"
         "key escape\nsleep 200\nkey f12\nsleep 200\n"
     )
     keys, both, cleared = run.states()[:3]
@@ -685,6 +711,203 @@ def folder_size_without_a_refresh(run: Run, fixture: Path) -> None:
             )
     finally:
         own.close()
+
+
+
+# --------------------------------------------------------------------------
+# Making, naming and removing things — with the keyboard alone, then with the
+# pointer alone. Both halves, because both were promised.
+# --------------------------------------------------------------------------
+
+
+@scenario("keyboard-new-folder", fresh=True)
+def keyboard_new_folder(run: Run, fixture: Path) -> None:
+    """Ctrl+Shift+N, a name, Enter — and Ctrl+Z takes it all back.
+
+    Two operations in one scenario on purpose: the folder is made under its
+    placeholder name and *then* renamed, so a passing rename here is also proof
+    that the field opened on the row the reload brought in rather than on
+    whatever row that index held before.
+    """
+    run.drive("sleep 500\nkey f12\nkey ctrl+shift+n\nsleep 900\nkey f12\nsleep 200\n")
+    before, naming = run.states()[:2]
+    expect(before, rows="9", undo="false")
+    if not naming["naming"]:
+        raise Failure(f"no name field opened: {naming}")
+    expect(naming, rows="10", naming="New folder")
+
+    # Ctrl+U clears the field, which is the whole reason it exists.
+    run.drive(
+        "key ctrl+u\ntext zeta\nsleep 200\nkey f12\nsleep 150\n"
+        "key enter\nsleep 900\nkey f12\nsleep 200\n"
+    )
+    typed, committed = run.states()[-2:]
+    expect(typed, naming="zeta")
+    expect(committed, naming="", rows="10", undo="true")
+    if not (fixture / "zeta").is_dir():
+        raise Failure("the folder was named zeta and is not on the disk")
+
+    # **Two operations, so two undos.** Making the folder and naming it are two
+    # entries on one stack, and the first Ctrl+Z takes back the name rather than
+    # the folder — which is the whole point of rule 3 being about mutations and
+    # not about gestures.
+    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    unnamed = run.state()
+    expect(unnamed, rows="10", undo="true", redo="true", cursor="New folder")
+    if (fixture / "zeta").exists():
+        raise Failure("undoing the rename left zeta behind")
+
+    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    undone = run.state()
+    if (fixture / "New folder").exists():
+        raise Failure("undo left the folder behind")
+    expect(undone, rows="9", undo="false", redo="true")
+
+
+@scenario("keyboard-rename", fresh=True)
+def keyboard_rename(run: Run, fixture: Path) -> None:
+    run.drive("sleep 500\nkey down\nkey f2\nsleep 300\nkey f12\nsleep 200\n")
+    naming = run.state()
+    original = naming["naming"]
+    if not original:
+        raise Failure("F2 opened no field")
+    run.drive("key home\ntext one-\nsleep 200\nkey enter\nsleep 900\nkey f12\nsleep 200\n")
+    after = run.state()
+    expect(after, naming="", undo="true", cursor=f"one-{original}")
+    if not (fixture / f"one-{original}").exists():
+        raise Failure(f"one-{original} is not on the disk")
+
+    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    if not (fixture / original).exists():
+        raise Failure(f"undo did not put {original} back")
+    expect(run.state(), undo="false", redo="true")
+
+
+@scenario("keyboard-trash", fresh=True)
+def keyboard_trash(run: Run, fixture: Path) -> None:
+    """Delete moves a file to the Trash, and Ctrl+Z brings it back.
+
+    The Trash is the one under this scenario's own `XDG_DATA_HOME`, so what this
+    fills is a temporary directory and not the person's own wastebasket.
+    """
+    run.drive("sleep 500\nkey end\nsleep 200\nkey f12\nsleep 100\n")
+    before = run.state()
+    doomed = before["cursor"]
+    if not doomed:
+        raise Failure("End put the cursor nowhere")
+    run.drive("key delete\nsleep 900\nkey f12\nsleep 200\n")
+    after = run.state()
+    expect(after, rows="8", undo="true")
+    if (fixture / doomed).exists():
+        raise Failure(f"{doomed} is still there")
+    trash = Path(run.log.parent / "data" / "keyboard-trash" / "Trash" / "files")
+    if not (trash / doomed).exists():
+        found = sorted(p.name for p in trash.iterdir()) if trash.is_dir() else "no Trash at all"
+        raise Failure(f"{doomed} is not in the Trash: {found}")
+
+    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    expect(run.state(), rows="9", undo="false", redo="true")
+    if not (fixture / doomed).exists():
+        raise Failure(f"undo did not put {doomed} back")
+    if (trash / doomed).exists():
+        raise Failure("undo left a copy in the Trash")
+
+
+@scenario("context-menu-keyboard")
+def context_menu_keyboard(run: Run, fixture: Path) -> None:
+    """Shift+F10 opens the menu, the arrows walk it, Escape closes it."""
+    run.drive("sleep 500\nkey down\nkey shift+f10\nsleep 300\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if int(opened["menu"]) < 5:
+        raise Failure(f"the row menu has {opened['menu']} rows")
+    expect(opened, menu_active="-1")
+
+    run.drive("key down\nsleep 150\nkey f12\nsleep 100\nkey down\nsleep 150\nkey f12\nsleep 150\n")
+    first, second = run.states()[-2:]
+    expect(first, menu_active="0", menu_id="go.open")
+    if second["menu_id"] == first["menu_id"]:
+        raise Failure("the second arrow moved nothing")
+
+    run.drive("key escape\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), menu="0")
+
+
+@scenario("context-menu-pointer")
+def context_menu_pointer(run: Run, fixture: Path) -> None:
+    """A secondary click opens the menu, and takes the row it points at."""
+    run.drive("sleep 500\nkey f12\nsleep 100\n")
+    pointing = point_at(run, 2)
+    wanted = pointing["hover_name"]
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if int(opened["menu"]) < 5:
+        raise Failure(f"a secondary click on a row opened {opened['menu']} rows")
+    expect(opened, cursor=wanted, selected="1")
+    if "file.trash" not in opened["menu_aim"]:
+        raise Failure(f"the row menu has no Move to Trash: {opened['menu_aim']}")
+
+    # A press that dismisses a menu dismisses it and nothing else: the row under
+    # the click must not take the selection.
+    away = aim(run, opened, 40.0, float(opened["body_top"]) + 4.0)
+    run.drive(
+        f"move {away[0]:.1f} {away[1]:.1f}\nsleep 150\nclick\nsleep 300\nkey f12\nsleep 150\n"
+    )
+    dismissed = run.state()
+    expect(dismissed, menu="0", cursor=wanted, selected="1")
+
+
+@scenario("mouse-only-trash-and-undo", fresh=True)
+def mouse_only_trash_and_undo(run: Run, fixture: Path) -> None:
+    """The whole promise, with no keyboard at all in the part that acts.
+
+    Right-click a row, click Move to Trash; right-click the empty space, click
+    Undo. F12 is the only key pressed, and it only asks the window what it
+    thinks — a pointer has no way to ask.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 100\n")
+    pointing = point_at(run, 3)
+    doomed = pointing["hover_name"]
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    aimed = menu_aim(run, run.state(), "file.trash")
+    run.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 200\n")
+    trashed = run.state()
+    expect(trashed, menu="0", rows="8", undo="true")
+    if (fixture / doomed).exists():
+        raise Failure(f"clicking Move to Trash left {doomed} where it was")
+
+    # The empty space below the last row, where the background menu lives.
+    below = float(trashed["body_top"]) + float(trashed["row_h"]) * (int(trashed["rows"]) + 1)
+    if below >= float(trashed["body_top"]) + float(trashed["body_height"]):
+        raise Failure("no empty space below the last row to click in")
+    where = aim(run, trashed, float(trashed["name_x"]) + 40.0, below)
+    run.drive(
+        f"move {where[0]:.1f} {where[1]:.1f}\n"
+        "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 150\n"
+    )
+    background = run.state()
+    if int(background["menu"]) < 9:
+        raise Failure(f"the background menu has {background['menu']} rows")
+    aimed = menu_aim(run, background, "edit.undo")
+    run.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 200\n")
+    undone = run.state()
+    expect(undone, menu="0", rows="9", undo="false")
+    if not (fixture / doomed).exists():
+        raise Failure(f"clicking Undo did not put {doomed} back")
+
+
+def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, float]:
+    """Where to move the pointer to click one menu row, as the driver's percentages.
+
+    The window reports the middle of every open row, so a test aims by command
+    identifier and never by arithmetic over the menu's own constants — which it
+    would have to copy, and which would then be a second copy to keep right.
+    """
+    for entry in state.get("menu_aim", "").split(","):
+        name, _, point = entry.partition("@")
+        if name == command:
+            x, _, y = point.partition(":")
+            return aim(run, state, float(x), float(y))
+    raise Failure(f"{command} is not on the open menu: {state.get('menu_aim')!r}")
 
 
 @scenario("select-all-and-clear")
@@ -1105,8 +1328,12 @@ def main(argv: list[str]) -> int:
                 continue
             run = None
             try:
-                run = Run(display, work, fixture, [], instance)
-                function(run, fixture)
+                own = getattr(function, "fresh", False)
+                path = make_fixture(work, f"fixture-{name}") if own else fixture
+                data = work / "data" / name
+                environment = {"XDG_DATA_HOME": str(data)} if own else None
+                run = Run(display, work, path, [], instance, environment)
+                function(run, path)
                 print(f"  ok    {name}")
                 passed += 1
             except Skipped as why:
