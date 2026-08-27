@@ -59,6 +59,10 @@ FRAMES = [
     # thing it shows. The keyboard overlay covers "an overlay draws correctly"
     # and its content comes from the command registry, which does not vary.
     ("narrow", ["--size", "340x300", "--scale", "125"]),
+    # The frame GNOME requires. A capture has no compositor to ask, so
+    # `--own-frame` tells it; without this the title bar, the three buttons and
+    # the breadcrumb's right edge have no golden coverage at all.
+    ("own-frame", ["--size", "900x520", "--scale", "125", "--own-frame"]),
 ]
 
 

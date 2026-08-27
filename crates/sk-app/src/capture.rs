@@ -26,7 +26,7 @@ use sk_ui::{Painter, Theme};
 
 use crate::frames::Frames;
 use crate::headless::{READ_DEADLINE, Session};
-use crate::layout::Layout;
+use crate::layout::{Frame, Layout};
 use crate::pane::Pane;
 use crate::view::{self, Chrome, Diagnostics};
 
@@ -57,23 +57,26 @@ pub struct Capture {
     pub keys: bool,
     /// Whether to draw the statistics overlay.
     pub stats: bool,
+    /// Whether to draw the window frame the program draws for itself.
+    ///
+    /// A capture has no compositor to ask, so it is told. Without this the
+    /// frame — the one GNOME requires, with its three buttons and its resize
+    /// band — has no golden coverage at all.
+    pub own_frame: bool,
 }
 
-/// Renders one frame and writes it.
-pub fn run(request: &Capture) -> Result<(), Problem> {
-    let mut session = Session::open(request.logical, request.scale_120)?;
-    let (mut pane, _) = session.read_fully(&request.path);
-
-    // Folder totals are measured for what is on screen, and a capture is all of
-    // it. Bounded by the same deadline as the read, because a capture of `/` is
-    // not a reason to walk the whole disk.
+/// Walks every visible folder to completion, so the frame is reproducible.
+///
+/// Bounded by the same deadline as the read, because a capture of `/` is not a
+/// reason to walk the whole disk.
+fn settle_folder_totals(pane: &mut Pane, session: &Session) {
     let mut measurer = crate::sizes::Measurer::new(session.waker.handle());
     let rows = 0..pane.listing.rows().min(MEASURED);
     let deadline = std::time::Instant::now() + READ_DEADLINE;
     loop {
         // `update` applies what is known and claims what is not, so a pass that
         // claims nothing and has nothing running is a pass with nothing left.
-        measurer.update(&mut pane, rows.clone(), &session.jobs);
+        measurer.update(pane, rows.clone(), &session.jobs);
         measurer.drain();
         if measurer.stats().1 == 0 || std::time::Instant::now() >= deadline {
             break;
@@ -86,9 +89,15 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // folder whose size was known. It depended on which side of the last `drain`
     // the walk landed, which made the golden frames flicker between two images
     // and is exactly the kind of thing they exist to catch.
-    measurer.update(&mut pane, rows, &session.jobs);
+    measurer.update(pane, rows, &session.jobs);
     measurer.stop();
+}
 
+/// Puts the list into the state a golden frame is worth taking of.
+///
+/// A selection, a cursor and a hover, at fixed rows: a frame with none of them
+/// covers none of the three shapes a row can have.
+fn pose(pane: &mut Pane) {
     for row in SELECTED {
         if let Some(id) = pane.listing.at(row) {
             pane.selection.toggle(id);
@@ -100,6 +109,15 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     if pane.listing.rows() > HOVERED {
         pane.hover = Some(HOVERED);
     }
+}
+
+/// Renders one frame and writes it.
+pub fn run(request: &Capture) -> Result<(), Problem> {
+    let mut session = Session::open(request.logical, request.scale_120)?;
+    let (mut pane, _) = session.read_fully(&request.path);
+
+    settle_folder_totals(&mut pane, &session);
+    pose(&mut pane);
 
     // The overlay reads the command registry, so a capture of it builds one.
     let keys_rows = request.keys.then(|| {
@@ -109,7 +127,12 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 
     let theme = if request.dark { Theme::dark() } else { Theme::light() };
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
-    let layout = Layout::compute(logical, &theme.metrics);
+    let frame = if request.own_frame {
+        Frame::Own { edges: true, minimize: true, maximize: true }
+    } else {
+        Frame::None
+    };
+    let layout = Layout::compute_with(logical, &theme.metrics, frame);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -153,10 +176,18 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 band: None,
                 watching: true,
                 notice: None,
+                // The pointer is on a row, so nothing in the frame is hovered
+                // — the hover shapes are covered by the GUI scenarios, which can
+                // actually move a pointer.
                 hovered_button: None,
                 hovered_crumb: None,
                 filtering: false,
-                window: sk_plat::WindowState::default(),
+                window: sk_plat::WindowState {
+                    activated: true,
+                    can_maximize: true,
+                    can_minimize: true,
+                    ..sk_plat::WindowState::default()
+                },
             };
             view::draw(
                 &mut painter,

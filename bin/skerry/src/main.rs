@@ -67,10 +67,17 @@ fn main() -> std::process::ExitCode {
     let path = std::fs::canonicalize(&path).unwrap_or(path);
 
     let outcome = match (capture, bench) {
-        (Some(file), _) => {
-            sk_app::capture(&Capture { file, path, logical, scale_120, dark, keys, stats })
-                .map(|()| true)
-        }
+        (Some(file), _) => sk_app::capture(&Capture {
+            file,
+            path,
+            logical,
+            scale_120,
+            dark,
+            keys,
+            stats,
+            own_frame,
+        })
+        .map(|()| true),
         (None, Some(frames)) => {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
         }
