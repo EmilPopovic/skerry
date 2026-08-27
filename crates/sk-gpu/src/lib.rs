@@ -26,5 +26,5 @@ mod renderer;
 pub mod capture;
 pub mod draw;
 
-pub use draw::{Color, DrawList, Rect};
+pub use draw::{Color, Direction, DrawList, Rect};
 pub use renderer::{FrameStats, Renderer};

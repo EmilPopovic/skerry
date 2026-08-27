@@ -98,6 +98,12 @@ pub struct Metrics {
     pub modified_column: f32,
     /// Width of the icon column, including its trailing space.
     pub icon_column: f32,
+    /// Width of one navigation button in the path bar.
+    ///
+    /// Narrower than a window button: four of them sit at the left of the strip
+    /// and the breadcrumb needs what is left. 30 by 44 is a target 1,320 square
+    /// logical pixels in area, which is above the 1,024 a pointer wants.
+    pub tool_width: f32,
     /// Width of one window button, when the window draws its own frame.
     pub button_width: f32,
     /// How far in from a window edge a press starts a resize, when the window
@@ -123,6 +129,7 @@ impl Default for Metrics {
             size_column: 96.0,
             modified_column: 128.0,
             icon_column: 26.0,
+            tool_width: 30.0,
             // 46 x 44: wider than it is tall, because three of them sit in a row
             // and a square target next to a square target reads as a grid. The
             // whole strip is 138 logical pixels, which is a fifth of a narrow

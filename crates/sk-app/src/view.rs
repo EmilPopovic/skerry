@@ -9,10 +9,10 @@ use sk_gpu::{Color, FrameStats};
 use sk_model::{Flags, SortColumn, i18n};
 use sk_plat::{Point, WindowState};
 use sk_text::Weight;
-use sk_ui::{Align, Painter, RunKey, TextStyle, format, visible_rows};
+use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format, visible_rows};
 
 use crate::frames::{BUDGET_US, Frames};
-use crate::layout::{Area, Button, Layout};
+use crate::layout::{Area, Button, Layout, Tool};
 use crate::pane::Pane;
 
 /// Which column a row cache key is for.
@@ -45,6 +45,11 @@ pub struct Chrome<'a> {
     pub hovered_button: Option<Button>,
     /// The path component under the pointer.
     pub hovered_crumb: Option<usize>,
+    /// The navigation button under the pointer.
+    pub hovered_tool: Option<Tool>,
+    /// Whether each of the four navigation buttons can run right now, from the
+    /// command registry rather than from a second copy of the same question.
+    pub tools: [bool; 4],
     /// Whether the filter field has the keyboard.
     pub filtering: bool,
     /// The filename half of shared-mime-info, once the job that reads it is
@@ -107,6 +112,7 @@ pub fn draw(
     hits: &mut Hits,
 ) {
     path_bar(painter, pane, layout, chrome, hits);
+    tool_buttons(painter, layout, chrome);
     window_buttons(painter, layout, chrome);
     header(painter, pane, layout);
     body(painter, pane, layout, now, chrome);
@@ -150,7 +156,7 @@ fn path_bar(
     let metrics = theme.metrics;
     // The whole strip, buttons included: the path area stops short of them and a
     // gap in the title bar's background is the first thing an eye finds.
-    let strip = Area { width: layout.path.width + strip_width(layout), ..layout.path };
+    let strip = Area { x: 0.0, width: layout.path.right() + strip_width(layout), ..layout.path };
     fill(painter, strip, theme.palette.chrome);
     painter.hairline(0.0, strip.bottom() - 1.0, strip.width, theme.palette.divider);
 
@@ -160,7 +166,7 @@ fn path_bar(
         painter,
         i18n::lookup("chrome.hint"),
         hint_style,
-        0.0,
+        layout.path.x,
         layout.path.width - metrics.gutter,
         baseline,
     ) / painter.scale;
@@ -208,11 +214,11 @@ fn path_bar(
     // clip region below is for.
     first = first.min(names.len().saturating_sub(1)).max(1);
     let elided = first > 1;
-    let mut cursor = metrics.gutter;
+    let mut cursor = layout.path.x + metrics.gutter;
 
     // Clipped to its own region, so a path that will not fit cannot draw over
     // the keyboard hint or under the window buttons.
-    let region = painter.rect(0.0, layout.path.y, layout.path.width, layout.path.height);
+    let region = painter.rect(layout.path.x, layout.path.y, layout.path.width, layout.path.height);
     painter.list.push_clip(region);
     for (index, name) in names.iter().enumerate() {
         if index > 0 && index < first {
@@ -319,6 +325,95 @@ fn kind_color(theme: &sk_ui::Theme, types: Option<&MimeDatabase>, name: &str) ->
 /// The width the window buttons take, or zero when the compositor draws them.
 fn strip_width(layout: &Layout) -> f32 {
     layout.buttons.iter().map(|button| button.width).sum()
+}
+
+/// Back, forward, parent and reload, drawn from triangles and rectangles.
+///
+/// Not font glyphs: `↻` and `⟳` are both missing from this machine's chain and
+/// render as a box, and a toolbar with a box in it is worse than one with no
+/// reload button. The arrows are a triangle for the head and a bar for the shaft,
+/// which is the same shape at every scale and needs nobody's font.
+///
+/// Dimmed from the command's own `enabled`, so a Back button with nowhere to go
+/// looks like a dimmed menu item and not like a broken one.
+fn tool_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_>) {
+    let theme = *painter.theme;
+    for ((tool, area), enabled) in Tool::ALL.into_iter().zip(layout.tools).zip(chrome.tools) {
+        if area.width <= 0.0 {
+            continue;
+        }
+        let hovered = chrome.hovered_tool == Some(tool);
+        if hovered && enabled {
+            let shape =
+                painter.rect(area.x + 3.0, area.y + 7.0, area.width - 6.0, area.height - 14.0);
+            painter.list.rect(shape, theme.palette.button_hover, painter.px(theme.metrics.radius));
+        }
+        let ink = match (enabled, chrome.window.activated) {
+            (false, _) => theme.palette.dim.with_alpha(70),
+            (true, false) => theme.palette.dim,
+            (true, true) => theme.palette.text,
+        };
+        let centre = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+        match tool {
+            Tool::Back => arrow(painter, centre, ink, Direction::Left),
+            Tool::Forward => arrow(painter, centre, ink, Direction::Right),
+            Tool::Parent => arrow(painter, centre, ink, Direction::Up),
+            Tool::Reload => reload(painter, centre, ink, hovered && enabled),
+        }
+    }
+}
+
+/// The head and the shaft of one arrow, centred on a point.
+fn arrow(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color, at: Direction) {
+    /// Across the head, and how far it reaches from the shaft.
+    const HEAD: f32 = 7.0;
+    const REACH: f32 = 4.0;
+    /// Tip to tail.
+    const LENGTH: f32 = 11.0;
+    const WEIGHT: f32 = 1.5;
+    let (x, y) = centre;
+    let half = LENGTH / 2.0;
+    let bar = |painter: &mut Painter<'_>, x: f32, y: f32, w: f32, h: f32| {
+        let rect = painter.rect(x, y, w, h);
+        painter.list.rect(rect, ink, 0.0);
+    };
+    match at {
+        Direction::Left => {
+            painter.triangle(x - half, y - HEAD / 2.0, REACH, HEAD, ink, at);
+            bar(painter, x - half + REACH - 0.5, y - WEIGHT / 2.0, LENGTH - REACH, WEIGHT);
+        }
+        Direction::Right => {
+            painter.triangle(x + half - REACH, y - HEAD / 2.0, REACH, HEAD, ink, at);
+            bar(painter, x - half, y - WEIGHT / 2.0, LENGTH - REACH + 0.5, WEIGHT);
+        }
+        Direction::Up | Direction::Down => {
+            painter.triangle(x - HEAD / 2.0, y - half, HEAD, REACH, ink, at);
+            bar(painter, x - WEIGHT / 2.0, y - half + REACH - 0.5, WEIGHT, LENGTH - REACH);
+        }
+    }
+}
+
+/// A circular arrow: a ring, a gap cut out of it, and a head on the gap.
+///
+/// The gap is painted in the colour behind the button rather than left out,
+/// because a stroked rounded rectangle cannot be a partial arc — and a full ring
+/// with a triangle stuck on it reads as a circle with a triangle stuck on it.
+fn reload(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color, hovered: bool) {
+    const SIZE: f32 = 11.0;
+    let theme = *painter.theme;
+    let (x, y) = centre;
+    let half = SIZE / 2.0;
+    let ring = painter.rect(x - half, y - half, SIZE, SIZE);
+    painter.list.stroke(ring, ink, painter.px(half), painter.snap(1.5).max(1.0));
+
+    let behind = if hovered {
+        theme.palette.chrome.mix(theme.palette.button_hover, 1.0)
+    } else {
+        theme.palette.chrome
+    };
+    let gap = painter.rect(x + 1.0, y - half - 1.0, half + 2.0, half - 1.0);
+    painter.list.rect(gap, behind, 0.0);
+    painter.triangle(x + half - 3.0, y - half - 1.0, 6.0, 5.5, ink, Direction::Right);
 }
 
 /// Minimise, maximise and close, drawn rather than taken from an icon theme.
@@ -941,6 +1036,8 @@ mod tests {
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,
+                hovered_tool: None,
+                tools: [true, true, true, true],
                 filtering: false,
                 types: None,
                 window: sk_plat::WindowState::default(),

@@ -184,6 +184,13 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 // actually move a pointer.
                 hovered_button: None,
                 hovered_crumb: None,
+                hovered_tool: None,
+                // What a freshly opened directory looks like: nowhere to go
+                // back to, nowhere forward, a parent and a reload. Hardcoded
+                // because a capture has no history — and it is the state worth
+                // having a golden frame of, since it is the one with two of the
+                // four dimmed.
+                tools: [false, false, true, true],
                 filtering: false,
                 types: Some(&types),
                 window: sk_plat::WindowState {

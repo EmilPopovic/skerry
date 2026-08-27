@@ -199,6 +199,15 @@ impl Background {
     }
 }
 
+/// Whether each navigation button can run, in `Tool::ALL`'s order.
+///
+/// From the registry, because the button and the chord are the same action and a
+/// second copy of "is there anywhere to go back to" is a second copy that drifts.
+fn tool_state(commands: &Registry<App>, app: &App) -> [bool; 4] {
+    crate::layout::Tool::ALL
+        .map(|tool| commands.find(tool.command()).is_some_and(|id| commands.enabled(id, app)))
+}
+
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
 fn clock_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
@@ -337,6 +346,8 @@ pub struct App {
     hovered_button: Option<crate::layout::Button>,
     /// The path component under the pointer.
     hovered_crumb: Option<usize>,
+    /// The navigation button under the pointer.
+    hovered_tool: Option<crate::layout::Tool>,
     /// The hit regions the last frame produced.
     hits: crate::view::Hits,
     /// Bytes read from a peer's clipboard, once the job that read them is done.
@@ -469,6 +480,7 @@ impl App {
             window_state: sk_plat::WindowState::default(),
             hovered_button: None,
             hovered_crumb: None,
+            hovered_tool: None,
             hits: crate::view::Hits::default(),
             paste_rx,
             paste_tx,
@@ -708,16 +720,19 @@ impl App {
                 // Every hover, and each of them taken: `||` short-circuits, so a
                 // pointer leaving a row left a breadcrumb lit and a window button
                 // shaded until it came back.
-                let row = self.pane.hover.take().is_some();
-                let button = self.hovered_button.take().is_some();
-                let crumb = self.hovered_crumb.take().is_some();
-                if row || button || crumb {
+                let gone = [
+                    self.pane.hover.take().is_some(),
+                    self.hovered_button.take().is_some(),
+                    self.hovered_crumb.take().is_some(),
+                    self.hovered_tool.take().is_some(),
+                ];
+                if gone.contains(&true) {
                     self.dirty = true;
                 }
             }
             Event::Button { button, pressed, position, clicks, mods } => match button {
                 Button::Primary if *pressed => {
-                    self.press(*position, *clicks, mods.ctrl, mods.shift);
+                    self.press(*position, *clicks, mods.ctrl, mods.shift, commands);
                 }
                 Button::Primary => self.release(),
                 // The compositor's own window menu, which is where "always on
@@ -1157,6 +1172,16 @@ impl App {
         let close_x = close.x + close.width / 2.0;
         let filtering = self.filtering;
         let filter = self.pane.filter.clone();
+        // The four are laid out from x=0, this wide each, so one number lets a
+        // test aim at any of them without a copy of the metric.
+        let tool_w = self.layout.tools[0].width;
+        let tool_hover = match self.hovered_tool {
+            Some(crate::layout::Tool::Back) => "back",
+            Some(crate::layout::Tool::Forward) => "forward",
+            Some(crate::layout::Tool::Parent) => "parent",
+            Some(crate::layout::Tool::Reload) => "reload",
+            None => "none",
+        };
         let crumbs = self.hits.crumbs.len();
         let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         // The middle of the crumb one level up, which is the one a test clicks.
@@ -1174,6 +1199,7 @@ hover={hover} hover_name={hover_name:?} \
 body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={maximized} close_x={close_x:.1} \
 crumbs={crumbs} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
+tool_w={tool_w:.1} tool_hover={tool_hover} \
 filtering={filtering} filter={filter:?} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
@@ -1217,7 +1243,14 @@ jobs={jobs}/{panics} keys={} stats={}",
         );
     }
 
-    fn press(&mut self, position: Point, clicks: u8, ctrl: bool, shift: bool) {
+    fn press(
+        &mut self,
+        position: Point,
+        clicks: u8,
+        ctrl: bool,
+        shift: bool,
+        commands: &Registry<Self>,
+    ) {
         self.pointer = position;
         // The frame comes first, and the resize border before the buttons: the
         // border overlaps the top-right corner where the close button is, and a
@@ -1229,6 +1262,15 @@ jobs={jobs}/{panics} keys={} stats={}",
         if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical)
             && self.window.start_resize(edge)
         {
+            return;
+        }
+        // Through the registry, not through a method: a dimmed button must do
+        // nothing when clicked, and `enabled` is the only place that knows.
+        if let Some(tool) = self.layout.tool_at(position.x, position.y) {
+            if let Some(id) = commands.find(tool.command()) {
+                commands.run(id, self);
+            }
+            self.dirty = true;
             return;
         }
         if let Some(button) = self.layout.button_at(position.x, position.y) {
@@ -1336,6 +1378,7 @@ jobs={jobs}/{panics} keys={} stats={}",
         }
         if self.crumb_at(position).is_some()
             || self.layout.button_at(position.x, position.y).is_some()
+            || self.layout.tool_at(position.x, position.y).is_some()
         {
             return sk_plat::Cursor::Hand;
         }
@@ -1399,6 +1442,11 @@ jobs={jobs}/{panics} keys={} stats={}",
         let crumb = self.crumb_at(position);
         if self.hovered_crumb != crumb {
             self.hovered_crumb = crumb;
+            self.dirty = true;
+        }
+        let tool = self.layout.tool_at(position.x, position.y);
+        if self.hovered_tool != tool {
+            self.hovered_tool = tool;
             self.dirty = true;
         }
         self.window.set_cursor(self.cursor_at(position));
@@ -1515,6 +1563,11 @@ jobs={jobs}/{panics} keys={} stats={}",
             measurer.update(pane, visible, jobs);
         }
 
+        // Asked before the borrow below splits `self` apart: the answer is
+        // whether each navigation command can run, and only the registry knows
+        // that — rule 2 again, so the dimming and the click cannot disagree.
+        let tools = tool_state(commands, self);
+
         self.list.begin(physical);
 
         let Self {
@@ -1540,6 +1593,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             capabilities,
             hovered_button,
             hovered_crumb,
+            hovered_tool,
             filtering,
             desktop,
             window_state,
@@ -1558,6 +1612,8 @@ jobs={jobs}/{panics} keys={} stats={}",
             notice: notice.as_ref().map(|(message, _)| message.as_str()),
             hovered_button: *hovered_button,
             hovered_crumb: *hovered_crumb,
+            hovered_tool: *hovered_tool,
+            tools,
             filtering: *filtering,
             types: desktop.as_deref().map(|it| &it.mime),
             window: *window_state,

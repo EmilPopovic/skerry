@@ -50,6 +50,12 @@ pub struct Layout {
     /// The modified column.
     pub modified: Area,
 
+    /// Back, forward, parent and reload, at the left of the path strip.
+    ///
+    /// In the strip rather than above it, which is where Windows puts them and
+    /// costs no vertical space: the path bar is already the title bar, and a
+    /// second row for four buttons is 44 logical pixels of list for four marks.
+    pub tools: [Area; 4],
     /// The three window buttons — minimise, maximise, close, left to right.
     ///
     /// All empty when the compositor draws the frame, which is every desktop
@@ -106,6 +112,36 @@ impl Frame {
     }
 }
 
+/// Which navigation button.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tool {
+    /// Where the last navigation came from.
+    Back,
+    /// Where Back came from.
+    Forward,
+    /// The containing directory.
+    Parent,
+    /// Read this one again.
+    Reload,
+}
+
+impl Tool {
+    /// The four, in the order they are laid out.
+    pub const ALL: [Self; 4] = [Self::Back, Self::Forward, Self::Parent, Self::Reload];
+
+    /// The command each one runs. Rule 2: the button and the chord are the same
+    /// action, and the button's dimming comes from that command's `enabled`.
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Back => "go.back",
+            Self::Forward => "go.forward",
+            Self::Parent => "go.parent",
+            Self::Reload => "go.reload",
+        }
+    }
+}
+
 /// Which window button.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Button {
@@ -144,8 +180,29 @@ impl Layout {
         // a button that does nothing reads as a worse one.
         let offered = frame.offered();
         let strip = metrics.button_width * offered.iter().filter(|it| **it).count() as f32;
-        let path =
-            Area { x: 0.0, y: 0.0, width: (full - strip).max(0.0), height: metrics.path_height };
+        // The tools come off the left of the strip and the breadcrumb starts
+        // after them. Shed together below the width where the path would have
+        // nothing left, the same way the metadata columns shed.
+        let tools_width = metrics.tool_width * 4.0;
+        let room = full - strip;
+        let tools = std::array::from_fn(|index| {
+            if room - tools_width < 120.0 {
+                return Area::default();
+            }
+            Area {
+                x: metrics.tool_width * index as f32,
+                y: 0.0,
+                width: metrics.tool_width,
+                height: metrics.path_height,
+            }
+        });
+        let toolbar = tools.iter().map(|tool| tool.width).sum::<f32>();
+        let path = Area {
+            x: toolbar,
+            y: 0.0,
+            width: (room - toolbar).max(0.0),
+            height: metrics.path_height,
+        };
         let mut cursor = full - strip;
         let mut buttons = [Area::default(); 3];
         for (slot, offered) in buttons.iter_mut().zip(offered) {
@@ -211,10 +268,20 @@ impl Layout {
                 width: modified_width,
                 height: 0.0,
             },
+            tools,
             buttons,
             drag,
             resize_border,
         }
+    }
+
+    /// The navigation button at a point, if any.
+    #[must_use]
+    pub fn tool_at(&self, x: f32, y: f32) -> Option<Tool> {
+        Tool::ALL
+            .into_iter()
+            .zip(self.tools)
+            .find_map(|(tool, area)| (area.width > 0.0 && area.contains(x, y)).then_some(tool))
     }
 
     /// The window button at a point, if any.
@@ -268,7 +335,7 @@ impl Layout {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Button, Frame, Layout};
+    use super::{Button, Frame, Layout, Tool};
     use sk_plat::{Edge, Size};
     use sk_ui::Metrics;
 
@@ -301,7 +368,10 @@ mod tests {
         let served = Layout::compute_with(size, &metrics, Frame::None);
         assert!(served.buttons.iter().all(|button| button.width <= 0.0));
         assert!(served.drag.width <= 0.0, "a compositor-drawn title bar is not ours to drag");
-        assert!((served.path.width - 1100.0).abs() < f32::EPSILON);
+        // The whole strip minus the four navigation buttons, which are there
+        // whoever draws the frame.
+        assert!((served.path.right() - 1100.0).abs() < f32::EPSILON);
+        assert!((served.path.x - served.tools[3].right()).abs() < f32::EPSILON);
     }
 
     /// Corners win over sides, or a diagonal drag is impossible: the band is six
@@ -339,6 +409,45 @@ mod tests {
         assert!(fixed.resize_border <= 0.0);
         assert_eq!(fixed.edge_at(1.0, 1.0, size), None);
         assert!(fixed.buttons[2].width > 0.0, "a tiled window still has to close");
+    }
+
+    /// The four navigation buttons come off the left of the strip, the
+    /// breadcrumb starts after them, and both shed at the same width — a path
+    /// bar with buttons and no path is worse than either alone.
+    #[test]
+    fn the_navigation_buttons_take_the_left_of_the_strip_and_shed_together() {
+        let metrics = Metrics::default();
+        let wide = Layout::compute(Size::new(1100.0, 720.0), &metrics);
+        assert!(wide.tools.iter().all(|tool| tool.width > 0.0));
+        assert!(wide.tools[0].x <= f32::EPSILON, "they start at the left edge");
+        for pair in wide.tools.windows(2) {
+            assert!((pair[0].right() - pair[1].x).abs() < f32::EPSILON, "a gap in the row");
+        }
+        assert!(
+            (wide.tools[3].right() - wide.path.x).abs() < f32::EPSILON,
+            "the path does not start where the buttons end"
+        );
+        assert!((wide.path.right() - 1100.0).abs() < f32::EPSILON);
+
+        // Narrow enough that the path would have nothing left.
+        let narrow = Layout::compute(Size::new(200.0, 720.0), &metrics);
+        assert!(narrow.tools.iter().all(|tool| tool.width <= 0.0));
+        assert!(narrow.path.x <= f32::EPSILON);
+        assert!((narrow.path.width - 200.0).abs() < f32::EPSILON);
+    }
+
+    /// Each button is found by the rectangle it is drawn from, and each names
+    /// the command it runs — rule 2, so the dimming and the click agree.
+    #[test]
+    fn a_press_on_a_navigation_button_finds_that_button() {
+        let layout = Layout::compute(Size::new(1100.0, 720.0), &Metrics::default());
+        for (tool, area) in Tool::ALL.into_iter().zip(layout.tools) {
+            let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+            assert_eq!(layout.tool_at(x, y), Some(tool));
+        }
+        assert_eq!(layout.tool_at(600.0, 20.0), None, "the breadcrumb is not a button");
+        let commands: Vec<_> = Tool::ALL.into_iter().map(Tool::command).collect();
+        assert_eq!(commands, vec!["go.back", "go.forward", "go.parent", "go.reload"]);
     }
 
     /// And the buttons are found by the same rectangles they are drawn from.

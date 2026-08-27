@@ -21,6 +21,7 @@ pub mod theme;
 
 pub use painter::{Align, Painter, TextStyle};
 pub use scroll::{MIN_THUMB, Scroll, thumb, visible_rows};
+pub use sk_gpu::Direction;
 pub use theme::{Kinds, Metrics, Palette, Theme};
 
 // Re-exported so a view needs one `use` for the drawing vocabulary rather than

@@ -1,6 +1,6 @@
 //! Drawing text, hairlines and the two icon shapes, in device pixels.
 
-use sk_gpu::{Color, DrawList, Rect};
+use sk_gpu::{Color, Direction, DrawList, Rect};
 use sk_text::{Fonts, GlyphKey, LayoutCache, RunKey, SUBPIXEL_BUCKETS, ShapedRun, Weight};
 
 /// Which end of a box a string is anchored to.
@@ -112,6 +112,25 @@ impl Painter<'_> {
         let left = self.snap(x);
         let rect = Rect::new(left, self.snap(y), self.snap(x + width) - left, 1.0);
         self.list.rect(rect, color, 0.0);
+    }
+
+    /// A filled triangle inscribed in a logical rectangle.
+    ///
+    /// For an arrowhead: the one shape a rectangle cannot make, and the
+    /// alternative is a font glyph whose presence on somebody else's machine is
+    /// somebody else's decision. Measured on this machine's chain, `↻` and `⟳`
+    /// are both missing and render as a box.
+    pub fn triangle(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: Color,
+        at: Direction,
+    ) {
+        let rect = self.rect(x, y, width, height);
+        self.list.triangle(rect, color, at);
     }
 
     /// Draws the text of one listing cell, keyed by which cell it is.

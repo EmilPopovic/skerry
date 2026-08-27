@@ -18,6 +18,8 @@ struct Uniforms {
 const KIND_RECT: u32 = 0u;
 const KIND_MASK: u32 = 1u;
 const KIND_COLOR: u32 = 2u;
+// Four kinds, one per direction: up, down, left, right.
+const KIND_TRIANGLE: u32 = 3u;
 
 struct Instance {
     @location(0) rect: vec4<f32>,   // device px: x, y, w, h
@@ -68,6 +70,33 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> Vertex {
     return out;
 }
 
+/// Signed distance to an isosceles triangle with its apex at the top of the box,
+/// negative inside.
+///
+/// The maximum of the signed distances to the three edge lines. Exact along an
+/// edge and a little short near a vertex, which sharpens a nine-pixel arrowhead
+/// rather than blunting it.
+fn triangle_up(point: vec2<f32>, half_size: vec2<f32>) -> f32 {
+    let w = half_size.x;
+    let h = half_size.y;
+    let slant = sqrt(4.0 * h * h + w * w);
+    let base = point.y - h;
+    let left = -(2.0 * h * point.x + w * (point.y + h)) / slant;
+    let right = (2.0 * h * point.x - w * (point.y + h)) / slant;
+    return max(base, max(left, right));
+}
+
+/// The same triangle, turned. The point is rotated rather than the shape, so
+/// there is one distance function and four ways into it.
+fn triangle(point: vec2<f32>, half_size: vec2<f32>, kind: u32) -> f32 {
+    switch kind - KIND_TRIANGLE {
+        case 1u: { return triangle_up(vec2<f32>(point.x, -point.y), half_size); }
+        case 2u: { return triangle_up(vec2<f32>(point.y, point.x), half_size.yx); }
+        case 3u: { return triangle_up(vec2<f32>(point.y, -point.x), half_size.yx); }
+        default: { return triangle_up(point, half_size); }
+    }
+}
+
 /// Signed distance to a rounded box, negative inside.
 fn rounded_box(point: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     let r = min(radius, min(half_size.x, half_size.y));
@@ -88,6 +117,11 @@ fn fs(in: Vertex) -> @location(0) vec4<f32> {
             coverage = coverage * clamp(distance + in.border + 0.5, 0.0, 1.0);
         }
         let alpha = in.color.a * coverage;
+        return vec4<f32>(in.color.rgb * alpha, alpha);
+    }
+    if in.kind >= KIND_TRIANGLE {
+        let distance = triangle(in.local - in.half_size, in.half_size, in.kind);
+        let alpha = in.color.a * clamp(0.5 - distance, 0.0, 1.0);
         return vec4<f32>(in.color.rgb * alpha, alpha);
     }
     if in.kind == KIND_MASK {

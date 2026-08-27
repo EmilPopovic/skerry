@@ -181,6 +181,8 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,
+                hovered_tool: None,
+                tools: [true, true, true, true],
                 filtering: false,
                 types: Some(&types),
                 window: sk_plat::WindowState::default(),

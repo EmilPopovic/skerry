@@ -751,6 +751,66 @@ def filter_narrows_the_list(run: Run, fixture: Path) -> None:
         raise Failure(f"{state['rows']} rows after clearing, wanted {everything}")
 
 
+@scenario("navigation-buttons")
+def navigation_buttons(run: Run, fixture: Path) -> None:
+    """Back, forward, parent and reload, clicked rather than pressed.
+
+    Each dispatches the command its chord does, so what is checked is that the
+    button and the key are the same action — and that a dimmed one does nothing,
+    which is the half a `run` without an `enabled` check would get wrong.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 200\n")
+    state = run.state()
+    width = float(state["tool_w"])
+    if width <= 0.0:
+        raise Failure("the navigation buttons were shed at this window size")
+    middle = float(state["body_top"]) / 4.0
+    at = {
+        name: aim(run, state, width * index + width / 2.0, middle)
+        for index, name in enumerate(("back", "forward", "parent", "reload"))
+    }
+
+    def point(name: str) -> dict[str, str]:
+        x, y = at[name]
+        run.drive(f"move {x:.2f} {y:.2f}\nsleep 180\nkey f12\nsleep 150\n")
+        found = run.state()
+        if found["tool_hover"] != name:
+            raise Failure(f"aimed at {name} and hit {found['tool_hover']!r}")
+        return found
+
+    # Back has nowhere to go from the directory the window opened on, so a click
+    # on it must do nothing at all.
+    point("back")
+    run.drive("click\nsleep 400\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture))
+
+    # Into `alpha` with the keyboard, out with the Back button.
+    run.drive("key down\nkey enter\nsleep 600\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture / "alpha"))
+    point("back")
+    run.drive("click\nsleep 600\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture))
+
+    # Which is what makes Forward live. Going *up* would not: up is a fresh
+    # navigation and ends the forward branch, the same as it does in a browser.
+    point("forward")
+    run.drive("click\nsleep 600\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture / "alpha"))
+
+    # And the parent button climbs out again.
+    point("parent")
+    run.drive("click\nsleep 600\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture))
+
+    # And reload re-reads without moving.
+    point("reload")
+    run.drive("click\nsleep 800\nkey f12\nsleep 200\n")
+    state = run.state()
+    expect(state, path=str(fixture), loading="false")
+    if int(state["rows"]) != 9:
+        raise Failure(f"{state['rows']} rows after a reload, wanted 9")
+
+
 @scenario("breadcrumb-navigation")
 def breadcrumb_navigation(run: Run, fixture: Path) -> None:
     """Clicking a path component goes there, and hovering says which.

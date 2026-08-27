@@ -143,6 +143,40 @@ impl Color {
 pub(crate) const KIND_RECT: u32 = 0;
 pub(crate) const KIND_MASK: u32 = 1;
 pub(crate) const KIND_COLOR: u32 = 2;
+/// The four triangles, in [`Direction`]'s order. One kind each rather than a
+/// direction packed into a field, because a field that means something different
+/// for one kind is a field nobody can read.
+pub(crate) const KIND_TRIANGLE: u32 = 3;
+
+/// Which way a triangle points.
+///
+/// The one shape a rectangle cannot make and the interface needs: an arrowhead.
+/// Back, forward and parent are arrows, a reload mark is an arc with an arrowhead
+/// on it, and a tree's disclosure is a chevron — four marks that would otherwise
+/// be four font glyphs whose presence is somebody else's decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    /// Apex at the top edge.
+    Up,
+    /// Apex at the bottom edge.
+    Down,
+    /// Apex at the left edge.
+    Left,
+    /// Apex at the right edge.
+    Right,
+}
+
+impl Direction {
+    const fn kind(self) -> u32 {
+        KIND_TRIANGLE
+            + match self {
+                Self::Up => 0,
+                Self::Down => 1,
+                Self::Left => 2,
+                Self::Right => 3,
+            }
+    }
+}
 
 /// One instance. 48 bytes, `repr(C)`, no padding.
 #[repr(C)]
@@ -270,6 +304,25 @@ impl DrawList {
             kind: KIND_RECT,
             radius,
             border: thickness,
+        }));
+    }
+
+    /// A filled triangle inscribed in `rect`, pointing `direction`.
+    ///
+    /// Antialiased analytically like the rounded rectangles, because an
+    /// arrowhead nine pixels tall with staircase edges is the difference between
+    /// a toolbar that looks drawn and one that looks rendered.
+    pub fn triangle(&mut self, rect: Rect, color: Color, direction: Direction) {
+        if color.is_invisible() || rect.is_empty() {
+            return;
+        }
+        self.items.push(Item::Quad(Quad {
+            rect: [rect.x, rect.y, rect.width, rect.height],
+            uv: [0.0; 4],
+            color: color.packed(),
+            kind: direction.kind(),
+            radius: 0.0,
+            border: 0.0,
         }));
     }
 
