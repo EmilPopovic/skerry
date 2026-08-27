@@ -492,7 +492,7 @@ so the count is a crowd of ghosts.
 
 ## A reference is only valid against inputs that are not in the repository
 
-`tools/golden` compares eleven rendered frames to committed PNGs at a tolerance of
+`tools/golden` compares twelve rendered frames to committed PNGs at a tolerance of
 **two channel levels of 255**, which is what makes it able to catch a glyph that
 moved half a pixel. That sensitivity means every input has to be pinned, and two
 of them were not:

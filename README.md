@@ -28,9 +28,9 @@ method, and the three budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares eleven rendered frames to committed
+defect nothing else could: `tools/golden` compares twelve rendered frames to committed
 references on lavapipe, `tools/gui-test` presses keys and moves a pointer through
-forty-four scenarios in a nested compositor — one of which mounts a filesystem in a
+fifty-two scenarios in a nested compositor — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
 filesystem torture matrix that is a CI job rather than thrown-away spike code.
 Two of the three run on every push; the scenarios need a compositor that will hand out
@@ -126,7 +126,7 @@ and fails the build on any upward or sideways edge — see
 
 ## Working on it
 
-All six Phase 0 spikes are resolved and M0 is in progress: twelve crates, 325 tests, a
+All six Phase 0 spikes are resolved and M0 is in progress: eleven crates, 378 tests, a
 window on screen over a real directory. What is done and what is owed is the table in
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). [CLAUDE.md](CLAUDE.md) is
 the working brief — the craft bar, the invariants that are expensive to undo, and which

@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates, 325 tests, every gate green. What "the least to show" turned out to mean in practice:
+crates, 378 tests, 52 GUI scenarios and twelve golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -147,8 +147,8 @@ defects they exposed.
 | Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change, **frame 1 included** — a one-pixel buffer maps the surface first, because the scale arrives at map and not before it | — |
 | Keyboard through `xkbcommon`, with key repeat implemented client-side | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
-| **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural | A paste that pastes *files*, which needs M3's operation engine |
-| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | The forty-four GUI scenarios **in** CI: they drive a real nested compositor for the virtual-input protocols, and a runner has no seat to give one |
+| **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural, and a paste that pastes **files** | `x-special/gnome-copied-files`, which is what makes a cut arrive in Nautilus as a move rather than a copy — and interop in either direction, which is unverified |
+| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | The fifty-two GUI scenarios **in** CI: they drive a real nested compositor for the virtual-input protocols, and a runner has no seat to give one |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, and Spike E's matrix nightly on four filesystems it builds itself | A second runner architecture — the matrix and the frames are both `x86_64` today, and [06-portability.md](06-portability.md) names `aarch64` |
 | Eleven golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on | A perceptual diff. Two channel levels of 255 is a threshold, not a metric, and it cannot tell a moved glyph from a re-blended one |
@@ -175,8 +175,8 @@ dogfooding:
 | A mark coloured by the kind of file | M7 | An icon theme is a spec, a parser and a dependency on the user having one installed. Nine hues over the mark that was already there is legible at thirteen pixels, costs 0.012 ms a frame, and is what M7 replaces rather than what it starts from |
 | The sidebar, and back / forward / parent / reload | M2 | A file manager without them is a demo. What goes in the sidebar comes from three files every other file manager on the machine already reads, so it cost a parser each and no dependency — and the tree, the drag-to-reorder and the resizable divider that M2 owes are still owed |
 | Filter-as-you-type | M4 | A substring over a listing already in memory is thirty lines and the narrowing is what a directory of ten thousand needs before search exists. **Not** search: no fuzzy matching, no index, no recursion — those are M4's and cost what M4 costs |
-| New folder, rename, Move to Trash over a whole selection, one undo stack over all of it, and Copy the text inside | M3 | Rule 3 is one of the eight expensive-to-undo invariants, and every mutation added before the stack exists is a mutation that has to be retrofitted onto it. **Not** the queue: one operation at a time, no progress, no ETA, no copy and no move — those are M3's and are what M3 costs. The XDG Trash is written by hand, so it brought no dependency and it interoperates with every other file manager on the machine |
-| The context menu, built out of the command registry | M6 | Every action reachable by keyboard alone *and* by pointer alone, which is a promise that gets more expensive with every command that arrives without it. `every_command_can_be_reached_without_a_keyboard` is the other half of the test rule 2 already had, and the exemption table it allows names ten commands and the reason a pointer has a better way of doing each |
+| New folder, rename, **copy, cut, paste**, Move to Trash over a whole selection, one undo stack over all of it, a counted progress line, a stop, and Copy the text inside | M3 | Rule 3 is one of the eight expensive-to-undo invariants, and every mutation added before the stack exists is a mutation that has to be retrofitted onto it. The engine is Spike E's, ported rather than rewritten. **Not** the whole queue: one operation at a time, no ETA, no pause, no conflict resolution — a name that is taken is refused, which is what every other mutation here does. The XDG Trash is written by hand, so it brought no dependency and it interoperates with every other file manager on the machine |
+| The context menu **and the fuzzy palette**, both built out of the command registry | M6 | Every action reachable by keyboard alone *and* by pointer alone, which is a promise that gets more expensive with every command that arrives without it. `every_command_can_be_reached_without_a_keyboard` is the other half of the test rule 2 already had, and the exemption table it allows names ten commands and the reason a pointer has a better way of doing each |
 
 None of them brought a dependency: every parser is ours, which is what
 [07-dependencies.md](07-dependencies.md) said it would cost and what it did cost.
@@ -345,7 +345,7 @@ Three rows claim a gate that does not exist. Each is a job in
   required"* in [07-dependencies.md](07-dependencies.md#budgets-and-enforcement).
 - **`cargo-deny`**, which is the whole evidence behind *"permissive licences only,
   rejected at the gate"* in the same table.
-- **The forty-four GUI scenarios**, which need a compositor that will hand out
+- **The fifty-two GUI scenarios**, which need a compositor that will hand out
   `zwp_virtual_keyboard_v1` on a runner with no seat. The answer is a headless
   backend or nothing; until then a scenario is a person's job before pushing.
 
