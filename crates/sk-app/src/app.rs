@@ -326,7 +326,11 @@ impl App {
         let physical = window.physical();
         // SAFETY: the handles come from `window`, which this struct owns and
         // which is declared after `renderer` — so the renderer is dropped first.
-        let renderer = unsafe { Renderer::new(window.raw_handles(), physical) }?;
+        // The GPU the *compositor* is on, when it and the machine disagree about
+        // which that is. On a hybrid laptop a buffer from the wrong one cannot
+        // be imported and the connection dies at start-up.
+        let render_device = window.capabilities().render_device_ids();
+        let renderer = unsafe { Renderer::new(window.raw_handles(), physical, render_device) }?;
         let gpu_us = gpu_started.elapsed().as_micros();
 
         // Beside font discovery for the same reason: both read a file that the

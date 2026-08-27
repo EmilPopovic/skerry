@@ -383,6 +383,27 @@ entries: p50 0.191 ms before and after, p99 within run-to-run variance.
 > **Fails if:** a cache is keyed by position and any string at that position is
 > derived from something other than the collection the key names.
 
+## A component's own log is the first place to look, not the last
+
+The window died on GNOME with `error 7: failed to import supplied dmabufs`, and
+it was written down as "may be the nested software path rather than anything
+about GNOME" — a guess, recorded honestly as a guess, and wrong. mutter's own log
+had already answered it, four lines above the failure:
+
+```
+Added device '/dev/dri/renderD128' (nvidia-drm)
+Added device '/dev/dri/renderD129' (amdgpu)
+GPU /dev/dri/renderD128 selected as primary
+```
+
+Two GPUs, and the compositor had picked the other one. Nothing about nesting,
+nothing about software rendering, and nothing that a real GNOME session would
+have made go away — it is every hybrid laptop. The diagnosis cost one `grep` of a
+log file that had been written to disk the whole time.
+
+> **Fails if:** an unexplained failure in somebody else's component is recorded
+> as unexplained without reading what that component said about it.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

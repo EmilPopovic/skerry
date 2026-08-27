@@ -90,7 +90,11 @@ impl Renderer {
     ///
     /// `handles` must name a live compositor display and surface that outlive
     /// the returned renderer.
-    pub unsafe fn new(handles: RawHandles, physical: (u32, u32)) -> Result<Self, Problem> {
+    pub unsafe fn new(
+        handles: RawHandles,
+        physical: (u32, u32),
+        render_device: Option<(u32, u32)>,
+    ) -> Result<Self, Problem> {
         let (Some(display), Some(window)) =
             (std::ptr::NonNull::new(handles.display), std::ptr::NonNull::new(handles.surface))
         else {
@@ -102,7 +106,7 @@ impl Renderer {
             // SAFETY: the caller's contract, restated: both pointers name live
             // objects owned by the `sk_plat::Window` that produced them, and the
             // window outlives this renderer.
-            match unsafe { Self::windowed(backends, display, window, physical) } {
+            match unsafe { Self::windowed(backends, display, window, physical, render_device) } {
                 Ok(renderer) => return Ok(renderer),
                 Err(problem) => refused = Some(problem),
             }
@@ -118,6 +122,7 @@ impl Renderer {
         display: std::ptr::NonNull<c_void>,
         window: std::ptr::NonNull<c_void>,
         physical: (u32, u32),
+        render_device: Option<(u32, u32)>,
     ) -> Result<Self, Problem> {
         let instance = instance(backends);
         let raw_display =
@@ -134,7 +139,7 @@ impl Renderer {
         }
         .map_err(|error| Problem::plain(ProblemKind::NoGpu, format!("create_surface: {error}")))?;
 
-        let (adapter, device, queue) = open_device(&instance, Some(&surface))?;
+        let (adapter, device, queue) = open_device(&instance, Some(&surface), render_device)?;
         let capabilities = surface.get_capabilities(&adapter);
         let format = pick_format(&capabilities).ok_or_else(|| {
             Problem::plain(ProblemKind::NoGpu, "the surface offers no 8-bit format")
@@ -164,7 +169,7 @@ impl Renderer {
         let mut refused = None;
         for backends in BACKENDS {
             let instance = instance(backends);
-            match open_device(&instance, None) {
+            match open_device(&instance, None, None) {
                 Ok((adapter, device, queue)) => {
                     let size = (physical.0.max(1), physical.1.max(1));
                     let texture = offscreen_texture(&device, size);
@@ -508,20 +513,12 @@ const BACKENDS: [wgpu::Backends; 2] = [wgpu::Backends::VULKAN, wgpu::Backends::G
 fn open_device(
     instance: &wgpu::Instance,
     surface: Option<&wgpu::Surface<'static>>,
+    wanted: Option<(u32, u32)>,
 ) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue), Problem> {
-    let adapter = timed_out(
-        pollster(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            // A file manager is not a game. On a laptop with two GPUs the integrated
-            // one draws quads at the same speed and does not spin up a fan or cost
-            // an hour of battery.
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: surface,
-            force_fallback_adapter: false,
-        })),
-        "request_adapter",
-    )?
-    .map_err(|error| Problem::plain(ProblemKind::NoGpu, format!("request_adapter: {error}")))?;
-
+    let adapter = match wanted.and_then(|ids| matching_adapter(instance, surface, ids)) {
+        Some(adapter) => adapter,
+        None => request_any(instance, surface)?,
+    };
     let (device, queue) = timed_out(
         pollster(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("skerry"),
@@ -536,6 +533,50 @@ fn open_device(
     )?
     .map_err(|error| Problem::plain(ProblemKind::NoGpu, format!("request_device: {error}")))?;
     Ok((adapter, device, queue))
+}
+
+/// The adapter on a particular PCI device, if it can present to this surface.
+///
+/// **Not a preference — a correctness requirement on a hybrid machine.** A buffer
+/// allocated on one GPU cannot be imported by a compositor rendering on another:
+/// measured, mutter chose the discrete NVIDIA card, this asked for `LowPower` and
+/// got the integrated AMD one, and the compositor answered `failed to import
+/// supplied dmabufs` and killed the connection at start-up.
+///
+/// `None` when nothing matches — a machine with one GPU, or a compositor whose
+/// device has no PCI ids to compare — and the caller then chooses as it always
+/// did.
+fn matching_adapter(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'static>>,
+    (vendor, device): (u32, u32),
+) -> Option<wgpu::Adapter> {
+    instance.enumerate_adapters(wgpu::Backends::all()).into_iter().find(|adapter| {
+        let info = adapter.get_info();
+        info.vendor == vendor
+            && info.device == device
+            && surface.is_none_or(|surface| adapter.is_surface_supported(surface))
+    })
+}
+
+/// Whatever the driver thinks is best, which is what a single-GPU machine wants.
+fn request_any(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'static>>,
+) -> Result<wgpu::Adapter, Problem> {
+    timed_out(
+        pollster(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            // A file manager is not a game. On a laptop with two GPUs the integrated
+            // one draws quads at the same speed and does not spin up a fan or cost
+            // an hour of battery — unless the compositor is on the other one, which
+            // `matching_adapter` above has already decided.
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: surface,
+            force_fallback_adapter: false,
+        })),
+        "request_adapter",
+    )?
+    .map_err(|error| Problem::plain(ProblemKind::NoGpu, format!("request_adapter: {error}")))
 }
 
 /// Turns a missed [`SETUP_DEADLINE`] into a `Problem` that names what stalled.

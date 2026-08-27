@@ -190,11 +190,18 @@ to an NVIDIA EGL, and the import fails. Forcing the client onto the same GPU wit
 its own frame, and reports `own-frame` in its capability line.
 
 This is a real configuration and not a laboratory one — it is every hybrid laptop
-where the compositor has picked the discrete card. What is owed is the fix rather
-than the diagnosis: the adapter request should prefer the GPU the compositor is
-on, which on Wayland means reading the DRM device from `wp_linux_dmabuf_v1`'s
-`main_device` and matching it against the adapters' device ids. Until then, the
-symptom is a protocol error at start-up, and the window now says so and exits
-non-zero rather than spinning.
+where the compositor has picked the discrete card, and the symptom is that the
+program does not start.
+
+**Fixed.** `zwp_linux_dmabuf_v1` version 4 answers `main_device` with the `dev_t`
+of the GPU the compositor renders on; `/sys/dev/char/<major>:<minor>/device`
+turns that into a PCI vendor and device id; and the adapter is chosen to match
+before `LowPower` is consulted. Where nothing matches — one GPU, or a device with
+no PCI parent — the request is exactly what it was. Verified by running under the
+nested GNOME with no environment overrides at all: 234, 244, 331 ms to first
+frame on the NVIDIA card, where before it was a protocol error and an exit.
+
+Owed: the same probe on X11, where the answer is `DRI3`'s open of the provider
+rather than a Wayland global.
 
 Owed: none of this is a real GNOME *session*, only a headless one.

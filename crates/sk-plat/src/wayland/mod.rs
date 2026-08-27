@@ -35,6 +35,9 @@ use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
 };
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
+};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_manager_v1;
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::decoration::zv1::client::{
@@ -109,9 +112,38 @@ pub struct Capabilities {
     /// unless `misc:middle_click_paste` is on, which Spike D found by
     /// elimination because nothing reports it.
     pub primary_selection: bool,
+    /// The DRM device the compositor renders on, as a `dev_t`.
+    ///
+    /// From `zwp_linux_dmabuf_v1`'s default feedback. It exists because a hybrid
+    /// laptop has two, and a buffer allocated on the wrong one cannot be
+    /// imported: measured, mutter picked the discrete NVIDIA card, the drawing
+    /// stack picked the integrated AMD one for its low-power preference, and the
+    /// compositor answered `failed to import supplied dmabufs` and killed the
+    /// connection.
+    pub render_device: Option<u64>,
     /// Every advertised global with its version, so "why did that not work" has
     /// an answer that does not need a second run.
     pub advertised: Vec<(String, u32)>,
+}
+
+impl Capabilities {
+    /// The PCI vendor and device ids of the compositor's render device.
+    ///
+    /// Resolved through `/sys/dev/char`, which is where a `dev_t` becomes a
+    /// device one can ask questions about. `None` when there is no feedback to
+    /// read, when the node has no PCI parent — a virtual or USB display — or when
+    /// the files are not there, all of which are "no opinion" rather than errors:
+    /// the caller then chooses an adapter the way it always did.
+    #[must_use]
+    pub fn render_device_ids(&self) -> Option<(u32, u32)> {
+        let (major, minor) = split_dev(self.render_device?);
+        let base = std::path::PathBuf::from(format!("/sys/dev/char/{major}:{minor}/device"));
+        let read = |name: &str| -> Option<u32> {
+            let text = std::fs::read_to_string(base.join(name)).ok()?;
+            u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
+        };
+        Some((read("vendor")?, read("device")?))
+    }
 }
 
 /// Which edge or corner a resize drag is pulling.
@@ -284,6 +316,7 @@ impl Window {
         let primary_manager: Option<
             zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
         > = bind(&globals, &handle, 1..=1);
+        let dmabuf = ask_which_gpu(&globals, &handle);
 
         let clipboard =
             clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
@@ -299,25 +332,7 @@ impl Window {
 
         let xdg_surface = wm_base.get_xdg_surface(&surface, &handle, ());
         let toplevel = xdg_surface.get_toplevel(&handle, ());
-        toplevel.set_title(config.title.clone());
-        toplevel.set_app_id(config.app_id.clone());
-        // A window that cannot be made smaller than its content is a window that
-        // cannot be tiled. 320x240 is small enough to be useless and large
-        // enough that the layout code never sees a zero.
-        toplevel.set_min_size(320, 240);
-
-        let decoration = decorations.as_ref().map(|manager| {
-            let object = manager.get_toplevel_decoration(&toplevel, &handle, ());
-            // mutter answers `client_side` and means it, so the answer is
-            // recorded rather than assumed and the fallback is ours either way.
-            object.set_mode(if config.own_frame {
-                zxdg_toplevel_decoration_v1::Mode::ClientSide
-            } else {
-                zxdg_toplevel_decoration_v1::Mode::ServerSide
-            });
-            object
-        });
-
+        let decoration = dress(&toplevel, &handle, decorations.as_ref(), config);
         surface.commit();
 
         let capabilities = Capabilities {
@@ -328,6 +343,7 @@ impl Window {
             pointer: false,
             clipboard: data_manager.is_some(),
             primary_selection: primary_manager.is_some(),
+            render_device: None,
             advertised,
         };
 
@@ -369,6 +385,8 @@ impl Window {
             })?;
         }
         state.events.clear();
+
+        forget_which_gpu(dmabuf);
 
         let mut window = Self { connection, queue, state };
         window.apply_geometry();
@@ -654,6 +672,71 @@ pub struct RawHandles {
     pub surface: *mut c_void,
 }
 
+/// Names the window and asks for a frame, before the first commit.
+fn dress(
+    toplevel: &xdg_toplevel::XdgToplevel,
+    handle: &QueueHandle<State>,
+    decorations: Option<&zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    config: &WindowConfig,
+) -> Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1> {
+    toplevel.set_title(config.title.clone());
+    toplevel.set_app_id(config.app_id.clone());
+    // A window that cannot be made smaller than its content is a window that
+    // cannot be tiled. 320x240 is small enough to be useless and large enough
+    // that the layout code never sees a zero.
+    toplevel.set_min_size(320, 240);
+
+    let object = decorations?.get_toplevel_decoration(toplevel, handle, ());
+    // A request, not an instruction: mutter answers `client_side` and means it,
+    // Hyprland answers `server_side` whatever it is asked. So the answer is
+    // recorded rather than assumed and the fallback is ours either way.
+    object.set_mode(if config.own_frame {
+        zxdg_toplevel_decoration_v1::Mode::ClientSide
+    } else {
+        zxdg_toplevel_decoration_v1::Mode::ServerSide
+    });
+    Some(object)
+}
+
+/// Asks the compositor which GPU it renders on, and nothing else.
+///
+/// `zwp_linux_dmabuf_v1` version 4 is where `get_default_feedback` and
+/// `main_device` arrive. Nothing else in this program uses the protocol: it is
+/// bound, asked one question, and destroyed as soon as the answer lands.
+type WhichGpu = Option<(
+    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+)>;
+
+fn ask_which_gpu(globals: &GlobalList, handle: &QueueHandle<State>) -> WhichGpu {
+    let dmabuf: zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 = bind(globals, handle, 4..=5)?;
+    let feedback = dmabuf.get_default_feedback(handle, ());
+    Some((dmabuf, feedback))
+}
+
+/// Lets it go. Keeping the feedback would make the compositor send a fresh
+/// tranche every time it changed its mind about scanout, and nothing here can
+/// act on that.
+fn forget_which_gpu(asked: WhichGpu) {
+    if let Some((dmabuf, feedback)) = asked {
+        feedback.destroy();
+        dmabuf.destroy();
+    }
+}
+
+/// A `dev_t` split into its major and minor numbers.
+///
+/// glibc's packing, not the kernel's sixteen-bit one: the major is split across
+/// bits 8–19 and 32–63, and the minor across 0–7 and 20–31. Written out rather
+/// than taken from `libc::major`, which is a macro in C and an inline function
+/// with no stable Rust binding.
+const fn split_dev(device: u64) -> (u64, u64) {
+    (
+        ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff),
+        (device & 0xff) | ((device >> 12) & !0xff),
+    )
+}
+
 fn physical_of(logical: (u32, u32), scale_120: u32) -> (u32, u32) {
     ((logical.0 * scale_120).div_ceil(120).max(1), (logical.1 * scale_120).div_ceil(120).max(1))
 }
@@ -843,6 +926,24 @@ impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()> for Sta
     }
 }
 
+impl Dispatch<zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+        event: zwp_linux_dmabuf_feedback_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // `main_device` is a `dev_t` in the sender's byte order, per the protocol.
+        if let zwp_linux_dmabuf_feedback_v1::Event::MainDevice { device } = event
+            && let Ok(bytes) = <[u8; 8]>::try_from(device.as_slice())
+        {
+            state.capabilities.render_device = Some(u64::from_ne_bytes(bytes));
+        }
+    }
+}
+
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     fn event(
         _: &mut Self,
@@ -872,6 +973,7 @@ macro_rules! ignore_events {
 }
 
 ignore_events!(
+    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     wl_compositor::WlCompositor,
     wl_output::WlOutput,
     wp_viewporter::WpViewporter,
@@ -898,8 +1000,22 @@ impl Drop for State {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{physical_of, shorter};
+    use super::{physical_of, shorter, split_dev};
     use std::time::Duration;
+
+    /// The number that turns "which GPU is the compositor on" into a path under
+    /// `/sys/dev/char`. A DRM render node is major 226; `renderD128` is minor
+    /// 128 and `renderD129` is 129, which is the pair this had to tell apart.
+    #[test]
+    fn a_dev_t_splits_the_way_glibc_packed_it() {
+        assert_eq!(split_dev(226 * 256 + 128), (226, 128));
+        assert_eq!(split_dev(226 * 256 + 129), (226, 129));
+        assert_eq!(split_dev(0), (0, 0));
+        // A minor above 255, which is where the second field lives and where a
+        // naive `dev & 0xff` loses it.
+        let wide = (226u64 << 8) | (0x1_00u64 << 12) | 0x34;
+        assert_eq!(split_dev(wide), (226, 0x134));
+    }
 
     #[test]
     fn the_physical_size_is_derived_from_the_integer_the_compositor_sent() {
