@@ -8,7 +8,8 @@ on screen: twelve crates, a Wayland platform layer, a GPU renderer, real text sh
 and a Details view over a real directory that stays live under inotify, shows folder
 totals as they are computed, filters as you type, navigates by breadcrumb and by typed
 path, makes and renames and trashes things with one undo stack over all of it, opens
-files in whatever the desktop says owns them, copies to the clipboard, lists the
+files in whatever the desktop says owns them, copies files, paths and the text
+inside a text file to the clipboard, lists the
 volumes as they are mounted, and draws its own window frame where the compositor
 declines to. **Every action is reachable with the keyboard alone and with the pointer
 alone**, and a test fails the build for one that is not. What is done and what is owed
@@ -29,7 +30,7 @@ method, and the three budget rows that are currently missed are in
 Three harnesses assert about things a unit test cannot reach, and each of them found a
 defect nothing else could: `tools/golden` compares ten rendered frames to committed
 references on lavapipe, `tools/gui-test` presses keys and moves a pointer through
-forty-one scenarios in a nested compositor — one of which mounts a filesystem in a
+forty-three scenarios in a nested compositor — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
 filesystem torture matrix that is a CI job rather than thrown-away spike code.
 

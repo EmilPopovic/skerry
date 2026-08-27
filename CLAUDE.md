@@ -7,13 +7,14 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for an afternoon.** Twelve crates,
-317 tests, every gate green: a Details view over a real directory at a **0.342 ms
+324 tests, every gate green: a Details view over a real directory at a **0.342 ms
 frame p99 with 200,000 entries in it**, live under inotify, with folder totals,
 Back and Forward, a sidebar, a command registry behind every key and a context
 menu over the same registry, new-folder / rename / Move to Trash with one undo
 stack over them, files that open in the application the desktop says owns them,
-and the clipboard. Every command is reachable by keyboard alone and by pointer
-alone, and a test fails the build for one that is not. What is done and what is owed:
+and a clipboard that takes files, paths, and the text inside a text file.
+Every command is reachable by keyboard alone and by pointer alone, and a test
+fails the build for one that is not. What is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the
 three budget rows currently missed:
 [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).

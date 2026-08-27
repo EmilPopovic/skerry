@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates, 317 tests, every gate green. What "the least to show" turned out to mean in practice:
+crates, 324 tests, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -174,7 +174,7 @@ dogfooding:
 | A mark coloured by the kind of file | M7 | An icon theme is a spec, a parser and a dependency on the user having one installed. Nine hues over the mark that was already there is legible at thirteen pixels, costs 0.012 ms a frame, and is what M7 replaces rather than what it starts from |
 | The sidebar, and back / forward / parent / reload | M2 | A file manager without them is a demo. What goes in the sidebar comes from three files every other file manager on the machine already reads, so it cost a parser each and no dependency — and the tree, the drag-to-reorder and the resizable divider that M2 owes are still owed |
 | Filter-as-you-type | M4 | A substring over a listing already in memory is thirty lines and the narrowing is what a directory of ten thousand needs before search exists. **Not** search: no fuzzy matching, no index, no recursion — those are M4's and cost what M4 costs |
-| New folder, rename, Move to Trash over a whole selection, and one undo stack over all of it | M3 | Rule 3 is one of the eight expensive-to-undo invariants, and every mutation added before the stack exists is a mutation that has to be retrofitted onto it. **Not** the queue: one operation at a time, no progress, no ETA, no copy and no move — those are M3's and are what M3 costs. The XDG Trash is written by hand, so it brought no dependency and it interoperates with every other file manager on the machine |
+| New folder, rename, Move to Trash over a whole selection, one undo stack over all of it, and Copy the text inside | M3 | Rule 3 is one of the eight expensive-to-undo invariants, and every mutation added before the stack exists is a mutation that has to be retrofitted onto it. **Not** the queue: one operation at a time, no progress, no ETA, no copy and no move — those are M3's and are what M3 costs. The XDG Trash is written by hand, so it brought no dependency and it interoperates with every other file manager on the machine |
 | The context menu, built out of the command registry | M6 | Every action reachable by keyboard alone *and* by pointer alone, which is a promise that gets more expensive with every command that arrives without it. `every_command_can_be_reached_without_a_keyboard` is the other half of the test rule 2 already had, and the exemption table it allows names ten commands and the reason a pointer has a better way of doing each |
 
 None of them brought a dependency: every parser is ours, which is what

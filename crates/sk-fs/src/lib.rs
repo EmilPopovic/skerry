@@ -18,9 +18,11 @@ pub mod device;
 pub mod mounts;
 pub mod ops;
 pub mod scan;
+pub mod text;
 pub mod watch;
 
 pub use device::{Device, lane_for};
 pub use mounts::{Mount, mounts};
 pub use scan::{META_CHUNK, MetaRow, Names, metadata, names};
+pub use text::{TEXT_LIMIT, read_text};
 pub use watch::{Change, Watcher, can_watch};

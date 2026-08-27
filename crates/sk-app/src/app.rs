@@ -156,10 +156,7 @@ struct Background {
     updates: Receiver<Message>,
     pane: Pane,
     desktop_rx: Receiver<std::sync::Arc<Desktop>>,
-    paste_tx: std::sync::mpsc::Sender<Pasted>,
-    paste_rx: Receiver<Pasted>,
-    launched_tx: std::sync::mpsc::Sender<Launched>,
-    launched_rx: Receiver<Launched>,
+    replies: Replies,
     watcher: sk_fs::Watcher,
     changes: Receiver<sk_fs::Change>,
 }
@@ -175,8 +172,6 @@ impl Background {
         pane.reload(&jobs);
 
         let desktop_rx = read_desktop_databases(&jobs, &waker);
-        let (paste_tx, paste_rx) = mpsc::channel();
-        let (launched_tx, launched_rx) = mpsc::channel();
         let (watch_sender, changes) = mpsc::channel();
         let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
             Problem::plain(ProblemKind::OutOfResources, format!("inotify: {error}"))
@@ -189,10 +184,7 @@ impl Background {
             updates,
             pane,
             desktop_rx,
-            paste_tx,
-            paste_rx,
-            launched_tx,
-            launched_rx,
+            replies: Replies::new(),
             watcher,
             changes,
         })
@@ -359,6 +351,38 @@ enum Pasted {
     NotAFolder,
 }
 
+/// The three channels a job answers the frame loop on.
+///
+/// Together because they are three of the same thing with the same lifetime: a
+/// command starts a job, the job sends one message, and a `drain_` method takes
+/// delivery in the next pass. Held as one field so that adding a fourth is one
+/// line rather than four in three places.
+struct Replies {
+    paste_tx: std::sync::mpsc::Sender<Pasted>,
+    paste_rx: Receiver<Pasted>,
+    content_tx: std::sync::mpsc::Sender<Copied>,
+    content_rx: Receiver<Copied>,
+    launched_tx: std::sync::mpsc::Sender<Launched>,
+    launched_rx: Receiver<Launched>,
+}
+
+impl Replies {
+    fn new() -> Self {
+        let (paste_tx, paste_rx) = mpsc::channel();
+        let (content_tx, content_rx) = mpsc::channel();
+        let (launched_tx, launched_rx) = mpsc::channel();
+        Self { paste_tx, paste_rx, content_tx, content_rx, launched_tx, launched_rx }
+    }
+}
+
+/// A file's text, once the job that read it has finished.
+struct Copied {
+    /// What it was read from, for the notice.
+    name: String,
+    /// The text, or why there is none.
+    outcome: Result<String, Problem>,
+}
+
 /// The application.
 ///
 /// **The field order is load-bearing.** `renderer` is declared before `window`
@@ -422,9 +446,6 @@ pub struct App {
     desktop: Option<std::sync::Arc<Desktop>>,
     desktop_rx: Receiver<std::sync::Arc<Desktop>>,
     launcher: Launcher,
-    /// Launches that have started, or failed to.
-    launched_rx: Receiver<Launched>,
-    launched_tx: std::sync::mpsc::Sender<Launched>,
     /// An open asked for before the databases arrived.
     open_owed: Option<PathBuf>,
     /// Something to tell the person, shown in the status line.
@@ -458,9 +479,8 @@ pub struct App {
     /// leaves the request here and [`App::handle`] builds it, which is the one
     /// place a menu is ever constructed.
     menu_wanted: Option<(Point, &'static [&'static [&'static str]])>,
-    /// Bytes read from a peer's clipboard, once the job that read them is done.
-    paste_rx: Receiver<Pasted>,
-    paste_tx: std::sync::mpsc::Sender<Pasted>,
+    /// What the jobs a command starts answer on.
+    replies: Replies,
     layout: Layout,
     frames: Frames,
     last: FrameStats,
@@ -506,19 +526,8 @@ impl App {
         // does. Reading what goes in it is a job, started with the others.
         let sidebar =
             crate::sidebar::Sidebar::new(&background.jobs, background.waker.handle(), true);
-        let Background {
-            waker,
-            jobs,
-            updates,
-            pane,
-            desktop_rx,
-            paste_tx,
-            paste_rx,
-            launched_tx,
-            launched_rx,
-            watcher,
-            changes,
-        } = background;
+        let Background { waker, jobs, updates, pane, desktop_rx, replies, watcher, changes } =
+            background;
         let watch_target = pane.path.clone();
 
         let Drawing { renderer, fonts, physical, gpu_us, font_us } = open_drawing(&window)?;
@@ -562,8 +571,6 @@ impl App {
             desktop: None,
             desktop_rx,
             launcher: Launcher::default(),
-            launched_rx,
-            launched_tx,
             open_owed: None,
             notice: None,
             window_state: sk_plat::WindowState::default(),
@@ -575,8 +582,7 @@ impl App {
             typing_path: None,
             menu: None,
             menu_wanted: None,
-            paste_rx,
-            paste_tx,
+            replies,
             frames: Frames::new(),
             last: FrameStats::default(),
             pending: Vec::with_capacity(64),
@@ -636,6 +642,7 @@ impl App {
             self.drain_changes();
             self.drain_desktop();
             self.drain_paste();
+            self.drain_content();
             self.drain_launches();
             self.drain_edits();
             if self.sidebar.drain() {
@@ -757,7 +764,7 @@ impl App {
 
     /// Applies whatever came back from a clipboard read.
     fn drain_paste(&mut self) {
-        let Ok(pasted) = self.paste_rx.try_recv() else { return };
+        let Ok(pasted) = self.replies.paste_rx.try_recv() else { return };
         match pasted {
             Pasted::Folder(path) => self.pane.open(path, &self.jobs),
             Pasted::NotAFolder => {
@@ -1397,6 +1404,77 @@ impl App {
             Some((sk_model::i18n::format("notice.copied_path", &[&text]), Instant::now()));
     }
 
+    /// Puts the focused file's text on the clipboard.
+    ///
+    /// **The whole point is not opening it.** A path or a snippet you want in a
+    /// message is two keys instead of starting an editor, waiting for it, selecting
+    /// all, copying, and closing it again.
+    ///
+    /// The read is a job, because it is a read: rule 1 has no exemption for a
+    /// small file, and a small file on an unresponsive mount takes as long to
+    /// open as a large one. Bounded at [`sk_fs::TEXT_LIMIT`], and the job decides
+    /// whether the bytes are really text — `enabled` only guesses from the name.
+    pub(crate) fn copy_content(&mut self) {
+        let Some(id) = self.pane.focused() else { return };
+        let name = self.pane.listing.name(id).to_owned();
+        let path = self.pane.path.join(&name);
+        let sender = self.replies.content_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let outcome = sk_fs::read_text(&path, sk_fs::TEXT_LIMIT);
+            if sender.send(Copied { name, outcome }).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Whether the focused entry is worth offering to copy as text.
+    ///
+    /// **A guess from the name, and deliberately a generous one.** `by_name` is a
+    /// hash lookup with no syscall behind it, which is what lets this run in an
+    /// `enabled` predicate; `of` would read the first bytes of the file, and rule
+    /// 1 has no exemption for that either. A name no glob matches — `notes`, or a
+    /// `Makefile` on a machine with an old shared-mime-info — is offered rather
+    /// than dimmed, and the read says so if it turns out not to be text. A name
+    /// that *is* matched and is not text — `.png`, `.pdf` — is dimmed, because a
+    /// menu row that cannot work is worth more dimmed than absent.
+    #[must_use]
+    pub(crate) fn focused_is_text(&self) -> bool {
+        let Some(id) = self.pane.focused() else { return false };
+        // A directory, a device, a socket, a FIFO, or a link to nothing: the read
+        // would refuse each of them, and dimming is a better way to say so than a
+        // message after the fact.
+        let flags = self.pane.listing.flags(id);
+        for refused in [sk_model::Flags::DIR, sk_model::Flags::SPECIAL, sk_model::Flags::BROKEN] {
+            if flags.has(refused) {
+                return false;
+            }
+        }
+        let name = self.pane.listing.name(id);
+        self.desktop
+            .as_deref()
+            .and_then(|desktop| desktop.mime.by_name(name))
+            .is_none_or(sk_desktop::is_text)
+    }
+
+    /// Takes delivery of a file's text and puts it on the clipboard.
+    fn drain_content(&mut self) {
+        let Ok(copied) = self.replies.content_rx.try_recv() else { return };
+        let message = match copied.outcome {
+            Ok(text) => {
+                let size = sk_ui::format::size(text.len() as u64);
+                // Both selections, like every other copy here: the clipboard for
+                // `Ctrl+V` and the primary for a middle click.
+                self.window.set_selection(Selection::Clipboard, Content::text(&text));
+                self.window.set_selection(Selection::Primary, Content::text(&text));
+                sk_model::i18n::format("notice.copied_content", &[&size, &copied.name])
+            }
+            Err(problem) => problem.message(),
+        };
+        self.notice = Some((message, Instant::now()));
+        self.dirty = true;
+    }
+
     /// Reads the clipboard and, if it names a folder, goes there.
     ///
     /// The read happens on a job: the peer writes to the pipe whenever it likes
@@ -1414,7 +1492,7 @@ impl App {
             return;
         };
         let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
-        let sender = self.paste_tx.clone();
+        let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
             let mut bytes = Vec::new();
@@ -1479,7 +1557,7 @@ impl App {
         // parent on the child's exec-status pipe. Enter on an extensionless file
         // living on a stalled mount used to stop the window painting until the
         // mount answered.
-        let sender = self.launched_tx.clone();
+        let sender = self.replies.launched_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(self.pane.lane(), sk_util::Cancel::new(), move |_| {
             let mime = desktop.mime.of(&path, false);
@@ -1605,7 +1683,7 @@ impl App {
 
     /// Takes delivery of a launch: its notice, and the child to reap.
     fn drain_launches(&mut self) {
-        while let Ok(launched) = self.launched_rx.try_recv() {
+        while let Ok(launched) = self.replies.launched_rx.try_recv() {
             if let Some(child) = launched.child {
                 self.launcher.adopt(child);
             }
@@ -1774,8 +1852,10 @@ impl App {
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
         let (queue_left, queue_total) = self.edits.queue_state();
+        let cursor_row = self.pane.cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         format!(
-            "path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
+            "path={:?} rows={} hidden={} sort={:?} descending={} \
+cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} path_entry={typing_path:?} \
@@ -1834,6 +1914,16 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             .and_then(|menu| menu.active)
             .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         let menu_id = menu.and_then(super::menu::Menu::active_id).unwrap_or_default();
+        // Which rows are drawn dimmed, because "dimmed rather than absent" is a
+        // claim about the interface and not an implementation detail.
+        let dimmed = menu.map_or_else(String::new, |menu| {
+            menu.items
+                .iter()
+                .filter(|item| !item.enabled)
+                .map(|item| item.id)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
         // The middle of each menu row, so a scenario can aim at one by name
         // rather than by arithmetic over constants it would have to copy.
         let menu_aim = menu.map_or_else(String::new, |menu| {
@@ -1859,6 +1949,7 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
 crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 menu={menu_rows} menu_active={menu_active} menu_id={menu_id:?} menu_aim={menu_aim:?} \
+menu_dim={dimmed:?} \
 tool_w={tool_w:.1} tool_hover={tool_hover} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \

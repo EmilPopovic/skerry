@@ -408,6 +408,27 @@ def expect(state: dict[str, str], **wanted) -> None:
 # --------------------------------------------------------------------------
 
 
+def clipboard(run: Run, mime: str = "text/plain;charset=utf-8") -> str:
+    """What the compositor's clipboard holds, read by a real Wayland client.
+
+    `wl-paste` rather than the window's own report: the point of a clipboard is
+    that another application can read it, and a scenario that asked the window
+    what it thinks it offered would pass with the data source never bound.
+    """
+    if not shutil.which("wl-paste"):
+        raise Skipped("wl-clipboard is not installed")
+    done = subprocess.run(
+        ["wl-paste", "--no-newline", "--type", mime],
+        env=dict(os.environ, WAYLAND_DISPLAY=run.display),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if done.returncode != 0:
+        raise Failure(f"wl-paste refused: {done.stderr.strip()}")
+    return done.stdout
+
+
 def make_fixture(root: Path, name: str = "fixture") -> Path:
     fixture = root / name
     shutil.rmtree(fixture, ignore_errors=True)
@@ -1064,6 +1085,83 @@ def copy_to_clipboard(run: Run, fixture: Path) -> None:
     state = run.state()
     if "Copied" not in state.get("notice", ""):
         raise Failure(f"copying said {state.get('notice')!r}")
+
+
+@scenario("copy-the-text-inside", fresh=True)
+def copy_the_text_inside(run: Run, fixture: Path) -> None:
+    """A text file's contents on the clipboard, without opening it.
+
+    Read back with `wl-paste`, which is another Wayland client: the point of the
+    feature is that something else can paste it, and asking the window what it
+    thinks it offered would pass with the data source never bound at all.
+    """
+    content = 'fn main() {\n    println!("caf\u00e9 \u2014 hello");\n}\n'
+    (fixture / "main.rs").write_text(content)
+    (fixture / "photo.png").write_bytes(bytes(range(256)) * 8)
+
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    if run.state()["rows"] != "11":
+        raise Failure(f"the fixture has {run.state()['rows']} rows, wanted 11")
+
+    # By name, because the row a file lands on depends on the sort.
+    run.drive("text main.rs\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), cursor="main.rs")
+    run.drive("key ctrl+alt+c\nsleep 900\nkey f12\nsleep 200\n")
+    copied = run.state()
+    if "main.rs" not in copied.get("notice", ""):
+        raise Failure(f"copying said {copied.get('notice')!r}")
+    # Verbatim, trailing newline included: a file's text is its bytes, and a
+    # copy that trims them is a copy of something else.
+    held = clipboard(run)
+    if held != content:
+        raise Failure(f"the clipboard holds {held!r}, wanted {content!r}")
+
+
+@scenario("copy-the-text-inside-by-pointer", fresh=True)
+def copy_the_text_inside_by_pointer(run: Run, fixture: Path) -> None:
+    """The same action from the row menu, and dimmed where it cannot work.
+
+    A `.png` is a type shared-mime-info knows and knows is not text, so the row
+    is drawn and dimmed rather than left out — rule 4 — and clicking it does
+    nothing, which is what a dimmed row means everywhere else.
+    """
+    (fixture / "notes.txt").write_text("one\ntwo\n")
+    (fixture / "photo.png").write_bytes(bytes(range(256)) * 8)
+    run.drive("sleep 700\ntext notes.txt\nsleep 400\nkey f12\nsleep 150\n")
+    at_text = run.state()
+    expect(at_text, cursor="notes.txt")
+
+    point_at(run, int(at_text["cursor_row"]))
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if "file.copy_content" not in opened["menu_aim"]:
+        raise Failure(f"the row menu has no copy-content: {opened['menu_aim']}")
+    if "file.copy_content" in opened["menu_dim"]:
+        raise Failure("copy-content is dimmed on a text file")
+    aimed = menu_aim(run, opened, "file.copy_content")
+    run.drive(
+        f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 200\n"
+    )
+    expect(run.state(), menu="0")
+    if clipboard(run) != "one\ntwo\n":
+        raise Failure(f"the clipboard holds {clipboard(run)!r}")
+
+    # And on a picture the row is there, dimmed, and does nothing.
+    run.drive("text photo.png\nsleep 400\nkey f12\nsleep 150\n")
+    at_image = run.state()
+    expect(at_image, cursor="photo.png")
+    point_at(run, int(at_image["cursor_row"]))
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    over_image = run.state()
+    if "file.copy_content" not in over_image["menu_dim"]:
+        raise Failure(f"copy-content is not dimmed on a .png: {over_image['menu_dim']!r}")
+    aimed = menu_aim(run, over_image, "file.copy_content")
+    run.drive(
+        f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 700\nkey f12\nsleep 200\n"
+    )
+    expect(run.state(), menu="0")
+    if clipboard(run) != "one\ntwo\n":
+        raise Failure("clicking a dimmed row changed the clipboard")
 
 
 @scenario("filter-narrows-the-list")

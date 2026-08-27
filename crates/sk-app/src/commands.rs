@@ -379,6 +379,18 @@ fn file(registry: &mut Registry<App>) {
             run: App::copy_path,
         },
         CommandSpec {
+            id: "file.copy_content",
+            name: "action.copy_content",
+            group: Group::File,
+            // The third of the copy family, after the files themselves and the
+            // path: `Ctrl+C`, `Ctrl+Shift+C`, `Ctrl+Alt+C`. No file manager has
+            // this action, so there is no muscle memory to respect — only the
+            // family to stay inside.
+            keys: &["ctrl+alt+c"],
+            enabled: App::focused_is_text,
+            run: App::copy_content,
+        },
+        CommandSpec {
             id: "file.paste_location",
             name: "action.paste_location",
             group: Group::File,

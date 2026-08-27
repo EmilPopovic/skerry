@@ -79,6 +79,54 @@ pub enum Category {
     Unknown,
 }
 
+/// Whether a type's *bytes* are text.
+///
+/// **Not [`Category`], which answers a different question.** `Document` holds
+/// `text/plain` and `application/pdf` together because they are the same thing
+/// to a person reading a listing, and they are not the same thing to a clipboard.
+///
+/// `text/*` is the specification's own answer and most of this one. The list
+/// below exists because shared-mime-info spells a dozen text formats
+/// `application/*` for historical reasons — JSON, XML and every shell script
+/// among them — and a person copying the text out of a `.json` is not interested
+/// in why it is not called `text/json`.
+///
+/// The answer is a *guess from the name*, which is the only kind available
+/// without reading the file: it decides whether to offer the action, and the read
+/// that follows decides whether the bytes really are text.
+#[must_use]
+pub fn is_text(mime: &str) -> bool {
+    mime.starts_with("text/") || TEXT_TYPES.contains(&mime)
+}
+
+/// Text that shared-mime-info does not call `text/`.
+const TEXT_TYPES: &[&str] = &[
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/javascript",
+    "application/ecmascript",
+    "application/sql",
+    "application/toml",
+    "application/x-yaml",
+    "application/x-shellscript",
+    "application/x-csh",
+    "application/x-perl",
+    "application/x-php",
+    "application/x-python",
+    "application/x-ruby",
+    "application/x-awk",
+    "application/x-m4",
+    "application/x-tex",
+    "application/x-desktop",
+    "application/x-subrip",
+    // XML with a picture in it. The mark on the row says image, and a person
+    // asking for the text of an `.svg` knows exactly what they are asking for.
+    "image/svg+xml",
+];
+
 /// Which kind a MIME type belongs to.
 ///
 /// By prefix where shared-mime-info has one — `image/`, `audio/`, `video/` are
@@ -795,5 +843,43 @@ mod tests {
         assert_eq!(database.by_name("a.txt"), Some("text/plain"));
         assert_eq!(database.by_name("a.png"), Some("image/png"));
         assert_eq!(database.by_name("a.pdf"), Some("application/pdf"));
+    }
+
+    /// The question a clipboard asks, which is not the question a row's mark
+    /// asks: `text/plain` and `application/pdf` are one `Category` and two
+    /// different answers here.
+    #[test]
+    fn text_is_the_bytes_and_not_the_category() {
+        for mime in [
+            "text/plain",
+            "text/x-rust",
+            "text/x-csrc",
+            "text/markdown",
+            "text/html",
+            "application/json",
+            "application/x-shellscript",
+            "application/xml",
+            "application/x-desktop",
+            "image/svg+xml",
+        ] {
+            assert!(super::is_text(mime), "{mime}");
+        }
+        for mime in [
+            "application/pdf",
+            "image/png",
+            "image/jpeg",
+            "audio/flac",
+            "video/mp4",
+            "application/zip",
+            "inode/directory",
+            "application/octet-stream",
+            "application/x-executable",
+            "application/vnd.oasis.opendocument.text",
+        ] {
+            assert!(!super::is_text(mime), "{mime}");
+        }
+        // And the two that are one category and two answers.
+        assert_eq!(super::category("text/plain"), super::category("application/pdf"));
+        assert!(super::is_text("text/plain") && !super::is_text("application/pdf"));
     }
 }

@@ -21,8 +21,11 @@ use crate::layout::Area;
 /// what a double click already does, the two clipboard entries together, and the
 /// two that change the file last — where a slip costs the most and the pointer
 /// is least likely to be.
-pub const ON_ROW: &[&[&str]] =
-    &[&["go.open"], &["file.copy", "file.copy_path"], &["file.rename", "file.trash"]];
+pub const ON_ROW: &[&[&str]] = &[
+    &["go.open"],
+    &["file.copy", "file.copy_path", "file.copy_content"],
+    &["file.rename", "file.trash"],
+];
 
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[

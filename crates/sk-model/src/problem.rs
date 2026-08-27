@@ -51,6 +51,14 @@ pub enum ProblemKind {
     AcrossFilesystems,
     /// A directory that has to be empty is not.
     NotEmpty,
+    /// More bytes than the operation is willing to hold in memory.
+    TooLarge,
+    /// The bytes are not text, so they cannot be treated as text.
+    ///
+    /// Its own kind because the answer is not "this failed" but "this is not the
+    /// thing you asked about": a JPEG has no text to copy, and saying so names
+    /// the file rather than blaming the operation.
+    NotText,
 }
 
 impl ProblemKind {
@@ -66,6 +74,8 @@ impl ProblemKind {
             Self::NameTaken => "error.name_taken",
             Self::AcrossFilesystems => "error.across_filesystems",
             Self::NotEmpty => "error.not_empty",
+            Self::TooLarge => "error.too_large",
+            Self::NotText => "error.not_text",
         }
     }
 }

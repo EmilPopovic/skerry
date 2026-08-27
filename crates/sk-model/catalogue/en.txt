@@ -62,6 +62,8 @@ error.bad_name = “{0}” cannot be a name. Names cannot be empty or contain �
 error.name_taken = Something is already called “{0}”. Choose another name.
 error.across_filesystems = {0} is on another filesystem. Moving it there is not possible yet — copy it instead.
 error.not_empty = {0} is not empty any more, so undoing that would delete what is in it.
+error.too_large = {0} is too large to copy as text. Open it instead.
+error.not_text = {0} is not text. Open it to see what it is.
 error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
 
 # Key names, for the keyboard overlay and anywhere else a chord is shown. As
@@ -215,10 +217,12 @@ notice.opening = Opening with {0}
 # The clipboard.
 action.copy = Copy
 action.copy_path = Copy the path as text
+action.copy_content = Copy the text inside
 action.paste_location = Go to the copied folder
 notice.copied = Copied {0} items
 notice.copied_one = Copied {0}
 notice.copied_path = Copied {0}
+notice.copied_content = Copied {0} of text from {1}
 error.clipboard_not_a_folder = The clipboard does not hold a folder.
 error.no_clipboard = This compositor offers no clipboard.
 stats.capabilities = platform
