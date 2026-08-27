@@ -1939,6 +1939,95 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
     run.drive("key escape\nsleep 200\n")
 
 
+@scenario("copy-and-paste-a-file", fresh=True)
+def copy_and_paste(run: Run, fixture: Path) -> None:
+    """Ctrl+C in one folder, Ctrl+V in another, and Ctrl+Z takes it back.
+
+    The whole vertical slice: the clipboard offer, a peer-readable `text/uri-list`,
+    the copy engine on a job, and one undo entry over it.
+    """
+    (fixture / "target").mkdir()
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    # Pick a file by typing its name, so the scenario does not depend on row order.
+    run.drive("text file-1.txt\nsleep 400\nkey ctrl+c\nsleep 400\nkey f12\nsleep 150\n")
+    copied = run.state()
+    expect(copied, cursor="file-1.txt")
+    if "file-1.txt" not in clipboard(run, "text/uri-list"):
+        raise Failure(f"the clipboard holds {clipboard(run, 'text/uri-list')!r}")
+
+    # Into the folder, and paste.
+    # The type-ahead buffer lives for a second, so the wait is not padding: a
+    # second `text` inside that window appends to the first and matches nothing.
+    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 900\nkey f12\nsleep 150\n")
+    inside = run.state()
+    expect(inside, rows="0")
+    run.drive("key ctrl+v\nsleep 900\nkey f12\nsleep 200\n")
+    pasted = run.state()
+    if int(pasted["rows"]) != 1:
+        raise Failure(f"after pasting, the folder holds {pasted['rows']} rows")
+    expect(pasted, cursor="file-1.txt", undo="true")
+    if not (fixture / "target/file-1.txt").is_file():
+        raise Failure("the file is not on disk")
+    if not (fixture / "file-1.txt").is_file():
+        raise Failure("a copy removed the original")
+
+    # And the undo takes away what the copy made, and only that.
+    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    undone = run.state()
+    expect(undone, rows="0")
+    if (fixture / "target/file-1.txt").exists():
+        raise Failure("the copy survived its undo")
+    if not (fixture / "file-1.txt").is_file():
+        raise Failure("the undo removed the original")
+
+
+@scenario("cut-and-paste-moves-it", fresh=True)
+def cut_and_paste(run: Run, fixture: Path) -> None:
+    """Ctrl+X then Ctrl+V moves rather than copies, and the undo brings it back."""
+    (fixture / "target").mkdir()
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    run.drive("text file-2.txt\nsleep 400\nkey ctrl+x\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), cursor="file-2.txt")
+
+    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 900\nkey ctrl+v\nsleep 900\n")
+    run.drive("key f12\nsleep 200\n")
+    moved = run.state()
+    if int(moved["rows"]) != 1:
+        raise Failure(f"after pasting a cut, the folder holds {moved['rows']} rows")
+    if (fixture / "file-2.txt").exists():
+        raise Failure("a cut and paste left the original behind")
+    if not (fixture / "target/file-2.txt").is_file():
+        raise Failure("the file did not arrive")
+
+    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    if not (fixture / "file-2.txt").is_file():
+        raise Failure("the undo did not bring it back")
+    if (fixture / "target/file-2.txt").exists():
+        raise Failure("the undo left the moved copy behind")
+
+
+@scenario("pasting-a-whole-folder", fresh=True)
+def paste_a_folder(run: Run, fixture: Path) -> None:
+    """A folder pastes with everything in it, and one undo removes all of it."""
+    (fixture / "target").mkdir()
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    run.drive("text alpha\nsleep 400\nkey ctrl+c\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), cursor="alpha")
+
+    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 900\nkey ctrl+v\nsleep 1500\n")
+    run.drive("key f12\nsleep 200\n")
+    if not (fixture / "target/alpha/nested/deep.txt").is_file():
+        raise Failure("the folder's contents did not come with it")
+    if not (fixture / "target/alpha/inner.txt").is_file():
+        raise Failure("a file beside the nested folder did not come with it")
+
+    run.drive("key ctrl+z\nsleep 1200\nkey f12\nsleep 200\n")
+    if (fixture / "target/alpha").exists():
+        raise Failure("the folder survived its undo")
+    if not (fixture / "alpha/nested/deep.txt").is_file():
+        raise Failure("the undo reached into the original")
+
+
 @scenario("the-frame-is-at-the-compositors-scale")
 def first_frame_scale(run: Run, fixture: Path) -> None:
     """What the program scales by is what the compositor asked for.

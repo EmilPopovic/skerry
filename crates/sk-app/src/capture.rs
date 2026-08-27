@@ -84,7 +84,7 @@ fn sample_menu(layout: &Layout) -> Option<crate::menu::Menu> {
     let at = sk_plat::Point::new(layout.body.x + 140.0, layout.body.y + 96.0);
     let mut menu =
         crate::menu::build(crate::menu::ON_BACKGROUND, &crate::commands::registry(), at, |id| {
-            !matches!(id, "edit.undo" | "edit.redo" | "file.paste_location")
+            !matches!(id, "edit.undo" | "edit.redo" | "file.paste" | "file.cut")
         })?;
     menu.step(true);
     menu.step(true);

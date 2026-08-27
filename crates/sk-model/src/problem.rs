@@ -53,6 +53,21 @@ pub enum ProblemKind {
     NotEmpty,
     /// More bytes than the operation is willing to hold in memory.
     TooLarge,
+    /// Not a file, a folder or a link, so there is nothing to copy.
+    ///
+    /// Its own kind because a device node and a named pipe are not *broken* and
+    /// not *unreadable* — recreating one needs `mknod` and, for a device,
+    /// privilege this process does not have. Reported rather than skipped: a copy
+    /// that leaves something out and returns success is worse than one that says
+    /// what it will not do.
+    NotCopyable,
+    /// The destination has no room, or the quota is spent.
+    ///
+    /// Its own kind because the advice is "free some space or choose somewhere
+    /// else" and no other kind here says that — and because it is the failure a
+    /// copy engine has to handle cleanly rather than the one it hopes not to see:
+    /// Spike E measured `ENOSPC` at an exact byte with nothing left behind.
+    Full,
     /// The bytes are not text, so they cannot be treated as text.
     ///
     /// Its own kind because the answer is not "this failed" but "this is not the
@@ -75,6 +90,8 @@ impl ProblemKind {
             Self::AcrossFilesystems => "error.across_filesystems",
             Self::NotEmpty => "error.not_empty",
             Self::TooLarge => "error.too_large",
+            Self::Full => "error.full",
+            Self::NotCopyable => "error.not_copyable",
             Self::NotText => "error.not_text",
         }
     }

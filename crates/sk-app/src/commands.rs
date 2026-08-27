@@ -402,10 +402,30 @@ fn file(registry: &mut Registry<App>) {
             run: App::copy_content,
         },
         CommandSpec {
+            id: "file.cut",
+            name: "action.cut",
+            group: Group::File,
+            keys: &["ctrl+x"],
+            enabled: |app: &App| app.pane.focused().is_some(),
+            run: App::cut_selection,
+        },
+        CommandSpec {
+            id: "file.paste",
+            name: "action.paste",
+            group: Group::File,
+            // `Ctrl+V` is *this*, and it used to be Go to the copied folder —
+            // which was the pulled-forward stand-in for a paste that could not
+            // paste files yet. Now that one can, the universal chord belongs to
+            // it and the stand-in moves down one.
+            keys: &["ctrl+v"],
+            enabled: App::can_paste,
+            run: App::paste_files,
+        },
+        CommandSpec {
             id: "file.paste_location",
             name: "action.paste_location",
-            group: Group::File,
-            keys: &["ctrl+v"],
+            group: Group::Navigate,
+            keys: &["ctrl+shift+v"],
             enabled: |_| true,
             run: App::paste_location,
         },

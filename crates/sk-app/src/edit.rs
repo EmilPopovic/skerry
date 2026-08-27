@@ -76,13 +76,36 @@ pub struct Edits {
     /// `New folder 2` on the job, and only the outcome says which.
     pub naming_owed: bool,
     pending: Option<Pending>,
-    /// Paths still to trash, next one last.
+    /// What the queue is doing to each path it holds.
+    doing: Queued,
+    /// Paths still to work through, next one last.
     queue: Vec<PathBuf>,
     /// How many were asked for, so the notice can count them.
     queued: usize,
     done: Receiver<Outcome>,
     sender: Sender<Outcome>,
     wake: WakeHandle,
+}
+
+/// What the queue is doing to each path it holds.
+///
+/// One queue rather than three, because "one at a time, one undo entry each, a
+/// failure stops the rest" is the same policy for all of them and a second queue
+/// beside it would be a second place for that policy to drift.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Queued {
+    /// Move to the trash.
+    Trash,
+    /// Copy into this directory.
+    Copy {
+        /// Where the copies go.
+        into: PathBuf,
+    },
+    /// Move into this directory.
+    Move {
+        /// Where they end up.
+        into: PathBuf,
+    },
 }
 
 /// What a finished operation asks the rest of the program to do.
@@ -106,6 +129,7 @@ impl Edits {
             name_after_load: None,
             naming_owed: false,
             pending: None,
+            doing: Queued::Trash,
             queue: Vec::new(),
             queued: 0,
             done,
@@ -160,9 +184,24 @@ impl Edits {
     /// not others with only the last message visible, and "seven of nine went"
     /// is not a state a person can act on.
     pub fn trash_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
+        self.queue_all(Queued::Trash, paths, jobs);
+    }
+
+    /// Copies or moves several paths into `into`, one at a time.
+    ///
+    /// `moving` is what tells a paste after Cut from a paste after Copy. The same
+    /// one-at-a-time policy as [`Edits::trash_all`], for the same reasons, and the
+    /// same one undo entry each.
+    pub fn paste_all(&mut self, paths: Vec<PathBuf>, into: PathBuf, moving: bool, jobs: &Jobs) {
+        let doing = if moving { Queued::Move { into } } else { Queued::Copy { into } };
+        self.queue_all(doing, paths, jobs);
+    }
+
+    fn queue_all(&mut self, doing: Queued, paths: Vec<PathBuf>, jobs: &Jobs) {
         if self.pending.is_some() || paths.is_empty() {
             return;
         }
+        self.doing = doing;
         self.queued = paths.len();
         // Reversed, so `pop` takes them in the order they were given — which is
         // display order, so the notice counts down the list a person is looking
@@ -172,7 +211,7 @@ impl Edits {
         self.next_in_queue(jobs);
     }
 
-    /// Starts the next queued trash, if nothing is in flight.
+    /// Starts the next queued operation, if nothing is in flight.
     pub fn next_in_queue(&mut self, jobs: &Jobs) {
         if self.pending.is_some() {
             return;
@@ -181,7 +220,14 @@ impl Edits {
             self.queued = 0;
             return;
         };
-        self.start(Pending::Doing, jobs, move || Outcome::Did(ops::trash(&path)));
+        let doing = self.doing.clone();
+        self.start(Pending::Doing, jobs, move || {
+            Outcome::Did(match doing {
+                Queued::Trash => ops::trash(&path),
+                Queued::Copy { into } => ops::copy_into(&path, &into),
+                Queued::Move { into } => ops::move_into(&path, &into),
+            })
+        });
     }
 
     /// How many are still to go, and how many there were.

@@ -359,6 +359,14 @@ enum Pasted {
     Folder(PathBuf),
     /// The clipboard held something else, or nothing.
     NotAFolder,
+    /// Paths to copy or move in, and whether to move them.
+    ///
+    /// Read on a job like everything else that touches the clipboard: the peer
+    /// writes into a pipe at its own pace, and a read on the frame loop is a
+    /// frame loop waiting on another process.
+    Files(Vec<PathBuf>, bool),
+    /// The clipboard held nothing that names a file.
+    NotFiles,
 }
 
 /// The three channels a job answers the frame loop on.
@@ -489,6 +497,11 @@ pub struct App {
     typing_path: Option<crate::field::Field>,
     /// The command palette, while it is open.
     palette: Option<crate::palette::Palette>,
+    /// Whether the paths on the clipboard were cut rather than copied.
+    ///
+    /// Cleared by a copy and by a paste, so a second paste after a cut copies
+    /// rather than moving something that is no longer where the clipboard says.
+    cutting: bool,
     /// The context menu, while one is open.
     menu: Option<crate::menu::Menu>,
     /// A menu a command asked for, and where it goes.
@@ -609,6 +622,7 @@ impl App {
             hint: String::new(),
             typing_path: None,
             palette: None,
+            cutting: false,
             menu: None,
             menu_wanted: None,
             replies,
@@ -805,6 +819,21 @@ impl App {
             Pasted::NotAFolder => {
                 self.notice = Some((
                     sk_model::i18n::lookup("error.clipboard_not_a_folder").to_owned(),
+                    Instant::now(),
+                ));
+            }
+            Pasted::Files(paths, moving) => {
+                // Cleared here rather than where the cut was made: a paste is
+                // what consumes it, and a second paste of the same clipboard has
+                // to copy — the originals are not where the clipboard says any
+                // more.
+                self.cutting = false;
+                let into = self.pane.path.clone();
+                self.edits.paste_all(paths, into, moving, &self.jobs);
+            }
+            Pasted::NotFiles => {
+                self.notice = Some((
+                    sk_model::i18n::lookup("error.clipboard_no_files").to_owned(),
                     Instant::now(),
                 ));
             }
@@ -1424,6 +1453,7 @@ impl App {
 
     /// Puts the selected paths on the clipboard.
     pub(crate) fn copy_selection(&mut self) {
+        self.cutting = false;
         let paths = self.selected_paths();
         let Some(first) = paths.first().cloned() else { return };
         if !self.window.capabilities().clipboard {
@@ -1445,6 +1475,74 @@ impl App {
             sk_model::i18n::format("notice.copied", &[&count])
         };
         self.notice = Some((message, Instant::now()));
+    }
+
+    /// Puts the selected paths on the clipboard and marks them to be moved.
+    ///
+    /// **The mark is ours and does not leave the process.** GNOME and KDE both
+    /// carry a cut through `x-special/gnome-copied-files`, whose first line is
+    /// the word `cut`; offering that is what makes a cut here paste as a move in
+    /// Nautilus, and it is owed. Until then another application pasting this gets
+    /// a copy, which is the documented behaviour of a cut whose marker the peer
+    /// does not understand — not a silent move that loses the original.
+    pub(crate) fn cut_selection(&mut self) {
+        self.copy_selection();
+        self.cutting = !self.selected_paths().is_empty();
+    }
+
+    /// Whether there is anything on the clipboard worth pasting.
+    ///
+    /// Asked of what the peer *offers*, not of what it holds: reading the bytes
+    /// means a pipe and a job, and a command's `enabled` runs every frame. So the
+    /// answer is "the clipboard offers something that could name a file", and a
+    /// paste that then finds none says so in a notice.
+    #[must_use]
+    pub fn can_paste(&self) -> bool {
+        let offered = self.window.clipboard().offered();
+        ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
+            .iter()
+            .any(|want| offered.iter().any(|have| have == want))
+    }
+
+    /// Copies or moves what is on the clipboard into the directory being shown.
+    pub(crate) fn paste_files(&mut self) {
+        let offered = self.window.clipboard().offered().to_vec();
+        let Some(mime) = ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
+            .into_iter()
+            .find(|want| offered.iter().any(|have| have == want))
+        else {
+            self.notice = Some((
+                sk_model::i18n::lookup("error.clipboard_no_files").to_owned(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        let moving = self.cutting;
+        let sender = self.replies.paste_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let mut bytes = Vec::new();
+            let mut file = std::fs::File::from(fd);
+            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            let text = String::from_utf8_lossy(&bytes);
+            // Every line, not just the first: a copy of nine files is nine lines,
+            // and a paste that takes one of them is a paste that silently drops
+            // eight. `symlink_metadata`, so a broken link is still a thing to
+            // move rather than a line to discard.
+            let paths: Vec<PathBuf> = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .filter_map(|line| sk_plat::decode_uri(line).or_else(|| Some(PathBuf::from(line))))
+                .filter(|path| path.is_absolute() && path.symlink_metadata().is_ok())
+                .collect();
+            let reply =
+                if paths.is_empty() { Pasted::NotFiles } else { Pasted::Files(paths, moving) };
+            if sender.send(reply).is_ok() {
+                wake.wake();
+            }
+        });
     }
 
     /// Puts the focused entry's full path on the clipboard as plain text.

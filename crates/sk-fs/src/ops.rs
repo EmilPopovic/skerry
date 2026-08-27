@@ -1,10 +1,10 @@
 //! Mutations, and the inverse of each one.
 //!
-//! Three of them for now: make a directory, rename, move to the trash. Each
-//! returns a [`Change`] describing what happened, and every `Change` can be
-//! [`revert`]ed and [`apply`]ed again — which is [rule
-//! 3](../../../docs/03-principles.md), and the reason the inverse is written in
-//! the same file as the operation rather than somewhere that can drift from it.
+//! Make a directory, rename, copy in, move in, move to the trash. Each returns a
+//! [`Change`] describing what happened, and every `Change` can be [`revert`]ed and
+//! [`apply`]ed again — which is [rule 3](../../../docs/03-principles.md), and the
+//! reason the inverse is written in the same file as the operation rather than
+//! somewhere that can drift from it.
 //!
 //! **An inverse is not a guess.** Creating a directory is undone by removing it,
 //! and only while it is still empty — if something has been put in it since, the
@@ -12,6 +12,11 @@
 //! renaming back, and only if the original name is still free. Trashing is undone
 //! by moving the file out of the trash and deleting the `.trashinfo` beside it.
 //! Each refusal is a `Problem` with a message, not a silent no-op.
+//!
+//! **A copy is the one whose inverse is a recursive delete**, and it is an undo
+//! rather than a deletion because everything it removes is something the copy
+//! itself made. The bytes are `crate::copy`'s, ported from Spike E; what is here
+//! is the part that makes the result undoable.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +37,16 @@ pub enum Change {
         from: PathBuf,
         /// What it is called now.
         to: PathBuf,
+    },
+    /// Something copied in from somewhere else.
+    ///
+    /// Both ends are kept: undoing a copy removes what it made, and doing it
+    /// again needs the source it came from.
+    Copied {
+        /// Where it came from.
+        source: PathBuf,
+        /// What the copy is called.
+        destination: PathBuf,
     },
     /// Something moved into the trash, with both files the specification puts
     /// there so the undo can take both away.
@@ -55,6 +70,7 @@ impl Change {
         match self {
             Self::Created { path } => path,
             Self::Renamed { to, .. } => to,
+            Self::Copied { destination, .. } => destination,
             Self::Trashed { original, .. } => original,
         }
     }
@@ -71,6 +87,8 @@ impl Change {
         match self {
             Self::Created { .. } => None,
             Self::Renamed { from, .. } => Some(from),
+            // A copy's source never moved, so an undo leaves the cursor on it.
+            Self::Copied { source, .. } => Some(source),
             Self::Trashed { original, .. } => Some(original),
         }
     }
@@ -158,6 +176,40 @@ pub fn trash(path: &Path) -> Result<Change, Problem> {
     Ok(Change::Trashed { original: path.to_path_buf(), stored, info: info_path })
 }
 
+/// Copies `source` into the directory `into`.
+///
+/// **Runs on a job.** The engine is `crate::copy`, ported from Spike E; this is
+/// the part that turns its result into something the undo stack can hold.
+pub fn copy_into(source: &Path, into: &Path) -> Result<Change, Problem> {
+    let mut progress = crate::copy::Progress::default();
+    let destination = crate::copy::copy_into(
+        source,
+        into,
+        crate::copy::Options::default(),
+        &sk_util::Cancel::new(),
+        &mut progress,
+    )?;
+    Ok(Change::Copied { source: source.to_path_buf(), destination })
+}
+
+/// Moves `source` into the directory `into`.
+///
+/// Recorded as a rename, because that is what it is when the filesystems match
+/// and what its undo has to do either way.
+///
+/// **Runs on a job.**
+pub fn move_into(source: &Path, into: &Path) -> Result<Change, Problem> {
+    let mut progress = crate::copy::Progress::default();
+    let destination = crate::copy::move_into(
+        source,
+        into,
+        crate::copy::Options::default(),
+        &sk_util::Cancel::new(),
+        &mut progress,
+    )?;
+    Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
+}
+
 /// Undoes a change. Refuses rather than guessing.
 ///
 /// **Runs on a job.**
@@ -167,7 +219,19 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         // this fails with `ENOTEMPTY` and the undo refuses. An undo that deletes
         // files somebody added is not an undo.
         Change::Created { path } => rustix::fs::rmdir(path).map_err(|error| problem(error, path)),
-        Change::Renamed { from, to } => move_no_replace(to, from),
+        // Through the copy engine rather than `move_no_replace`: a rename inside
+        // one directory can never cross a filesystem, but a *move* between two
+        // can, and its undo has to be able to come back the same way it went.
+        Change::Renamed { from, to } => {
+            crate::copy::move_file(to, from, crate::copy::Options::default()).map(|_| ())
+        }
+        // Recursive, unlike `Created`'s `rmdir`: what the copy made is what is
+        // being taken away, and all of it was made by the copy. Anything added to
+        // it since is inside a directory this operation created, which is the one
+        // case where a recursive remove is still an undo.
+        Change::Copied { destination, .. } => {
+            crate::copy::remove_tree(destination, &sk_util::Cancel::new())
+        }
         Change::Trashed { original, stored, info } => {
             move_no_replace(stored, original)?;
             // The file is back; a leftover `.trashinfo` is the corruption the
@@ -203,6 +267,16 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
                 ));
             };
             rename(from, name)
+        }
+        Change::Copied { source, destination } => {
+            let Some(into) = destination.parent() else {
+                return Err(Problem::new(
+                    ProblemKind::BadName,
+                    destination.display().to_string(),
+                    "no parent",
+                ));
+            };
+            copy_into(source, into)
         }
         // Re-trashed from scratch rather than by moving the same bytes back into
         // the same slot: the slot may have been taken, and `trash` is the thing
@@ -333,7 +407,9 @@ fn io_problem(error: &std::io::Error, path: &Path) -> Problem {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Change, apply, create_directory, encode_path, rename, revert, trash};
+    use super::{
+        Change, apply, copy_into, create_directory, encode_path, move_into, rename, revert, trash,
+    };
     use sk_model::ProblemKind;
     use std::path::{Path, PathBuf};
 
@@ -343,6 +419,77 @@ mod tests {
     /// other — `TRASH` serialises the ones that touch them. Everything else uses
     /// its own directory and runs in parallel.
     static TRASH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Undoing a copy removes what the copy made, and doing it again remakes it.
+    #[test]
+    fn a_copy_is_undone_by_removing_what_it_made() {
+        let root = scratch("copy-undo");
+        let from = root.join("from");
+        let into = root.join("into");
+        std::fs::create_dir_all(from.join("folder")).unwrap();
+        std::fs::create_dir(&into).unwrap();
+        std::fs::write(from.join("folder/inside.txt"), b"contents").unwrap();
+
+        let change = copy_into(&from.join("folder"), &into).expect("copied");
+        let landed = into.join("folder");
+        assert_eq!(change.subject(), landed);
+        assert!(landed.join("inside.txt").is_file());
+
+        revert(&change).expect("undone");
+        assert!(!landed.exists(), "the copy survived its undo");
+        assert!(from.join("folder/inside.txt").is_file(), "the source was touched");
+
+        let again = apply(&change).expect("redone");
+        assert_eq!(again.subject(), landed);
+        assert_eq!(std::fs::read(landed.join("inside.txt")).unwrap(), b"contents");
+    }
+
+    /// An undo leaves the cursor on the source, because that is the only thing
+    /// still there.
+    #[test]
+    fn undoing_a_copy_points_at_the_source() {
+        let root = scratch("copy-origin");
+        let from = root.join("one.txt");
+        let into = root.join("into");
+        std::fs::write(&from, b"x").unwrap();
+        std::fs::create_dir(&into).unwrap();
+        let change = copy_into(&from, &into).expect("copied");
+        assert_eq!(change.origin(), Some(from.as_path()));
+    }
+
+    /// A move records itself as a rename, and its undo brings it back.
+    #[test]
+    fn a_move_is_undone_by_moving_it_back() {
+        let root = scratch("move-undo");
+        let from = root.join("one.txt");
+        let into = root.join("into");
+        std::fs::write(&from, b"contents").unwrap();
+        std::fs::create_dir(&into).unwrap();
+
+        let change = move_into(&from, &into).expect("moved");
+        assert!(!from.exists());
+        assert!(into.join("one.txt").is_file());
+
+        revert(&change).expect("undone");
+        assert!(from.is_file(), "the file did not come back");
+        assert!(!into.join("one.txt").exists());
+    }
+
+    /// Refusing rather than replacing, which is what every other mutation here
+    /// does — conflict resolution is the queue's job and the queue is owed.
+    #[test]
+    fn a_copy_onto_an_existing_name_refuses_and_changes_nothing() {
+        let root = scratch("copy-exists");
+        let from = root.join("one.txt");
+        let into = root.join("into");
+        std::fs::write(&from, b"new").unwrap();
+        std::fs::create_dir(&into).unwrap();
+        std::fs::write(into.join("one.txt"), b"old").unwrap();
+
+        let refused = copy_into(&from, &into).expect_err("refused");
+        assert_eq!(refused.kind(), ProblemKind::NameTaken);
+        assert_eq!(std::fs::read(into.join("one.txt")).unwrap(), b"old");
+    }
 
     fn scratch(label: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("skerry-ops-{}-{label}", std::process::id()));

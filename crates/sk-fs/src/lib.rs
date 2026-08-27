@@ -14,6 +14,7 @@
 // table in Cargo.toml, together with the few pedantic lints allowed there with a
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
+pub mod copy;
 pub mod device;
 pub mod mounts;
 pub mod ops;
@@ -21,6 +22,7 @@ pub mod scan;
 pub mod text;
 pub mod watch;
 
+pub use copy::{Copied, Placement, Strategy, copy_file, move_file};
 pub use device::{Device, lane_for};
 pub use mounts::{Mount, mounts};
 pub use scan::{META_CHUNK, MetaRow, Names, metadata, names};

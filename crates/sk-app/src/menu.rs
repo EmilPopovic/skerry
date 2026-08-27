@@ -23,17 +23,19 @@ use crate::layout::Area;
 /// is least likely to be.
 pub const ON_ROW: &[&[&str]] = &[
     &["go.open"],
-    &["file.copy", "file.copy_path", "file.copy_content"],
+    &["file.copy", "file.cut", "file.paste"],
+    &["file.copy_path", "file.copy_content"],
     &["file.rename", "file.trash"],
 ];
 
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[
-    &["file.new_folder", "file.paste_location"],
+    &["file.new_folder", "file.paste"],
     &["edit.undo", "edit.redo"],
     &["select.all", "view.filter"],
     &["view.hidden", "view.theme", "view.sidebar"],
-    &["view.path_entry", "go.reload", "view.palette", "help.keys"],
+    &["view.path_entry", "file.paste_location", "go.reload"],
+    &["view.palette", "help.keys"],
 ];
 
 /// One row of an open menu.

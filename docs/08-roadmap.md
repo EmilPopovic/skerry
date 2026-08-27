@@ -288,10 +288,10 @@ to have run.
 
 | | What | From | Bar |
 | --- | --- | --- | --- |
-| 4 | **Copy, move and permanent delete**, porting Spike E's engine into `sk-fs` behind the `Change` model the three existing mutations already use | M3 | The matrix stays green in CI — already a gate. Per-extent `copy_file_range` and the placement fallback chain survive as tests rather than being rediscovered |
+| 4 | ~~**Copy, move and permanent delete**~~ **Done.** Spike E's engine is `sk-fs::copy`: reflink, `copy_file_range` per extent, a hole-preserving floor, temp-then-rename, the three-step placement chain, recursive trees, symlinks recreated, and cancellation | M3 | Per-extent `copy_file_range` and the placement chain survive as tests rather than being rediscovered — met. The sparse test was watched failing against the naive loop: **131,072 blocks against 32** |
 | 5 | **The queue: honest progress, a real ETA, pause and cancel** | M3, [rule 7](03-principles.md#7-honest-progress) | No frame over 8 ms while a 4 GiB copy runs; cancel leaves no partial file; the ETA's method written down beside the number it produces |
-| 6 | **A paste that pastes files, and Cut** — the row owed since the clipboard landed | M0 owed | A file copied in Nautilus pastes here, and the reverse, on GTK and Qt |
-| 7 | **Undo across copy and move**, and a visible history | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation, and undoing a copy never deletes a file that was already there |
+| 6 | ~~**A paste that pastes files, and Cut**~~ **Mostly done.** `Ctrl+V` pastes what the clipboard names, `Ctrl+X` cuts, both undoable, both on the menus. `Ctrl+V` took over from *Go to the copied folder*, which moved to `Ctrl+Shift+V` | M0 owed | A file copied in Nautilus pastes here — **unverified**, and the reverse needs `x-special/gnome-copied-files` for a cut to arrive as a move rather than a copy. That marker is what is left |
+| 7 | **Undo across copy and move** — done — **and a visible history**, which is not | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation: met, and asserted through the window for a file, a cut and a whole folder. Undoing a copy removes only what the copy made, which is why its inverse may be recursive at all |
 
 Four and five are one decision apart and should not be split: a copy with no
 progress is a frozen window on a 4 GiB file, and [rule 1](03-principles.md#1-never-block-the-frame)
