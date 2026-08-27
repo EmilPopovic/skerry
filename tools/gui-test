@@ -1064,6 +1064,75 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
     expect(run.state(), path_entry="", path=str(fixture))
 
 
+@scenario("two-fields-never-open-at-once", fresh=True)
+def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
+    """A caret in two places at once is a keyboard nobody can predict.
+
+    Opening the path bar over a rename commits the rename, which is what a click
+    outside the field already did — and a secondary click *inside* the path field
+    belongs to the field, not to the compositor's window menu, which the path bar
+    being the title bar made the default answer.
+    """
+    run.drive("sleep 500\nkey down\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    naming = run.state()
+    original = naming["naming"]
+    if not original:
+        raise Failure("F2 opened no field")
+
+    run.drive("key home\ntext two-\nsleep 150\nkey ctrl+l\nsleep 800\nkey f12\nsleep 200\n")
+    swapped = run.state()
+    expect(swapped, naming="", path_entry=str(fixture))
+    if not (fixture / f"two-{original}").exists():
+        raise Failure(f"the rename was abandoned rather than committed: {swapped}")
+
+    # A secondary click in the field leaves it open and opens no menu at all.
+    inside = aim(run, swapped, float(swapped["name_x"]) - 100.0, 22.0)
+    run.drive(
+        f"move {inside[0]:.1f} {inside[1]:.1f}\n"
+        "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 200\n"
+    )
+    expect(run.state(), menu="0", path_entry=str(fixture))
+
+
+@scenario("everything-in-an-awkward-order", fresh=True)
+def everything_in_an_awkward_order(run: Run, fixture: Path) -> None:
+    """Every new surface, opened over every other one, and nothing may die.
+
+    Not an assertion about behaviour — the scenarios above make those. This is
+    the pass that says the combinations nobody designed for do not crash, hang
+    or leave two fields with a caret in them, which is the class of defect a
+    person finds in the first ten minutes and a per-feature test never does.
+    """
+    run.drive(
+        "sleep 500\n"
+        "key ctrl+l\nkey shift+f10\nsleep 200\n"      # menu over the path field
+        "key escape\nkey escape\nsleep 150\n"
+        "key ctrl+f\ntext al\nkey shift+f10\nsleep 200\n"   # menu over the filter
+        "key escape\nkey escape\nsleep 150\n"
+        "key ctrl+shift+n\nsleep 700\n"                # a folder, then abandon the name
+        "key escape\nsleep 200\n"
+        "key f2\nkey ctrl+l\nsleep 500\n"             # rename, then the path bar
+        "key escape\nsleep 200\n"
+        "key ctrl+z\nsleep 700\n"                      # take the folder back
+        "key f1\nkey shift+f10\nsleep 200\n"          # a menu over the keyboard list
+        "key escape\nkey f1\nsleep 150\n"
+        "key end\nkey delete\nsleep 700\n"            # trash and redo
+        "key ctrl+z\nsleep 700\nkey ctrl+shift+z\nsleep 700\n"
+        "key ctrl+z\nsleep 700\n"
+        "key f12\nsleep 300\n"
+    )
+    end = run.state()
+    if run.process.poll() is not None:
+        raise Failure(f"the window died: {run.err.read_text()[-400:]}")
+    # Everything closed, nothing owed, and the directory back as it started.
+    expect(end, naming="", path_entry="", menu="0", filtering="false", busy="false")
+    expect(end, path=str(fixture), rows="9", undo="false")
+    if sorted(p.name for p in fixture.iterdir()) != sorted(
+        ["alpha", "beta", "gamma", ".hidden"] + [f"file-{index}.txt" for index in range(1, 7)]
+    ):
+        raise Failure(f"the directory did not come back: {sorted(p.name for p in fixture.iterdir())}")
+
+
 @scenario("sidebar-places")
 def sidebar_places(run: Run, fixture: Path) -> None:
     """The list of places is there, one row is where you are, and a click goes.

@@ -1011,6 +1011,12 @@ impl App {
     /// is a path bar you cannot use to go one directory sideways, which is most
     /// of what typing a path is for.
     pub(crate) fn toggle_path_entry(&mut self) {
+        // Two fields with a caret in them is one field too many, and the name
+        // field commits when the focus leaves it — the same thing a click
+        // outside it does.
+        if self.edits.naming.is_some() {
+            self.commit_name();
+        }
         self.typing_path = match self.typing_path {
             Some(_) => None,
             None => Some(crate::field::Field::new(self.pane.path.to_string_lossy().into_owned())),
@@ -1938,6 +1944,15 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// file manager does and the only behaviour under which "Move to Trash" is
     /// safe to have on a menu at all.
     fn open_menu(&mut self, position: Point) {
+        // A secondary click inside a text field belongs to the field. Without
+        // this the path bar — which is the title bar — answered one with the
+        // compositor's window menu, over a field with a caret in it.
+        if self.typing_path.is_some()
+            && crate::view::path_field(&self.layout, &self.theme.metrics)
+                .contains(position.x, position.y)
+        {
+            return;
+        }
         // The title bar's menu is the compositor's, which is where "always on
         // top" and "move to workspace" live. Ours to offer and not ours to draw.
         if self.layout.drag.contains(position.x, position.y) {
