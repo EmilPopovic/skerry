@@ -116,10 +116,11 @@ somebody.
 | `zwp_primary_selection_device_manager_v1` | yes, but see below | yes | yes |
 | `zwp_text_input_manager_v3` | yes | yes, and v1 and v2 | yes |
 | `zwp_input_method_manager_v2` | yes | no | no |
+| `wp_cursor_shape_v1` | yes | yes | yes |
 | `zwp_virtual_keyboard_manager_v1` | yes | **no** | no |
 | `zwlr_virtual_pointer_manager_v1` | yes | **no** | no |
 
-Four things follow that were not obvious before running it:
+Five things follow that were not obvious before running it:
 
 - **GNOME has no decoration manager**, so a client that does not draw a frame has
   no title bar, no close button and no resize edges there. That was the largest
@@ -133,6 +134,13 @@ Four things follow that were not obvious before running it:
 - **A headless seat has no pointer**, and both KWin and mutter present one. The
   capability probe reports `pointer` absent and the program runs; a client that
   assumed a pointer exists would not.
+- **All three name cursor shapes**, which is what lets the pointer have an image
+  at all: `wp_cursor_shape_v1` hands a name to the compositor, which owns the
+  theme, the size and the scale. Without it the pointer keeps whatever the client
+  it came from left on it — the protocol says the image is undefined on enter —
+  and there is no fallback here, because the fallback is an `XCursor` theme
+  parser and a shm buffer. It is staging and recent, so an older desktop is a
+  window with no cursor policy and an invisible resize band.
 - **Hyprland discards a primary-selection write** unless `middle_click_paste` is
   on, silently, with no error — which is Spike D's finding and remains a
   documented limitation with no fallback.

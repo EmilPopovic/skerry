@@ -26,6 +26,7 @@ copy of the metrics it is testing.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -89,6 +90,15 @@ def start_compositor(work: Path) -> tuple[subprocess.Popen, str, str]:
         "    middle_click_paste = true\n"
         "}\n"
     )
+    # Leaks are cumulative and silent until the inotify limit is reached, so a
+    # run that starts with a crowd says so rather than adding to it. Counted by
+    # *process*: an instance directory outlives the compositor that made it, so
+    # counting those reports a crowd of ghosts.
+    already = subprocess.run(
+        ["pgrep", "-c", "-x", "Hyprland"], capture_output=True, text=True
+    ).stdout.strip()
+    if already.isdigit() and int(already) > 3:
+        print(f"  warn  {already} Hyprland processes are running; something is leaking them")
     before, before_instances = sockets(), instances()
     process = subprocess.Popen(
         ["Hyprland", "--config", str(config)],
@@ -107,6 +117,47 @@ def start_compositor(work: Path) -> tuple[subprocess.Popen, str, str]:
             raise Failure("the nested compositor exited; see compositor.log")
         time.sleep(0.2)
     raise Failure("the nested compositor never created a socket")
+
+
+def stop_compositor(process: subprocess.Popen | None, config: Path) -> None:
+    """Ends the nested compositor, and **waits to see that it ended**.
+
+    A `SIGTERM` and no wait is what left seventy-eight of these running over one
+    night's work. Each holds inotify instances, and the per-user limit is 128 —
+    so the thing that broke first was not the compositor, it was `sk-fs`'s own
+    unit tests failing with `Too many open files` in a suite that had not
+    changed. The group is signalled, waited for, and killed outright if it is
+    still there.
+    """
+    if process is not None and process.poll() is None:
+        group = os.getpgid(process.pid)
+        os.killpg(group, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(group, signal.SIGKILL)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    # **And then by config path.** Hyprland re-executes itself into a new session
+    # of its own, so the process this started is a launcher that exits and the
+    # compositor is re-parented to init with a process group `killpg` cannot
+    # reach. The config path names *this* run's compositor and no other, which is
+    # what makes it safe to signal by pattern — the session's own Hyprland has no
+    # `--config` under a temporary directory.
+    for _ in range(20):
+        found = subprocess.run(
+            ["pgrep", "-f", f"Hyprland --config {config}"], capture_output=True, text=True
+        ).stdout.split()
+        if not found:
+            return
+        for pid in found:
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(pid), signal.SIGKILL)
+        time.sleep(0.1)
+    print("  warn  the nested compositor would not die; kill it by hand")
 
 
 # --------------------------------------------------------------------------
@@ -762,6 +813,63 @@ def own_frame_close_button(run: Run, fixture: Path) -> None:
         own.close()
 
 
+@scenario("cursor-shapes")
+def cursor_shapes(run: Run, fixture: Path) -> None:
+    """Sweeps the pointer over every region that names a cursor shape.
+
+    **The shape itself cannot be read back** — no compositor exposes it, and
+    Hyprland does not even validate the serial, so an invalid request is not
+    observable from here either. What this covers is the half that is: the sweep
+    runs the same `cursor_at` hit-testing the shapes come from, the window
+    survives it, and the two regions that *do* report — a breadcrumb and a window
+    button — report the right thing at the coordinates the shape logic used.
+
+    It needs a floating window, because a tiled one has no resize edges and the
+    corner shapes are the interesting half.
+    """
+    run.close()
+    own = Run(run.display, run.log.parent, fixture, ["--own-frame"], run.instance)
+    try:
+        own.make_floating()
+        own.drive("sleep 400\nkey f12\nsleep 200\n")
+        state = own.state()
+        width, height = (float(v) for v in state["logical"].split("x"))
+        if "cursor-shape" not in own.err.read_text():
+            raise Failure("the compositor does not name cursor shapes; nothing to test")
+
+        places = [
+            (1.0, 1.0),                                  # top left corner
+            (width - 1.0, 1.0),                          # top right corner
+            (width / 2.0, 1.0),                          # top edge
+            (1.0, height / 2.0),                         # left edge
+            (width - 1.0, height - 1.0),                 # bottom right corner
+            (float(state["parent_crumb_x"]), float(state["body_top"]) / 4.0),
+            (float(state["close_x"]), float(state["body_top"]) / 4.0),
+            (float(state["size_x"]) + 4.0, float(state["body_top"]) - 8.0),
+            (width / 2.0, float(state["body_top"]) + float(state["row_h"]) * 2.0),
+        ]
+        for logical_x, logical_y in places:
+            x, y = aim(own, state, logical_x, logical_y)
+            own.drive(f"move {x:.2f} {y:.2f}\nsleep 90\n")
+        own.drive("sleep 300\nkey f12\nsleep 200\n")
+
+        if own.process.poll() is not None:
+            raise Failure(f"a cursor request killed the window: {own.err.read_text()[-300:]}")
+        expect(own.state(), frame="own")
+
+        # The one place the hit-testing behind the shapes is observable at this
+        # size — a floating window here is 320x240, which is the toplevel's own
+        # minimum, and its path bar is too narrow for a breadcrumb to be a
+        # reliable target. `breadcrumb-navigation` covers that one at full size.
+        x, y = aim(own, state, float(state["close_x"]), float(state["body_top"]) / 4.0)
+        own.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 150\n")
+        expect(own.state(), frame_hover="close")
+        if "went away" in own.err.read_text():
+            raise Failure(f"the connection died: {own.err.read_text()[-300:]}")
+    finally:
+        own.close()
+
+
 @scenario("window-close-command")
 def window_close_command(run: Run, fixture: Path) -> None:
     """`Ctrl+W` closes the window, and it is the same action as the button.
@@ -882,8 +990,7 @@ def main(argv: list[str]) -> int:
         print(f"fixture: {problem}")
         return 1
     finally:
-        if compositor is not None and compositor.poll() is None:
-            os.killpg(os.getpgid(compositor.pid), signal.SIGTERM)
+        stop_compositor(compositor, work / "hypr.conf")
         if keep:
             print(f"left behind: {work}")
         else:

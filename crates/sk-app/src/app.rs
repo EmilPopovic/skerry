@@ -91,6 +91,7 @@ fn describe(window: &Window) -> String {
         ("own-frame", window.needs_own_frame()),
         ("keyboard", found.keyboard),
         ("pointer", found.pointer),
+        ("cursor-shape", found.cursor_shape),
         ("clipboard", found.clipboard),
         ("primary", found.primary_selection),
     ]
@@ -1320,6 +1321,32 @@ jobs={jobs}/{panics} keys={} stats={}",
         }
     }
 
+    /// What the pointer should look like at a point.
+    ///
+    /// **The resize band is invisible without this.** Six logical pixels that do
+    /// something on a press and nothing to look at is a feature discoverable
+    /// only by trying it, and the first thing a person tries is dragging the
+    /// edge of a window.
+    fn cursor_at(&self, position: Point) -> sk_plat::Cursor {
+        if self.thumb_grab.is_some() {
+            return sk_plat::Cursor::Grabbing;
+        }
+        if let Some(edge) = self.layout.edge_at(position.x, position.y, self.logical) {
+            return sk_plat::Cursor::Resize(edge);
+        }
+        if self.crumb_at(position).is_some()
+            || self.layout.button_at(position.x, position.y).is_some()
+        {
+            return sk_plat::Cursor::Hand;
+        }
+        if self.layout.header.contains(position.x, position.y)
+            && self.column_at(position.x).is_some()
+        {
+            return sk_plat::Cursor::Hand;
+        }
+        sk_plat::Cursor::Arrow
+    }
+
     /// Which path component is under a point, if any.
     ///
     /// The last component is excluded: it is where you already are, and a
@@ -1374,6 +1401,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             self.hovered_crumb = crumb;
             self.dirty = true;
         }
+        self.window.set_cursor(self.cursor_at(position));
         if let Some(grab) = self.thumb_grab {
             self.drag_thumb(position, grab);
             self.dirty = true;

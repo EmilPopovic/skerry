@@ -114,6 +114,10 @@ pub struct Seat {
     /// The serial of the last button press, which is the only thing that makes a
     /// drag legal.
     pub button_serial: Option<u32>,
+    /// The serial of the last `wl_pointer.enter`, which is the only thing that
+    /// lets a client set the pointer's image. The protocol allows it while the
+    /// pointer is over this surface and not otherwise.
+    pub enter_serial: Option<u32>,
 }
 
 impl Seat {
@@ -134,12 +138,18 @@ impl Seat {
             last_click: None,
             keyboard_serial: None,
             button_serial: None,
+            enter_serial: None,
         }
     }
 
     /// The seat, for the requests that name one.
     pub fn seat(&self) -> &wl_seat::WlSeat {
         &self.object
+    }
+
+    /// The pointer, where the seat has one.
+    pub fn pointer(&self) -> Option<&wl_pointer::WlPointer> {
+        self.pointer.as_ref()
     }
 
     /// How long until the next key repeat is due, if one is pending.
@@ -355,14 +365,23 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
     ) {
         let seat = &mut state.seat;
         match event {
-            wl_pointer::Event::Enter { surface_x, surface_y, .. }
-            | wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
+            wl_pointer::Event::Enter { serial, surface_x, surface_y, .. } => {
+                // The only serial that lets a client dress the pointer, and the
+                // protocol says its image is undefined until one does.
+                seat.enter_serial = Some(serial);
+                seat.position = Point::new(surface_x as f32, surface_y as f32);
+                state
+                    .events
+                    .push_back(Event::PointerMoved { position: seat.position, mods: seat.mods });
+            }
+            wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
                 seat.position = Point::new(surface_x as f32, surface_y as f32);
                 state
                     .events
                     .push_back(Event::PointerMoved { position: seat.position, mods: seat.mods });
             }
             wl_pointer::Event::Leave { .. } => {
+                seat.enter_serial = None;
                 seat.last_click = None;
                 state.events.push_back(Event::PointerLeft);
             }

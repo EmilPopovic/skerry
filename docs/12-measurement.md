@@ -426,6 +426,29 @@ shows only CPU time.
 > **Fails if:** a scheduling change is made on the strength of "these threads are
 > busy" without a measurement of the thing they are supposedly starving.
 
+## A harness that leaks is a harness that eventually reports somebody else's bug
+
+`tools/gui-test` started a nested compositor per run and signalled its process
+group at the end. Hyprland re-executes itself into a session of its own, so the
+process the harness started was a launcher that exited and the compositor was
+re-parented to init, in a group `killpg` could not reach. Nothing was slow,
+nothing failed, and the count went up by one per run.
+
+What broke, after about eighty runs, was `sk-fs`'s **unit tests** — three of
+them, with `Too many open files`, in code that had not been touched. Each
+compositor holds inotify instances and the per-user limit is 128. The failure
+appeared as far from its cause as it is possible to get: a crate that does not
+know the harness exists, in a suite that runs without one.
+
+The cleanup now signals the group, waits to see the process go, and then kills by
+`--config` path — which names this run's compositor and no other, and is what
+makes killing by pattern safe at all. The harness also counts running Hyprland
+*processes* on the way in and says so if there is a crowd. Counting instance
+*directories* would not have worked: those outlive the compositor that made them,
+so the count is a crowd of ghosts.
+
+> **Fails if:** a test harness starts a process it does not confirm the death of.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

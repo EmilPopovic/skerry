@@ -32,6 +32,9 @@ use wayland_client::protocol::{
     wl_compositor, wl_data_device_manager, wl_output, wl_registry, wl_seat, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1,
+};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1, wp_fractional_scale_v1,
 };
@@ -105,6 +108,8 @@ pub struct Capabilities {
     pub keyboard: bool,
     /// A pointer is present on the seat.
     pub pointer: bool,
+    /// `wp_cursor_shape_v1`, which is how the pointer gets an image at all.
+    pub cursor_shape: bool,
     /// `wl_data_device_manager`: the clipboard, and later drag-and-drop.
     pub clipboard: bool,
     /// `zwp_primary_selection_device_manager_v1`. Present here does **not** mean
@@ -143,6 +148,47 @@ impl Capabilities {
             u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
         };
         Some((read("vendor")?, read("device")?))
+    }
+}
+
+/// What the pointer should look like over a particular thing.
+///
+/// A named shape rather than an image: `wp_cursor_shape_v1` hands the name to
+/// the compositor, which owns the theme, the size and the scale — all three of
+/// which are settings a person has already chosen once and should not choose
+/// again here. The alternative is parsing an `XCursor` theme and uploading a
+/// buffer, which is the whole of a cursor library for a set of arrows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Cursor {
+    /// The ordinary arrow.
+    #[default]
+    Arrow,
+    /// Over something that acts on a click: a breadcrumb, a column header.
+    Hand,
+    /// Over a resize edge, named by the edge.
+    Resize(Edge),
+    /// Dragging something that follows the pointer.
+    Grabbing,
+}
+
+impl Cursor {
+    const fn as_protocol(self) -> wp_cursor_shape_device_v1::Shape {
+        use wp_cursor_shape_device_v1::Shape;
+        match self {
+            Self::Arrow => Shape::Default,
+            Self::Hand => Shape::Pointer,
+            Self::Grabbing => Shape::Grabbing,
+            Self::Resize(edge) => match edge {
+                Edge::Top => Shape::NResize,
+                Edge::Bottom => Shape::SResize,
+                Edge::Left => Shape::WResize,
+                Edge::Right => Shape::EResize,
+                Edge::TopLeft => Shape::NwResize,
+                Edge::TopRight => Shape::NeResize,
+                Edge::BottomLeft => Shape::SwResize,
+                Edge::BottomRight => Shape::SeResize,
+            },
+        }
     }
 }
 
@@ -237,6 +283,17 @@ struct State {
     primary_manager:
         Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
     clipboard: clipboard::Clipboard,
+    /// The compositor's cursor namer, where it has one.
+    ///
+    /// `wp_cursor_shape_v1` is staging and recent — mutter 45, kwin 5.27, sway
+    /// 1.9. Without it the pointer keeps whatever image the client it came from
+    /// left on it, which the protocol says is undefined and which in practice
+    /// means an I-beam from a text field sitting over the file list. Recorded as
+    /// a capability rather than worked around: the fallback is an `XCursor` theme
+    /// parser and a shm buffer, and that is a library.
+    cursor: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    /// What the pointer was last told to be, so it is told only on a change.
+    shape: Cursor,
     /// Selection writes the peer has not finished reading.
     ///
     /// A pipe holds 64 KiB and a whole-directory selection is megabytes, so the
@@ -318,6 +375,8 @@ impl Window {
         > = bind(&globals, &handle, 1..=1);
         let dmabuf = ask_which_gpu(&globals, &handle);
 
+        let cursor_shapes: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1> =
+            bind(&globals, &handle, 1..=2);
         let clipboard =
             clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
         let surface = compositor.create_surface(&handle, ());
@@ -341,6 +400,7 @@ impl Window {
             server_side_decorations: false,
             keyboard: false,
             pointer: false,
+            cursor_shape: cursor_shapes.is_some(),
             clipboard: data_manager.is_some(),
             primary_selection: primary_manager.is_some(),
             render_device: None,
@@ -358,6 +418,8 @@ impl Window {
             data_manager,
             primary_manager,
             clipboard,
+            cursor: None,
+            shape: Cursor::Arrow,
             transfers: Vec::new(),
             pending_offer: None,
             pending_types: Vec::new(),
@@ -378,13 +440,16 @@ impl Window {
 
         // Two round trips: the first delivers the configure and the scale, the
         // second delivers the seat capabilities and the keymap that the first
-        // one's `get_keyboard` asked for.
+        // one's `get_keyboard` asked for. The cursor device is made after them,
+        // because it is made from the `wl_pointer` and there is no pointer until
+        // the seat has said there is one.
         for _ in 0..2 {
             queue.roundtrip(&mut state).map_err(|error| {
                 Problem::plain(ProblemKind::NoDisplay, format!("roundtrip: {error}"))
             })?;
         }
         state.events.clear();
+        state.cursor = dress_pointer(cursor_shapes, &state.seat, &handle);
 
         forget_which_gpu(dmabuf);
 
@@ -465,6 +530,21 @@ impl Window {
             at.x as i32,
             at.y as i32,
         );
+    }
+
+    /// Sets the pointer's image, if the compositor names shapes.
+    ///
+    /// Only on a change and only with a real `wl_pointer.enter` serial, which is
+    /// the protocol's rule: a client may dress the pointer while it is over its
+    /// own surface and not otherwise.
+    pub fn set_cursor(&mut self, cursor: Cursor) {
+        if self.state.shape == cursor {
+            return;
+        }
+        let Some(device) = &self.state.cursor else { return };
+        let Some(serial) = self.state.seat.enter_serial else { return };
+        device.set_shape(serial, cursor.as_protocol());
+        self.state.shape = cursor;
     }
 
     /// Asks the window to close, as the title bar's button does.
@@ -701,6 +781,22 @@ fn dress(
         zxdg_toplevel_decoration_v1::Mode::ServerSide
     });
     Some(object)
+}
+
+/// Makes the cursor-shape device, if there is a manager and a pointer.
+///
+/// After the seat's round trips, because the device is made from the
+/// `wl_pointer` and there is no pointer until the seat has said there is one.
+/// The manager is let go straight after: it exists to make this one object.
+fn dress_pointer(
+    manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    seat: &Seat,
+    handle: &QueueHandle<State>,
+) -> Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1> {
+    let manager = manager?;
+    let device = seat.pointer().map(|pointer| manager.get_pointer(pointer, handle, ()));
+    manager.destroy();
+    device
 }
 
 /// Asks the compositor which GPU it renders on, and nothing else.
@@ -980,6 +1076,8 @@ macro_rules! ignore_events {
 }
 
 ignore_events!(
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
     zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     wl_compositor::WlCompositor,
     wl_output::WlOutput,
