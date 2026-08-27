@@ -64,11 +64,17 @@ pub struct Edits {
     pub history: History<Change>,
     /// The name being typed, if one is.
     pub naming: Option<Naming>,
-    /// A name to start renaming once the listing containing it lands.
+    /// A name to open a field on once the listing containing it lands.
     ///
     /// Making a folder and naming it are two steps with a directory read between
     /// them: the folder has to exist before there is a row to type in.
     pub name_after_load: Option<String>,
+    /// Whether the next successful operation's subject should be named.
+    ///
+    /// Separate from [`Edits::name_after_load`] because the name is not known
+    /// when the request is made: `new_directory` picks between `New folder` and
+    /// `New folder 2` on the job, and only the outcome says which.
+    pub naming_owed: bool,
     pending: Option<Pending>,
     done: Receiver<Outcome>,
     sender: Sender<Outcome>,
@@ -94,6 +100,7 @@ impl Edits {
             history: History::new(200),
             naming: None,
             name_after_load: None,
+            naming_owed: false,
             pending: None,
             done,
             sender,

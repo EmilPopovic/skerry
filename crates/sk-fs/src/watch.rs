@@ -499,9 +499,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&second);
     }
 
-    /// The NFS case, which is the reason `armed` is public: a directory inotify
-    /// cannot cover produces no error and no events, and the only way a caller
-    /// learns that the listing is a snapshot is by asking.
     /// The mount table is polled on this thread too, and a `POLLPRI` that does
     /// not clear is a thread that spins at a hundred per cent for the life of
     /// the process. Nothing is mounted here, so nothing may arrive.
@@ -518,6 +515,9 @@ mod tests {
         drop(watcher);
     }
 
+    /// The NFS case, which is the reason `armed` is public: a directory inotify
+    /// cannot cover produces no error and no events, and the only way a caller
+    /// learns that the listing is a snapshot is by asking.
     #[test]
     fn a_directory_that_cannot_be_watched_reports_not_armed_rather_than_failing() {
         let root = fixture("unwatchable");

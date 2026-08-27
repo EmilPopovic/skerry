@@ -261,7 +261,6 @@ fn tool_state(commands: &Registry<App>, app: &App) -> [bool; 4] {
         .map(|tool| commands.find(tool.command()).is_some_and(|id| commands.enabled(id, app)))
 }
 
-/// Seconds since the epoch, for the `Modified` column's sense of "today".
 /// `~` and `~/x` to a path under `$HOME`, or `None` for anything else.
 ///
 /// Only the current user's home: `~other` is a shell feature that needs
@@ -274,6 +273,18 @@ fn expand_home(typed: &str) -> Option<PathBuf> {
         "" | "/" => Some(home),
         _ => Some(home.join(rest.strip_prefix('/')?)),
     }
+}
+
+/// Seconds since the epoch, for the `Modified` column's sense of "today".
+/// Which field is claiming the keyboard.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Claim {
+    /// The filter over the listing.
+    Filter,
+    /// A name being typed over a row.
+    Naming,
+    /// A path being typed over the breadcrumbs.
+    Path,
 }
 
 fn clock_seconds() -> i64 {
@@ -665,8 +676,11 @@ impl App {
                 }
             }
         }
-        if landed && self.edits.name_after_load.is_some() && !self.pane.loading {
-            self.name_when_it_arrives();
+        if landed {
+            self.settle_naming();
+            if self.edits.name_after_load.is_some() && !self.pane.loading {
+                self.name_when_it_arrives();
+            }
         }
     }
 
@@ -755,6 +769,13 @@ impl App {
             self.dirty = true;
         }
         if self.watch_target != self.pane.path {
+            // **Every field belongs to the directory it was opened in.** This is
+            // the one place that notices a navigation whatever caused it — a
+            // chord, a breadcrumb, a sidebar row, a pasted path — and each of
+            // the four had a way of surviving one: `Ctrl+L` then `Alt ←` left
+            // the path bar holding the path you had just left, and `Enter`
+            // then took you back to it.
+            self.abandon_fields();
             self.watch_target = self.pane.path.clone();
             self.watcher.watch(self.watch_target.clone());
         } else if !self.watcher.armed() && !self.pane.loading && self.pane.problem.is_none() {
@@ -1005,18 +1026,55 @@ impl App {
         true
     }
 
+    /// Closes every field except the one about to open.
+    ///
+    /// **Two carets is one too many.** Three things in this window take the
+    /// keyboard — the filter, a name and a path — and each was opened without
+    /// asking what already had it: `Ctrl+F` then `Ctrl+L` left the filter
+    /// narrowing the list while the path field ate every character.
+    ///
+    /// A name is committed rather than abandoned, which is what a click outside
+    /// it already does. The menu is not here: it is a mode over the whole window
+    /// rather than a field, `menu_key` has the keyboard while it is up, and
+    /// closing a filter because somebody right-clicked would lose their filter.
+    fn claim_keyboard(&mut self, keep: Claim) {
+        if keep != Claim::Filter && self.filtering {
+            self.filtering = false;
+            self.pane.set_filter(String::new(), &self.jobs);
+            self.dirty = true;
+        }
+        if keep != Claim::Naming && self.edits.naming.is_some() {
+            self.commit_name();
+        }
+        if keep != Claim::Path && self.typing_path.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Closes every field and the menu, because the directory changed under them.
+    ///
+    /// A name is abandoned here and not committed: the subject is in a directory
+    /// nobody is looking at any more, and `F2` then `Alt ←` then `Enter` renamed
+    /// a file in it.
+    fn abandon_fields(&mut self) {
+        let closed = [
+            self.edits.stop_naming(),
+            self.typing_path.take().is_some(),
+            self.menu.take().is_some(),
+            std::mem::take(&mut self.filtering),
+        ];
+        if closed.contains(&true) {
+            self.dirty = true;
+        }
+    }
+
     /// Opens the path bar for typing, or closes it.
     ///
     /// **The whole path, with the caret at the end.** A path bar that opens empty
     /// is a path bar you cannot use to go one directory sideways, which is most
     /// of what typing a path is for.
     pub(crate) fn toggle_path_entry(&mut self) {
-        // Two fields with a caret in them is one field too many, and the name
-        // field commits when the focus leaves it — the same thing a click
-        // outside it does.
-        if self.edits.naming.is_some() {
-            self.commit_name();
-        }
+        self.claim_keyboard(Claim::Path);
         self.typing_path = match self.typing_path {
             Some(_) => None,
             None => Some(crate::field::Field::new(self.pane.path.to_string_lossy().into_owned())),
@@ -1137,11 +1195,15 @@ impl App {
     pub(crate) fn new_folder(&mut self) {
         let parent = self.pane.path.clone();
         self.edits.new_directory(parent, &self.jobs);
-        self.edits.name_after_load = Some(String::new());
+        // The job picks the name — `New folder`, or `New folder 2` if that is
+        // taken — so what is owed here is "name whatever it made", and the name
+        // itself arrives with the outcome.
+        self.edits.naming_owed = true;
     }
 
     /// Starts renaming whatever the cursor is on.
     pub(crate) fn start_rename(&mut self) {
+        self.claim_keyboard(Claim::Naming);
         let Some(id) = self.pane.focused() else { return };
         let Some(row) = self.pane.listing.row_of(id) else { return };
         let name = self.pane.listing.name(id).to_owned();
@@ -1224,6 +1286,7 @@ impl App {
 
     /// Opens the filter, or closes and clears it if it is already open.
     pub(crate) fn toggle_filter(&mut self) {
+        self.claim_keyboard(Claim::Filter);
         if self.filtering {
             self.filtering = false;
             self.pane.set_filter(String::new(), &self.jobs);
@@ -1396,11 +1459,58 @@ impl App {
     ///
     /// A folder is made and then named, and there is a directory read between the
     /// two: this is the far side of it.
+    ///
+    /// **By name, not on the cursor.** It used to call `start_rename` directly,
+    /// which renames whatever the cursor is on — so a creation that failed left
+    /// the debt outstanding and the next listing to land anywhere at all opened a
+    /// rename field over a file nobody had chosen.
     fn name_when_it_arrives(&mut self) {
-        if self.edits.name_after_load.take().is_none() {
+        let Some(wanted) = self.edits.name_after_load.take() else { return };
+        let Some(row) = self.row_named(&wanted) else { return };
+        let Some(id) = self.pane.listing.at(row) else { return };
+        self.pane.selection.replace_with(id);
+        self.start_rename();
+    }
+
+    /// Which display row holds an entry with this name.
+    ///
+    /// A scan, and it runs when a listing lands or when one moves under an open
+    /// field — never per frame. `EntryId` is an index into the listing it came
+    /// from, so it is not an identity that survives a re-read; the name is.
+    fn row_named(&self, name: &str) -> Option<usize> {
+        (0..self.pane.listing.rows()).find(|row| {
+            self.pane.listing.at(*row).is_some_and(|id| self.pane.listing.name(id) == name)
+        })
+    }
+
+    /// Puts an open name field back on its own row after the listing moved.
+    ///
+    /// A file that sorts above it landing renumbers every row below, and a field
+    /// drawn over the wrong row renames a file nobody chose. If the name is gone
+    /// altogether the field goes with it: one that captures the keyboard while
+    /// being drawn nowhere is a window that looks frozen.
+    fn settle_naming(&mut self) {
+        let Some(naming) = self.edits.naming.as_ref() else { return };
+        let Some(name) = naming.path.file_name().map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let still_there =
+            self.pane.listing.at(naming.row).is_some_and(|id| self.pane.listing.name(id) == name);
+        if still_there {
             return;
         }
-        self.start_rename();
+        match self.row_named(&name) {
+            Some(row) => {
+                if let Some(naming) = self.edits.naming.as_mut() {
+                    naming.row = row;
+                }
+            }
+            None => {
+                self.edits.stop_naming();
+            }
+        }
+        self.dirty = true;
     }
 
     /// Takes delivery of a finished mutation.
@@ -1414,12 +1524,23 @@ impl App {
                 if let Some(path) = subject
                     && let Some(name) = path.file_name()
                 {
-                    self.pane.select_after(name.to_string_lossy().into_owned());
+                    let name = name.to_string_lossy().into_owned();
+                    if std::mem::take(&mut self.edits.naming_owed) {
+                        self.edits.name_after_load = Some(name.clone());
+                    }
+                    self.pane.select_after(name);
                 }
                 self.pane.refresh(&self.jobs);
                 message
             }
-            crate::edit::Landed::Failed(message) => message,
+            crate::edit::Landed::Failed(message) => {
+                // **The debt dies with the operation.** A creation that failed
+                // has nothing to name, and an outstanding one made the next
+                // listing to land anywhere open a rename field over whatever the
+                // cursor happened to be on.
+                self.edits.naming_owed = false;
+                message
+            }
         };
         self.notice = Some((message, Instant::now()));
         self.dirty = true;
@@ -1935,8 +2056,6 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.dirty = true;
     }
 
-    /// The compositor's own window menu, which is where "always on top" and
-    /// "move to workspace" live. Ours to offer and not ours to draw.
     /// Asks for the context menu the pointer is over.
     ///
     /// **The menu acts on what it points at.** A secondary click on a row the

@@ -814,6 +814,90 @@ def keyboard_trash(run: Run, fixture: Path) -> None:
         raise Failure("undo left a copy in the Trash")
 
 
+@scenario("a-failed-operation-owes-nothing", fresh=True)
+def a_failed_operation_owes_nothing(run: Run, fixture: Path) -> None:
+    """A creation that fails must not leave a rename field owed.
+
+    New folder and naming it are two steps with a directory read between them, so
+    the second is remembered until the listing lands. It used to be remembered as
+    a bare flag and applied to *the cursor*, so a creation that failed left the
+    debt outstanding and the next listing to land anywhere at all opened a rename
+    field over a file nobody had chosen — with Enter renaming it.
+    """
+    locked = fixture / "locked"
+    locked.mkdir(exist_ok=True)
+    locked.chmod(0o500)
+    try:
+        run.drive("sleep 500\nkey ctrl+l\nkey ctrl+u\n")
+        run.drive(f"text {locked}\nkey enter\nsleep 800\nkey f12\nsleep 200\n")
+        expect(run.state(), path=str(locked), rows="0")
+
+        run.drive("key ctrl+shift+n\nsleep 900\nkey f12\nsleep 200\n")
+        refused = run.state()
+        if not refused["notice"]:
+            raise Failure("a folder was made in a directory with no write permission")
+        expect(refused, naming="", rows="0", undo="false")
+
+        # And the debt did not follow us out, nor attach itself to the next
+        # operation that *does* succeed — which is where an uncleared flag lands
+        # now that the name comes from the outcome rather than from the cursor.
+        run.drive("key alt+up\nsleep 900\nkey f12\nsleep 300\n")
+        expect(run.state(), path=str(fixture), naming="")
+        run.drive("key end\nkey f2\nsleep 300\nkey home\ntext ok-\nsleep 150\n")
+        run.drive("key enter\nsleep 900\nkey f12\nsleep 300\n")
+        renamed = run.state()
+        expect(renamed, undo="true")
+        if renamed["naming"]:
+            raise Failure(f"a field opened over the rename's own subject: {renamed['naming']!r}")
+    finally:
+        locked.chmod(0o700)
+
+
+@scenario("a-field-follows-its-own-row", fresh=True)
+def a_field_follows_its_own_row(run: Run, fixture: Path) -> None:
+    """A file landing above an open rename field must not move it onto another row.
+
+    The field knows its subject by path and its position by row index, and the
+    listing is re-read underneath it four times a second while a directory is
+    being written into. Nothing reconciled the two: a name that sorts above it
+    renumbered every row below, and the field was left drawn over a different
+    file while Enter renamed the original.
+    """
+    run.drive("sleep 500\nkey end\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    naming = run.state()
+    subject = naming["naming"]
+    row = int(naming["naming_row"])
+    if not subject or row < 0:
+        raise Failure(f"F2 opened no field: {naming}")
+
+    # Two names that sort above every existing one, so every row moves down.
+    for name in ("000-first.txt", "001-second.txt"):
+        (fixture / name).write_text("x")
+    run.drive("sleep 900\nkey f12\nsleep 200\n")
+    moved = run.state()
+    expect(moved, naming=subject, rows="11")
+    if int(moved["naming_row"]) != row + 2:
+        raise Failure(
+            f"the field stayed on row {moved['naming_row']} while its file moved to {row + 2}"
+        )
+
+    # And Enter still renames the file the field was opened on.
+    run.drive("key home\ntext kept-\nsleep 200\nkey enter\nsleep 900\nkey f12\nsleep 200\n")
+    expect(run.state(), naming="", undo="true")
+    if not (fixture / f"kept-{subject}").exists():
+        raise Failure(f"kept-{subject} is not on the disk")
+
+    # A subject that vanishes takes the field with it, rather than capturing the
+    # keyboard while being drawn nowhere.
+    run.drive("key end\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    doomed = run.state()["naming"]
+    if not doomed:
+        raise Failure("F2 opened no field the second time")
+    (fixture / doomed).unlink()
+    run.drive("sleep 900\nkey f12\nsleep 200\n")
+    expect(run.state(), naming="")
+
+
 @scenario("context-menu-keyboard")
 def context_menu_keyboard(run: Run, fixture: Path) -> None:
     """Shift+F10 opens the menu, the arrows walk it, Escape closes it."""
@@ -1082,10 +1166,11 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
 def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
     """A caret in two places at once is a keyboard nobody can predict.
 
-    Opening the path bar over a rename commits the rename, which is what a click
-    outside the field already did — and a secondary click *inside* the path field
-    belongs to the field, not to the compositor's window menu, which the path bar
-    being the title bar made the default answer.
+    Three fields take the keyboard — the filter, a name and a path — so all three
+    pairs are here. Opening one over another commits a pending rename, which is
+    what a click outside the field already did; and a secondary click *inside*
+    the path field belongs to the field, not to the compositor's window menu,
+    which the path bar being the title bar made the default answer.
     """
     run.drive("sleep 500\nkey down\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
     naming = run.state()
@@ -1106,6 +1191,31 @@ def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
         "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 200\n"
     )
     expect(run.state(), menu="0", path_entry=str(fixture))
+
+    # The filter over the path bar, and the path bar over the filter. Each pair
+    # in both directions, because the guard was one-sided the first time.
+    run.drive("key ctrl+f\ntext al\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), filtering="true", path_entry="", filter="al")
+    run.drive("key ctrl+l\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), filtering="false", filter="", path_entry=str(fixture))
+    run.drive("key ctrl+f\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), filtering="true", path_entry="")
+
+    # And the filter over a rename.
+    run.drive("key escape\nsleep 150\nkey end\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    named = run.state()
+    if not named["naming"]:
+        raise Failure(f"F2 opened no field: {named}")
+    run.drive("key ctrl+f\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="", filtering="true")
+
+    # Navigating closes whatever is open: a field belongs to the directory it
+    # was opened in, and its subject is in that one.
+    run.drive("key escape\nsleep 150\nkey ctrl+l\nsleep 250\nkey alt+up\nsleep 800\nkey f12\nsleep 200\n")
+    left = run.state()
+    expect(left, path_entry="", naming="", filtering="false")
+    if left["path"] == str(fixture):
+        raise Failure("Alt+Up went nowhere, so nothing was proved")
 
 
 @scenario("everything-in-an-awkward-order", fresh=True)
