@@ -15,7 +15,16 @@ No syscall that can touch a disk, a network mount or a decoder ever runs on the 
 Directory contents stream in progressively; selection, typing and scrolling all work while
 enumeration is still running.
 
-> **Fails if:** any frame exceeds 8 ms while an sshfs mount is unplugged mid-listing.
+**Start-up is the exception, and it is one place with a list.** Before the first frame the
+main thread reads font directories, the timezone database, and — where the compositor
+answers `zwp_linux_dmabuf_v1` — three files under `/sys/dev/char` naming the GPU it renders
+on. Each is bounded, each is on a local filesystem by construction, and each is something
+the first frame would otherwise read while a person is looking at it. Nothing may be added
+to that list without a measurement of what it costs, because the list is exactly how a
+rule with no exceptions becomes a rule with several.
+
+> **Fails if:** any frame exceeds 8 ms while an sshfs mount is unplugged mid-listing — or a
+> syscall that can touch a disk appears on the UI thread anywhere but the start-up list.
 
 ### 2. Everything is a command
 
