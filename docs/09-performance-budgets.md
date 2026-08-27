@@ -55,7 +55,7 @@ the same renderer and the same glyph atlas the window uses.
 | Cold start to first frame | < 80 ms | **92.5 ms best, 122.6 ms median** of 12, plus one 2,654 ms outlier | **missed**, see below |
 | Keystroke to frame | < 8 ms | frame p99 **0.342 ms** median of 5 runs at 200,000 entries; **worst 5.0 ms**, while the read is landing | met |
 | Open a 10k-entry directory | < 30 ms | **23.9 ms** to a sorted, painted listing | met |
-| Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% | met at 200,000; 1M unmeasured |
+| Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% at 200,000. At **973,759**: 1 run in 5 breaches, worst frame **16.4 ms** | met at 200,000; **missed at 1M**, see below |
 | Sort a large listing | < 120 ms at 1M | **166.0 ms** median of 5 at 973,759, on a job — down from 1,460 ms | **missed** by 1.4×, see below |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
@@ -212,6 +212,31 @@ ms on a laptop, so the headroom is real and the work is an API that hands bucket
 to a caller above. Two things reduce the harm meanwhile: the first sort runs
 inside the directory-reading job, and a re-sort above 8,192 entries runs on a job
 over a clone, so the UI thread never blocks on it.
+
+**At a million entries the frame budget is breached, and it is the scale rather
+than anything this session changed.** Measured as five alternating pairs of the
+current binary and the commit before the radix sort, back to back at a one-minute
+load average of **5**, over Spike F's flat million-entry fixture, 900 frames each:
+
+| | worst frame | frames over 8 ms |
+| --- | --- | --- |
+| before | 2.4, 6.0, **9.2**, 4.1, 3.6 ms | 0, 0, **1**, 0, 0 of 899 |
+| after | **16.4**, 2.1, 6.3, 3.5, 4.8 ms | **1**, 0, 0, 0, 0 of 899 |
+
+One run in five breaches on each side. The worst single frame is larger on the
+after side in this sample, and with five runs at a load of five that is not a
+signal — [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded)
+prices a number taken on a loaded machine at 6× less. What the sample does
+establish is that **the breach is not new**: the row said "1M unmeasured" and the
+reason it said so is that nobody had run it.
+
+Every breach is in the window where the read lands, which is the same regime the
+200,000-entry worst frame sits in — the pool saturating every core with `statx`
+and a sort while the loop tries to draw. At 1M that window is four times as long,
+so there is four times as much of it to be unlucky in. Two things are owed before
+this row can be called: **an idle re-measure**, and the fix
+[08-roadmap.md](08-roadmap.md) already names — the frame that shares a machine
+with whatever else is running is the frame to fix, and it is the same one.
 
 **The RSS target is below the driver's floor.** 116.3 MB with 154 entries on
 screen is what the process costs before any of our data exists, and 10,000

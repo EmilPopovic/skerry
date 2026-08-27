@@ -336,6 +336,21 @@ argument for doing it earlier than this. The reason it is not earlier: a split p
 whose two halves cannot copy a file between them is the demo version of the feature,
 and the operations engine is what makes the second pane worth having.
 
+### One thing the port left behind
+
+**Spike E's matrix now tests a copy of the engine rather than the engine.** The
+code in `sk-fs::copy` is the spike's, ported; the matrix in
+`spikes/e-operations` still exercises its own. So *"M3 does not ship until the
+Spike E matrix is green in CI"* is now a gate over a fork, and two engines that
+agree today can stop agreeing without anything failing.
+
+The spike is standalone on purpose — its own `[workspace]`, exempt from the
+layering and dependency rules — so it cannot simply depend on `sk-fs`. The fix is
+to make the matrix an integration test over `sk-fs::copy` and keep the
+filesystem-discovery half, which is the part that has no equivalent anywhere else.
+Until that happens the product's engine is covered by 18 unit tests on tmpfs and
+ext4 and by nothing on btrfs, xfs, exFAT, vfat or NTFS.
+
 ### Owed, and cheap now that there is somewhere to run them
 
 Three rows claim a gate that does not exist. Each is a job in
