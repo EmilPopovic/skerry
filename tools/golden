@@ -63,6 +63,10 @@ FRAMES = [
     # highlight. Its width is the width of its widest shaped row, so this is
     # also the only frame that would catch that measurement drifting.
     ("context-menu", ["--size", "900x520", "--scale", "125", "--menu"]),
+    # The path bar as a field, with the caret a third of the way along it —
+    # which is the only frame that would catch the caret's position drifting
+    # from the shaped width of the text before it.
+    ("path-entry", ["--size", "900x520", "--scale", "125", "--path-entry"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

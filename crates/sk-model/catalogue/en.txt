@@ -148,6 +148,7 @@ action.undo = Undo
 action.redo = Redo
 action.filter = Filter the list
 action.menu = Show the menu
+action.path_entry = Type a path
 action.minimize = Minimise the window
 action.maximize = Maximise or restore
 action.close = Close the window

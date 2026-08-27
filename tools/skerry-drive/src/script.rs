@@ -170,10 +170,44 @@ fn chord_action(chord: &str) -> Result<Action, String> {
     Ok(Action::Key { modifiers, mask, code: code.ok_or(format!("`{chord}` names no key"))? })
 }
 
+/// The upper half of a US keyboard: the character, and the key Shift produces it
+/// from. A filename can hold any of them, so a harness that cannot type them
+/// cannot test a rename.
+const SHIFTED: [(char, &str); 21] = [
+    ('~', "`"),
+    ('!', "1"),
+    ('@', "2"),
+    ('#', "3"),
+    ('$', "4"),
+    ('%', "5"),
+    ('^', "6"),
+    ('&', "7"),
+    ('*', "8"),
+    ('(', "9"),
+    (')', "0"),
+    ('_', "-"),
+    ('+', "="),
+    ('{', "["),
+    ('}', "]"),
+    (':', ";"),
+    ('"', "'"),
+    ('|', "\\"),
+    ('<', ","),
+    ('>', "."),
+    ('?', "/"),
+];
+
 fn character_action(character: char) -> Result<Action, String> {
-    if character.is_ascii_uppercase() {
-        let lower = character.to_ascii_lowercase().to_string();
-        let code = keycode(&lower).ok_or(format!("`{character}` cannot be typed"))?;
+    let shifted = if character.is_ascii_uppercase() {
+        Some(character.to_ascii_lowercase().to_string())
+    } else {
+        SHIFTED
+            .iter()
+            .find(|(shifted, _)| *shifted == character)
+            .map(|(_, unshifted)| (*unshifted).to_owned())
+    };
+    if let Some(unshifted) = shifted {
+        let code = keycode(&unshifted).ok_or(format!("`{character}` cannot be typed"))?;
         return Ok(Action::Key { modifiers: vec![EV_LEFTSHIFT], mask: MOD_SHIFT, code });
     }
     let name = if character == ' ' { "space".to_owned() } else { character.to_string() };

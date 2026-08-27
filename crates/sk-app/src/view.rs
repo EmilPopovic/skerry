@@ -12,6 +12,7 @@ use sk_text::Weight;
 use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format, visible_rows};
 
 use crate::edit::Naming;
+use crate::field::Field;
 use crate::frames::{BUDGET_US, Frames};
 use crate::layout::{Area, Button, Layout, Tool};
 use crate::menu::Menu;
@@ -72,6 +73,8 @@ pub struct Chrome<'a> {
     pub window: WindowState,
     /// The context menu, while one is open.
     pub menu: Option<&'a Menu>,
+    /// The path being typed, which replaces the breadcrumbs while it is up.
+    pub path_entry: Option<&'a Field>,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -203,6 +206,12 @@ fn path_bar(
     ) / painter.scale;
 
     hits.crumbs.clear();
+    if let Some(field) = chrome.path_entry {
+        // No breadcrumbs and no hit regions for them: the strip is a text field
+        // now, and a click in it belongs to the caret.
+        path_entry(painter, layout, field, baseline);
+        return;
+    }
     let available = layout.path.width - metrics.gutter * 2.0 - hint_width - 12.0;
     let names = crumb_names(pane);
     let widths: Vec<f32> = names
@@ -291,6 +300,58 @@ fn path_bar(
     }
     painter.list.pop_clip();
 }
+
+/// The path being typed, across the strip the breadcrumbs were on.
+fn path_entry(painter: &mut Painter<'_>, layout: &Layout, field: &Field, baseline: f32) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let area = path_field(layout, &metrics);
+    let box_rect = painter.rect(area.x, area.y, area.width, area.height);
+    painter.list.rect(box_rect, theme.palette.background, painter.px(metrics.radius));
+    painter.list.stroke(
+        box_rect,
+        theme.palette.accent,
+        painter.px(metrics.radius),
+        painter.snap(1.0).max(1.0),
+    );
+
+    let style = TextStyle::new(metrics.path_size, theme.palette.text);
+    let inner = painter.rect(area.x + PATH_INSET, 0.0, area.width - PATH_INSET * 2.0, 0.0);
+    // Clipped, because a path longer than the strip is ordinary and the field
+    // must not draw over the window buttons.
+    painter.list.push_clip(box_rect);
+    painter.label(&field.text, style, inner, baseline);
+
+    let before = field.before_caret();
+    let advance = if before.is_empty() {
+        0.0
+    } else {
+        let px_size = painter.px(style.size);
+        painter.cache.get_or_shape_label(before, style.weight, px_size, painter.fonts).advance
+    };
+    let caret = sk_gpu::Rect::new(
+        painter.snap(area.x + PATH_INSET) + advance,
+        painter.snap(area.y + 4.0),
+        painter.snap(1.5).max(1.0),
+        painter.px(area.height - 8.0),
+    );
+    painter.list.rect(caret, theme.palette.accent, 0.0);
+    painter.list.pop_clip();
+}
+
+/// Where the path field goes, for the draw and for the hit test.
+pub fn path_field(layout: &Layout, metrics: &sk_ui::Metrics) -> Area {
+    Area {
+        x: layout.path.x + metrics.gutter * 0.5,
+        y: layout.path.y + 6.0,
+        width: (layout.path.width - metrics.gutter).max(0.0),
+        height: (layout.path.height - 12.0).max(0.0),
+    }
+}
+
+/// The text inset inside the path field, shared by the caret, the label and the
+/// hit test that turns a click into a caret position.
+pub const PATH_INSET: f32 = 8.0;
 
 /// Room for the `/` between two components, in logical pixels.
 const SEPARATOR: f32 = 10.0;
@@ -412,11 +473,11 @@ fn name_field_at(
 
     let style = TextStyle::new(metrics.text_size, theme.palette.text);
     let inner = painter.rect(area.x + 6.0, 0.0, area.width - 12.0, 0.0);
-    painter.label(&naming.text, style, inner, baseline);
+    painter.label(&naming.field.text, style, inner, baseline);
 
     // The caret is measured by shaping what is before it, which is the only
     // answer that survives a ligature or a combining mark.
-    let before = &naming.text[..naming.caret.min(naming.text.len())];
+    let before = naming.field.before_caret();
     let advance = if before.is_empty() {
         0.0
     } else {
@@ -1102,8 +1163,13 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
     // Rows are given up before columns are added, because a column costs width
     // and width is what the labels need: "Extend selection down" ellipsized into
     // the next column's keys the first time this had three of them.
+    // **The window, not the list.** The overlay is a panel over everything and
+    // it already covers the path bar and the status line, so bounding it by the
+    // body threw away a hundred pixels and cost a whole column: at forty
+    // commands the three-column arrangement truncates "Extend selection down"
+    // and the two-column one does not.
     let chrome = 76.0;
-    let available = (layout.body.height - 16.0 - chrome).max(chrome);
+    let available = (layout.window.height - 16.0 - chrome).max(chrome);
     let count = entries.len().max(1);
     let columns = (1..=4)
         .find(|columns| count.div_ceil(*columns) as f32 * MIN_KEY_STEP <= available)
@@ -1111,11 +1177,11 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
     let per_column = count.div_ceil(columns);
     let step = MAX_KEY_STEP.min(available / per_column as f32).max(MIN_KEY_STEP);
 
-    let width = (340.0 * columns as f32).min(layout.body.width - 40.0);
+    let width = (340.0 * columns as f32).min(layout.window.width - 40.0);
     let height = per_column as f32 * step + chrome;
     let area = Area {
-        x: ((layout.body.width - width) / 2.0).max(0.0),
-        y: (layout.body.y + (layout.body.height - height) / 2.0).max(layout.body.y + 8.0),
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: ((layout.window.height - height) / 2.0).max(8.0),
         width,
         height,
     };
@@ -1340,6 +1406,7 @@ mod tests {
                 types: None,
                 window: sk_plat::WindowState::default(),
                 menu: None,
+                path_entry: None,
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test

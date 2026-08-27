@@ -997,6 +997,73 @@ def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, fl
     raise Failure(f"no sidebar row called {label!r}")
 
 
+@scenario("path-entry")
+def path_entry(run: Run, fixture: Path) -> None:
+    """Ctrl+L, a path, Enter — and the pointer can reach it too.
+
+    Three routes into one field: the chord, a click that places the caret, and
+    the context menu, because the promise is that every command has both halves.
+    """
+    run.drive("sleep 500\nkey ctrl+l\nsleep 250\nkey f12\nsleep 150\n")
+    opened = run.state()
+    expect(opened, path_entry=str(fixture))
+
+    # Ctrl+U clears it, and a relative name is taken from where you are.
+    run.drive("key ctrl+u\ntext alpha\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="alpha")
+    run.drive("key enter\nsleep 800\nkey f12\nsleep 200\n")
+    expect(run.state(), path="" + str(fixture / "alpha"), path_entry="")
+
+    # Escape puts the breadcrumbs back and goes nowhere.
+    run.drive("key ctrl+l\nsleep 200\nkey ctrl+u\ntext /etc\nsleep 150\nkey escape\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture / "alpha"), path_entry="")
+
+    # And `~` is this user's home, which is the one expansion the field does.
+    run.drive("key ctrl+l\nsleep 200\nkey ctrl+u\ntext ~\nsleep 150\nkey f12\nsleep 150\n")
+    typed = run.state()
+    if typed["path_entry"] != "~":
+        raise Skipped(f"this keymap cannot type a tilde: {typed['path_entry']!r}")
+    run.drive("key enter\nsleep 900\nkey f12\nsleep 200\n")
+    expect(run.state(), path=os.environ.get("HOME", ""))
+
+
+@scenario("path-entry-by-pointer")
+def path_entry_by_pointer(run: Run, fixture: Path) -> None:
+    """The menu opens the field, and a click inside it moves the caret."""
+    run.drive("sleep 500\nkey f12\nsleep 100\n")
+    start = run.state()
+    # The empty space below the last row, where the background menu lives.
+    below = float(start["body_top"]) + float(start["row_h"]) * (int(start["rows"]) + 1)
+    if below >= float(start["body_top"]) + float(start["body_height"]):
+        raise Failure("no empty space below the last row to click in")
+    where = aim(run, start, 300.0, below)
+    run.drive(
+        f"move {where[0]:.1f} {where[1]:.1f}\n"
+        "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 150\n"
+    )
+    opened = run.state()
+    if "view.path_entry" not in opened["menu_aim"]:
+        raise Failure(f"the background menu has no path entry: {opened['menu_aim']}")
+    aimed = menu_aim(run, opened, "view.path_entry")
+    run.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 400\nkey f12\nsleep 200\n")
+    field = run.state()
+    expect(field, menu="0", path_entry=str(fixture))
+
+    # A click a third of the way along the text puts the caret there rather than
+    # committing, and a click outside puts the breadcrumbs back.
+    inside = aim(run, field, 60.0, 22.0)
+    run.drive(f"move {inside[0]:.1f} {inside[1]:.1f}\nsleep 150\nclick\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry=str(fixture), path=str(fixture))
+    run.drive("key ctrl+u\nsleep 150\nkey f12\nsleep 150\n")
+    clipped = run.state()["path_entry"]
+    if clipped == str(fixture) or not str(fixture).endswith(clipped):
+        raise Failure(f"the click did not move the caret: cleared to {clipped!r}")
+
+    away = aim(run, field, 300.0, float(field["body_top"]) + 40.0)
+    run.drive(f"move {away[0]:.1f} {away[1]:.1f}\nsleep 150\nclick\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="", path=str(fixture))
+
+
 @scenario("sidebar-places")
 def sidebar_places(run: Run, fixture: Path) -> None:
     """The list of places is there, one row is where you are, and a click goes.

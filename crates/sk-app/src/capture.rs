@@ -59,6 +59,8 @@ pub struct Capture {
     pub stats: bool,
     /// Whether to draw the context menu.
     pub menu: bool,
+    /// Whether to draw the path bar as a field being typed into.
+    pub path_entry: bool,
     /// Whether to draw the sidebar.
     pub sidebar: bool,
     /// Whether to draw the window frame the program draws for itself.
@@ -85,6 +87,20 @@ fn sample_menu(layout: &Layout) -> Option<crate::menu::Menu> {
     menu.step(true);
     menu.step(true);
     Some(menu)
+}
+
+/// The path bar as a field, with the caret a third of the way along it.
+///
+/// Not at either end: the caret's position is the shaped width of the text
+/// before it, and a caret at offset zero or at the end would be in the right
+/// place even if that measurement were wrong.
+fn sample_path_entry(path: &std::path::Path) -> crate::field::Field {
+    let mut field = crate::field::Field::new(path.to_string_lossy().into_owned());
+    field.jump(false);
+    for _ in 0..field.text.chars().count() / 3 {
+        field.step(true);
+    }
+    field
 }
 
 /// Walks every visible folder to completion, so the frame is reproducible.
@@ -170,6 +186,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         .map_or(0, |since| since.as_secs().cast_signed());
 
     let menu = request.menu.then(|| sample_menu(&layout)).flatten();
+    let path_entry = request.path_entry.then(|| sample_path_entry(&request.path));
 
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
@@ -231,6 +248,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                     ..sk_plat::WindowState::default()
                 },
                 menu: menu.as_ref(),
+                path_entry: path_entry.as_ref(),
             };
             view::draw(
                 &mut painter,

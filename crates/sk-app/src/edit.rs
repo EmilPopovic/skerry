@@ -19,6 +19,7 @@ use sk_fs::ops::{self, Change};
 use sk_model::Problem;
 use sk_util::{Cancel, Lane, WakeHandle};
 
+use crate::field::Field;
 use crate::pane::Jobs;
 
 /// What the pool was asked to do.
@@ -53,54 +54,8 @@ pub struct Naming {
     pub row: usize,
     /// The path it will rename.
     pub path: PathBuf,
-    /// What has been typed.
-    pub text: String,
-    /// Where the caret is, as a byte offset into `text`.
-    pub caret: usize,
-}
-
-impl Naming {
-    /// Inserts text at the caret.
-    pub fn insert(&mut self, text: &str) {
-        self.text.insert_str(self.caret, text);
-        self.caret += text.len();
-    }
-
-    /// Removes the character before the caret.
-    pub fn backspace(&mut self) {
-        let Some(before) = self.text[..self.caret].chars().next_back() else { return };
-        self.caret -= before.len_utf8();
-        self.text.remove(self.caret);
-    }
-
-    /// Removes the character after the caret.
-    pub fn delete(&mut self) {
-        if self.caret < self.text.len() {
-            self.text.remove(self.caret);
-        }
-    }
-
-    /// Removes everything before the caret.
-    pub fn clear_before_caret(&mut self) {
-        self.text.drain(..self.caret);
-        self.caret = 0;
-    }
-
-    /// Moves the caret one character, by `step` in characters.
-    pub fn step(&mut self, forward: bool) {
-        if forward {
-            if let Some(next) = self.text[self.caret..].chars().next() {
-                self.caret += next.len_utf8();
-            }
-        } else if let Some(before) = self.text[..self.caret].chars().next_back() {
-            self.caret -= before.len_utf8();
-        }
-    }
-
-    /// Puts the caret at one end.
-    pub fn jump(&mut self, to_end: bool) {
-        self.caret = if to_end { self.text.len() } else { 0 };
-    }
+    /// What has been typed, and where the caret is.
+    pub field: Field,
 }
 
 /// Everything the frame loop needs to know about mutations.
@@ -263,112 +218,5 @@ impl Edits {
                 wake.wake();
             }
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used)]
-
-    use super::Naming;
-    use std::path::PathBuf;
-
-    fn field(text: &str) -> Naming {
-        Naming { row: 0, path: PathBuf::from("/tmp/x"), text: text.to_owned(), caret: text.len() }
-    }
-
-    /// A filename is not ASCII, and a caret that moves by bytes lands inside a
-    /// character and panics on the next slice.
-    #[test]
-    fn the_caret_moves_by_characters_and_not_by_bytes() {
-        let mut naming = field("café");
-        assert_eq!(naming.caret, 5, "é is two bytes");
-        naming.step(false);
-        assert_eq!(naming.caret, 3);
-        naming.step(false);
-        assert_eq!(naming.caret, 2);
-        naming.step(true);
-        assert_eq!(naming.caret, 3);
-
-        naming.jump(true);
-        assert_eq!(naming.caret, 5);
-        naming.jump(false);
-        assert_eq!(naming.caret, 0);
-        // And neither end runs off.
-        naming.step(false);
-        assert_eq!(naming.caret, 0);
-        naming.jump(true);
-        naming.step(true);
-        assert_eq!(naming.caret, 5);
-    }
-
-    #[test]
-    fn typing_and_deleting_work_at_the_caret() {
-        let mut naming = field("report.pdf");
-        naming.jump(false);
-        naming.insert("2024-");
-        assert_eq!(naming.text, "2024-report.pdf");
-        assert_eq!(naming.caret, 5);
-
-        naming.backspace();
-        assert_eq!(naming.text, "2024report.pdf");
-        assert_eq!(naming.caret, 4);
-
-        naming.delete();
-        assert_eq!(naming.text, "2024eport.pdf");
-        assert_eq!(naming.caret, 4);
-    }
-
-    /// The field has no selection, so clearing it was one press of Backspace
-    /// per character — twenty-six of them for a photograph's name.
-    #[test]
-    fn one_key_clears_the_field_and_leaves_what_is_after_the_caret() {
-        let mut naming = field("holiday.jpeg");
-        naming.clear_before_caret();
-        assert_eq!(naming.text, "");
-        assert_eq!(naming.caret, 0);
-
-        let mut naming = field("holiday.jpeg");
-        naming.jump(false);
-        for _ in 0..7 {
-            naming.step(true);
-        }
-        naming.clear_before_caret();
-        assert_eq!(naming.text, ".jpeg", "the extension went with it");
-        assert_eq!(naming.caret, 0);
-    }
-
-    #[test]
-    fn deleting_at_either_end_does_nothing_rather_than_panicking() {
-        let mut naming = field("a");
-        naming.jump(false);
-        naming.backspace();
-        assert_eq!(naming.text, "a");
-        naming.jump(true);
-        naming.delete();
-        assert_eq!(naming.text, "a");
-
-        let mut empty = field("");
-        empty.backspace();
-        empty.delete();
-        empty.step(true);
-        empty.step(false);
-        assert_eq!(empty.text, "");
-        assert_eq!(empty.caret, 0);
-    }
-
-    /// A multi-byte character deleted from either side leaves valid UTF-8.
-    #[test]
-    fn a_multibyte_character_is_removed_whole() {
-        let mut naming = field("aéb");
-        naming.step(false);
-        naming.backspace();
-        assert_eq!(naming.text, "ab");
-
-        let mut other = field("aéb");
-        other.jump(false);
-        other.step(true);
-        other.delete();
-        assert_eq!(other.text, "ab");
     }
 }

@@ -286,6 +286,16 @@ fn view(registry: &mut Registry<App>) {
             run: App::toggle_filter,
         },
         CommandSpec {
+            id: "view.path_entry",
+            name: "action.path_entry",
+            group: Group::Navigate,
+            // `Ctrl+L` from every browser and from GTK's own places bar, and
+            // `Alt+D` from Explorer, because both are somebody's muscle memory.
+            keys: &["ctrl+l", "alt+d"],
+            enabled: |_| true,
+            run: App::toggle_path_entry,
+        },
+        CommandSpec {
             id: "view.menu",
             name: "action.menu",
             group: Group::View,

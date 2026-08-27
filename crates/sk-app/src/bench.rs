@@ -194,6 +194,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 types: Some(&types),
                 window: sk_plat::WindowState::default(),
                 menu: None,
+                path_entry: None,
             };
             view::draw(
                 &mut painter,

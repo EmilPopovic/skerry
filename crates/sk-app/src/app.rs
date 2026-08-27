@@ -262,6 +262,20 @@ fn tool_state(commands: &Registry<App>, app: &App) -> [bool; 4] {
 }
 
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
+/// `~` and `~/x` to a path under `$HOME`, or `None` for anything else.
+///
+/// Only the current user's home: `~other` is a shell feature that needs
+/// `getpwnam`, and a path bar that silently treated `~other` as a relative
+/// directory of that name would be worse than one that does not expand it.
+fn expand_home(typed: &str) -> Option<PathBuf> {
+    let rest = typed.strip_prefix('~')?;
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    match rest {
+        "" | "/" => Some(home),
+        _ => Some(home.join(rest.strip_prefix('/')?)),
+    }
+}
+
 fn clock_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
 }
@@ -407,6 +421,8 @@ pub struct App {
     hovered_tool: Option<crate::layout::Tool>,
     /// The hit regions the last frame produced.
     hits: crate::view::Hits,
+    /// The path being typed over the breadcrumbs, while one is.
+    typing_path: Option<crate::field::Field>,
     /// The context menu, while one is open.
     menu: Option<crate::menu::Menu>,
     /// A menu a command asked for, and where it goes.
@@ -527,6 +543,7 @@ impl App {
             hovered_crumb: None,
             hovered_tool: None,
             hits: crate::view::Hits::default(),
+            typing_path: None,
             menu: None,
             menu_wanted: None,
             paste_rx,
@@ -831,6 +848,12 @@ impl App {
         if self.menu.is_some() && self.menu_key(event, commands) {
             return;
         }
+        // The path bar takes the keyboard while it is open, for the same reason
+        // the name field does and before it: it is the field with the caret in
+        // it, and `Delete` in it must delete a character and not a file.
+        if self.typing_path.is_some() && self.path_key(event) {
+            return;
+        }
         // A name being typed takes the keyboard before anything else, and takes
         // more of it than the filter does: `Delete` is bound to Move to Trash,
         // and a rename field where `Delete` deletes the file is a field nobody
@@ -894,10 +917,10 @@ impl App {
         let scale = self.window.scale();
         // The colour is not read: only the weight and the size decide an advance.
         let style = sk_ui::TextStyle::new(self.theme.metrics.text_size, self.theme.palette.text);
-        naming.caret = sk_ui::caret_offset(
+        naming.field.caret = sk_ui::caret_offset(
             &mut self.cache,
             &mut self.fonts,
-            &naming.text,
+            &naming.field.text,
             style,
             style.size * scale,
             (x - field.x - 6.0) * scale,
@@ -905,41 +928,114 @@ impl App {
         self.dirty = true;
     }
 
+    /// The scroll extent, and the folder totals for what is on screen.
+    ///
+    /// Once per frame, and bounded by the viewport rather than by the directory:
+    /// keyed by path rather than by row, so a new listing shows what is already
+    /// known instead of starting again.
+    fn settle_rows(&mut self) {
+        let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
+        self.pane.scroll.set_extent(content, self.layout.body.height);
+        let visible = sk_ui::visible_rows(
+            self.pane.scroll.offset(),
+            self.layout.body.height,
+            self.theme.metrics.row_height,
+            self.pane.listing.rows(),
+        );
+        let Self { measurer, pane, jobs, .. } = self;
+        measurer.update(pane, visible, jobs);
+    }
+
+    /// Puts the caret where a click in the path field landed.
+    fn place_path_caret(&mut self, x: f32) {
+        let Some(field) = self.typing_path.as_mut() else { return };
+        let area = crate::view::path_field(&self.layout, &self.theme.metrics);
+        let scale = self.window.scale();
+        let style = sk_ui::TextStyle::new(self.theme.metrics.path_size, self.theme.palette.text);
+        field.caret = sk_ui::caret_offset(
+            &mut self.cache,
+            &mut self.fonts,
+            &field.text,
+            style,
+            style.size * scale,
+            (x - area.x - crate::view::PATH_INSET) * scale,
+        );
+        self.dirty = true;
+    }
+
     /// Feeds one key to the name being typed. Returns whether it was consumed.
     ///
-    /// **Everything a field needs, and nothing else.** Enter commits, Escape
-    /// abandons, the arrows and Home and End move the caret, Backspace and
-    /// Delete remove a character, and a bare character types one. Every other
-    /// chord falls through, so `Ctrl+Z` still undoes and `F1` still opens the
-    /// keyboard list from inside the field.
+    /// Enter commits and Escape abandons; everything else the field does itself.
     fn name_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
         use sk_plat::{Key, Named};
-        let Some(naming) = self.edits.naming.as_mut() else { return false };
-        let bare = event.mods.none();
         match event.key {
             Key::Named(Named::Enter) => self.commit_name(),
             Key::Named(Named::Escape) => {
                 self.edits.stop_naming();
-                self.dirty = true;
             }
-            Key::Named(Named::Backspace) if bare => naming.backspace(),
-            Key::Named(Named::Delete) if bare => naming.delete(),
-            Key::Named(Named::Left) if bare => naming.step(false),
-            Key::Named(Named::Right) if bare => naming.step(true),
-            Key::Named(Named::Home) if bare => naming.jump(false),
-            Key::Named(Named::End) if bare => naming.jump(true),
-            // Readline's, and every terminal's, and the only way to clear this
-            // field in one key: there is no selection in it, so renaming
-            // `holiday-2024-portugal.jpeg` to anything else was twenty-six
-            // presses of Backspace.
-            Key::Character('u') if event.mods.ctrl => naming.clear_before_caret(),
-            _ => match keys::typed_text(event) {
-                Some(text) => naming.insert(text),
-                None => return false,
-            },
+            _ => {
+                let Some(naming) = self.edits.naming.as_mut() else { return false };
+                if !naming.field.key(event) {
+                    return false;
+                }
+            }
         }
         self.dirty = true;
         true
+    }
+
+    /// Feeds one key to the path being typed. Returns whether it was consumed.
+    ///
+    /// Enter goes there and Escape puts the breadcrumbs back.
+    fn path_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
+        use sk_plat::{Key, Named};
+        match event.key {
+            Key::Named(Named::Enter) => self.go_to_typed_path(),
+            Key::Named(Named::Escape) => {
+                self.typing_path = None;
+            }
+            _ => {
+                let Some(field) = self.typing_path.as_mut() else { return false };
+                if !field.key(event) {
+                    return false;
+                }
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Opens the path bar for typing, or closes it.
+    ///
+    /// **The whole path, with the caret at the end.** A path bar that opens empty
+    /// is a path bar you cannot use to go one directory sideways, which is most
+    /// of what typing a path is for.
+    pub(crate) fn toggle_path_entry(&mut self) {
+        self.typing_path = match self.typing_path {
+            Some(_) => None,
+            None => Some(crate::field::Field::new(self.pane.path.to_string_lossy().into_owned())),
+        };
+        self.dirty = true;
+    }
+
+    /// Goes where the path bar says, and puts the breadcrumbs back.
+    ///
+    /// **Nothing is stat'ed here** — rule 1. A path that is not a directory is
+    /// opened anyway and the read fails with a message that says so, which is
+    /// the same answer a directory deleted a moment ago gives.
+    fn go_to_typed_path(&mut self) {
+        let Some(field) = self.typing_path.take() else { return };
+        let typed = field.text.trim();
+        if typed.is_empty() {
+            return;
+        }
+        let path = expand_home(typed).unwrap_or_else(|| {
+            let path = std::path::Path::new(typed);
+            if path.is_absolute() { path.to_path_buf() } else { self.pane.path.join(path) }
+        });
+        if path != self.pane.path {
+            self.pane.open(path, &self.jobs);
+        }
     }
 
     /// Feeds one key to the open filter. Returns whether it was consumed.
@@ -1051,12 +1147,7 @@ impl App {
         self.edits.naming = Some(crate::edit::Naming {
             row,
             path: self.pane.path.join(&name),
-            // The caret at the end rather than the whole name selected: there is
-            // no selection in this field yet, and a caret at the end is the one
-            // position from which every edit is reachable with the keys that
-            // exist.
-            caret: name.len(),
-            text: name,
+            field: crate::field::Field::new(name),
         });
         self.dirty = true;
     }
@@ -1065,12 +1156,14 @@ impl App {
     fn commit_name(&mut self) {
         let Some(naming) = self.edits.naming.take() else { return };
         self.dirty = true;
-        let unchanged =
-            naming.path.file_name().is_some_and(|current| current.to_string_lossy() == naming.text);
-        if unchanged || naming.text.is_empty() {
+        let unchanged = naming
+            .path
+            .file_name()
+            .is_some_and(|current| current.to_string_lossy() == naming.field.text);
+        if unchanged || naming.field.text.is_empty() {
             return;
         }
-        self.edits.rename(naming.path, naming.text, &self.jobs);
+        self.edits.rename(naming.path, naming.field.text, &self.jobs);
     }
 
     /// Moves what is selected to the trash.
@@ -1491,14 +1584,16 @@ impl App {
             .unwrap_or_default();
         let (known, running) = self.measurer.stats();
         let (jobs, panics) = self.jobs.pool.stats();
-        let naming = self.edits.naming.as_ref().map(|it| it.text.clone()).unwrap_or_default();
+        let naming = self.edits.naming.as_ref().map(|it| it.field.text.clone()).unwrap_or_default();
+        let typing_path =
+            self.typing_path.as_ref().map(|field| field.text.clone()).unwrap_or_default();
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
         format!(
             "path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
-naming={naming:?} naming_row={naming_row} undo={} redo={} busy={} \
+naming={naming:?} naming_row={naming_row} path_entry={typing_path:?} undo={} redo={} busy={} \
 filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
@@ -1673,6 +1768,19 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if let Some(button) = self.layout.button_at(position.x, position.y) {
             if let Some(id) = commands.find(button.command()) {
                 commands.run(id, self);
+            }
+            return;
+        }
+        // The path field before the drag region, for the same reason a
+        // breadcrumb is: a press in a text field belongs to the caret, and a
+        // press that moved the window instead would make the field unusable.
+        if self.typing_path.is_some() {
+            let field = crate::view::path_field(&self.layout, &self.theme.metrics);
+            if field.contains(position.x, position.y) {
+                self.place_path_caret(position.x);
+            } else {
+                self.typing_path = None;
+                self.dirty = true;
             }
             return;
         }
@@ -2097,24 +2205,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.physical = physical;
         }
         let scale = self.window.scale();
-
-        let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
-        self.pane.scroll.set_extent(content, self.layout.body.height);
-
-        // Folder totals are applied to what is on screen and measured for what is
-        // missing, once per frame. Bounded by the viewport rather than by the
-        // directory, and keyed by path rather than by row — so a new listing
-        // shows what is already known instead of starting again.
-        let visible = sk_ui::visible_rows(
-            self.pane.scroll.offset(),
-            self.layout.body.height,
-            self.theme.metrics.row_height,
-            self.pane.listing.rows(),
-        );
-        {
-            let Self { measurer, pane, jobs, .. } = self;
-            measurer.update(pane, visible, jobs);
-        }
+        self.settle_rows();
 
         // Asked before the borrow below splits `self` apart: the answer is
         // whether each navigation command can run, and only the registry knows
@@ -2154,6 +2245,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             window_state,
             hits,
             menu,
+            typing_path,
             ..
         } = self;
 
@@ -2177,6 +2269,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             types: desktop.as_deref().map(|it| &it.mime),
             window: *window_state,
             menu: menu.as_ref(),
+            path_entry: typing_path.as_ref(),
         };
         let now = clock_seconds();
         let mut diagnostics = diagnostics_for(
@@ -2235,5 +2328,41 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.scale_120 * 100 / 120,
             self.capabilities,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::expand_home;
+    use std::path::Path;
+
+    /// `~other` is a shell feature that needs `getpwnam`. Expanding it as this
+    /// user's home would send a person somewhere they did not ask for, and
+    /// treating it as a relative directory called `~other` at least fails with a
+    /// message that names what it looked for.
+    #[test]
+    fn only_this_users_home_is_expanded() {
+        // SAFETY: single-threaded test, and the value is restored below.
+        let saved = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", "/home/tester") };
+
+        assert_eq!(expand_home("~").as_deref(), Some(Path::new("/home/tester")));
+        assert_eq!(expand_home("~/").as_deref(), Some(Path::new("/home/tester")));
+        assert_eq!(
+            expand_home("~/Downloads/x").as_deref(),
+            Some(Path::new("/home/tester/Downloads/x"))
+        );
+        assert_eq!(expand_home("~other").as_deref(), None);
+        assert_eq!(expand_home("~other/files").as_deref(), None);
+        assert_eq!(expand_home("/etc").as_deref(), None);
+        assert_eq!(expand_home("relative").as_deref(), None);
+
+        match saved {
+            // SAFETY: as above.
+            Some(home) => unsafe { std::env::set_var("HOME", home) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 }
