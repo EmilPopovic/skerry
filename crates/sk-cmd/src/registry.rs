@@ -55,6 +55,25 @@ impl Group {
     }
 }
 
+/// Where a chord means what this command means.
+///
+/// **The one thing a global keymap cannot express.** `Ctrl+A` is Select all over a
+/// listing and Select the whole name inside a text field; `Ctrl+V` pastes files
+/// into a directory and text into a field. Without a scope the keymap has to pick
+/// one, and the loser gets handled by a hand-written check somewhere in the event
+/// path — which is a binding that no palette can find and no keymap can rebind.
+///
+/// Two values, because two is what the program has. A per-view scope and a vim
+/// layer are M6's, and both are the same mechanism with more variants.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub enum Scope {
+    /// Wherever nothing narrower has claimed the chord.
+    #[default]
+    Global,
+    /// While a text field has the keyboard.
+    Field,
+}
+
 /// A command's position in the registry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CommandId(usize);
@@ -83,7 +102,7 @@ pub struct CommandSpec<C> {
 pub struct Registry<C> {
     specs: Vec<CommandSpec<C>>,
     by_id: HashMap<&'static str, usize>,
-    bindings: Vec<(Chord, usize)>,
+    bindings: Vec<(Chord, Scope, usize)>,
     /// Bindings that were refused, and why. Read by a test, not by the program.
     problems: Vec<String>,
 }
@@ -106,13 +125,22 @@ impl<C> Registry<C> {
         }
     }
 
-    /// Adds a command and binds its default chords.
+    /// Adds a command in the global scope, and binds its default chords.
+    pub fn add(&mut self, spec: CommandSpec<C>) {
+        self.add_in(Scope::Global, spec);
+    }
+
+    /// Adds a command in `scope`, and binds its default chords there.
+    ///
+    /// A chord may be bound once per scope: `Ctrl+A` is one command over a listing
+    /// and another inside a field, and that is not a conflict. Two commands
+    /// claiming it in the *same* scope is.
     ///
     /// Anything wrong — a duplicate id, an unparseable chord, a chord already
-    /// taken — is recorded in [`Registry::problems`] rather than panicking, so a
-    /// test can assert the whole set is sound in one place instead of the program
-    /// dying on the one machine where a locale changed a key name.
-    pub fn add(&mut self, spec: CommandSpec<C>) {
+    /// taken in the same scope — is recorded in [`Registry::problems`] rather than
+    /// panicking, so a test can assert the whole set is sound in one place instead
+    /// of the program dying on the one machine where a locale changed a key name.
+    pub fn add_in(&mut self, scope: Scope, spec: CommandSpec<C>) {
         let index = self.specs.len();
         if self.by_id.insert(spec.id, index).is_some() {
             self.problems.push(format!("`{}` is registered twice", spec.id));
@@ -121,13 +149,18 @@ impl<C> Registry<C> {
             match Chord::parse(text) {
                 None => self.problems.push(format!("`{}`: `{text}` is not a chord", spec.id)),
                 Some(chord) => {
-                    if let Some((_, taken)) =
-                        self.bindings.iter().find(|(existing, _)| *existing == chord)
+                    if let Some((_, _, taken)) = self
+                        .bindings
+                        .iter()
+                        .find(|(existing, at, _)| *existing == chord && *at == scope)
                     {
                         let other = self.specs.get(*taken).map_or("?", |spec| spec.id);
-                        self.problems.push(format!("`{}`: `{text}` is already `{other}`", spec.id));
+                        self.problems.push(format!(
+                            "`{}`: `{text}` is already `{other}` in {scope:?}",
+                            spec.id
+                        ));
                     } else {
-                        self.bindings.push((chord, index));
+                        self.bindings.push((chord, scope, index));
                     }
                 }
             }
@@ -153,13 +186,34 @@ impl<C> Registry<C> {
         self.specs.is_empty()
     }
 
-    /// The command a key press reaches.
+    /// The command a key press reaches in `scope`.
+    ///
+    /// The narrower scope wins and the global one is the fallback, so a field
+    /// claims only the chords it has an answer for and everything else still
+    /// reaches the command it always reaches.
     #[must_use]
-    pub fn resolve(&self, event: &KeyEvent) -> Option<CommandId> {
+    pub fn resolve(&self, event: &KeyEvent, scope: Scope) -> Option<CommandId> {
+        let matching = |at: Scope| {
+            self.bindings
+                .iter()
+                .find(|(chord, binding, _)| *binding == at && chord.matches(event))
+                .map(|(_, _, index)| CommandId(*index))
+        };
+        match scope {
+            Scope::Global => matching(Scope::Global),
+            // Named rather than a wildcard, so a third scope has to decide here
+            // whether it falls back rather than inheriting an answer by default.
+            Scope::Field => matching(Scope::Field).or_else(|| matching(Scope::Global)),
+        }
+    }
+
+    /// Which scope a command's chords are bound in.
+    #[must_use]
+    pub fn scope_of(&self, id: CommandId) -> Scope {
         self.bindings
             .iter()
-            .find(|(chord, _)| chord.matches(event))
-            .map(|(_, index)| CommandId(*index))
+            .find(|(_, _, index)| *index == id.0)
+            .map_or(Scope::Global, |(_, scope, _)| *scope)
     }
 
     /// The command with this identifier.
@@ -209,7 +263,7 @@ impl<C> Registry<C> {
 
     fn keys_for(&self, index: usize) -> String {
         let mut out = String::new();
-        for (chord, bound) in &self.bindings {
+        for (chord, _, bound) in &self.bindings {
             if *bound != index {
                 continue;
             }
@@ -239,7 +293,7 @@ pub struct Described<'a> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{CommandSpec, Group, Registry};
+    use super::{CommandSpec, Group, Registry, Scope};
     use sk_plat::{Key, KeyEvent, Modifiers, Named};
 
     #[derive(Default)]
@@ -270,7 +324,8 @@ mod tests {
         assert!(registry.problems().is_empty());
 
         let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
-        let id = registry.resolve(&press(Key::Character('a'), ctrl)).expect("resolved");
+        let id =
+            registry.resolve(&press(Key::Character('a'), ctrl), Scope::Global).expect("resolved");
         let mut context = Context::default();
         assert!(registry.run(id, &mut context));
         assert_eq!(context.count, 1);
@@ -286,9 +341,12 @@ mod tests {
         assert!(described.keys.contains("Alt ↑"), "{}", described.keys);
 
         let alt = Modifiers { alt: true, ..Modifiers::default() };
-        assert_eq!(registry.resolve(&press(Key::Named(Named::Up), alt)), Some(id));
+        assert_eq!(registry.resolve(&press(Key::Named(Named::Up), alt), Scope::Global), Some(id));
         let plain = Modifiers::default();
-        assert_eq!(registry.resolve(&press(Key::Named(Named::Backspace), plain)), Some(id));
+        assert_eq!(
+            registry.resolve(&press(Key::Named(Named::Backspace), plain), Scope::Global),
+            Some(id)
+        );
     }
 
     /// A registry that silently drops a conflict is a registry where two
@@ -301,7 +359,10 @@ mod tests {
         assert_eq!(registry.problems().len(), 1, "{:?}", registry.problems());
         assert!(registry.problems()[0].contains("already"));
         let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
-        assert_eq!(registry.resolve(&press(Key::Character('a'), ctrl)), registry.find("first"));
+        assert_eq!(
+            registry.resolve(&press(Key::Character('a'), ctrl), Scope::Global),
+            registry.find("first")
+        );
     }
 
     #[test]
@@ -334,6 +395,36 @@ mod tests {
         assert!(registry.enabled(id, &context));
         assert!(registry.run(id, &mut context));
         assert_eq!(context.count, 1);
+    }
+
+    /// The thing a global keymap cannot express: `Ctrl+A` is one command over a
+    /// listing and another inside a text field.
+    #[test]
+    fn a_narrower_scope_wins_the_chord_and_the_global_one_is_the_fallback() {
+        let mut registry = Registry::new();
+        registry.add(spec("select.all", &["ctrl+a"]));
+        registry.add(spec("go.reload", &["f5"]));
+        registry.add_in(Scope::Field, spec("field.select_all", &["ctrl+a"]));
+        assert!(registry.problems().is_empty(), "{:?}", registry.problems());
+
+        let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
+        let press_a = press(Key::Character('a'), ctrl);
+        assert_eq!(registry.resolve(&press_a, Scope::Global), registry.find("select.all"));
+        assert_eq!(registry.resolve(&press_a, Scope::Field), registry.find("field.select_all"));
+
+        // And a chord the field does not claim still reaches what it always did.
+        let f5 = press(Key::Named(Named::Function(5)), Modifiers::default());
+        assert_eq!(registry.resolve(&f5, Scope::Field), registry.find("go.reload"));
+    }
+
+    /// Two commands claiming one chord in the *same* scope is still a conflict.
+    #[test]
+    fn a_conflict_inside_one_scope_is_still_a_conflict() {
+        let mut registry = Registry::new();
+        registry.add_in(Scope::Field, spec("first", &["ctrl+a"]));
+        registry.add_in(Scope::Field, spec("second", &["ctrl+a"]));
+        assert_eq!(registry.problems().len(), 1, "{:?}", registry.problems());
+        assert!(registry.problems()[0].contains("Field"), "{}", registry.problems()[0]);
     }
 
     #[test]

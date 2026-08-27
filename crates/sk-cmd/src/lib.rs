@@ -26,4 +26,4 @@ pub mod registry;
 pub use chord::Chord;
 pub use fuzzy::score;
 pub use history::History;
-pub use registry::{CommandId, CommandSpec, Group, Registry};
+pub use registry::{CommandId, CommandSpec, Group, Registry, Scope};

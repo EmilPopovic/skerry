@@ -29,6 +29,7 @@ pub fn registry() -> Registry<App> {
     edit(&mut registry);
     window(&mut registry);
     help(&mut registry);
+    field(&mut registry);
     registry
 }
 
@@ -528,6 +529,14 @@ const POINTER_EXEMPT: &[(&str, &str)] = &[
     ("select.bottom", "a pointer reaches the bottom by dragging the thumb"),
     ("help.dump", "a diagnostic for a bug report, not an action on a file"),
     ("help.stats", "a diagnostic for a bug report, not an action on a file"),
+    // A field's own four. A pointer selects text by dragging in the field, which
+    // is a gesture rather than a menu row — and a menu cannot be opened over an
+    // open field without closing it, so a row for these would be a row that can
+    // never be reached.
+    ("field.select_all", "a pointer selects text by dragging across it"),
+    ("field.copy", "a pointer has the middle-click selection and the drag"),
+    ("field.cut", "a pointer has the drag; a menu over a field would close it"),
+    ("field.paste", "a pointer has the middle-click paste"),
 ];
 
 /// The hint in the corner of the path bar, from the registry.
@@ -545,6 +554,61 @@ pub fn hint(registry: &Registry<App>) -> String {
         .map(|command| command.keys)
         .unwrap_or_default();
     sk_model::i18n::format("chrome.hint", &[&keys])
+}
+
+/// What the chords a text field claims mean inside one.
+///
+/// **In the registry rather than in `Field::key`**, because these four chords mean
+/// something else over a listing and the registry is the only place that
+/// difference can live if a keymap is ever to be rebindable — `sk_cmd::Scope`. The
+/// rest of a field's keys are not here: `Shift ←` and `Home` mean nothing over a
+/// listing, so there is nothing for a scope to settle and they are text editing
+/// rather than actions.
+///
+/// Every one of them is dimmed unless a field has the keyboard, which is what the
+/// palette shows. Their **names start with "In a field:"** for the same reason:
+/// the keyboard overlay is a reference, and four chords listed twice with no
+/// indication of when reads as a contradiction rather than as a scope.
+fn field(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "field.select_all",
+            name: "action.select_all_text",
+            group: Group::Edit,
+            keys: &["ctrl+a"],
+            enabled: App::in_a_field,
+            run: App::select_all_text,
+        },
+        CommandSpec {
+            id: "field.copy",
+            name: "action.copy_text",
+            group: Group::Edit,
+            keys: &["ctrl+c"],
+            enabled: App::in_a_field,
+            run: App::copy_text,
+        },
+        CommandSpec {
+            id: "field.cut",
+            name: "action.cut_text",
+            group: Group::Edit,
+            keys: &["ctrl+x"],
+            enabled: App::in_a_field,
+            run: App::cut_text,
+        },
+        CommandSpec {
+            id: "field.paste",
+            name: "action.paste_text",
+            group: Group::Edit,
+            // **The one that was dangerous.** `Ctrl+V` while renaming started a
+            // file paste into the directory being looked at, which is not what
+            // anybody typing a name means by it.
+            keys: &["ctrl+v"],
+            enabled: App::in_a_field,
+            run: App::paste_text,
+        },
+    ] {
+        registry.add_in(sk_cmd::Scope::Field, spec);
+    }
 }
 
 /// The keyboard overlay's rows: what to press, and what it does.

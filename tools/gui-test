@@ -480,7 +480,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 54
+FEWEST_SCENARIOS = 57
 
 
 def scenario(name, fresh: bool = False):
@@ -2140,6 +2140,131 @@ def rename_keeps_the_extension(run: Run, fixture: Path) -> None:
         raise Failure("the renamed file is not on disk")
     if (fixture / "file-1.txt").exists():
         raise Failure("the original is still there")
+
+
+@scenario("a-field-selects-text-and-ctrl-a-does-not-select-files", fresh=True)
+def field_selection(run: Run, fixture: Path) -> None:
+    """Shift+arrows extend, Ctrl+A takes the name, and neither touches the list.
+
+    `Ctrl+A` is the one chord where a field and the listing genuinely disagree, and
+    the registry settles it by scope — so this is the scenario that would fail if
+    the scope ever stopped being consulted.
+    """
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    run.drive("text file-1.txt\nsleep 400\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    opened = run.state()
+    expect(opened, naming="file-1.txt", selected="1")
+
+    # Ctrl+A takes the whole name, not every file: one keystroke then replaces it.
+    run.drive("key ctrl+a\nsleep 250\ntext x\nsleep 300\nkey f12\nsleep 150\n")
+    took = run.state()
+    expect(took, naming="x")
+    if int(took["selected"]) != 1:
+        raise Failure(f"Ctrl+A in a field selected {took['selected']} files")
+
+    # Shift+Left three times over `file-2.txt` selects `txt`, and one keystroke
+    # replaces all three of them.
+    run.drive("key escape\nsleep 300\ntext file-2.txt\nsleep 400\nkey f2\nsleep 300\n")
+    run.drive(
+        "key end\nsleep 150\nkey shift+left\nkey shift+left\nkey shift+left\n"
+        "sleep 250\ntext Z\nsleep 300\nkey f12\nsleep 150\n"
+    )
+    expect(run.state(), naming="file-2.Z")
+
+    run.drive("key escape\nsleep 250\n")
+
+    # **The filter is deliberately not a field.** It is a `String` with no caret
+    # and no selection, so `Ctrl+A` while filtering selects the rows that matched
+    # — which is what filtering is for, and the boundary the scope draws.
+    run.drive("key ctrl+f\nsleep 300\ntext file\nsleep 500\nkey f12\nsleep 150\n")
+    filtering = run.state()
+    expect(filtering, filtering="true", filter="file")
+    matched = int(filtering["rows"])
+    if matched < 2:
+        raise Failure(f"the filter matched {matched} rows, which proves nothing")
+    run.drive("key ctrl+a\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), selected=str(matched), filtering="true")
+    run.drive("key escape\nsleep 250\n")
+
+
+@scenario("renaming-a-directory-offers-its-whole-name", fresh=True)
+def rename_a_directory(run: Run, fixture: Path) -> None:
+    """A folder has no extension to keep, so all of its name is offered."""
+    (fixture / "photos.2024").mkdir()
+    run.drive("sleep 900\nkey f12\nsleep 150\n")
+    run.drive("text photos.2024\nsleep 500\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="photos.2024")
+
+    # One keystroke replaces all of it, dots included — where a file would have
+    # kept `.2024`.
+    run.drive("text album\nsleep 300\nkey enter\nsleep 800\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor="album")
+    if not (fixture / "album").is_dir():
+        raise Failure("the folder was not renamed")
+    if (fixture / "photos.2024").exists():
+        raise Failure("the old name is still there")
+
+
+@scenario("a-pointer-selects-text-in-the-path-field")
+def drag_in_the_path_field(run: Run, fixture: Path) -> None:
+    """Ctrl+L, then a drag across the path, and the span it covered is selected.
+
+    The path bar and the rename field are the same one line of editable text, so a
+    drag proved here is a drag proved in both — and this is the one a scenario can
+    aim at, because the path field's box is reported and a row's is not.
+
+    **Aimed in text widths, not in fractions of the box.** The box is 968 logical
+    pixels wide and the path draws in about 220 of them, so a drag from a third to
+    two thirds of the *box* starts and ends past the end of the text — where the
+    caret correctly goes to the end and nothing is selected at all. That was the
+    first version, and it read as a broken drag.
+    """
+    run.drive("sleep 700\nkey ctrl+l\nsleep 400\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if not opened["path_entry"]:
+        raise Failure("Ctrl+L opened no path field")
+    left, top, width, height = (float(value) for value in opened["path_field"].split(","))
+    middle = top + height / 2.0
+
+    def at(x: float) -> tuple[float, float]:
+        return aim(run, opened, x, middle)
+
+    # From inside the left inset to well past the end of the text: whatever the
+    # path is and whatever it measures, that is all of it.
+    everything = f"drag {at(left + 4)[0]:.2f} {at(left + 4)[1]:.2f} " \
+                 f"{at(left + width * 0.95)[0]:.2f} {at(left + width * 0.95)[1]:.2f}"
+    run.drive(
+        f"move {at(left + 4)[0]:.2f} {at(left + 4)[1]:.2f}\nsleep 200\n"
+        f"{everything}\nsleep 300\nkey f12\nsleep 200\n"
+    )
+    dragged = run.state()
+    if dragged["path_selected"] != opened["path_entry"]:
+        raise Failure(
+            f"a drag across the whole field selected {dragged['path_selected']!r} "
+            f"of {opened['path_entry']!r}"
+        )
+
+    # And one keystroke replaces all of it, which is what a selection is for.
+    run.drive("text Q\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="Q")
+
+    # A short drag selects a span rather than everything: about forty pixels of
+    # text, which is a few characters at any size this draws at.
+    run.drive("key escape\nsleep 300\nkey ctrl+l\nsleep 400\nkey f12\nsleep 150\n")
+    reopened = run.state()
+    span = f"drag {at(left + 4)[0]:.2f} {at(left + 4)[1]:.2f} " \
+           f"{at(left + 44)[0]:.2f} {at(left + 44)[1]:.2f}"
+    run.drive(f"{span}\nsleep 300\nkey f12\nsleep 200\n")
+    part = run.state()["path_selected"]
+    if not part:
+        raise Failure("a short drag selected nothing")
+    if part == reopened["path_entry"]:
+        raise Failure(f"a short drag selected the whole path: {part!r}")
+    if not reopened["path_entry"].startswith(part):
+        raise Failure(f"the selection is not the start of the path: {part!r}")
+
+    run.drive("key escape\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), path=opened["path"])
 
 
 @scenario("a-held-backspace-does-not-walk-out-of-the-folder")

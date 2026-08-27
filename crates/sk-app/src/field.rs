@@ -48,10 +48,73 @@ impl Field {
     /// leading dot is part of its name rather than a separator.
     ///
     /// The **last** dot, so `archive.tar.gz` keeps `.gz` and offers `archive.tar`.
+    ///
+    /// A name with no extension is all stem, so all of it is selected — `Makefile`
+    /// and `.bashrc` behave like a directory does, which is the consistency the
+    /// rule is for rather than an exception to it.
     #[must_use]
     pub fn naming(text: String) -> Self {
         let end = stem_end(&text);
-        Self { caret: end, anchor: (end < text.len()).then_some(0), text }
+        Self { caret: end, anchor: Some(0), text }
+    }
+
+    /// A field holding a name with all of it selected.
+    ///
+    /// For a directory: there is no extension to keep, so the whole name is what a
+    /// rename offers — the same gesture as a file's stem, over a name that has no
+    /// parts to it.
+    #[must_use]
+    pub fn naming_all(text: String) -> Self {
+        Self { caret: text.len(), anchor: Some(0), text }
+    }
+
+    /// Selects everything.
+    pub fn select_all(&mut self) {
+        self.anchor = Some(0);
+        self.caret = self.text.len();
+    }
+
+    /// Moves the caret one character, keeping or starting a selection.
+    ///
+    /// The anchor stays where the caret was when the first `Shift` arrow arrived,
+    /// which is what makes a run of them grow one selection rather than a new one
+    /// per press.
+    pub fn extend(&mut self, forward: bool) {
+        let anchor = self.anchor.unwrap_or(self.caret);
+        if forward {
+            if let Some(next) = self.text[self.caret..].chars().next() {
+                self.caret += next.len_utf8();
+            }
+        } else if let Some(before) = self.text[..self.caret].chars().next_back() {
+            self.caret -= before.len_utf8();
+        }
+        self.anchor = Some(anchor);
+    }
+
+    /// Moves the caret to one end, keeping or starting a selection.
+    pub fn extend_to_end(&mut self, to_end: bool) {
+        let anchor = self.anchor.unwrap_or(self.caret);
+        self.caret = if to_end { self.text.len() } else { 0 };
+        self.anchor = Some(anchor);
+    }
+
+    /// Moves the caret to `offset`, keeping or starting a selection.
+    ///
+    /// What a pointer drag does: the anchor is where the press landed and the
+    /// caret follows the pointer.
+    pub fn extend_to(&mut self, offset: usize) {
+        let anchor = self.anchor.unwrap_or(self.caret);
+        self.caret = offset.min(self.text.len());
+        self.anchor = Some(anchor);
+    }
+
+    /// The selected text, or `""`.
+    #[must_use]
+    pub fn selected(&self) -> &str {
+        match self.selection() {
+            Some((start, end)) => self.text.get(start..end).unwrap_or(""),
+            None => "",
+        }
     }
 
     /// The selected range in byte offsets, if anything is selected.
@@ -161,6 +224,13 @@ impl Field {
             Key::Named(Named::Right) if bare => self.step(true),
             Key::Named(Named::Home) if bare => self.jump(false),
             Key::Named(Named::End) if bare => self.jump(true),
+            // Shift and an arrow. Not in the registry, unlike `Ctrl+A`: these
+            // chords mean nothing over a listing, so there is nothing for a scope
+            // to disambiguate and they are text editing rather than actions.
+            Key::Named(Named::Left) if event.mods.only_shift() => self.extend(false),
+            Key::Named(Named::Right) if event.mods.only_shift() => self.extend(true),
+            Key::Named(Named::Home) if event.mods.only_shift() => self.extend_to_end(false),
+            Key::Named(Named::End) if event.mods.only_shift() => self.extend_to_end(true),
             // Readline's, and every terminal's, and the only way to clear this
             // field in one key: there is no selection in it, so renaming
             // `holiday-2024-portugal.jpeg` was twenty-six presses of Backspace.
@@ -200,11 +270,13 @@ mod tests {
             ("email2.txt", Some("email2")),
             // The last dot, not the first: `.gz` is the extension here.
             ("archive.tar.gz", Some("archive.tar")),
-            // A leading dot is part of the name, not a separator on an empty one.
-            (".bashrc", None),
+            // A leading dot is part of the name, not a separator on an empty one —
+            // so there is no extension and the whole thing is the stem.
+            (".bashrc", Some(".bashrc")),
             (".hidden.txt", Some(".hidden")),
-            // Nothing to keep.
-            ("Makefile", None),
+            // No extension either, and all of it selected for the same reason a
+            // directory's whole name is.
+            ("Makefile", Some("Makefile")),
             ("", None),
             // A name that is only dots: the last one still separates, so `..` is
             // offered and the final `.` kept. Odd, and it is what the rule says.
@@ -264,14 +336,74 @@ mod tests {
         assert_eq!((field.caret, field.selection()), (0, None));
     }
 
-    /// A name with no extension opens with nothing selected, so the first
-    /// keystroke has to add rather than replace.
+    /// A name with no extension is all stem, so all of it is offered — the same
+    /// gesture as a file's stem, over a name with no parts to it.
     #[test]
-    fn a_name_with_no_extension_selects_nothing() {
+    fn a_name_with_no_extension_is_all_stem() {
         let mut field = Field::naming("Makefile".to_owned());
-        assert_eq!(field.selection(), None);
-        field.insert("!");
-        assert_eq!(field.text, "Makefile!");
+        assert_eq!(field.selected(), "Makefile");
+        field.insert("Justfile");
+        assert_eq!(field.text, "Justfile");
+    }
+
+    /// A directory has no extension to keep, so a rename offers its whole name
+    /// however many dots are in it.
+    #[test]
+    fn a_directory_offers_its_whole_name() {
+        for name in ["photos", "my.folder", "site.v2.backup"] {
+            let field = Field::naming_all(name.to_owned());
+            assert_eq!(field.selected(), name, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn shift_and_an_arrow_grow_one_selection() {
+        let mut field = Field::new("abcdef".to_owned());
+        field.jump(false);
+        field.extend(true);
+        field.extend(true);
+        assert_eq!(field.selected(), "ab");
+        // Back one: the anchor has not moved, so the selection shrinks rather than
+        // starting again from here.
+        field.extend(false);
+        assert_eq!(field.selected(), "a");
+    }
+
+    #[test]
+    fn shift_home_and_shift_end_reach_the_ends() {
+        let mut field = Field::new("abcdef".to_owned());
+        field.step(false);
+        field.extend_to_end(false);
+        assert_eq!(field.selected(), "abcde");
+
+        let mut field = Field::new("abcdef".to_owned());
+        field.jump(false);
+        field.extend_to_end(true);
+        assert_eq!(field.selected(), "abcdef");
+    }
+
+    /// What a pointer drag does: the anchor stays where the press landed.
+    #[test]
+    fn dragging_extends_from_where_it_started() {
+        let mut field = Field::new("abcdef".to_owned());
+        field.caret = 1;
+        field.extend_to(4);
+        assert_eq!(field.selected(), "bcd");
+        field.extend_to(2);
+        assert_eq!(field.selected(), "b");
+        // Back past the anchor, and the selection is on the other side of it.
+        field.extend_to(0);
+        assert_eq!(field.selected(), "a");
+    }
+
+    #[test]
+    fn select_all_takes_everything_and_typing_replaces_it() {
+        let mut field = Field::new("abcdef".to_owned());
+        field.caret = 3;
+        field.select_all();
+        assert_eq!(field.selected(), "abcdef");
+        field.insert("x");
+        assert_eq!(field.text, "x");
     }
 
     /// The defect this shape exists to prevent: `café` is five bytes and four

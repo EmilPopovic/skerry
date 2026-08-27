@@ -58,6 +58,16 @@ impl Modifiers {
     pub const fn none(self) -> bool {
         !self.ctrl && !self.shift && !self.alt && !self.logo
     }
+
+    /// Whether Shift is held and nothing else is.
+    ///
+    /// Its own question because Shift is the one modifier that also changes what
+    /// a key *types*: a caller asking "is this a bare press" has to exclude it,
+    /// and a caller asking "is this a Shift chord" has to require it alone.
+    #[must_use]
+    pub const fn only_shift(self) -> bool {
+        self.shift && !self.ctrl && !self.alt && !self.logo
+    }
 }
 
 /// A key identified by what it means rather than where it is.

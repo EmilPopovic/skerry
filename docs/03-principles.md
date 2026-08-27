@@ -31,7 +31,14 @@ rule with no exceptions becomes a rule with several.
 Every action, toggle and setting is one entry in one registry. The palette, the menus, the
 keymap and the config file are four views of that single list, so they cannot drift apart.
 
-> **Fails if:** a menu item or a setting exists that the palette cannot find.
+A chord that means two things means them in two **scopes**, and the registry holds both:
+`Ctrl+A` is Select all over a listing and Select the whole name inside a text field. The
+alternative is a hand-written check in the event path, which is a binding no palette can
+find and no keymap can rebind — the same drift this rule exists to prevent, arriving through
+the back door.
+
+> **Fails if:** a menu item or a setting exists that the palette cannot find, or a chord
+> behaves differently somewhere the registry does not know about.
 
 ### 3. Everything is reversible
 

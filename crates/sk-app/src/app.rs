@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sk_cmd::Registry;
+use sk_cmd::{Registry, Scope};
 use sk_desktop::{Applications, Launcher, MimeDatabase};
 use sk_gpu::{DrawList, FrameStats, Renderer};
 use sk_model::{Problem, ProblemKind, SortColumn};
@@ -367,6 +367,8 @@ enum Pasted {
     Files(Vec<PathBuf>, bool),
     /// The clipboard held nothing that names a file.
     NotFiles,
+    /// Text to insert into whichever field still has the keyboard.
+    Text(String),
 }
 
 /// The three channels a job answers the frame loop on.
@@ -545,6 +547,12 @@ pub struct App {
     band: Option<(Point, Point)>,
     /// The offset within the scrollbar thumb where a drag began.
     thumb_grab: Option<f32>,
+    /// The field a press landed in, while the button is still down.
+    ///
+    /// A drag in a field selects text, and the field it started in is the field it
+    /// stays in: dragging out of the box and back must not move the selection to
+    /// whatever the pointer passed over.
+    text_drag: Option<Claim>,
     last_frame: Instant,
     started: Instant,
     first_frame_reported: bool,
@@ -643,6 +651,7 @@ impl App {
             pointer: Point::default(),
             band: None,
             thumb_grab: None,
+            text_drag: None,
             last_frame: now,
             started: options.started,
             first_frame_reported: false,
@@ -834,6 +843,11 @@ impl App {
                 let into = self.pane.path.clone();
                 self.edits.paste_all(paths, into, moving, &self.jobs);
             }
+            Pasted::Text(text) => {
+                if let Some(field) = self.focused_field() {
+                    field.insert(&text);
+                }
+            }
             Pasted::NotFiles => {
                 self.notice = Some((
                     sk_model::i18n::lookup("error.clipboard_no_files").to_owned(),
@@ -991,6 +1005,20 @@ impl App {
         if self.palette.is_some() && self.palette_key(event, commands) {
             return;
         }
+        // **A field-scoped command comes before the field's own editing keys.**
+        // `Ctrl+A` over a listing is Select all and inside a field is Select the
+        // whole name, and the registry is the only place that difference can live
+        // if a keymap is ever to be rebindable — see `sk_cmd::Scope`. Everything a
+        // field does that means nothing over a listing, `Shift ←` included, stays
+        // in `Field::key`, because there is nothing there for a scope to settle.
+        if self.field_scope() == Scope::Field
+            && let Some(command) = commands.resolve(event, Scope::Field)
+            && commands.scope_of(command) == Scope::Field
+        {
+            commands.run(command, self);
+            self.dirty = true;
+            return;
+        }
         // The path bar takes the keyboard while it is open, for the same reason
         // the name field does and before it: it is the field with the caret in
         // it, and `Delete` in it must delete a character and not a file.
@@ -1011,7 +1039,7 @@ impl App {
         if self.filtering && self.filter_key(event) {
             return;
         }
-        if let Some(command) = commands.resolve(event) {
+        if let Some(command) = commands.resolve(event, Scope::Global) {
             // A disabled command consumes its key and does nothing, which is the
             // same thing a dimmed menu item does. Falling through to type-ahead
             // instead would make `Alt ←` with no history type an arrow.
@@ -1025,6 +1053,94 @@ impl App {
             if self.pane.jump_to(&self.typed) {
                 self.reveal_cursor();
             }
+            self.dirty = true;
+        }
+    }
+
+    /// Which scope the keyboard is in.
+    ///
+    /// `Field` while something with a caret has it — a name, a path, the palette's
+    /// query. **Not the filter**, which is a `String` with no caret and no
+    /// selection: `Ctrl+A` while filtering selects the rows that matched, which is
+    /// what filtering is for.
+    fn field_scope(&self) -> Scope {
+        let has_field =
+            self.edits.naming.is_some() || self.typing_path.is_some() || self.palette.is_some();
+        if has_field { Scope::Field } else { Scope::Global }
+    }
+
+    /// The field with the keyboard, in the order the key chain gives it away.
+    fn focused_field(&mut self) -> Option<&mut crate::field::Field> {
+        if self.palette.is_some() {
+            return self.palette.as_mut().map(|palette| &mut palette.query);
+        }
+        if self.typing_path.is_some() {
+            return self.typing_path.as_mut();
+        }
+        self.edits.naming.as_mut().map(|naming| &mut naming.field)
+    }
+
+    /// Whether a field has the keyboard, for a command's `enabled`.
+    #[must_use]
+    pub fn in_a_field(&self) -> bool {
+        self.field_scope() == Scope::Field
+    }
+
+    /// Selects everything in the field with the keyboard.
+    pub(crate) fn select_all_text(&mut self) {
+        if let Some(field) = self.focused_field() {
+            field.select_all();
+            self.dirty = true;
+        }
+    }
+
+    /// Puts the field's selection on the clipboard as text.
+    pub(crate) fn copy_text(&mut self) {
+        let Some(selected) = self.focused_field().map(|field| field.selected().to_owned()) else {
+            return;
+        };
+        if selected.is_empty() {
+            return;
+        }
+        self.window.set_selection(Selection::Clipboard, Content::text(&selected));
+    }
+
+    /// Inserts the clipboard's text into the field with the keyboard.
+    ///
+    /// **Read on a job**, like every other clipboard read: the peer writes into a
+    /// pipe at its own pace, and a read on the frame loop is a frame loop waiting
+    /// on another process. The field may be gone by the time the bytes arrive, and
+    /// then the paste is dropped — the place it was going no longer exists.
+    pub(crate) fn paste_text(&mut self) {
+        let offered = self.window.clipboard().offered().to_vec();
+        let Some(mime) = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "text/uri-list"]
+            .into_iter()
+            .find(|want| offered.iter().any(|have| have == want))
+        else {
+            return;
+        };
+        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        let sender = self.replies.paste_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let mut bytes = Vec::new();
+            let mut file = std::fs::File::from(fd);
+            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            // The first line only: this is one line of text, and a filename
+            // cannot hold a newline at all.
+            let text = String::from_utf8_lossy(&bytes);
+            let line = text.lines().next().unwrap_or("").to_owned();
+            if !line.is_empty() && sender.send(Pasted::Text(line)).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Copies the field's selection and removes it.
+    pub(crate) fn cut_text(&mut self) {
+        self.copy_text();
+        if let Some(field) = self.focused_field() {
+            field.backspace();
             self.dirty = true;
         }
     }
@@ -1084,6 +1200,105 @@ impl App {
         let area = crate::view::path_field(&self.layout, &self.theme.metrics);
         let size = self.theme.metrics.path_size;
         self.place_caret_in(Claim::Path, area, size, crate::view::PATH_INSET, x);
+    }
+
+    /// A press inside an open text field: the caret goes there and a drag begins.
+    ///
+    /// Returns whether the press belonged to a field. **A press outside the name
+    /// field commits it**, which is what every other text field on the desktop
+    /// does — and the press then carries on to whatever it landed on.
+    fn press_in_a_field(&mut self, position: Point) -> bool {
+        if self.edits.naming.is_some() {
+            if self.naming_field().contains(position.x, position.y) {
+                self.place_caret(position.x);
+                self.text_drag = Some(Claim::Naming);
+                return true;
+            }
+            self.commit_name();
+        }
+        if self.typing_path.is_some()
+            && crate::view::path_field(&self.layout, &self.theme.metrics)
+                .contains(position.x, position.y)
+        {
+            self.place_path_caret(position.x);
+            self.text_drag = Some(Claim::Path);
+            return true;
+        }
+        false
+    }
+
+    /// Extends the field's selection to where the pointer is.
+    ///
+    /// The same measurement `place_caret_in` makes, and then the caret moves with
+    /// the anchor left where the press put it — which is the whole of a drag.
+    fn drag_text(&mut self, which: Claim, x: f32) {
+        let (area, size, inset) = match which {
+            Claim::Naming => {
+                let Some(row) = self.edits.naming.as_ref().map(|naming| naming.row) else { return };
+                let area = crate::view::name_field(
+                    &self.layout,
+                    &self.theme.metrics,
+                    row,
+                    self.pane.scroll.offset(),
+                );
+                (area, self.theme.metrics.text_size, crate::view::NAME_INSET)
+            }
+            Claim::Path => (
+                crate::view::path_field(&self.layout, &self.theme.metrics),
+                self.theme.metrics.path_size,
+                crate::view::PATH_INSET,
+            ),
+            Claim::Filter | Claim::Palette => return,
+        };
+        let Some(offset) = self.text_offset_at(which, area, size, inset, x) else { return };
+        if let Some(field) = self.field_for(which) {
+            field.extend_to(offset);
+            self.dirty = true;
+        }
+    }
+
+    /// The field one claim names, for the two the pointer can drag in.
+    fn field_for(&mut self, which: Claim) -> Option<&mut crate::field::Field> {
+        match which {
+            Claim::Path => self.typing_path.as_mut(),
+            Claim::Naming => self.edits.naming.as_mut().map(|naming| &mut naming.field),
+            Claim::Palette => self.palette.as_mut().map(|palette| &mut palette.query),
+            Claim::Filter => None,
+        }
+    }
+
+    /// Which byte offset in a field a logical `x` lands on.
+    ///
+    /// The one measurement, shared by the click that places a caret and the drag
+    /// that extends a selection — two copies of it is how a drag selects a
+    /// different span from the one the pointer is over.
+    fn text_offset_at(
+        &mut self,
+        which: Claim,
+        area: Area,
+        size: f32,
+        inset: f32,
+        x: f32,
+    ) -> Option<usize> {
+        let scale = self.window.scale();
+        let style = sk_ui::TextStyle::new(size, self.theme.palette.text);
+        let px_size = size * scale;
+        let (text, caret) = {
+            let field = self.field_for(which)?;
+            (field.text.clone(), field.caret)
+        };
+        let Self { cache, fonts, .. } = self;
+        let before =
+            sk_ui::advance_of(cache, fonts, &text[..caret.min(text.len())], style.weight, px_size)
+                / scale;
+        let scroll = crate::view::field_scroll(before, area.width - inset * 2.0);
+        Some(sk_ui::caret_offset(
+            fonts,
+            &text,
+            style,
+            px_size,
+            (x - area.x - inset + scroll) * scale,
+        ))
     }
 
     /// Puts the caret in one of the two fields where a click landed.
@@ -1358,10 +1573,12 @@ impl App {
         self.edits.naming = Some(crate::edit::Naming {
             row,
             path: self.pane.path.join(&name),
-            // The whole name for a directory, and the part before the extension
-            // for a file — the edit a rename almost always is.
+            // The whole name for a directory, which has no extension to keep, and
+            // the part before the extension for a file — the edit a rename almost
+            // always is. One gesture either way: a rename opens with something
+            // selected, and typing replaces it.
             field: if directory {
-                crate::field::Field::new(name)
+                crate::field::Field::naming_all(name)
             } else {
                 crate::field::Field::naming(name)
             },
@@ -2032,6 +2249,15 @@ impl App {
         let naming = self.edits.naming.as_ref().map(|it| it.field.text.clone()).unwrap_or_default();
         let typing_path =
             self.typing_path.as_ref().map(|field| field.text.clone()).unwrap_or_default();
+        // The caret and the selection, because a field's *text* says nothing about
+        // either — and a click that fails to move the caret looks identical to one
+        // that lands, from the text alone.
+        let path_caret =
+            self.typing_path.as_ref().map_or(-1, |field| i64::try_from(field.caret).unwrap_or(-1));
+        let path_selected =
+            self.typing_path.as_ref().map(|field| field.selected().to_owned()).unwrap_or_default();
+        let naming_selected =
+            self.edits.naming.as_ref().map(|it| it.field.selected().to_owned()).unwrap_or_default();
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
         let (queue_left, queue_total) = self.edits.queue_state();
@@ -2042,7 +2268,8 @@ impl App {
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
-naming={naming:?} naming_row={naming_row} path_entry={typing_path:?} \
+naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
+path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
@@ -2171,6 +2398,12 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             .map(|entry| entry.label.clone())
             .unwrap_or_default();
         let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        // Where the path field's box is, so a scenario can drag inside it by
+        // arithmetic over what the frame drew rather than over its own copy of the
+        // metrics.
+        let box_of = crate::view::path_field(&self.layout, &self.theme.metrics);
+        let path_field =
+            format!("{:.1},{:.1},{:.1},{:.1}", box_of.x, box_of.y, box_of.width, box_of.height);
         let menu_report = self.menu_report();
         let palette_report = self.palette_report();
         // The middle of the crumb one level up, which is the one a test clicks.
@@ -2189,6 +2422,7 @@ crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
+path_field={path_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.layout.body.y,
@@ -2243,14 +2477,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.menu_press(position, commands);
             return;
         }
-        // A press outside the field commits, which is what every other text
-        // field on the desktop does.
-        if self.edits.naming.is_some() {
-            if self.naming_field().contains(position.x, position.y) {
-                self.place_caret(position.x);
-                return;
-            }
-            self.commit_name();
+        if self.press_in_a_field(position) {
+            return;
         }
         // The frame comes first, and the resize border before the buttons: the
         // border overlaps the top-right corner where the close button is, and a
@@ -2371,7 +2599,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // time that stops being true.
         let ended = self.band.take().is_some();
         let released = self.thumb_grab.take().is_some();
-        if ended || released {
+        let dragged = self.text_drag.take().is_some();
+        if ended || released || dragged {
             self.dirty = true;
         }
     }
@@ -2679,7 +2908,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 // matched on the key, so rebinding the report does not quietly
                 // make the menu opaque again.
                 let diagnostic = commands
-                    .resolve(event)
+                    .resolve(event, Scope::Global)
                     .and_then(|id| commands.describe(id))
                     .is_some_and(|command| command.id == "help.dump");
                 if diagnostic {
@@ -2720,8 +2949,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// that opened it, so the same key closes it again.
     fn palette_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
         use sk_plat::{Key, Named};
-        let opener =
-            commands.resolve(event).and_then(|id| commands.describe(id)).map(|command| command.id);
+        let opener = commands
+            .resolve(event, Scope::Global)
+            .and_then(|id| commands.describe(id))
+            .map(|command| command.id);
         if opener == Some("help.dump") {
             return false;
         }
@@ -2776,6 +3007,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
     fn moved(&mut self, position: Point, commands: &Registry<Self>) {
         self.pointer = position;
+        // A drag inside a field selects text. Before the palette's branch, because
+        // a drag that started in a field belongs to that field until the button
+        // comes up — and after nothing, because it is the most specific thing the
+        // pointer can be doing.
+        if let Some(which) = self.text_drag {
+            self.drag_text(which, position.x);
+            return;
+        }
         // The palette is over everything the menu is over, and over the menu, so
         // it answers first and nothing beneath it hovers.
         if self.palette.is_some() {
