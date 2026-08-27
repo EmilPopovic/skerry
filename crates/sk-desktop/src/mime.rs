@@ -50,6 +50,133 @@ struct Pattern {
     mime: String,
 }
 
+/// The broad kind of a file, for anything that wants one mark per kind.
+///
+/// Nine of them, because that is how many a person can tell apart at thirteen
+/// pixels without reading the name — and because the alternative, an icon per
+/// MIME type, is an icon theme, which is M7 and is four hundred lines of
+/// `index.theme` before the first pixel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Category {
+    /// A directory.
+    Folder,
+    /// A picture.
+    Image,
+    /// Sound.
+    Audio,
+    /// Moving pictures.
+    Video,
+    /// Something holding other files.
+    Archive,
+    /// Source, markup, or a script.
+    Code,
+    /// Prose: text, PDF, office formats.
+    Document,
+    /// Something the system can run.
+    Executable,
+    /// Anything else, including a file whose type nothing claims.
+    #[default]
+    Unknown,
+}
+
+/// Which kind a MIME type belongs to.
+///
+/// By prefix where shared-mime-info has one — `image/`, `audio/`, `video/` are
+/// three quarters of the answer — and by a short list where it does not. The
+/// list is short on purpose: a type that is not on it is `Unknown`, which draws
+/// the plain mark, and a plain mark is the right answer for a file nothing
+/// recognises.
+#[must_use]
+pub fn category(mime: &str) -> Category {
+    let (top, rest) = mime.split_once('/').unwrap_or((mime, ""));
+    match top {
+        "inode" => Category::Folder,
+        "image" => Category::Image,
+        "audio" => Category::Audio,
+        "video" => Category::Video,
+        "font" => Category::Document,
+        _ => other_category(mime, rest),
+    }
+}
+
+fn other_category(mime: &str, rest: &str) -> Category {
+    const ARCHIVES: &[&str] = &[
+        "zip",
+        "gzip",
+        "x-tar",
+        "x-compressed-tar",
+        "x-xz",
+        "x-xz-compressed-tar",
+        "x-7z-compressed",
+        "vnd.rar",
+        "x-bzip",
+        "x-bzip2",
+        "x-bzip-compressed-tar",
+        "zstd",
+        "x-zstd-compressed-tar",
+        "x-lzma",
+        "x-cpio",
+        "x-archive",
+        "vnd.debian.binary-package",
+        "x-rpm",
+        "x-iso9660-image",
+    ];
+    // **`x-shellscript` is deliberately absent.** A shell script is text you
+    // open in an editor, and it is the one runnable thing whose name a person
+    // reads rather than launches. `Executable` here means a binary.
+    const RUNNABLE: &[&str] =
+        &["x-executable", "x-sharedlib", "x-pie-executable", "x-ms-dos-executable"];
+    if ARCHIVES.contains(&rest) {
+        return Category::Archive;
+    }
+    if RUNNABLE.contains(&rest) {
+        return Category::Executable;
+    }
+    // `text/x-csrc`, `text/x-python`, `application/javascript`, `text/x-makefile`
+    // — source is spelled several ways and none of them is a prefix.
+    if rest.ends_with("src")
+        || rest.ends_with("hdr")
+        || rest.ends_with("script")
+        || matches!(
+            mime,
+            "application/javascript"
+                | "application/json"
+                | "application/xml"
+                | "application/x-yaml"
+                | "text/x-makefile"
+                | "text/x-cmake"
+                | "text/x-python"
+                | "text/x-ruby"
+                | "text/x-java"
+                | "text/x-go"
+                | "text/x-rust"
+                | "text/html"
+                | "text/css"
+                | "text/x-diff"
+                | "text/x-patch"
+        )
+    {
+        return Category::Code;
+    }
+    if mime.starts_with("text/") || DOCUMENTS.contains(&rest) {
+        return Category::Document;
+    }
+    Category::Unknown
+}
+
+const DOCUMENTS: &[&str] = &[
+    "pdf",
+    "epub+zip",
+    "rtf",
+    "msword",
+    "vnd.oasis.opendocument.text",
+    "vnd.oasis.opendocument.spreadsheet",
+    "vnd.oasis.opendocument.presentation",
+    "vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "vnd.openxmlformats-officedocument.presentationml.presentation",
+];
+
 /// The filename half of shared-mime-info.
 #[derive(Default)]
 pub struct MimeDatabase {
@@ -169,14 +296,21 @@ impl MimeDatabase {
         if let Some((_, mime)) = self.cased_literals.get(name) {
             return Some(mime);
         }
-        let lowered = name.to_ascii_lowercase();
-        if let Some((_, mime)) = self.literals.get(&lowered) {
+        // Borrowed when the name is already lowercase, which is most of them.
+        // This runs once per visible row per frame, and an allocation there is
+        // forty a frame for nothing.
+        let lowered = if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            std::borrow::Cow::Owned(name.to_ascii_lowercase())
+        } else {
+            std::borrow::Cow::Borrowed(name)
+        };
+        if let Some((_, mime)) = self.literals.get(lowered.as_ref()) {
             return Some(mime);
         }
         // Longest extension first, so `.tar.gz` beats `.gz`. The case-sensitive
         // map is consulted with the name as written and wins outright, because a
         // `cs` glob is the specification saying the case *is* the distinction.
-        let lower = lowered;
+        let lower = lowered.as_ref();
         let mut best: Option<(u32, usize, &str)> = None;
         for (index, _) in name.match_indices('.') {
             let extension = &name[index + 1..];
@@ -270,13 +404,29 @@ fn sniff(path: &Path) -> Option<String> {
 /// file anyone can drop into `~/.local/share/mime/`, and the name is a filename.
 /// The greedy form below is O(pattern × name) and needs no stack.
 fn matches(glob: &str, name: &str) -> bool {
-    // Characters, not bytes: `?` means one character, and over a byte slice it
-    // matched one *byte* of a multi-byte one, so `?.txt` did not match `é.txt`
-    // and a class range compared bytes of a UTF-8 sequence. Names are short and
-    // this runs only for the handful of globs that are not `*.ext`.
+    // **ASCII on both sides is the case that runs**, and it runs once per visible
+    // row per frame for every glob that is not `*.ext`. Collecting two `Vec<char>`
+    // there cost 0.05 ms of a 0.19 ms frame, measured — so the bytes are used
+    // directly when they are the characters, and the allocation happens only for
+    // the name with an accent in it.
+    if glob.is_ascii() && name.is_ascii() {
+        return walk(glob.as_bytes(), name.as_bytes());
+    }
     let pattern: Vec<char> = glob.chars().collect();
     let text: Vec<char> = name.chars().collect();
-    let (pattern, text) = (&pattern[..], &text[..]);
+    walk(&pattern, &text)
+}
+
+/// The greedy matcher, over bytes or over characters.
+///
+/// Iterative, with one backtrack point. The obvious recursive form — every `*`
+/// trying every split — is exponential: measured, `*a*a…*b` against a string of
+/// twenty `a`s took 442 calls with two stars, 49,595 with five and 665,879 with
+/// eight, and twelve stars against a sixty-character name did not finish in ten
+/// minutes. Both halves of that are attacker-supplied: a `globs2` line is a file
+/// anyone can drop into `~/.local/share/mime/`, and the name is a filename. This
+/// form is O(pattern × name) and needs no stack.
+fn walk<T: Glyph>(pattern: &[T], text: &[T]) -> bool {
     let (mut at, mut index) = (0usize, 0usize);
     // Where to resume from if the greedy star took too much.
     let mut star: Option<(usize, usize)> = None;
@@ -284,7 +434,7 @@ fn matches(glob: &str, name: &str) -> bool {
         if let Some(next) = element(pattern, at, text[index]) {
             at = next;
             index += 1;
-        } else if pattern.get(at) == Some(&'*') {
+        } else if pattern.get(at).is_some_and(|it| it.is(b'*')) {
             star = Some((at, index));
             at += 1;
         } else if let Some((from, taken)) = star {
@@ -295,13 +445,32 @@ fn matches(glob: &str, name: &str) -> bool {
             return false;
         }
     }
-    while pattern.get(at) == Some(&'*') {
+    while pattern.get(at).is_some_and(|it| it.is(b'*')) {
         at += 1;
     }
     at == pattern.len()
 }
 
-/// Matches one pattern element against one character.
+/// One element of a pattern: a byte when both sides are ASCII, a `char` when
+/// they are not.
+trait Glyph: Copy + PartialEq + PartialOrd {
+    /// Whether this is the ASCII character `mark`.
+    fn is(self, mark: u8) -> bool;
+}
+
+impl Glyph for u8 {
+    fn is(self, mark: u8) -> bool {
+        self == mark
+    }
+}
+
+impl Glyph for char {
+    fn is(self, mark: u8) -> bool {
+        self == char::from(mark)
+    }
+}
+
+/// Matches one pattern element against one glyph.
 ///
 /// Returns where the pattern continues, or `None` if it did not match — which
 /// `*` always is, because a star is not an element and is handled by the caller.
@@ -309,50 +478,55 @@ fn matches(glob: &str, name: &str) -> bool {
 /// The bracket rules are `fnmatch`'s, checked against it: an unterminated `[` is
 /// a literal `[`, and a `]` immediately after the opening bracket (or after its
 /// negation) is a member of the set rather than its end. Both were wrong here,
-/// and both are reachable from a `globs2` line, which is a file anyone can write.
-fn element(pattern: &[char], at: usize, character: char) -> Option<usize> {
-    match pattern.get(at)? {
-        '?' => Some(at + 1),
-        '*' => None,
-        '[' => match class_end(pattern, at) {
-            Some(close) => in_class(&pattern[at + 1..close], character).then_some(close + 1),
+/// and both are reachable from a `globs2` line.
+fn element<T: Glyph>(pattern: &[T], at: usize, glyph: T) -> Option<usize> {
+    let here = *pattern.get(at)?;
+    if here.is(b'?') {
+        return Some(at + 1);
+    }
+    if here.is(b'*') {
+        return None;
+    }
+    if here.is(b'[') {
+        return match class_end(pattern, at) {
+            Some(close) => in_class(&pattern[at + 1..close], glyph).then_some(close + 1),
             // No closing bracket anywhere: a literal `[`, which is what
             // `fnmatch` does and what a filename containing one needs.
-            None => (character == '[').then_some(at + 1),
-        },
-        other => (*other == character).then_some(at + 1),
+            None => here.is(b'[').then_some(at + 1).filter(|_| glyph.is(b'[')),
+        };
     }
+    (here == glyph).then_some(at + 1)
 }
 
 /// Where the bracket opened at `at` closes, if it does.
 ///
 /// The first `]` cannot end it if it is the first member: `[]]` is a set holding
 /// a right bracket, and `[!]]` is everything except one.
-fn class_end(pattern: &[char], at: usize) -> Option<usize> {
+fn class_end<T: Glyph>(pattern: &[T], at: usize) -> Option<usize> {
     let mut cursor = at + 1;
-    if matches!(pattern.get(cursor), Some('^' | '!')) {
+    if pattern.get(cursor).is_some_and(|it| it.is(b'^') || it.is(b'!')) {
         cursor += 1;
     }
-    if pattern.get(cursor) == Some(&']') {
+    if pattern.get(cursor).is_some_and(|it| it.is(b']')) {
         cursor += 1;
     }
-    (cursor..pattern.len()).find(|index| pattern[*index] == ']')
+    (cursor..pattern.len()).find(|index| pattern[*index].is(b']'))
 }
 
-/// Whether `character` is in the set between the brackets.
-fn in_class(set: &[char], character: char) -> bool {
+/// Whether `glyph` is in the set between the brackets.
+fn in_class<T: Glyph>(set: &[T], glyph: T) -> bool {
     let (negated, set) = match set.first() {
-        Some('^' | '!') => (true, &set[1..]),
+        Some(first) if first.is(b'^') || first.is(b'!') => (true, &set[1..]),
         _ => (false, set),
     };
     let mut hit = false;
     let mut cursor = 0;
     while cursor < set.len() {
-        if cursor + 2 < set.len() && set[cursor + 1] == '-' {
-            hit |= (set[cursor]..=set[cursor + 2]).contains(&character);
+        if cursor + 2 < set.len() && set[cursor + 1].is(b'-') {
+            hit |= set[cursor] <= glyph && glyph <= set[cursor + 2];
             cursor += 3;
         } else {
-            hit |= set[cursor] == character;
+            hit |= set[cursor] == glyph;
             cursor += 1;
         }
     }
@@ -454,6 +628,40 @@ mod tests {
         assert_eq!(database.by_name("makefile"), Some("text/x-makefile"));
         assert_eq!(database.by_name("MAKEFILE.LISP"), Some("text/x-lisp"));
         assert_eq!(database.by_name("makefile.lisp"), None, "a cs glob is not folded");
+    }
+
+    /// A mark per kind is only useful if the kinds are the ones a person would
+    /// draw the same line between. Checked against the types the installed
+    /// database actually produces for these names.
+    #[test]
+    fn a_type_lands_in_the_kind_a_person_would_put_it_in() {
+        use super::{Category, category};
+        for (mime, wanted) in [
+            ("inode/directory", Category::Folder),
+            ("image/png", Category::Image),
+            ("image/svg+xml", Category::Image),
+            ("audio/flac", Category::Audio),
+            ("video/x-matroska", Category::Video),
+            ("application/zip", Category::Archive),
+            ("application/x-compressed-tar", Category::Archive),
+            ("application/vnd.debian.binary-package", Category::Archive),
+            ("text/x-csrc", Category::Code),
+            ("text/x-chdr", Category::Code),
+            ("text/x-shellscript", Category::Code),
+            ("application/json", Category::Code),
+            ("text/html", Category::Code),
+            ("text/x-makefile", Category::Code),
+            ("text/plain", Category::Document),
+            ("application/pdf", Category::Document),
+            ("application/vnd.oasis.opendocument.text", Category::Document),
+            ("application/x-executable", Category::Executable),
+            ("application/x-sharedlib", Category::Executable),
+            ("application/octet-stream", Category::Unknown),
+            ("application/x-sqlite3", Category::Unknown),
+            ("", Category::Unknown),
+        ] {
+            assert_eq!(category(mime), wanted, "{mime}");
+        }
     }
 
     /// Two data directories offering the same pattern at the same weight: the

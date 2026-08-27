@@ -158,7 +158,7 @@ is deliberately after X11: XDND has five actions where Wayland has three, and an
 API designed against one dialect would be wrong in a way that is expensive to
 correct.
 
-**Six things arrived ahead of their milestone**, each into the crate the table
+**Seven things arrived ahead of their milestone**, each into the crate the table
 in [04-architecture.md](04-architecture.md#crate-responsibilities) already names
 for it, because each one is what a person reaches for on the first day of
 dogfooding:
@@ -170,6 +170,7 @@ dogfooding:
 | `sk-desktop` — MIME, `.desktop`, launch | M7 | A file manager that cannot open a file is a directory listing |
 | `sk-index::size` — recursive folder totals | M4 | A folder with no size is a folder you have to open to understand |
 | A breadcrumb path bar | M2 | The path bar is already the title bar the client-drawn frame needed, and an inert one is a strip of pixels that looks clickable and is not |
+| A mark coloured by the kind of file | M7 | An icon theme is a spec, a parser and a dependency on the user having one installed. Nine hues over the mark that was already there is legible at thirteen pixels, costs 0.012 ms a frame, and is what M7 replaces rather than what it starts from |
 | Filter-as-you-type | M4 | A substring over a listing already in memory is thirty lines and the narrowing is what a directory of ten thousand needs before search exists. **Not** search: no fuzzy matching, no index, no recursion — those are M4's and cost what M4 costs |
 
 None of them brought a dependency: every parser is ours, which is what

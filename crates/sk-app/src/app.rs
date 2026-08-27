@@ -1541,6 +1541,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             hovered_button,
             hovered_crumb,
             filtering,
+            desktop,
             window_state,
             hits,
             ..
@@ -1558,6 +1559,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             hovered_button: *hovered_button,
             hovered_crumb: *hovered_crumb,
             filtering: *filtering,
+            types: desktop.as_deref().map(|it| &it.mime),
             window: *window_state,
         };
         let now = clock_seconds();

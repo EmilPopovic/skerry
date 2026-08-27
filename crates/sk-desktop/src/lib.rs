@@ -33,7 +33,7 @@ pub mod mime;
 pub use apps::Applications;
 pub use entry::DesktopEntry;
 pub use launch::Launcher;
-pub use mime::MimeDatabase;
+pub use mime::{Category, MimeDatabase, category};
 
 use std::path::{Path, PathBuf};
 

@@ -21,7 +21,7 @@ pub mod theme;
 
 pub use painter::{Align, Painter, TextStyle};
 pub use scroll::{MIN_THUMB, Scroll, thumb, visible_rows};
-pub use theme::{Metrics, Palette, Theme};
+pub use theme::{Kinds, Metrics, Palette, Theme};
 
 // Re-exported so a view needs one `use` for the drawing vocabulary rather than
 // three, and so the layout cache's key type travels with the painter that needs

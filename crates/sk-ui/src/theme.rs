@@ -45,6 +45,30 @@ pub struct Palette {
     /// The close button under the pointer, which is the one destructive thing
     /// in the frame and says so.
     pub close_hover: Color,
+    /// One hue per broad kind of file, for the mark at the head of a row.
+    ///
+    /// **Hue, not shape.** An icon per MIME type is an icon theme, which is a
+    /// spec, a parser and a dependency on the user having one installed; a mark
+    /// that changes colour is legible at thirteen pixels and costs nothing. The
+    /// hues are far enough apart to be told apart at a glance and desaturated
+    /// enough that fifteen of them in a column do not read as a chart — the row
+    /// is still a name, and the mark is still furniture.
+    pub kinds: Kinds,
+}
+
+/// The colour of the mark for each kind of file.
+#[derive(Clone, Copy, Debug)]
+#[allow(missing_docs, reason = "each field is the kind of that name")]
+pub struct Kinds {
+    pub folder: Color,
+    pub image: Color,
+    pub audio: Color,
+    pub video: Color,
+    pub archive: Color,
+    pub code: Color,
+    pub document: Color,
+    pub executable: Color,
+    pub unknown: Color,
 }
 
 /// Sizes, in logical pixels.
@@ -141,6 +165,17 @@ impl Theme {
                 thumb: Color::hex(0xffffff).with_alpha(52),
                 button_hover: Color::hex(0xffffff).with_alpha(28),
                 close_hover: Color::hex(0xe5484d),
+                kinds: Kinds {
+                    folder: Color::hex(0x64a8f5),
+                    image: Color::hex(0x4fbfa8),
+                    audio: Color::hex(0xc78ce0),
+                    video: Color::hex(0xe08a9a),
+                    archive: Color::hex(0xd9a35c),
+                    code: Color::hex(0x8fbf6a),
+                    document: Color::hex(0x9aa4b5),
+                    executable: Color::hex(0xe0705c),
+                    unknown: Color::hex(0x788091),
+                },
             },
             metrics: Metrics::default(),
             dark: true,
@@ -164,6 +199,17 @@ impl Theme {
                 thumb: Color::hex(0x000000).with_alpha(64),
                 button_hover: Color::hex(0x000000).with_alpha(22),
                 close_hover: Color::hex(0xd93a3f),
+                kinds: Kinds {
+                    folder: Color::hex(0x2f7fd6),
+                    image: Color::hex(0x18866f),
+                    audio: Color::hex(0x8f4fb8),
+                    video: Color::hex(0xb44a63),
+                    archive: Color::hex(0xa9701f),
+                    code: Color::hex(0x4d8a2a),
+                    document: Color::hex(0x646c7d),
+                    executable: Color::hex(0xc0432c),
+                    unknown: Color::hex(0x7d8493),
+                },
             },
             metrics: Metrics::default(),
             dark: false,

@@ -125,6 +125,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         crate::commands::overlay_rows(&registry)
     });
 
+    // Read here rather than left as `None`: the mark at the head of a row is
+    // coloured from it, so a golden frame without it is a golden frame of grey.
+    let types = sk_desktop::MimeDatabase::load();
     let theme = if request.dark { Theme::dark() } else { Theme::light() };
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     let frame = if request.own_frame {
@@ -182,6 +185,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 hovered_button: None,
                 hovered_crumb: None,
                 filtering: false,
+                types: Some(&types),
                 window: sk_plat::WindowState {
                     activated: true,
                     can_maximize: true,

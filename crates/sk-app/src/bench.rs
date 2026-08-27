@@ -41,7 +41,7 @@ use sk_ui::{Painter, Theme};
 use crate::frames::{BUDGET_US, Frames};
 use crate::headless::Session;
 use crate::layout::Layout;
-use crate::pane::Pane;
+use crate::pane::{Message, Pane};
 use crate::sizes::Measurer;
 use crate::view::{self, Chrome, Diagnostics};
 
@@ -63,6 +63,32 @@ pub struct Bench {
     pub frames: u32,
 }
 
+/// Everything the loop does between waking and drawing.
+///
+/// Applying what the read finished, recording folder totals, and scheduling the
+/// walks for what is on screen — the three things the clock has to cover and did
+/// not, before it was moved to the top of the turn.
+fn take_delivery(
+    pane: &mut Pane,
+    measurer: &mut Measurer,
+    session: &Session,
+    pending: Option<Message>,
+    layout: &Layout,
+    theme: &Theme,
+) {
+    for message in pending.into_iter().chain(session.updates.try_iter()) {
+        pane.apply(message, &session.jobs);
+    }
+    measurer.drain();
+    let visible = sk_ui::visible_rows(
+        pane.scroll.offset(),
+        layout.body.height,
+        theme.metrics.row_height,
+        pane.listing.rows(),
+    );
+    measurer.update(pane, visible, &session.jobs);
+}
+
 /// What the trace accumulated, apart from the frame distribution.
 #[derive(Default)]
 struct Trace {
@@ -82,6 +108,9 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
     let read_started = Instant::now();
     pane.reload(&session.jobs);
 
+    // The windowed loop asks the database once per visible row per frame, so a
+    // trace without one measures a frame the product does not draw.
+    let types = sk_desktop::MimeDatabase::load();
     let theme = Theme::dark();
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     let layout = Layout::compute(logical, &theme.metrics);
@@ -118,17 +147,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
 
         // The clock covers the whole turn, exactly as `App::run` does.
         let started = Instant::now();
-        for message in pending.into_iter().chain(session.updates.try_iter()) {
-            pane.apply(message, &session.jobs);
-        }
-        measurer.drain();
-        let visible = sk_ui::visible_rows(
-            pane.scroll.offset(),
-            layout.body.height,
-            theme.metrics.row_height,
-            pane.listing.rows(),
-        );
-        measurer.update(&mut pane, visible, &session.jobs);
+        take_delivery(&mut pane, &mut measurer, &session, pending, &layout, &theme);
         let loading = pane.loading;
         let shaped_before = cache.stats().1;
 
@@ -163,6 +182,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 hovered_button: None,
                 hovered_crumb: None,
                 filtering: false,
+                types: Some(&types),
                 window: sk_plat::WindowState::default(),
             };
             view::draw(

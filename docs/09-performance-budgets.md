@@ -95,6 +95,19 @@ before, and it is a real cost the old harness was constructed not to see:
 
 `skerry --bench` reports it as its own row so it cannot be averaged away.
 
+**What the row mark costs: 0.012 ms a frame.** Colouring a row by the kind of
+file it names asks `MimeDatabase::by_name` once per visible row per frame — a
+hash lookup and, for the four globs on this machine that are not `*.ext`, a short
+scan. Measured at 200,000 entries: p50 **0.191 ms before, 0.205 ms after**, p99
+unchanged.
+
+The first version cost **0.05 ms** and put one frame over the 8 ms budget, from
+two allocations nobody had looked for: the glob matcher collected the pattern and
+the name into `Vec<char>` per call, and `by_name` lowercased the name whether or
+not it had a capital in it. Both are gone — bytes where both sides are ASCII,
+which is every glob and almost every name, and a borrow where the name is already
+lowercase.
+
 **Cold start on the NVIDIA proprietary driver is twice as slow, and it is all
 the driver.** Measured under a nested GNOME on the same machine, six sequential
 runs after a warm-up: **211, 220, 220, 241, 220 ms**, of which `wgpu` device

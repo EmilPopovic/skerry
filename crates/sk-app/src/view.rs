@@ -4,6 +4,7 @@
 //! the row loop below runs about forty times, which is the whole reason a
 //! million entries costs the same as a hundred.
 
+use sk_desktop::{Category, MimeDatabase};
 use sk_gpu::{Color, FrameStats};
 use sk_model::{Flags, SortColumn, i18n};
 use sk_plat::{Point, WindowState};
@@ -46,6 +47,9 @@ pub struct Chrome<'a> {
     pub hovered_crumb: Option<usize>,
     /// Whether the filter field has the keyboard.
     pub filtering: bool,
+    /// The filename half of shared-mime-info, once the job that reads it is
+    /// done. `None` for the first few milliseconds, and every row is grey.
+    pub types: Option<&'a MimeDatabase>,
     /// What the compositor says the window is, for the frame the window draws.
     pub window: WindowState,
 }
@@ -283,6 +287,35 @@ fn crumb_width(painter: &mut Painter<'_>, name: &str, size: f32, bold: bool) -> 
     painter.cache.get_or_shape_label(name, weight, px_size, painter.fonts).advance / painter.scale
 }
 
+/// The colour of the mark at the head of a row, from the file's kind.
+///
+/// **By name only.** `MimeDatabase::by_name` is a hash lookup and, for the few
+/// globs that are not `*.ext`, a short scan — no allocation and no syscall, which
+/// is what lets this run once per visible row per frame. `of` would sniff the
+/// first bytes of a file with an unhelpful name, and that is a `read` on the
+/// frame loop.
+///
+/// Grey until the databases arrive, which is the first few milliseconds after
+/// start-up. A row that changes colour once is better than a first frame that
+/// waits for `globs2`.
+fn kind_color(theme: &sk_ui::Theme, types: Option<&MimeDatabase>, name: &str) -> Color {
+    let kinds = theme.palette.kinds;
+    let Some(mime) = types.and_then(|types| types.by_name(name)) else {
+        return kinds.unknown;
+    };
+    match sk_desktop::category(mime) {
+        Category::Folder => kinds.folder,
+        Category::Image => kinds.image,
+        Category::Audio => kinds.audio,
+        Category::Video => kinds.video,
+        Category::Archive => kinds.archive,
+        Category::Code => kinds.code,
+        Category::Document => kinds.document,
+        Category::Executable => kinds.executable,
+        Category::Unknown => kinds.unknown,
+    }
+}
+
 /// The width the window buttons take, or zero when the compositor draws them.
 fn strip_width(layout: &Layout) -> f32 {
     layout.buttons.iter().map(|button| button.width).sum()
@@ -403,7 +436,7 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
     let rows = pane.listing.rows();
     let range = visible_rows(pane.scroll.offset(), layout.body.height, metrics.row_height, rows);
     for row in range {
-        row_at(painter, pane, layout, now, row);
+        row_at(painter, pane, layout, now, row, chrome.types);
     }
 
     if rows == 0 && !pane.loading {
@@ -435,7 +468,14 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
 }
 
 /// One row: its shape, its mark, and its three cells.
-fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row: usize) {
+fn row_at(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &Layout,
+    now: i64,
+    row: usize,
+    types: Option<&MimeDatabase>,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let cursor = pane.selection.cursor();
@@ -475,9 +515,18 @@ fn row_at(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, row
         let icon_color = if broken {
             theme.palette.pending
         } else if directory {
-            theme.palette.accent
+            theme.palette.kinds.folder
         } else {
-            theme.palette.dim
+            // The mode bit before the name: a program is usually called
+            // something with no extension at all — `runme`, `configure`, half of
+            // `/usr/bin` — so a name-only answer calls it unknown, and what it
+            // is is the one thing about it worth marking.
+            let by_name = kind_color(&theme, types, pane.listing.name(id));
+            if flags.has(Flags::EXEC) && by_name == theme.palette.kinds.unknown {
+                theme.palette.kinds.executable
+            } else {
+                by_name
+            }
         };
         if directory {
             painter.folder(icon_box, icon_color);
@@ -893,6 +942,7 @@ mod tests {
                 hovered_button: None,
                 hovered_crumb: None,
                 filtering: false,
+                types: None,
                 window: sk_plat::WindowState::default(),
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
