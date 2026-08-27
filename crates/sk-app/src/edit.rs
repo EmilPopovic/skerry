@@ -336,7 +336,18 @@ impl Edits {
                 self.history.record(change);
                 let message = if self.queued > 1 {
                     let done = self.queued - self.queue.len();
-                    sk_model::i18n::format("notice.trashed", &[&done, &self.queued])
+                    // **Named by what the queue is doing.** This said "Moved 10
+                    // of 10 to Trash" for a paste, because the queue was
+                    // generalised from trashing and its wording was not. Three
+                    // keys rather than a verb slotted into one sentence: a
+                    // sentence assembled from parts is untranslatable by
+                    // construction, which is what `i18n` exists to prevent.
+                    let key = match self.doing {
+                        Queued::Trash => "notice.trashed",
+                        Queued::Copy { .. } => "notice.copied_in",
+                        Queued::Move { .. } => "notice.moved_in",
+                    };
+                    sk_model::i18n::format(key, &[&done, &self.queued])
                 } else {
                     sk_model::i18n::lookup("notice.done").to_owned()
                 };

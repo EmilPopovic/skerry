@@ -42,6 +42,8 @@ name.new_folder = New folder
 # More than one thing was selected and only the first was acted on. The queue
 # that does the rest is M3's; saying so is better than silently doing one.
 notice.trashed = Moved {0} of {1} to Trash
+notice.copied_in = Copied {0} of {1}
+notice.moved_in = Moved {0} of {1}
 notice.done = Done
 notice.undone = Undone
 notice.redone = Redone

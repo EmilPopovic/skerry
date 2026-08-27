@@ -1107,6 +1107,7 @@ impl App {
         let before =
             sk_ui::advance_of(cache, fonts, field.before_caret(), style.weight, px_size) / scale;
         let scroll = crate::view::field_scroll(before, area.width - inset * 2.0);
+        field.deselect();
         field.caret = sk_ui::caret_offset(
             fonts,
             &field.text,
@@ -1348,6 +1349,7 @@ impl App {
         let Some(id) = self.pane.focused() else { return };
         let Some(row) = self.pane.listing.row_of(id) else { return };
         let name = self.pane.listing.name(id).to_owned();
+        let directory = self.pane.listing.flags(id).has(sk_model::Flags::DIR);
         self.pane.scroll.reveal(
             row as f32 * self.theme.metrics.row_height,
             (row + 1) as f32 * self.theme.metrics.row_height,
@@ -1356,7 +1358,13 @@ impl App {
         self.edits.naming = Some(crate::edit::Naming {
             row,
             path: self.pane.path.join(&name),
-            field: crate::field::Field::new(name),
+            // The whole name for a directory, and the part before the extension
+            // for a file — the edit a rename almost always is.
+            field: if directory {
+                crate::field::Field::new(name)
+            } else {
+                crate::field::Field::naming(name)
+            },
         });
         self.dirty = true;
     }

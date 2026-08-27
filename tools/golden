@@ -93,6 +93,10 @@ FRAMES = [
     # narrowed to — which is also the only frame that would catch the caret
     # growing back to the height of its box.
     ("find", ["--size", "900x520", "--scale", "125", "--filter"]),
+    # A name being typed, with its stem selected and its extension not — and the
+    # only frame that would catch the row's focus ring coming back around a field
+    # that already draws its own box.
+    ("rename", ["--size", "900x400", "--scale", "125", "--rename"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

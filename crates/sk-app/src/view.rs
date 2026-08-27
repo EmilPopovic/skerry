@@ -333,7 +333,7 @@ fn path_entry(painter: &mut Painter<'_>, layout: &Layout, field: &Field, baselin
     );
 
     let style = TextStyle::new(metrics.path_size, theme.palette.text);
-    field_text(painter, area, &field.text, field.caret, style, PATH_INSET, baseline);
+    field_text(painter, area, field.into(), style, PATH_INSET, baseline);
 }
 
 /// Where the path field goes, for the draw and for the hit test.
@@ -495,8 +495,7 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
         let room = area.width - INSET * 2.0;
         line(painter, i18n::lookup("palette.prompt"), prompt, area.x + INSET, room, baseline);
     }
-    let query = &palette.query;
-    field_text(painter, field_area, &query.text, query.caret, style, INSET, baseline);
+    field_text(painter, field_area, (&palette.query).into(), style, INSET, baseline);
     painter.hairline(area.x, area.y + FIELD, area.width, theme.palette.divider);
 
     hits.palette.clear();
@@ -592,8 +591,8 @@ fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
         line(painter, i18n::lookup("find.prompt"), prompt, field.x + FIND_INSET, room, baseline);
     }
     let style = TextStyle::new(metrics.path_size, theme.palette.text);
-    let caret = pane.filter.len();
-    field_text(painter, field, &pane.filter, caret, style, FIND_INSET, baseline);
+    let view = FieldView::plain(&pane.filter, pane.filter.len());
+    field_text(painter, field, view, style, FIND_INSET, baseline);
 }
 
 /// The narrowest and widest the find popup may be.
@@ -629,7 +628,7 @@ fn name_field_at(
     );
 
     let style = TextStyle::new(metrics.text_size, theme.palette.text);
-    field_text(painter, area, &naming.field.text, naming.field.caret, style, NAME_INSET, baseline);
+    field_text(painter, area, (&naming.field).into(), style, NAME_INSET, baseline);
 }
 
 /// The text and the caret inside a field's box.
@@ -638,21 +637,44 @@ fn name_field_at(
 /// text's origin are the same number offset by the same scroll — and the two of
 /// them living in two functions is how a caret ends up two characters from the
 /// character it is between.
+/// What a field looks like to the draw: its text, its caret, its selection.
+///
+/// A view rather than a [`Field`] because the filter is not one — it is a `String`
+/// that only ever grows and shrinks at the end — and a struct rather than three
+/// more parameters because eight is one more than a function should take.
+#[derive(Clone, Copy)]
+struct FieldView<'a> {
+    text: &'a str,
+    caret: usize,
+    selection: Option<(usize, usize)>,
+}
+
+impl<'a> From<&'a Field> for FieldView<'a> {
+    fn from(field: &'a Field) -> Self {
+        Self { text: &field.text, caret: field.caret, selection: field.selection() }
+    }
+}
+
+impl<'a> FieldView<'a> {
+    /// A field with no selection, for the filter.
+    const fn plain(text: &'a str, caret: usize) -> Self {
+        Self { text, caret, selection: None }
+    }
+}
+
 /// One line of text in a box, with a caret in it, clipped and scrolled.
 ///
-/// Takes the text and the caret rather than a [`Field`] because the filter is not
-/// one: it is a `String` that only ever grows and shrinks at the end. One
-/// implementation regardless, because a second caret is a second thing to get
-/// wrong — the first one was as tall as its box.
+/// One implementation for all four fields, because a second caret is a second
+/// thing to get wrong — the first one was as tall as its box.
 fn field_text(
     painter: &mut Painter<'_>,
     area: Area,
-    text: &str,
-    caret: usize,
+    field: FieldView<'_>,
     style: TextStyle,
     inset: f32,
     baseline: f32,
 ) {
+    let (text, caret) = (field.text, field.caret);
     let theme = *painter.theme;
     let room = area.width - inset * 2.0;
     // Shaping what is before the caret is the only measurement that survives a
@@ -666,6 +688,16 @@ fn field_text(
     // typed into is a character that is not there.
     let box_rect = painter.rect(area.x, area.y, area.width, area.height);
     painter.list.push_clip(box_rect);
+    // Behind the text, and only as tall as the text: a selection block the height
+    // of the box is the same defect the caret had.
+    if let Some((start, end)) = field.selection {
+        let from = text_width(painter, text.get(..start).unwrap_or(""), style.size, false);
+        let to = text_width(painter, text.get(..end).unwrap_or(text), style.size, false);
+        let block = painter.caret(area.x + inset - scroll + from, baseline, style.size);
+        let width = painter.snap(to - from).max(1.0);
+        let block = sk_gpu::Rect::new(block.x, block.y, width, block.height);
+        painter.list.rect(block, theme.palette.accent.with_alpha(120), 0.0);
+    }
     let inner = painter.rect(area.x + inset - scroll, 0.0, full.max(room) + scroll, 0.0);
     painter.label(text, style, inner, baseline);
     let caret = painter.caret(area.x + inset - scroll + before, baseline, style.size);
@@ -1107,7 +1139,14 @@ fn row_at(
         if !background.is_invisible() {
             painter.list.rect(pill, background, painter.px(metrics.radius));
         }
-        if cursor == Some(id) {
+        // **Not while a name is being typed over this row.** The field draws its
+        // own accent box, and the ring around the whole row put a second one
+        // around it — two nested rounded rectangles in the same colour, which
+        // reads as a rendering fault rather than as a focus ring. The field's box
+        // is the marker while it is up; the row still has its selected fill, so
+        // which row is being renamed is not in doubt.
+        let renaming_here = naming.is_some_and(|naming| naming.row == row);
+        if cursor == Some(id) && !renaming_here {
             painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
         }
 

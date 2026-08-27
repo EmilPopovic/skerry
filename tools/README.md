@@ -12,7 +12,7 @@ dependency policy the product has, applied to the thing that enforces it.
 | `check-invariants.py` | Banned crates, capability feature flags, crate lints, the GPU seam, ADR immutability | manifests, sources |
 | `make-listing-fixture` | Not a gate. Builds a directory of N files so the frame and listing numbers in [09-performance-budgets.md](../docs/09-performance-budgets.md) have a method that can be re-run | — |
 | `golden` | Renders the interface on lavapipe and compares it to `tests/golden`, which is the only assertion here about *pixels* rather than about a number the program reports. `--bless` accepts what it renders now | Pillow, lavapipe, a release build, the fonts in `tests/golden/faces.txt` |
-| `gui-test` | Not in `check`, because it needs a compositor. Drives the real window with real input through a nested Hyprland and asserts on the state `F12` prints, and in one scenario on the pixels. `--scale=1.25` nests the compositor at a fractional scale, which is the only way one scenario can fail at all | `Hyprland`, a release build; `grim` and Pillow for the pixel scenario |
+| `gui-test` | Not in `check`, because it needs a compositor. Drives the real window with real input through a nested Hyprland and asserts on the state `F12` prints, and in one scenario on the pixels. `--scale=1.25` nests the compositor at a fractional scale, which is the only way one scenario can fail at all. Refuses to run if it registers fewer scenarios than `FEWEST_SCENARIOS`, because an edit once deleted two of them silently | `Hyprland`, a release build; `grim` and Pillow for the pixel scenario |
 | `skerry-drive` | The input half of `gui-test`: replays a script of keys, clicks, drags and scrolls into a compositor | — |
 
 ## Testing the window itself
@@ -64,10 +64,10 @@ crate cannot be the one that violates them.
 
 ## Golden frames
 
-`tools/golden` renders thirteen frames — four scales, both palettes, the keyboard
-overlay, the context menu, the command palette, the find popup, the path bar as a
-field at two widths, a window too narrow for the metadata columns, and the frame
-GNOME requires — and compares them to committed references. It is what catches a glyph that moved half a pixel, a
+`tools/golden` renders fourteen frames — four scales, both palettes, the keyboard
+overlay, the context menu, the command palette, the find popup, a name being typed,
+the path bar as a field at two widths, a window too narrow for the metadata
+columns, and the frame GNOME requires — and compares them to committed references. It is what catches a glyph that moved half a pixel, a
 colour that lost its alpha, a column that stopped shedding, and a row that draws
 under the status bar at 200%.
 

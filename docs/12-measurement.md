@@ -492,7 +492,7 @@ so the count is a crowd of ghosts.
 
 ## A reference is only valid against inputs that are not in the repository
 
-`tools/golden` compares thirteen rendered frames to committed PNGs at a tolerance of
+`tools/golden` compares fourteen rendered frames to committed PNGs at a tolerance of
 **two channel levels of 255**, which is what makes it able to catch a glyph that
 moved half a pixel. That sensitivity means every input has to be pinned, and two
 of them were not:
@@ -565,6 +565,45 @@ first draws at 100%.
 
 > **Fails if:** a defect one frame wide is chased with a harness whose finest
 > resolution is a second.
+
+## A test calibrated on a loaded machine fails on an idle one
+
+The scenario for cancelling a copy was written while this machine was at a load
+average of **5**, and it passed. Once the machine was idle it failed **three for
+three**, and the message was about the wrong thing: *after stopping, the status
+line says 'Done'* — the copy had finished before the keystroke arrived.
+
+Thirty thousand small files on tmpfs take about **350 ms** idle and about three
+times that loaded. The cancel was sent 400 ms after the paste, which was
+comfortably inside the window when the number was chosen and outside it once
+nothing else was running. Every rule in this document about load applies to a
+*test's* timing as much as to a measurement's, and this is the direction nobody
+watches for: the machine getting **faster** is what broke it.
+
+Three things fixed it, and only the third is about timing:
+
+- **The gap has to be inside one driver script.** Each `drive` call is a fresh
+  process, so a keystroke in its own call lands whenever that process starts.
+- **Ask more than once.** `edit.cancel` is disabled when nothing is running, so an
+  attempt outside the window does nothing — six of them 60 ms apart cover a window
+  whose length is not known.
+- **Assert what the feature claims, not a proxy for it.** Two of the failures were
+  the assertion's fault: "fewer than ten folders arrived" is false when the stop
+  lands inside the tenth, and "the undo removed files" is false when the entry it
+  undoes had made its folder and not yet filled it.
+
+> **Fails if:** a scenario's `sleep` was chosen against a machine that was busy.
+
+And rewriting that scenario deleted two others. The edit replaced everything
+between one `@scenario` and the next, and two scenarios added since had landed in
+between — the same shape as the [spliced doc
+comments](#a-comment-can-be-left-on-the-wrong-item-six-times), and silent for the
+same reason: the only sign was the summary count going from 54 to 52, which is
+noticed only by somebody who remembers what it was. `tools/gui-test` now refuses
+to run when it registers fewer scenarios than a recorded floor.
+
+> **Fails if:** a count in a summary is the only thing standing between a deleted
+> test and nobody knowing.
 
 ## The bar is quoted before the code and never adjusted after
 

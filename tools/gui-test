@@ -473,6 +473,15 @@ def make_fixture(root: Path, name: str = "fixture") -> Path:
 
 SCENARIOS = {}
 
+# The fewest scenarios this file is allowed to register.
+#
+# A ratchet, and it is here because a scripted edit deleted two of them by
+# slicing between one `@scenario` and the next — which is silent except for the
+# count in the summary, and the count is only noticed by somebody who remembers
+# what it was. Removing a scenario on purpose means lowering this in the same
+# commit, which is where the argument for removing it belongs.
+FEWEST_SCENARIOS = 54
+
 
 def scenario(name, fresh: bool = False):
     """Registers a scenario.
@@ -2030,53 +2039,107 @@ def paste_a_folder(run: Run, fixture: Path) -> None:
 
 @scenario("a-big-copy-shows-progress-and-stops-when-told", fresh=True)
 def progress_and_cancel(run: Run, fixture: Path) -> None:
-    """A copy large enough to watch, a status line that counts, and Ctrl+. stops it.
+    """A copy long enough to watch, a status line that counts, and Ctrl+. stops it.
 
-    **Large enough to be watchable is the whole difficulty**, and bytes are the
-    wrong lever: 240 MB of tmpfs copies through `copy_file_range` faster than one
-    frame. What makes a copy slow is syscalls per file — six of them each — so the
-    fixture is thirty thousand small files in nested folders — four megabytes of
-    memory, and about a second of copying. Twelve thousand was not enough: tmpfs
-    finished them inside 350 ms, which is one frame's worth of margin.
+    **Two things make this deterministic rather than a race**, and the first
+    version had neither — it passed while the machine was at a load average of 5
+    and failed three for three once it was idle, which is
+    docs/12-measurement.md's load contamination arriving as a flaky test.
+
+    *The queue, not one folder.* Ten folders pasted at once is a ten-entry queue
+    run one at a time, so stopping it drops the nine that have not started. A
+    single folder is a race against one copy finishing, and on tmpfs thirty
+    thousand small files finish in about half a second.
+
+    *One driver script.* Every `drive` call is a fresh process, so a cancel in its
+    own call lands whenever that process starts. Paste, look and stop go in one
+    script, where the gap is a `sleep` this test chose.
+
+    Bytes are the wrong lever throughout: 240 MB of tmpfs copies through
+    `copy_file_range` faster than one frame. What costs is syscalls per file.
     """
     big = fixture / "big"
-    for bucket in range(30):
-        (big / f"bucket-{bucket:02}").mkdir(parents=True)
-        for index in range(1000):
-            (big / f"bucket-{bucket:02}" / f"part-{index:04}.bin").write_bytes(b"x" * 128)
+    for bucket in range(10):
+        (big / f"bucket-{bucket}").mkdir(parents=True)
+        for index in range(3000):
+            (big / f"bucket-{bucket}" / f"part-{index:04}.bin").write_bytes(b"x" * 128)
     (fixture / "target").mkdir()
 
-    run.drive("sleep 700\nkey f12\nsleep 150\n")
-    run.drive("text big\nsleep 400\nkey ctrl+c\nsleep 300\nkey f12\nsleep 150\n")
-    expect(run.state(), cursor="big")
+    # Into `big`, select its ten folders, copy them.
+    run.drive("sleep 700\ntext big\nsleep 400\nkey enter\nsleep 900\nkey f12\nsleep 150\n")
+    inside = run.state()
+    expect(inside, rows="10")
+    run.drive("key ctrl+a\nsleep 250\nkey ctrl+c\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), selected="10")
 
-    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 800\nkey ctrl+v\nsleep 300\nkey f12\nsleep 100\n")
-    during = run.state()
+    # Out to the fixture, into `target`, and paste all ten.
+    run.drive("key backspace\nsleep 900\nsleep 700\ntext target\nsleep 400\nkey enter\nsleep 900\n")
+    # One script, with the stop asked for early and then repeatedly. **A single
+    # keystroke at a chosen moment is a bet on how long the copy takes**, and the
+    # bet was lost twice: 30,000 files on tmpfs take about 350 ms on an idle
+    # machine and three times that on a loaded one, so a stop at 400 ms missed the
+    # end of it. The first one here lands around 240 ms and the rest follow every
+    # 60 ms; `edit.cancel` is disabled when nothing is running, so the ones that
+    # fall outside the window do nothing at all.
+    stops = "".join("key ctrl+.\nsleep 60\n" for _ in range(6))
+    run.drive(f"key ctrl+v\nsleep 200\nkey f12\nsleep 40\n{stops}sleep 1500\nkey f12\nsleep 200\n")
+    during, stopped = run.states()[-2:]
     if "opying" not in during["progress"]:
         raise Failure(
             f"during a copy the progress line says {during['progress']!r} "
             f"and the notice says {during['notice']!r}"
         )
-
-    # And stopping it leaves what it wrote, with an undo entry over it.
-    run.drive("key ctrl+.\nsleep 1500\nkey f12\nsleep 200\n")
-    stopped = run.state()
     if "Stopped" not in stopped["notice"]:
         raise Failure(f"after stopping, the status line says {stopped['notice']!r}")
     expect(stopped, undo="true")
-    partial = fixture / "target/big"
-    if not partial.is_dir():
-        raise Failure("a stopped copy left nothing at all, so there is nothing to undo")
-    kept = sum(1 for _ in partial.rglob("*.bin"))
-    if kept >= 30_000:
-        raise Failure(f"the copy finished all {kept} files rather than stopping")
-    if kept == 0:
-        raise Failure("the copy had not started, so stopping it proved nothing")
 
-    # The undo takes the partial copy away, which is the only thing that can.
+    # What it wrote is still there, and it is not all of it. Counted in files
+    # rather than folders: the stop can land while the tenth folder is being
+    # copied, so all ten names can exist with the last one part-filled — and
+    # "not everything arrived" is the claim, not "fewer than ten folders did".
+    arrived = sum(1 for _ in (fixture / "target").rglob("*.bin"))
+    if arrived == 0:
+        raise Failure("a stopped copy left nothing at all, so there is nothing to undo")
+    if arrived >= 30_000:
+        raise Failure(f"all {arrived} files arrived, so nothing was stopped")
+
+    # The undo takes back the entry that was in flight, which is the only one the
+    # stack has — the ones that never started need nothing taken back.
+    #
+    # **Counted in entries, not in files.** The entry that was in flight can have
+    # been stopped after its folder was made and before anything went into it, so
+    # undoing it removes a directory and no files at all — which a `*.bin` count
+    # reads as "the undo removed nothing".
+    before = sum(1 for _ in (fixture / "target").rglob("*"))
     run.drive("key ctrl+z\nsleep 2000\nkey f12\nsleep 200\n")
-    if partial.exists():
-        raise Failure(f"the partial copy survived its undo: {partial}")
+    after = sum(1 for _ in (fixture / "target").rglob("*"))
+    if after >= before:
+        raise Failure(f"the undo removed nothing: {before} entries, then {after}")
+
+
+@scenario("a-rename-offers-the-name-and-keeps-the-extension", fresh=True)
+def rename_keeps_the_extension(run: Run, fixture: Path) -> None:
+    """F2 then typing replaces the name and leaves `.txt` alone.
+
+    The whole point of the selection: a rename is almost always a change to the
+    name and not to the extension, so the extension has to survive one keystroke.
+    """
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    run.drive("text file-1.txt\nsleep 400\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    opened = run.state()
+    expect(opened, cursor="file-1.txt", naming="file-1.txt")
+
+    # One keystroke replaces the selected stem; `.txt` is still there.
+    run.drive("text notes\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="notes.txt")
+
+    run.drive("key enter\nsleep 800\nkey f12\nsleep 200\n")
+    landed = run.state()
+    expect(landed, cursor="notes.txt")
+    if not (fixture / "notes.txt").is_file():
+        raise Failure("the renamed file is not on disk")
+    if (fixture / "file-1.txt").exists():
+        raise Failure("the original is still there")
 
 
 @scenario("a-held-backspace-does-not-walk-out-of-the-folder")
@@ -2225,6 +2288,13 @@ def main(argv: list[str]) -> int:
         if not binary.is_file():
             print(f"missing {binary}; run `cargo build --release` first")
             return 2
+
+    if len(SCENARIOS) < FEWEST_SCENARIOS:
+        print(
+            f"{len(SCENARIOS)} scenarios registered, against {FEWEST_SCENARIOS} recorded. "
+            "One has been deleted; lower FEWEST_SCENARIOS if that was deliberate."
+        )
+        return 2
 
     work = Path(tempfile.mkdtemp(prefix="skerry-gui-"))
     compositor = None

@@ -24,6 +24,7 @@ fn main() -> std::process::ExitCode {
     let mut path_entry = false;
     let mut palette = false;
     let mut filter = false;
+    let mut rename = false;
     let mut own_frame = false;
     let mut no_sidebar = false;
     let mut capture = None;
@@ -41,6 +42,7 @@ fn main() -> std::process::ExitCode {
             "--path-entry" => path_entry = true,
             "--palette" => palette = true,
             "--filter" => filter = true,
+            "--rename" => rename = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
             "--capture" => match arguments.next() {
@@ -88,6 +90,7 @@ fn main() -> std::process::ExitCode {
             path_entry,
             palette,
             filter,
+            rename,
             stats,
             own_frame,
             sidebar: !no_sidebar,
@@ -156,6 +159,7 @@ skerry [OPTIONS] [PATH]
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it
+  --rename         show a name being typed, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,

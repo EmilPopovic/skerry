@@ -65,6 +65,8 @@ pub struct Capture {
     pub palette: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
     pub filter: bool,
+    /// Whether to draw a name being typed over a row, with its stem selected.
+    pub rename: bool,
     /// Whether to draw the sidebar.
     pub sidebar: bool,
     /// Whether to draw the window frame the program draws for itself.
@@ -136,6 +138,29 @@ struct Overlays {
     menu: Option<crate::menu::Menu>,
     path_entry: Option<crate::field::Field>,
     palette: Option<crate::palette::Palette>,
+    naming: Option<crate::edit::Naming>,
+}
+
+/// A rename in progress over the row whose name has two dots in it.
+///
+/// `archive.tar.gz` is the case the stem rule is about: the selection has to reach
+/// the **last** dot, so what is offered is `archive.tar` and `.gz` is kept. A name
+/// with one extension would look the same whichever dot the rule used.
+fn sample_naming(pane: &mut Pane) -> Option<crate::edit::Naming> {
+    let row = (0..pane.listing.rows()).find(|row| {
+        pane.listing.at(*row).is_some_and(|id| pane.listing.name(id).contains(".tar."))
+    })?;
+    let id = pane.listing.at(row)?;
+    let name = pane.listing.name(id).to_owned();
+    // The cursor goes here too, because a rename always happens on the focused
+    // row — and the frame is only about the *second* box if the row that would
+    // have drawn one is the row being renamed.
+    pane.selection.set_cursor(Some(id));
+    Some(crate::edit::Naming {
+        row,
+        path: pane.path.join(&name),
+        field: crate::field::Field::naming(name),
+    })
 }
 
 fn sample_overlays(
@@ -153,6 +178,7 @@ fn sample_overlays(
         menu: request.menu.then(|| sample_menu(layout)).flatten(),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
         palette: request.palette.then(sample_palette),
+        naming: request.rename.then(|| sample_naming(pane)).flatten(),
     }
 }
 
@@ -285,7 +311,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,
-                naming: None,
+                naming: overlays.naming.as_ref(),
                 // What a freshly opened directory looks like: nowhere to go
                 // back to, nowhere forward, a parent and a reload. Hardcoded
                 // because a capture has no history — and it is the state worth
