@@ -60,6 +60,13 @@ pub struct Sidebar {
     pub open: bool,
     /// The row under the pointer, as an index into [`Sidebar::rows`].
     pub hover: Option<usize>,
+    /// How many times the contents have arrived.
+    ///
+    /// A diagnostic, and the only observable effect of a mount the sidebar has
+    /// no row for: plugging in a disk changes the sections, and mounting a
+    /// `tmpfs` — the only mount a test can make without being root — changes
+    /// nothing but this.
+    pub loads: u64,
     loaded: Receiver<Vec<Section>>,
     sender: Sender<Vec<Section>>,
     wake: WakeHandle,
@@ -70,7 +77,8 @@ impl Sidebar {
     #[must_use]
     pub fn new(jobs: &Jobs, wake: WakeHandle, open: bool) -> Self {
         let (sender, loaded) = std::sync::mpsc::channel();
-        let sidebar = Self { sections: Vec::new(), open, hover: None, loaded, sender, wake };
+        let sidebar =
+            Self { sections: Vec::new(), open, hover: None, loads: 0, loaded, sender, wake };
         sidebar.reload(jobs);
         sidebar
     }
@@ -95,6 +103,7 @@ impl Sidebar {
         let mut any = false;
         while let Ok(sections) = self.loaded.try_recv() {
             self.sections = sections;
+            self.loads += 1;
             any = true;
         }
         if any {

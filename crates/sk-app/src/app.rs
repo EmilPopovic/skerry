@@ -657,11 +657,17 @@ impl App {
     fn drain_changes(&mut self) {
         let mut owed = self.refresh_owed;
         while let Ok(change) = self.changes.try_recv() {
-            // Every one of the three means the same thing to a listing: read it
-            // again. `Vanished` reads it again too, and the read fails with a
-            // message that says the directory is gone — which is the honest
-            // thing to show, rather than the entries it used to have.
-            let _ = change;
+            if change == sk_fs::Change::Mounts {
+                // A disk plugged in or unmounted. Only the sidebar's Volumes
+                // section is affected, and re-reading the listing for it would
+                // be a refresh of a directory nothing happened to.
+                self.sidebar.reload(&self.jobs);
+                continue;
+            }
+            // Every one of the other three means the same thing to a listing:
+            // read it again. `Vanished` reads it again too, and the read fails
+            // with a message that says the directory is gone — which is the
+            // honest thing to show, rather than the entries it used to have.
             owed = true;
         }
         if !owed {
@@ -1573,7 +1579,7 @@ frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
 crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 menu={menu_rows} menu_active={menu_active} menu_id={menu_id:?} menu_aim={menu_aim:?} \
 tool_w={tool_w:.1} tool_hover={tool_hover} \
-sidebar_w={:.1} sidebar_top={:.1} places={} \
+sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
@@ -1588,6 +1594,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.layout.sidebar.width,
             self.layout.sidebar.y,
             self.sidebar.len(),
+            self.sidebar.loads,
             self.logical.width,
             self.logical.height,
             self.scale_120,

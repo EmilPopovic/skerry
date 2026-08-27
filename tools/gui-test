@@ -176,13 +176,14 @@ class Run:
         arguments: list[str],
         instance: str = "",
         environment: dict | None = None,
+        wrap: list[str] | None = None,
     ):
         self.instance = instance
         self.log = work / "app.log"
         self.err = work / "app.err"
         environment = dict(os.environ, **(environment or {}), WAYLAND_DISPLAY=display)
         self.process = subprocess.Popen(
-            [str(SKERRY), *arguments, str(path)],
+            [*(wrap or []), str(SKERRY), *arguments, str(path)],
             stdout=self.log.open("w"),
             stderr=self.err.open("w"),
             env=environment,
@@ -1019,6 +1020,73 @@ def sidebar_places(run: Run, fixture: Path) -> None:
 
     run.drive("click\nsleep 900\nkey f12\nsleep 200\n")
     expect(run.state(), path=os.environ["HOME"])
+
+
+# `unshare -Urm` maps this user to root in a namespace of its own, which is the
+# only way a test can mount anything: the mount is invisible outside it and gone
+# when the process is.
+MOUNT_WRAPPER = """
+"$0" "$@" &
+child=$!
+waited=0
+while [ ! -e "$SKERRY_MOUNT_TRIGGER" ] && [ "$waited" -lt 400 ]; do
+    sleep 0.05
+    waited=$((waited + 1))
+done
+mount -t tmpfs none "$SKERRY_MOUNT_TARGET" && echo mounted >"$SKERRY_MOUNT_TRIGGER.done"
+wait "$child"
+"""
+
+
+@scenario("a-mount-reaches-the-sidebar")
+def a_mount_reaches_the_sidebar(run: Run, fixture: Path) -> None:
+    """`/proc/self/mountinfo` is polled, so plugging a disk in is not a restart.
+
+    A `tmpfs` is the only filesystem a test can mount without being root, and a
+    `tmpfs` is deliberately not something the sidebar shows — so what this
+    asserts is that the notification arrived and the sections were read again,
+    which is every part of the path except the row.
+    """
+    work = run.log.parent
+    trigger = work / "mount-trigger"
+    target = work / "mount-target"
+    target.mkdir(exist_ok=True)
+    trigger.unlink(missing_ok=True)
+    run.close()
+
+    own = Run(
+        run.display,
+        work,
+        fixture,
+        [],
+        run.instance,
+        {"SKERRY_MOUNT_TRIGGER": str(trigger), "SKERRY_MOUNT_TARGET": str(target)},
+        ["unshare", "-Urm", "sh", "-c", MOUNT_WRAPPER],
+    )
+    try:
+        own.drive("sleep 700\nkey f12\nsleep 200\n")
+        before = own.state()
+        if int(before["places_loaded"]) < 1:
+            raise Failure("the sidebar never loaded at all")
+
+        trigger.write_text("go")
+        deadline = time.time() + 8
+        while time.time() < deadline and not (work / "mount-trigger.done").exists():
+            time.sleep(0.1)
+        if not (work / "mount-trigger.done").exists():
+            raise Skipped("this kernel would not let an unprivileged namespace mount a tmpfs")
+
+        own.drive("sleep 600\nkey f12\nsleep 200\n")
+        after = own.state()
+        if int(after["places_loaded"]) <= int(before["places_loaded"]):
+            raise Failure(
+                f"a mount did not reach the sidebar: loaded "
+                f"{before['places_loaded']} then {after['places_loaded']}"
+            )
+        # And the rows did not change, because a tmpfs is not a volume.
+        expect(after, places=before["places"])
+    finally:
+        own.close()
 
 
 @scenario("sidebar-toggle")

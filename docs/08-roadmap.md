@@ -149,6 +149,7 @@ defects they exposed.
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
 | **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural | A paste that pastes *files*, which needs M3's operation engine |
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | A headless compositor fixture and input-trace replay in CI |
+| `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | Offscreen rendering, PNG capture, and a comparable glyph stream — the golden-frame harness minus its references | The reference images, the perceptual diff, and llvmpipe in CI |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8) |
 

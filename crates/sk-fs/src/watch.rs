@@ -59,6 +59,13 @@ pub enum Change {
     Overflowed,
     /// The directory itself was deleted or unmounted.
     Vanished,
+    /// The mount table changed: something was mounted or unmounted anywhere on
+    /// the machine.
+    ///
+    /// Nothing to do with the watched directory, and on this thread because it is
+    /// the same `poll` and the same wake-up. A second thread for one descriptor
+    /// would be a second thread that sleeps forever.
+    Mounts,
 }
 
 /// The events worth waking a listing for.
@@ -75,6 +82,23 @@ fn watched_events() -> inotify::WatchFlags {
         | inotify::WatchFlags::MOVE_SELF
         | inotify::WatchFlags::CLOSE_WRITE
         | inotify::WatchFlags::ATTRIB
+}
+
+/// Opens `/proc/self/mountinfo` as a poll target.
+///
+/// **`POLLPRI`, never `POLLIN`.** proc(5) says a change in this file marks the
+/// descriptor as having a priority event; it is *always* readable, so `POLLIN`
+/// is not a signal at all. Measured on Linux 7.0: no change gives no event, a
+/// mount gives `POLLIN|POLLPRI|POLLERR`, and the condition clears on the next
+/// poll — but it is re-read anyway, which is what proc(5) documents as the way
+/// to clear it and what `libmount` does.
+fn mount_table() -> Option<OwnedFd> {
+    rustix::fs::open(
+        "/proc/self/mountinfo",
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .ok()
 }
 
 /// Watches one directory at a time, on its own thread.
@@ -114,6 +138,7 @@ impl Watcher {
             move || {
                 let mut state = Thread {
                     inotify,
+                    mounts: mount_table(),
                     control: thread_control,
                     wanted,
                     armed,
@@ -164,6 +189,10 @@ impl Drop for Watcher {
 
 struct Thread {
     inotify: OwnedFd,
+    /// `/proc/self/mountinfo`, held open only to be polled. `None` where it
+    /// cannot be opened, which is a machine with no `procfs` and a sidebar whose
+    /// volumes are a snapshot.
+    mounts: Option<OwnedFd>,
     control: OwnedFd,
     wanted: Arc<Mutex<Option<PathBuf>>>,
     armed: Arc<AtomicBool>,
@@ -179,8 +208,13 @@ impl Thread {
             self.retarget();
             let inotify = self.inotify.as_fd();
             let control = self.control.as_fd();
-            let mut fds =
-                [PollFd::new(&inotify, PollFlags::IN), PollFd::new(&control, PollFlags::IN)];
+            let mut fds = Vec::with_capacity(3);
+            fds.push(PollFd::new(&inotify, PollFlags::IN));
+            fds.push(PollFd::new(&control, PollFlags::IN));
+            let table = self.mounts.as_ref().map(AsFd::as_fd);
+            if let Some(table) = table.as_ref() {
+                fds.push(PollFd::new(table, PollFlags::PRI));
+            }
             // No timeout: the thread sleeps until the kernel has something or the
             // frame loop retargets it. Zero CPU at idle applies here too.
             if rustix::event::poll(&mut fds, None).is_err() {
@@ -190,11 +224,36 @@ impl Thread {
                 let mut buffer = [0u8; 8];
                 let _ = rustix::io::read(self.control.as_fd(), &mut buffer);
             }
-            if fds[0].revents().contains(PollFlags::IN) {
+            let remounted = fds.get(2).is_some_and(|fd| !fd.revents().is_empty());
+            let touched = fds[0].revents().contains(PollFlags::IN);
+            // The borrows of the two descriptors end here, which is why the two
+            // answers are taken before either handler runs.
+            drop(fds);
+            if remounted {
+                self.mounted();
+            }
+            if touched {
                 self.drain();
             }
         }
         self.disarm();
+    }
+
+    /// The mount table changed. Re-read it and say so.
+    ///
+    /// The contents are thrown away: what the frame loop does with this is start
+    /// a job that reads the table properly, and reading it here would put the
+    /// answer on the wrong thread. The read happens because it is what clears the
+    /// poll condition — proc(5)'s own remedy — and a condition that does not
+    /// clear is a thread that spins.
+    fn mounted(&mut self) {
+        let Some(table) = self.mounts.as_ref() else { return };
+        let _ = rustix::fs::seek(table.as_fd(), rustix::fs::SeekFrom::Start(0));
+        let mut buffer = [0u8; 4096];
+        while matches!(rustix::io::read(table.as_fd(), &mut buffer), Ok(read) if read > 0) {}
+        if self.changes.send(Change::Mounts).is_ok() {
+            self.wake.wake();
+        }
     }
 
     /// Moves the watch if the caller has asked for a different directory.
@@ -300,7 +359,9 @@ fn classify(event: &inotify::Event<'_>) -> Change {
 /// lesser one would re-read a directory that is not there.
 fn worse_of(left: Option<Change>, right: Change) -> Change {
     let rank = |change: Change| match change {
-        Change::Touched => 0,
+        // Never reaches this function: it comes from the mount table and not
+        // from an inotify event, so it is not part of a directory's burst.
+        Change::Mounts | Change::Touched => 0,
         Change::Overflowed => 1,
         Change::Vanished => 2,
     };
@@ -441,6 +502,22 @@ mod tests {
     /// The NFS case, which is the reason `armed` is public: a directory inotify
     /// cannot cover produces no error and no events, and the only way a caller
     /// learns that the listing is a snapshot is by asking.
+    /// The mount table is polled on this thread too, and a `POLLPRI` that does
+    /// not clear is a thread that spins at a hundred per cent for the life of
+    /// the process. Nothing is mounted here, so nothing may arrive.
+    #[test]
+    fn an_idle_mount_table_reports_nothing() {
+        let waker = Waker::new().expect("eventfd");
+        let (sender, changes) = mpsc::channel();
+        let watcher = Watcher::new(sender, waker.handle()).expect("watcher");
+        // No directory is being watched, so `Mounts` is the only thing that can
+        // arrive — and `recv_timeout` rather than a sleep, so a spinning thread
+        // fails this in microseconds instead of after the whole window.
+        let arrived = changes.recv_timeout(Duration::from_millis(300));
+        assert!(arrived.is_err(), "the mount table reported {arrived:?} with nothing mounted");
+        drop(watcher);
+    }
+
     #[test]
     fn a_directory_that_cannot_be_watched_reports_not_armed_rather_than_failing() {
         let root = fixture("unwatchable");
