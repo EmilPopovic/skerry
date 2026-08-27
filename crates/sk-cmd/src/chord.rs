@@ -48,16 +48,37 @@ impl Chord {
     /// Whether `event` is this chord.
     #[must_use]
     pub fn matches(&self, event: &KeyEvent) -> bool {
-        // Shift is compared for named keys and ignored for characters, because a
-        // keymap already applied it: `shift+3` produces `#` on a US layout and
-        // `£` on a British one, and a binding written against the character is
-        // the one that survives both.
-        let shift_matters = matches!(self.key, Key::Named(_));
-        self.key == event.key
+        let same_key = match (self.key, event.key) {
+            // **The keymap applies Shift before we see it.** `Ctrl+Shift+N`
+            // arrives as `N`, and a binding is written in lower case — so
+            // comparing the characters exactly made every `ctrl+shift+<letter>`
+            // chord in the program unreachable, which is where this came from.
+            (Key::Character(bound), Key::Character(pressed)) => {
+                bound.eq_ignore_ascii_case(&pressed)
+            }
+            (bound, pressed) => bound == pressed,
+        };
+        same_key
             && self.mods.ctrl == event.mods.ctrl
             && self.mods.alt == event.mods.alt
             && self.mods.logo == event.mods.logo
-            && (!shift_matters || self.mods.shift == event.mods.shift)
+            && (!self.shift_matters() || self.mods.shift == event.mods.shift)
+    }
+
+    /// Whether Shift is part of this chord's identity.
+    ///
+    /// **For a letter and for a named key, yes; for other characters, no.**
+    /// Shift on a letter changes its case and nothing else, so `Ctrl+Shift+C`
+    /// and `Ctrl+C` are two chords and a person expects them to be two commands.
+    /// Shift on punctuation changes which character the key produces at all —
+    /// `/` is unshifted on a US layout and `Shift+7` on a German one — so a
+    /// binding written `/` has to match both, and comparing Shift there would
+    /// make it a binding that works in one country.
+    const fn shift_matters(&self) -> bool {
+        match self.key {
+            Key::Character(character) => character.is_ascii_alphabetic(),
+            Key::Named(_) | Key::Unknown(_) => true,
+        }
     }
 
     /// The chord as a person reads it: `Ctrl A`, `Alt ←`, `Page Down`, `F5`.
@@ -218,19 +239,49 @@ mod tests {
         assert!(!chord.matches(&press(Key::Character('a'), ctrl_alt)));
     }
 
-    /// Shift is part of a named chord and not of a character one: a keymap has
-    /// already applied it to the character, and which character it produced
-    /// depends on the layout.
+    /// Shift counts for a named key and for a letter, and not for punctuation.
+    ///
+    /// **This test asserted the opposite for a letter and passed while three
+    /// commands could not be reached at all.** `Ctrl+Shift+N` arrives from xkb
+    /// as `N` with Shift held; the binding is written `n`; the comparison was
+    /// exact, so New folder, Copy the path and Redo were bound to chords no
+    /// keyboard could produce — and the assertion that `Ctrl+Shift+A` runs
+    /// Select All was the reason nobody looked.
     #[test]
-    fn shift_counts_for_a_named_key_and_not_for_a_character() {
-        let named = Chord::parse("shift+down").expect("chord");
+    fn shift_counts_for_a_named_key_and_a_letter_and_not_for_punctuation() {
         let shift = Modifiers { shift: true, ..Modifiers::default() };
+        let named = Chord::parse("shift+down").expect("chord");
         assert!(named.matches(&press(Key::Named(Named::Down), shift)));
         assert!(!named.matches(&press(Key::Named(Named::Down), Modifiers::default())));
 
-        let character = Chord::parse("ctrl+a").expect("chord");
+        // A letter: two chords, and each matches only its own.
+        let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
         let ctrl_shift = Modifiers { ctrl: true, shift: true, ..Modifiers::default() };
-        assert!(character.matches(&press(Key::Character('a'), ctrl_shift)));
+        let plain = Chord::parse("ctrl+a").expect("chord");
+        let shifted = Chord::parse("ctrl+shift+a").expect("chord");
+        assert!(plain.matches(&press(Key::Character('a'), ctrl)));
+        assert!(!plain.matches(&press(Key::Character('A'), ctrl_shift)));
+        assert!(shifted.matches(&press(Key::Character('A'), ctrl_shift)));
+        assert!(!shifted.matches(&press(Key::Character('a'), ctrl)));
+
+        // Punctuation: one chord, and Shift is whatever the layout needed to
+        // produce the character.
+        let slash = Chord::parse("/").expect("chord");
+        assert!(slash.matches(&press(Key::Character('/'), Modifiers::default())));
+        assert!(slash.matches(&press(Key::Character('/'), shift)), "a German layout");
+    }
+
+    /// The three chords the defect above made unreachable, as they actually
+    /// arrive from xkb: the character comes through shifted.
+    #[test]
+    fn every_shifted_letter_chord_the_program_binds_is_reachable() {
+        let ctrl_shift = Modifiers { ctrl: true, shift: true, ..Modifiers::default() };
+        for (text, character) in
+            [("ctrl+shift+n", 'N'), ("ctrl+shift+c", 'C'), ("ctrl+shift+z", 'Z')]
+        {
+            let chord = Chord::parse(text).expect(text);
+            assert!(chord.matches(&press(Key::Character(character), ctrl_shift)), "{text}");
+        }
     }
 
     /// The property the keyboard overlay depends on: **no two chords display the
