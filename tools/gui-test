@@ -688,7 +688,12 @@ def filter_narrows_the_list(run: Run, fixture: Path) -> None:
     run.drive("key backspace\nsleep 300\nkey f12\nsleep 200\n")
     expect(run.state(), filter="fi")
 
-    run.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
+    # A space belongs in a field: `VirtualBox VMs` and `My Documents` are
+    # filenames, and a filter that cannot reach one is not a filter.
+    run.drive("key space\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), filter="fi ")
+
+    run.drive("key backspace\nkey escape\nsleep 300\nkey f12\nsleep 200\n")
     state = run.state()
     expect(state, filtering="false", filter="")
     if int(state["rows"]) != everything:

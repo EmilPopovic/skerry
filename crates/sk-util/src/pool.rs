@@ -16,6 +16,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use rustix::event::{EventfdFlags, eventfd};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -78,6 +79,9 @@ struct Queues {
     serial: VecDeque<Job>,
     serial_busy: bool,
     shutdown: bool,
+    /// Workers that have returned. Under the same lock as everything else here,
+    /// so the count and the wait cannot race.
+    left: usize,
 }
 
 impl Queues {
@@ -102,6 +106,9 @@ impl Queues {
 struct Shared {
     queues: Mutex<Queues>,
     ready: Condvar,
+    /// Signalled by a worker on its way out, so a dropped pool waits on an
+    /// event rather than on a timer — the same rule the frame loop follows.
+    left: Condvar,
     /// Jobs that panicked. Surfaced rather than swallowed: one unreadable
     /// directory must not take down a window, but it must also not be invisible.
     panics: AtomicU64,
@@ -129,6 +136,7 @@ impl Pool {
         let shared = Arc::new(Shared {
             queues: Mutex::new(Queues::default()),
             ready: Condvar::new(),
+            left: Condvar::new(),
             panics: AtomicU64::new(0),
             completed: AtomicU64::new(0),
         });
@@ -195,11 +203,44 @@ impl Drop for Pool {
             queues.serial.clear();
         }
         self.shared.ready.notify_all();
+
+        // **A bounded wait, not a join.** A worker inside a blocking syscall
+        // cannot be asked to stop: a read from a peer's clipboard pipe that the
+        // peer never writes to, a `statx` on a suspended sshfs host, an `exec` of
+        // a binary on a stalled mount. Joining meant the window vanished and the
+        // process never exited — nothing on screen, nothing to kill but a pid.
+        //
+        // Past the deadline the workers are left running and `main` returns,
+        // which ends the process and them with it. What is given up is the
+        // chance to run their destructors, and what they own is a closure and a
+        // file descriptor the kernel closes anyway.
+        let width = self.workers.len();
+        if let Ok(queues) = self.shared.queues.lock() {
+            // On the condvar and not on a timer: the wait ends the moment the
+            // last worker returns, and the deadline is only the bound.
+            let _ = self
+                .shared
+                .left
+                .wait_timeout_while(queues, SHUTDOWN_GRACE, |queues| queues.left < width);
+        }
         for worker in self.workers.drain(..) {
-            let _ = worker.join();
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                std::mem::forget(worker);
+            }
         }
     }
 }
+
+/// How long a dropped pool waits for its workers before leaving them to the
+/// process exit.
+///
+/// Long enough that an ordinary job — a `statx` batch, a directory read — is
+/// finished and reaped, short enough that a person closing a window sees it
+/// close. Every job in this program checks its cancellation token, so the ones
+/// that can stop have stopped by the time this matters.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
 /// Workers run at the **same** priority as the frame loop, and that was measured.
 ///
@@ -214,6 +255,14 @@ impl Drop for Pool {
 ///
 /// Recorded here rather than deleted, so it is not tried a third time.
 fn worker(shared: &Arc<Shared>) {
+    run(shared);
+    if let Ok(mut queues) = shared.queues.lock() {
+        queues.left += 1;
+    }
+    shared.left.notify_all();
+}
+
+fn run(shared: &Arc<Shared>) {
     loop {
         let job = {
             let Ok(mut queues) = shared.queues.lock() else { return };
@@ -309,9 +358,42 @@ impl WakeHandle {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Cancel, Lane, Pool, Waker};
+    use super::{Cancel, Lane, Pool, SHUTDOWN_GRACE, Waker};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    /// A worker inside a blocking syscall cannot be asked to stop, and joining
+    /// one meant the window vanished and the process never exited — a peer that
+    /// asked for the clipboard and stopped reading was enough. Dropping the pool
+    /// has to return whether or not every worker does.
+    #[test]
+    fn dropping_the_pool_does_not_wait_for_a_job_that_will_never_finish() {
+        // Declared before the pool so it outlives it: the job blocks on this
+        // channel, and a sender dropped first would release it.
+        let (_keep, blocked) = std::sync::mpsc::channel::<()>();
+        let started = Instant::now();
+        {
+            let pool = Pool::with_width(2);
+            let stuck = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&stuck);
+            pool.spawn(Lane::Parallel, Cancel::new(), move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Stands in for a `read` on a pipe nobody writes to: a blocking
+                // wait with no timeout that does not check its token, which is
+                // the point — it cannot.
+                let _ = blocked.recv();
+            });
+            while stuck.load(Ordering::SeqCst) == 0 {
+                std::hint::spin_loop();
+            }
+        }
+        let waited = started.elapsed();
+        assert!(waited < SHUTDOWN_GRACE * 4, "dropping the pool took {waited:?}");
+        // And it did wait — a pool whose workers all returned is joined, which
+        // this deliberately is not.
+        assert!(waited >= SHUTDOWN_GRACE, "it did not wait for them at all: {waited:?}");
+    }
 
     #[test]
     fn every_queued_job_runs() {

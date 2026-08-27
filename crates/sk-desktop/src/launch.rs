@@ -41,8 +41,13 @@ pub enum Refused {
 ///
 /// There is no specification for this and no D-Bus interface that answers it, so
 /// it is a list — the same shape as the list every other file manager carries.
-/// `$TERMINAL` comes first because it is the only part a user can set. Every one
-/// of these takes the command after `-e`.
+/// `$TERMINAL` comes first because it is the only part a user can set.
+///
+/// They are passed the command after `-e`, which `x-terminal-emulator`,
+/// `konsole` and `xterm` document and the wlroots-era three accept for
+/// compatibility. It is a claim about seven third-party programs with no test
+/// behind it, which is why a failure to start one is reported rather than
+/// swallowed.
 const TERMINALS: &[&str] =
     &["x-terminal-emulator", "foot", "kitty", "alacritty", "wezterm", "konsole", "xterm"];
 
@@ -169,7 +174,14 @@ fn find_terminal() -> Option<PathBuf> {
     let candidates = named.into_iter().chain(TERMINALS.iter().map(PathBuf::from));
     for candidate in candidates {
         if candidate.is_absolute() {
-            return candidate.is_file().then_some(candidate);
+            // `continue`, not `return`: a `$TERMINAL` pointing at something that
+            // is no longer installed would otherwise disable terminal launching
+            // entirely, and the message a user then sees is "set $TERMINAL" —
+            // advice for the variable that is already set and is the cause.
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            continue;
         }
         let found = std::env::var_os("PATH").map(|path| {
             std::env::split_paths(&path).map(|dir| dir.join(&candidate)).find(|it| it.is_file())

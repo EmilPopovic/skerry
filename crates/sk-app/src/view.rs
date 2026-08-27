@@ -190,6 +190,13 @@ fn path_bar(
         }
         total += widths[index];
     }
+    // **Never past the leaf.** A leaf wider than the whole bar used to set
+    // `first` to `names.len()`, and the draw loop then skipped every index from
+    // one — including the leaf. The bar read `/ … /` with the current directory
+    // absent and nothing clickable, at window widths the toplevel's own 320 px
+    // minimum can reach. It is drawn and clipped instead, which is what the
+    // clip region below is for.
+    first = first.min(names.len().saturating_sub(1)).max(1);
     let elided = first > 1;
     let mut cursor = metrics.gutter;
 
@@ -225,12 +232,14 @@ fn path_bar(
         // first draft read `/ / home / emil`.
         if !last && index > 0 {
             let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(120));
-            line(painter, "/", style, cursor - SEPARATOR, SEPARATOR, baseline);
+            let mark = i18n::lookup("chrome.crumb_separator");
+            line(painter, mark, style, cursor - SEPARATOR, SEPARATOR, baseline);
         }
         if index == 0 && elided {
             let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(150));
-            cursor += line(painter, "… /", style, cursor, available, baseline) / painter.scale
-                + CRUMB_PAD;
+            let mark = i18n::lookup("chrome.crumb_elided");
+            cursor +=
+                line(painter, mark, style, cursor, available, baseline) / painter.scale + CRUMB_PAD;
         }
     }
     painter.list.pop_clip();
@@ -248,7 +257,7 @@ const CRUMB_PAD: f32 = 6.0;
 /// `/` and `/home/emil` split differently and both have to read correctly: the
 /// root has no name of its own, so it is drawn as the separator it is.
 fn crumb_names(pane: &Pane) -> Vec<String> {
-    let mut names = vec!["/".to_owned()];
+    let mut names = vec![i18n::lookup("chrome.crumb_root").to_owned()];
     names.extend(
         pane.path
             .components()
@@ -942,6 +951,9 @@ mod tests {
             crumb_names(&pane)
         };
         assert_eq!(crumbs("/"), vec!["/"]);
+        // A path with nothing in it is still one crumb, not none: the draw loop
+        // indexes `names.len() - 1` for the leaf.
+        assert_eq!(crumbs(""), vec!["/"]);
         assert_eq!(crumbs("/home"), vec!["/", "home"]);
         assert_eq!(crumbs("/home/emil"), vec!["/", "home", "emil"]);
         // Trailing and doubled separators are components the path type folds

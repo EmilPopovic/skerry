@@ -95,9 +95,25 @@ fn describe(window: &Window) -> String {
         ("primary", found.primary_selection),
     ]
     .into_iter()
-    .filter_map(|(name, present)| present.then_some(name))
+    .filter_map(|(name, present)| present.then_some(name.to_owned()))
+    .chain(gpu_note(found))
     .collect::<Vec<_>>()
     .join(" ")
+}
+
+/// Which GPU the compositor said it renders on, and what that resolved to.
+///
+/// The ninth probed capability, and the only one whose absence is fatal: with no
+/// answer the adapter is chosen by power preference, which on a hybrid laptop is
+/// the wrong GPU and a protocol error at start-up. When the probe misses, the
+/// program dies before it can say anything else — so what it knew has to be on
+/// the line that is printed first.
+fn gpu_note(found: &sk_plat::Capabilities) -> Option<String> {
+    let device = found.render_device?;
+    Some(match found.render_device_ids() {
+        Some((vendor, device)) => format!("compositor-gpu={vendor:04x}:{device:04x}"),
+        None => format!("compositor-gpu=dev:{device}(unresolved)"),
+    })
 }
 
 /// The freedesktop databases, read together on one job.
@@ -688,7 +704,13 @@ impl App {
             Event::KeyDown(key) => self.key(key, commands),
             Event::PointerMoved { position, .. } => self.moved(*position),
             Event::PointerLeft => {
-                if self.pane.hover.take().is_some() || self.hovered_button.take().is_some() {
+                // Every hover, and each of them taken: `||` short-circuits, so a
+                // pointer leaving a row left a breadcrumb lit and a window button
+                // shaded until it came back.
+                let row = self.pane.hover.take().is_some();
+                let button = self.hovered_button.take().is_some();
+                let crumb = self.hovered_crumb.take().is_some();
+                if row || button || crumb {
                     self.dirty = true;
                 }
             }
@@ -761,7 +783,7 @@ impl App {
                 self.dirty = true;
                 return false;
             }
-            _ => match keys::type_ahead(event) {
+            _ => match keys::typed_text(event) {
                 Some(text) => wanted.push_str(text),
                 // Arrows, Page Down, `Ctrl+A`: still the list's, so a filtered
                 // list can be moved through and acted on without closing it.
@@ -865,8 +887,15 @@ impl App {
             let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
             // The `is_dir` happens here, not on the loop: this is a path another
             // application chose, and it can name a hung mount.
+            // **Canonical, not as written.** The clipboard can hold a relative
+            // path from somebody's terminal or one with `..` in it, and both
+            // resolve — `is_dir` against this process's working directory, and
+            // `Path::components` without folding `..` at all. The breadcrumb then
+            // named a directory that was not the one being shown, and clicking a
+            // component went somewhere else again.
             let pasted = sk_plat::decode_uri(first)
                 .or_else(|| (!first.is_empty()).then(|| PathBuf::from(first)))
+                .and_then(|path| std::fs::canonicalize(path).ok())
                 .filter(|path| path.is_dir())
                 .map_or(Pasted::NotAFolder, Pasted::Folder);
             if sender.send(pasted).is_ok() {
@@ -1185,10 +1214,6 @@ jobs={jobs}/{panics} keys={} stats={}",
             }
             return;
         }
-        // A breadcrumb before the drag region, because the breadcrumbs are *in*
-        // the drag region: the path bar is the title bar, and a component that
-        // moved the window instead of navigating would be a component nobody
-        // could click.
         // A breadcrumb before the drag region, because the breadcrumbs are *in*
         // the drag region: the path bar is the title bar, and a component that
         // moved the window instead of navigating would be a component nobody

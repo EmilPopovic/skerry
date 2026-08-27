@@ -52,6 +52,12 @@ error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.ino
 # The close button's mark. A multiplication sign, because it is the one shape
 # in the window frame that a rectangle cannot draw and every font has this.
 chrome.close = ×
+# The path bar's furniture. Separate entries because a right-to-left locale puts
+# the separator on the other side of the name and may spell an elision
+# differently, and because the root is `/` here and need not be everywhere.
+chrome.crumb_root = /
+chrome.crumb_separator = /
+chrome.crumb_elided = … /
 
 key.super = Super
 key.ctrl = Ctrl

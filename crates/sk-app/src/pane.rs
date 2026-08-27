@@ -29,6 +29,14 @@ pub enum Update {
         elapsed_us: u64,
         /// Microseconds the first sort took, on the job rather than on a frame.
         sort_us: u64,
+        /// What the order was computed with.
+        ///
+        /// Compared against the pane's, because the two can differ: the read
+        /// captures them when it starts and a person can sort, filter or press
+        /// `Ctrl+H` while it runs. Without this the arriving listing overwrote
+        /// whatever they had asked for, and nothing re-synced — the status line
+        /// said `3 of 200 items match "abc"` over an unfiltered list.
+        view: View,
         /// Which lane this directory's device belongs on, probed **on the job**.
         ///
         /// `statfs` on a suspended sshfs host blocks for the mount's timeout, and
@@ -63,6 +71,20 @@ pub struct Message {
     pub generation: u64,
     /// What the read found.
     pub update: Update,
+}
+
+/// Everything the display order is derived from.
+///
+/// One value rather than three arguments, so a read can carry what it was
+/// computed with and the pane can ask whether that is still what it wants.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct View {
+    /// The column and direction.
+    pub sort: Sort,
+    /// Whether dotfiles are shown.
+    pub show_hidden: bool,
+    /// What the list is narrowed to.
+    pub filter: String,
 }
 
 /// What a pane needs in order to start a read.
@@ -248,6 +270,11 @@ impl Pane {
         self.scroll.to(0.0);
         self.problem = None;
         self.hover = None;
+        // The filter goes too. It narrows *this* directory, and following you
+        // into the next one means arriving somewhere that silently hides most
+        // of what is there — with the only explanation a line in the status bar
+        // that a person on their way somewhere is not reading.
+        self.filter.clear();
         self.reload(jobs);
     }
 
@@ -278,14 +305,13 @@ impl Pane {
         let path = self.path.clone();
         let sender = jobs.sender.clone();
         let wake = jobs.wake.clone();
-        let sort = self.sort;
-        let show_hidden = self.show_hidden;
-        let filter = self.filter.clone();
+        let view = self.view();
         // One job, so `Parallel` costs at most one worker even on a mount that
         // never answers. The lane that matters is the metadata fan-out's, and
         // this job is what discovers it.
         jobs.pool.spawn(Lane::Parallel, self.cancel.clone(), move |cancel| {
             let lane = sk_fs::lane_for(&path);
+            let View { sort, show_hidden, filter } = &view;
             let update = match sk_fs::names(&path, cancel) {
                 Ok(found) => {
                     // The first sort happens **here**, on the job, not when the
@@ -294,12 +320,13 @@ impl Pane {
                     // rule 1's canonical failure.
                     let mut listing = found.listing;
                     let started = std::time::Instant::now();
-                    listing.set_order(listing.compute_order(sort, show_hidden, &filter));
+                    listing.set_order(listing.compute_order(*sort, *show_hidden, filter));
                     Update::Names {
                         listing: Box::new(listing),
                         names: found.names,
                         elapsed_us: found.elapsed_us,
                         sort_us: started.elapsed().as_micros() as u64,
+                        view: view.clone(),
                         lane,
                     }
                 }
@@ -406,7 +433,7 @@ impl Pane {
             return false;
         }
         match message.update {
-            Update::Names { listing, names, elapsed_us, sort_us, lane } => {
+            Update::Names { listing, names, elapsed_us, sort_us, view, lane } => {
                 self.carry_selection(&listing);
                 self.listing = *listing;
                 self.names_us = elapsed_us;
@@ -414,6 +441,10 @@ impl Pane {
                 self.lane = lane;
                 self.restore_cursor();
                 self.dispatch_metadata(&names, jobs);
+                // Sorted, filtered or unhidden while the read was in flight.
+                if view != self.view() {
+                    self.reorder(jobs);
+                }
             }
             Update::Meta(rows) => {
                 let mut kinds_changed = false;
@@ -460,6 +491,10 @@ impl Pane {
                 self.listing.set_order(order);
                 self.restore_cursor();
                 self.forget_hidden_cursor();
+                // A request that arrived while this one was running.
+                if std::mem::take(&mut self.reorder_owed) {
+                    self.reorder(jobs);
+                }
             }
             Update::Failed(problem) => {
                 self.loading = false;
@@ -484,11 +519,15 @@ impl Pane {
             return;
         }
         if self.sorting {
-            // A second request while one is in flight would race to publish. The
-            // pending one is discarded and this one replaces it, because what the
-            // user last asked for is what they want to see.
-            self.sort_cancel.cancel();
-            self.sort_cancel = Cancel::new();
+            // **One at a time, and the last request wins.** Cancelling and
+            // starting another does not stop the one in flight —
+            // `Listing::compute_order` is a `sort_unstable_by` and cannot be
+            // interrupted part way — so a filter being backspaced at the key
+            // repeat rate queued seven concurrent 272 ms sorts and seven 10 MB
+            // clones to feed them. Owed instead: `apply` starts the next one when
+            // this one lands, with whatever the parameters are by then.
+            self.reorder_owed = true;
+            return;
         }
         self.sorting = true;
         self.sort_epoch += 1;
@@ -501,7 +540,10 @@ impl Pane {
         let wake = jobs.wake.clone();
         let generation = self.generation;
         let epoch = self.sort_epoch;
-        jobs.pool.spawn(self.lane, self.sort_cancel.clone(), move |cancel| {
+        // `Parallel`, not the pane's lane: a sort touches no device, and queueing
+        // pure CPU work behind a network mount's `statx` chunks is how metadata
+        // stops landing while a filter is being typed.
+        jobs.pool.spawn(Lane::Parallel, self.sort_cancel.clone(), move |cancel| {
             let started = std::time::Instant::now();
             let order = snapshot.compute_order(sort, show_hidden, &filter);
             if cancel.is_cancelled() {
@@ -523,6 +565,12 @@ impl Pane {
         self.reorder(jobs);
     }
 
+    /// What the display order is currently derived from.
+    #[must_use]
+    pub fn view(&self) -> View {
+        View { sort: self.sort, show_hidden: self.show_hidden, filter: self.filter.clone() }
+    }
+
     /// Narrows the list to names containing `filter`. Returns whether it moved.
     ///
     /// The selection is left alone. An `EntryId` still names the same file, and
@@ -535,6 +583,15 @@ impl Pane {
         self.filter = filter;
         self.reorder(jobs);
         self.forget_hidden_cursor();
+        // A cursor the filter hid leaves nothing focused, and `Enter` on a list
+        // showing exactly one match then did nothing at all — the command's
+        // `enabled` reads `focused()`, which falls back to a selection that is
+        // usually empty. The first row is the only defensible answer.
+        if self.selection.cursor().is_none()
+            && let Some(first) = self.listing.at(0)
+        {
+            self.selection.set_cursor(Some(first));
+        }
         true
     }
 
@@ -940,6 +997,51 @@ mod tests {
         );
         let cursor = pane.selection.cursor().expect("a cursor on the folder we came out of");
         assert_eq!(pane.listing.name(cursor), "sub");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A person can sort, filter or press `Ctrl+H` while a directory is still
+    /// being read. The read captured the old parameters, so the arriving listing
+    /// used to overwrite what they had asked for and nothing re-synced — the
+    /// status line said `3 of 200 items match "abc"` over an unfiltered list.
+    #[test]
+    fn a_filter_typed_while_a_directory_loads_is_applied_when_it_lands() {
+        let root = fixture("mid-load");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        // Before a single message is applied, which is where the window is for
+        // the first frames of any directory large enough to notice.
+        pane.set_filter("parent".to_owned(), &harness.jobs);
+        harness.settle(&mut pane);
+
+        assert_eq!(
+            names_of(&pane),
+            vec!["parent-one.txt", "parent-three.txt", "parent-two.txt"],
+            "the listing landed unfiltered over a filter that was already set"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// And the filter does not follow you into the next directory: it narrows
+    /// *this* one, and arriving somewhere that silently hides most of what is
+    /// there is not a view, it is a trap.
+    #[test]
+    fn navigating_clears_the_filter() {
+        let root = fixture("filter-nav");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        pane.set_filter("sub".to_owned(), &harness.jobs);
+        harness.settle(&mut pane);
+        assert_eq!(names_of(&pane), vec!["sub"]);
+
+        pane.open(root.join("sub"), &harness.jobs);
+        harness.settle(&mut pane);
+        assert!(pane.filter.is_empty(), "the filter followed the navigation");
+        assert_eq!(names_of(&pane).len(), 4);
         let _ = std::fs::remove_dir_all(&root);
     }
 

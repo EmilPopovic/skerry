@@ -55,8 +55,24 @@ struct Pattern {
 pub struct MimeDatabase {
     /// Lowercased extension without the dot, to (weight, type).
     extensions: HashMap<String, (u32, String)>,
-    /// Whole filenames, like `Makefile`.
+    /// Extensions whose `globs2` line carried the `cs` flag, kept in the case
+    /// they were written in and consulted first.
+    ///
+    /// **`*.C` is C++ and `*.c` is C**, and both are weight 50. Folding them into
+    /// one key made the first line read win, and `/usr/share/mime/globs2` has
+    /// `*.C` at line 1118 and `*.c` at 1352 — so every C source file on the
+    /// machine was typed as C++ and opened with whatever handles C++.
+    cased: HashMap<String, (u32, String)>,
+    /// Whole filenames, like `makefile`, **lowercased**.
+    ///
+    /// Folded for the same reason the extensions are: `globs2` spells it
+    /// `makefile` with no `cs` flag, and a specification-conformant reader
+    /// matches a flagless glob without regard to case. Keyed as written, a file
+    /// called `Makefile` — which is what every one of them is called — had no
+    /// type at all.
     literals: HashMap<String, (u32, String)>,
+    /// Whole filenames whose glob carried `cs`, kept as written.
+    cased_literals: HashMap<String, (u32, String)>,
     /// Everything else, matched in order of weight.
     patterns: Vec<Pattern>,
 }
@@ -91,32 +107,43 @@ impl MimeDatabase {
             else {
                 continue;
             };
-            // The optional fourth field is flags such as `cs` for case
-            // sensitivity, and it is separated from the glob by another colon.
-            // A glob may not contain one, so splitting again is safe.
-            let glob = glob.split(':').next().unwrap_or(glob);
+            // The optional fourth field is flags, separated from the glob by
+            // another colon. A glob may not contain one, so splitting again is
+            // safe. `cs` means the glob is case-sensitive, which is the only
+            // flag the specification defines that changes a lookup.
+            let (glob, flags) = glob.split_once(':').unwrap_or((glob, ""));
+            let cased = flags.split(',').any(|flag| flag == "cs");
             let Ok(weight) = weight.parse::<u32>() else { continue };
             if glob.is_empty() || mime.is_empty() {
                 continue;
             }
-            self.insert(weight, mime, glob);
+            self.insert(weight, mime, glob, cased);
         }
     }
 
-    fn insert(&mut self, weight: u32, mime: &str, glob: &str) {
+    fn insert(&mut self, weight: u32, mime: &str, glob: &str, cased: bool) {
         // `*.ext` is the overwhelming majority and becomes a hash lookup.
         if let Some(extension) =
             glob.strip_prefix("*.").filter(|rest| !rest.contains(['*', '?', '[']))
         {
-            let key = extension.to_ascii_lowercase();
-            let entry = self.extensions.entry(key).or_insert((0, String::new()));
+            let (map, key) = if cased {
+                (&mut self.cased, extension.to_owned())
+            } else {
+                (&mut self.extensions, extension.to_ascii_lowercase())
+            };
+            let entry = map.entry(key).or_insert((0, String::new()));
             if entry.1.is_empty() || weight > entry.0 {
                 *entry = (weight, mime.to_owned());
             }
             return;
         }
         if !glob.contains(['*', '?', '[']) {
-            let entry = self.literals.entry(glob.to_owned()).or_insert((0, String::new()));
+            let (map, key) = if cased {
+                (&mut self.cased_literals, glob.to_owned())
+            } else {
+                (&mut self.literals, glob.to_ascii_lowercase())
+            };
+            let entry = map.entry(key).or_insert((0, String::new()));
             if entry.1.is_empty() || weight > entry.0 {
                 *entry = (weight, mime.to_owned());
             }
@@ -139,12 +166,30 @@ impl MimeDatabase {
     /// The type of a file with this name, by name alone.
     #[must_use]
     pub fn by_name(&self, name: &str) -> Option<&str> {
-        if let Some((_, mime)) = self.literals.get(name) {
+        if let Some((_, mime)) = self.cased_literals.get(name) {
             return Some(mime);
         }
-        // Longest extension first, so `.tar.gz` beats `.gz`.
-        let lower = name.to_ascii_lowercase();
+        let lowered = name.to_ascii_lowercase();
+        if let Some((_, mime)) = self.literals.get(&lowered) {
+            return Some(mime);
+        }
+        // Longest extension first, so `.tar.gz` beats `.gz`. The case-sensitive
+        // map is consulted with the name as written and wins outright, because a
+        // `cs` glob is the specification saying the case *is* the distinction.
+        let lower = lowered;
         let mut best: Option<(u32, usize, &str)> = None;
+        for (index, _) in name.match_indices('.') {
+            let extension = &name[index + 1..];
+            if let Some((weight, mime)) = self.cased.get(extension) {
+                let candidate = (*weight, extension.len(), mime.as_str());
+                if best.is_none_or(|current| candidate > current) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        if let Some((_, _, mime)) = best {
+            return Some(mime);
+        }
         for (index, _) in lower.match_indices('.') {
             let extension = &lower[index + 1..];
             if let Some((weight, mime)) = self.extensions.get(extension) {
@@ -332,6 +377,36 @@ mod tests {
         }
     }
 
+    /// `*.C:cs` is C++ and `*.c:cs` is C, both at weight 50. Folded into one
+    /// key, the first line read won — and `/usr/share/mime/globs2` has `*.C` at
+    /// line 1118 and `*.c` at 1352, so every C source file on the machine was
+    /// typed as C++ and opened with whatever handles C++.
+    #[test]
+    fn a_case_sensitive_glob_distinguishes_the_case_it_was_written_in() {
+        let mut database = MimeDatabase::default();
+        database.absorb("50:text/x-c++src:*.C:cs\n50:text/x-csrc:*.c:cs\n");
+        assert_eq!(database.by_name("main.c"), Some("text/x-csrc"));
+        assert_eq!(database.by_name("main.C"), Some("text/x-c++src"));
+
+        // A glob with no `cs` still folds, which is every other line in the file.
+        database.absorb("50:image/png:*.PNG\n");
+        assert_eq!(database.by_name("photo.png"), Some("image/png"));
+        assert_eq!(database.by_name("photo.PNG"), Some("image/png"));
+
+        // And a case-sensitive glob that does not match falls through to the
+        // folded map rather than stopping the search.
+        database.absorb("50:text/plain:*.txt\n");
+        assert_eq!(database.by_name("notes.TXT"), Some("text/plain"));
+
+        // A whole-filename glob folds too, which is how `Makefile` gets a type:
+        // `globs2` spells it `makefile` and does not flag it.
+        database.absorb("50:text/x-makefile:makefile\n50:text/x-lisp:MAKEFILE.LISP:cs\n");
+        assert_eq!(database.by_name("Makefile"), Some("text/x-makefile"));
+        assert_eq!(database.by_name("makefile"), Some("text/x-makefile"));
+        assert_eq!(database.by_name("MAKEFILE.LISP"), Some("text/x-lisp"));
+        assert_eq!(database.by_name("makefile.lisp"), None, "a cs glob is not folded");
+    }
+
     /// Two data directories offering the same pattern at the same weight: the
     /// one read first wins, which is `$XDG_DATA_HOME`. `max_by_key` returns the
     /// last maximum and so gave `/usr/share`, silently inverting the precedence
@@ -385,7 +460,13 @@ mod tests {
     fn a_literal_name_beats_having_no_extension_at_all() {
         let database = database();
         assert_eq!(database.by_name("Makefile"), Some("text/x-makefile"));
-        assert_eq!(database.by_name("makefile"), None, "the literal is case-sensitive");
+        // **Case-insensitive**, and this assertion used to say the opposite.
+        // shared-mime-info matches a glob without the `cs` flag without regard
+        // to case; the installed `globs2` spells this one `makefile`, so keying
+        // it as written gave a file called `Makefile` — which is what every one
+        // of them is called — no type at all.
+        assert_eq!(database.by_name("makefile"), Some("text/x-makefile"));
+        assert_eq!(database.by_name("MAKEFILE"), Some("text/x-makefile"));
     }
 
     #[test]

@@ -139,7 +139,15 @@ pub struct Listing {
 /// Unicode case folding is a table, and it belongs with the search work rather
 /// than with a substring test. A Turkish `İ` therefore matches only itself.
 fn contains_folded(haystack: &str, needle: &str) -> bool {
+    // Byte windows, and both sides folded by the comparison: a multi-byte
+    // character is a sequence of bytes that `eq_ignore_ascii_case` leaves alone,
+    // so it matches itself and nothing else.
     let (hay, needle) = (haystack.as_bytes(), needle.as_bytes());
+    // `windows(0)` panics. The only caller short-circuits on an empty filter, so
+    // this is a guard against the second caller rather than against today.
+    if needle.is_empty() {
+        return true;
+    }
     if needle.len() > hay.len() {
         return false;
     }
@@ -382,13 +390,16 @@ impl Listing {
     /// the frame loop.
     #[must_use]
     pub fn compute_order(&self, sort: Sort, show_hidden: bool, filter: &str) -> Vec<EntryId> {
-        // Folded once rather than per entry: at 200,000 names the needle would
-        // otherwise be lowercased 200,000 times to be compared against one.
-        let needle = filter.to_lowercase();
+        // **Not lowercased.** `contains_folded` compares with
+        // `eq_ignore_ascii_case`, which folds both sides — so folding one of them
+        // first is folding it twice for ASCII and once for everything else. With
+        // the needle lowercased, `Ä` matched `äpfel` and not `Äpfel`, and
+        // `İstanbul` matched nothing at all.
+        let needle = filter;
         let mut order: Vec<EntryId> = (0..self.name.len() as u32)
             .map(EntryId)
             .filter(|id| show_hidden || !self.flags[id.index()].has(Flags::HIDDEN))
-            .filter(|id| needle.is_empty() || contains_folded(self.name(*id), &needle))
+            .filter(|id| needle.is_empty() || contains_folded(self.name(*id), needle))
             .collect();
 
         let (names, name_refs, mtime, flags) = (&self.names, &self.name, &self.mtime, &self.flags);
@@ -396,8 +407,16 @@ impl Listing {
         // Resolved once rather than per comparison: a sort does O(n log n)
         // comparisons and this is O(n), so the branch on "is it a directory"
         // happens two hundred thousand times instead of three million.
-        let sizes: Vec<u64> =
-            (0..self.name.len()).map(|index| self.sort_size(EntryId(index as u32))).collect();
+        //
+        // And only when the comparison reads it. A name sort never does, and a
+        // name sort is what every keystroke of a filter re-runs — on the frame
+        // loop below `SORT_INLINE`, where a 200,000-element pass nobody looks at
+        // is the whole of the cost.
+        let sizes: Vec<u64> = if sort.column == SortColumn::Size {
+            (0..self.name.len()).map(|index| self.sort_size(EntryId(index as u32))).collect()
+        } else {
+            Vec::new()
+        };
 
         order.sort_unstable_by(|a, b| {
             let (a, b) = (a.index(), b.index());
@@ -515,6 +534,8 @@ mod tests {
         // Case-insensitive, and a substring rather than a prefix.
         listing.reorder(Sort::default(), false, "MAKE");
         assert_eq!(names(&listing), vec!["Makefile"]);
+        listing.reorder(Sort::default(), false, "make");
+        assert_eq!(names(&listing), vec!["Makefile"]);
         listing.reorder(Sort::default(), false, "PNG");
         assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
 
@@ -525,6 +546,26 @@ mod tests {
         // And an empty filter is every row back, in the order it had.
         listing.reorder(Sort::default(), false, "");
         assert_eq!(names(&listing), vec!["src", "img2.png", "img10.png", "Makefile"]);
+    }
+
+    /// ASCII folds both ways or neither. Lowercasing the needle and then
+    /// comparing with `eq_ignore_ascii_case` folded one side twice and the other
+    /// once: `Ä` found `äpfel` and hid `Äpfel`, and `İstanbul` was unreachable.
+    #[test]
+    fn a_non_ascii_capital_matches_itself_rather_than_only_its_lowercase() {
+        let mut listing = Listing::default();
+        for name in ["Äpfel", "äpfel", "İstanbul", "Istanbul"] {
+            listing.push(name, Flags::NONE);
+        }
+        listing.reorder(Sort::default(), false, "Ä");
+        assert_eq!(names(&listing), vec!["Äpfel"]);
+        listing.reorder(Sort::default(), false, "ä");
+        assert_eq!(names(&listing), vec!["äpfel"]);
+        listing.reorder(Sort::default(), false, "İ");
+        assert_eq!(names(&listing), vec!["İstanbul"]);
+        // And ASCII still folds, which is the bargain this is trading against.
+        listing.reorder(Sort::default(), false, "ISTAN");
+        assert_eq!(names(&listing), vec!["Istanbul"]);
     }
 
     /// A filter and the hidden flag are separate questions, and a dotfile that
