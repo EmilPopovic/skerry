@@ -104,6 +104,22 @@ before, and it is a real cost the old harness was constructed not to see:
 
 `skerry --bench` reports it as its own row so it cannot be averaged away.
 
+**And it moves with the machine's load, which is why it is written down twice.**
+The 2.5–5.0 ms above was taken on an idle machine. Ten runs later, five of the
+same binary and five of the commit before the operations landed, back to back at
+a one-minute load average of **2.3**: **3.6–4.9 ms before and 3.5–6.1 ms after**,
+with `p99` identical at 0.64–0.89 ms and no frame over 8 ms in any of the ten. An
+earlier set of three at the same load produced one **9.6 ms** frame, which is the
+first breach on this machine at nice 0 — one frame of 599, in the window where a
+200,000-entry read lands, and it did not recur in the ten runs after it.
+
+Two things follow, and neither is a widened budget. The row stays at 8 ms
+because [12-measurement.md](12-measurement.md#the-bar-is-quoted-before-the-code-and-never-adjusted-after)
+says a bar is not adjusted after the fact. And the one frame in the product that
+is anywhere near the budget is the one that shares a machine with whatever else
+is running, so **it is the frame to fix first** when M3's queue makes the read
+concurrent with an operation.
+
 **What the sidebar and the toolbar cost: below what this machine could resolve
 at the time.** Seven runs with a load average of **4.4** — a browser, an editor
 and this repository's own tooling — gave a best p50 of 0.210 ms against 0.191–0.205
