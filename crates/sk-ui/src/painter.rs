@@ -60,41 +60,85 @@ impl TextStyle {
     }
 }
 
+/// How wide `text` is when shaped, in device pixels.
+///
+/// The run comes out of the same cache the draw will use, so measuring a string
+/// before drawing it costs a hash lookup.
+#[must_use]
+pub fn advance_of(
+    cache: &mut LayoutCache,
+    fonts: &mut Fonts,
+    text: &str,
+    weight: Weight,
+    px_size: f32,
+) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    cache.get_or_shape_label(text, weight, px_size, fonts).advance
+}
+
 /// Which byte offset in `text` is nearest `want` device pixels from its start.
 ///
-/// Measured by shaping prefixes, which is O(characters) shapings for one click on
-/// one filename — and correct where arithmetic over glyph advances is not,
-/// because a cluster is not a character and a ligature is not two. Nothing here
-/// runs per frame.
+/// **Shaped, not counted, and binary-searched rather than scanned.** A cluster is
+/// not a character and a ligature is not two, so the only correct answer comes
+/// from shaping — but shaping *every* prefix is O(n) shapings of O(n) work each,
+/// on the UI thread inside a click handler, over a string bounded by `PATH_MAX`
+/// and not by a filename. Release build, 500 clicks each, one click costing:
+///
+/// | characters | scanned | searched |
+/// | --- | --- | --- |
+/// | 26 | 133 µs | 47 µs |
+/// | 49 | 460 µs | 87 µs |
+/// | 128 | **3.10 ms** | 257 µs |
+/// | 252 | **11.96 ms** | 564 µs |
+///
+/// The two in bold are a click that costs more than the whole 8 ms frame budget,
+/// and a path of either length is ordinary.
+///
+/// Deliberately **not** through the layout cache: each prefix is a distinct
+/// string, the cache holds 256 of them and clears wholesale at the cap, so one
+/// click used to evict every chrome string in the window and the next frame
+/// re-shaped all of them.
 ///
 /// A free function rather than only a [`Painter`] method because the caller that
-/// needs it most is an event handler, which has the cache and the faces and no
-/// frame to draw into.
+/// needs it most is an event handler, which has the faces and no frame to draw
+/// into.
 #[must_use]
 pub fn caret_offset(
-    cache: &mut LayoutCache,
     fonts: &mut Fonts,
     text: &str,
     style: TextStyle,
     px_size: f32,
     want: f32,
 ) -> usize {
-    if want <= 0.0 {
+    if want <= 0.0 || text.is_empty() {
         return 0;
     }
-    let mut best = (0usize, f32::MAX);
-    for (offset, _) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
-        let advance = if offset == 0 {
-            0.0
+    let advance = |fonts: &mut Fonts, offset: usize| {
+        if offset == 0 { 0.0 } else { fonts.shape(&text[..offset], px_size, style.weight).advance }
+    };
+    // Both ends are always character boundaries, and the midpoint is walked back
+    // to one — a caret that lands inside `é` panics on the next slice.
+    let mut low = 0usize;
+    let mut high = text.len();
+    while high - low > 1 {
+        let mut mid = usize::midpoint(low, high);
+        while mid > low && !text.is_char_boundary(mid) {
+            mid -= 1;
+        }
+        if mid == low {
+            break;
+        }
+        if advance(fonts, mid) <= want {
+            low = mid;
         } else {
-            cache.get_or_shape_label(&text[..offset], style.weight, px_size, fonts).advance
-        };
-        let distance = (advance - want).abs();
-        if distance < best.1 {
-            best = (offset, distance);
+            high = mid;
         }
     }
-    best.0
+    let before = advance(fonts, low);
+    let after = advance(fonts, high);
+    if (want - before).abs() <= (after - want).abs() { low } else { high }
 }
 
 /// Everything one frame's drawing needs, borrowed for the length of the frame.
@@ -185,12 +229,6 @@ impl Painter<'_> {
         align: Align,
     ) -> f32 {
         self.draw(Source::Cell(key), text, box_rect, baseline, color, align)
-    }
-
-    /// Which byte offset in `text` a click at `x` is nearest.
-    #[must_use]
-    pub fn caret_at(&mut self, text: &str, style: TextStyle, from: f32, x: f32) -> usize {
-        caret_offset(self.cache, self.fonts, text, style, self.px(style.size), x - from)
     }
 
     /// Draws a chrome string — a path, a header, a status line — keyed by its
@@ -426,8 +464,9 @@ fn ellipsis_key(px_size: f32) -> RunKey {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::ellipsis_key;
-    use sk_text::{RunKey, Weight};
+    use super::{TextStyle, caret_offset, ellipsis_key};
+    use sk_gpu::Color;
+    use sk_text::{Fonts, RunKey, Weight};
 
     /// `sk_model::Listing`'s version counter starts at one, so listing zero is
     /// reserved and nothing real can collide with the ellipsis.
@@ -439,5 +478,58 @@ mod tests {
         assert_ne!(ellipsis, RunKey::cell(u32::MAX, 0, 0, Weight::Regular, 13.0));
         assert_eq!(ellipsis, ellipsis_key(13.0), "and it is stable at one size");
         assert_ne!(ellipsis, ellipsis_key(16.25), "and distinct across sizes");
+    }
+
+    /// The binary search has to give the answer the scan gave, character for
+    /// character — including on a string where a character is two bytes and one
+    /// where two characters are one cluster.
+    #[test]
+    fn a_caret_lands_where_shaping_every_prefix_would_have_put_it() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let style = TextStyle::new(13.0, Color::hex(0xffffff));
+        let px_size = 13.0;
+        for text in [
+            "report.pdf",
+            "café-étude.txt",
+            "/home/emil/repos/skerry/crates/sk-app/src/view.rs",
+            "a",
+            "",
+        ] {
+            // Every character boundary, and a point either side of each.
+            let boundaries: Vec<usize> =
+                text.char_indices().map(|(at, _)| at).chain(std::iter::once(text.len())).collect();
+            let advance = |fonts: &mut Fonts, offset: usize| {
+                if offset == 0 {
+                    0.0
+                } else {
+                    fonts.shape(&text[..offset], px_size, style.weight).advance
+                }
+            };
+            for want_at in &boundaries {
+                let want = advance(&mut fonts, *want_at);
+                // The scan the search replaced, kept here as the oracle.
+                let mut best = (0usize, f32::MAX);
+                for offset in &boundaries {
+                    let distance = (advance(&mut fonts, *offset) - want).abs();
+                    if distance < best.1 {
+                        best = (*offset, distance);
+                    }
+                }
+                let found = caret_offset(&mut fonts, text, style, px_size, want);
+                // The offsets may differ where two of them are the same width —
+                // a zero-width joiner, a combining mark — and the *answer* is
+                // the position, so that is what is compared.
+                let (mine, theirs) = (advance(&mut fonts, found), advance(&mut fonts, best.0));
+                assert!(
+                    (mine - theirs).abs() < 0.01,
+                    "{text:?} at {want}: {found} rather than {}",
+                    best.0
+                );
+                assert!(text.is_char_boundary(found), "{text:?}: {found} is inside a character");
+            }
+            // Off either end, and never a panic.
+            assert_eq!(caret_offset(&mut fonts, text, style, px_size, -10.0), 0);
+            assert_eq!(caret_offset(&mut fonts, text, style, px_size, 1e6), text.len());
+        }
     }
 }

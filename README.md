@@ -29,7 +29,7 @@ method, and the three budget rows that are currently missed are in
 Three harnesses assert about things a unit test cannot reach, and each of them found a
 defect nothing else could: `tools/golden` compares ten rendered frames to committed
 references on lavapipe, `tools/gui-test` presses keys and moves a pointer through
-thirty-eight scenarios in a nested compositor — one of which mounts a filesystem in a
+forty-one scenarios in a nested compositor — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
 filesystem torture matrix that is a CI job rather than thrown-away spike code.
 

@@ -89,15 +89,17 @@ fn sample_menu(layout: &Layout) -> Option<crate::menu::Menu> {
     Some(menu)
 }
 
-/// The path bar as a field, with the caret a third of the way along it.
+/// The path bar as a field, with the caret five sixths of the way along it.
 ///
-/// Not at either end: the caret's position is the shaped width of the text
-/// before it, and a caret at offset zero or at the end would be in the right
-/// place even if that measurement were wrong.
+/// **Not at either end, and not in the middle.** The caret's position is the
+/// shaped width of the text before it, so a caret at offset zero or at the end
+/// would be in the right place even if that measurement were wrong; and far
+/// enough along that the narrow frame has to scroll the text to show it, which
+/// is the arithmetic that keeps a caret from being drawn outside its own box.
 fn sample_path_entry(path: &std::path::Path) -> crate::field::Field {
     let mut field = crate::field::Field::new(path.to_string_lossy().into_owned());
     field.jump(false);
-    for _ in 0..field.text.chars().count() / 3 {
+    for _ in 0..field.text.chars().count() * 5 / 6 {
         field.step(true);
     }
     field
@@ -191,6 +193,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
     // so a capture is never an image with holes in the text.
+    let keyboard_hint = crate::commands::hint(&crate::commands::registry());
     let mut stats = FrameStats::default();
     for pass in 0..MAX_PASSES {
         if pass >= 2 && session.renderer.pending_uploads() == 0 {
@@ -249,6 +252,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 },
                 menu: menu.as_ref(),
                 path_entry: path_entry.as_ref(),
+                hint: &keyboard_hint,
             };
             view::draw(
                 &mut painter,

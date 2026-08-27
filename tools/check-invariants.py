@@ -83,6 +83,76 @@ def source_check(report: Report) -> None:
                 report.fail(f"{rel(source)}:{number}", "wgpu must not leak above sk-gpu — ADR 0003")
 
 
+# Every string a person can see goes through the catalogue, and a key that is not
+# in it resolves to itself — so a typo ships as `notice.trashed` on screen.
+CATALOGUE = ROOT / "crates/sk-model/catalogue/en.txt"
+STRING_KEY = re.compile(
+    r'(?:i18n::lookup|i18n::format|\blookup|\bformat|t!)\(\s*"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"'
+)
+
+
+def catalogue_check(report: Report) -> None:
+    """Every catalogue key a source file asks for exists.
+
+    A missing key is not an error at run time: `lookup` returns the key, so the
+    window shows `notice.trashed` where it meant to show a sentence. Command
+    names are covered by `every_command_is_reachable_and_named` instead, which
+    asserts a name did not resolve to its own id.
+    """
+    keys = set()
+    for line in CATALOGUE.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            keys.add(line.split("=", 1)[0].strip())
+    for source in rust_sources("crates", "bin"):
+        for number, line in enumerate(source.read_text().splitlines(), 1):
+            if suppressed(line, "missing-string"):
+                continue
+            for key in STRING_KEY.findall(line):
+                if key not in keys:
+                    report.fail(
+                        f"{rel(source)}:{number}",
+                        f"`{key}` is not in the catalogue, so it would show as itself",
+                    )
+
+
+def spliced_comment_check(report: Report) -> None:
+    """A doc comment that has been left on the wrong item.
+
+    Inserting a function above an existing one, with no blank line between the
+    two comments, gives the new item the old one's comment and leaves the old one
+    with none. It has happened six times in this repository, twice unnoticed for
+    a commit, and `missing_docs` only catches the cases where the orphaned item
+    is public.
+
+    The shape is precise: this project's doc comments are a one-line summary, a
+    blank `///`, then prose — so a summary line followed immediately by the start
+    of another sentence is two comments that have been run together. Measured
+    against the whole tree when this was written: two hits, both real, no false
+    positives.
+    """
+    for source in rust_sources("crates", "bin"):
+        lines = source.read_text().splitlines()
+        index = 0
+        while index < len(lines):
+            if not lines[index].strip().startswith("///"):
+                index += 1
+                continue
+            start = index
+            while index < len(lines) and lines[index].strip().startswith("///"):
+                index += 1
+            run = [line.strip().removeprefix("///").strip() for line in lines[start:index]]
+            if len(run) < 2 or not run[0].endswith(".") or not run[1]:
+                continue
+            words = run[1].lstrip("*`[").split()
+            if words and words[0][:1].isupper() and not suppressed(lines[start + 1], "two-summaries"):
+                report.fail(
+                    f"{rel(source)}:{start + 1}",
+                    "a summary line followed by another sentence — two doc comments run "
+                    "together, and the item below the first one has none",
+                )
+
+
 def adr_immutability_check(report: Report) -> None:
     """ADRs record what was decided when. A changed decision is a new ADR."""
     changed = git("diff", "--name-only", "HEAD", "--", "docs/adr")
@@ -101,9 +171,14 @@ def run() -> int:
     feature_flag_check(report)
     lint_header_check(report)
     source_check(report)
+    spliced_comment_check(report)
+    catalogue_check(report)
     adr_immutability_check(report)
     if not report.failures:
-        report.note("banned crates, capability flags, crate lints, GPU seam, ADR immutability")
+        report.note(
+            "banned crates, capability flags, crate lints, GPU seam, doc comments, "
+            "catalogue keys, ADR immutability"
+        )
     return report.finish()
 
 

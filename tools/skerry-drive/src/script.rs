@@ -298,10 +298,8 @@ fn keycode(name: &str) -> Option<u32> {
         ("minus", 12),
     ];
     /// Every key a US layout produces without Shift, as the character itself, so
-    /// `text my-file.txt` types a filename rather than refusing one. The shifted
-    /// half — `_`, `~`, `!` — is deliberately absent: it needs Shift held, which
-    /// `character_action` only does for letters, and refusing it with the message
-    /// it already has beats typing the wrong character.
+    /// `text my-file.txt` types a filename rather than refusing one. `SHIFTED`
+    /// above is the other half of the same keyboard.
     const PUNCTUATION: [(&str, u32); 11] = [
         ("-", 12),
         ("=", 13),

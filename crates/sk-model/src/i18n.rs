@@ -111,9 +111,13 @@ mod tests {
         }
     }
 
+    /// A key with no line in the catalogue shows as the key. That is the fallback
+    /// a translator's incomplete file needs, and it is the reason
+    /// `tools/check-invariants.py` fails the build on a key that is not there —
+    /// nothing at run time will.
     #[test]
     fn a_missing_key_renders_as_itself() {
-        assert_eq!(lookup("nothing.here"), "nothing.here");
+        assert_eq!(lookup("nothing.here"), "nothing.here"); // skerry-allow: missing-string
     }
 
     #[test]

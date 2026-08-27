@@ -224,7 +224,11 @@ impl Thread {
                 let mut buffer = [0u8; 8];
                 let _ = rustix::io::read(self.control.as_fd(), &mut buffer);
             }
-            let remounted = fds.get(2).is_some_and(|fd| !fd.revents().is_empty());
+            // **`PRI` specifically.** `POLLERR`, `POLLHUP` and `POLLNVAL` are
+            // conditions a read of a proc file does not clear, so treating any
+            // of them as a mount would spin this thread and drag the frame loop
+            // out of its sleep at the same rate.
+            let remounted = fds.get(2).is_some_and(|fd| fd.revents().contains(PollFlags::PRI));
             let touched = fds[0].revents().contains(PollFlags::IN);
             // The borrows of the two descriptors end here, which is why the two
             // answers are taken before either handler runs.
@@ -248,9 +252,16 @@ impl Thread {
     /// clear is a thread that spins.
     fn mounted(&mut self) {
         let Some(table) = self.mounts.as_ref() else { return };
-        let _ = rustix::fs::seek(table.as_fd(), rustix::fs::SeekFrom::Start(0));
-        let mut buffer = [0u8; 4096];
-        while matches!(rustix::io::read(table.as_fd(), &mut buffer), Ok(read) if read > 0) {}
+        // **A read that fails drops the descriptor.** The read is what clears the
+        // poll condition, so one that cannot happen is a thread that spins; a
+        // sidebar whose volumes are a snapshot is the documented degradation for
+        // a machine with no `procfs`, and it is the right one here too.
+        let cleared = rustix::fs::seek(table.as_fd(), rustix::fs::SeekFrom::Start(0)).is_ok()
+            && drain_to_end(table.as_fd());
+        if !cleared {
+            self.mounts = None;
+            return;
+        }
         if self.changes.send(Change::Mounts).is_ok() {
             self.wake.wake();
         }
@@ -351,6 +362,19 @@ fn classify(event: &inotify::Event<'_>) -> Change {
         return Change::Vanished;
     }
     Change::Touched
+}
+
+/// Reads a descriptor to the end. `false` where a read failed.
+fn drain_to_end(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+    let mut buffer = [0u8; 4096];
+    loop {
+        match rustix::io::read(fd, &mut buffer) {
+            Ok(0) => return true,
+            // A signal that interrupted the read is not a read that failed.
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// The more serious of two changes.

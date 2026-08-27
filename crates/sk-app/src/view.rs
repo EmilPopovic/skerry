@@ -75,6 +75,8 @@ pub struct Chrome<'a> {
     pub menu: Option<&'a Menu>,
     /// The path being typed, which replaces the breadcrumbs while it is up.
     pub path_entry: Option<&'a Field>,
+    /// The keyboard hint in the corner of the path bar, from the registry.
+    pub hint: &'a str,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -198,7 +200,7 @@ fn path_bar(
     let hint_style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
     let hint_width = line(
         painter,
-        i18n::lookup("chrome.hint"),
+        chrome.hint,
         hint_style,
         layout.path.x,
         layout.path.width - metrics.gutter,
@@ -316,27 +318,7 @@ fn path_entry(painter: &mut Painter<'_>, layout: &Layout, field: &Field, baselin
     );
 
     let style = TextStyle::new(metrics.path_size, theme.palette.text);
-    let inner = painter.rect(area.x + PATH_INSET, 0.0, area.width - PATH_INSET * 2.0, 0.0);
-    // Clipped, because a path longer than the strip is ordinary and the field
-    // must not draw over the window buttons.
-    painter.list.push_clip(box_rect);
-    painter.label(&field.text, style, inner, baseline);
-
-    let before = field.before_caret();
-    let advance = if before.is_empty() {
-        0.0
-    } else {
-        let px_size = painter.px(style.size);
-        painter.cache.get_or_shape_label(before, style.weight, px_size, painter.fonts).advance
-    };
-    let caret = sk_gpu::Rect::new(
-        painter.snap(area.x + PATH_INSET) + advance,
-        painter.snap(area.y + 4.0),
-        painter.snap(1.5).max(1.0),
-        painter.px(area.height - 8.0),
-    );
-    painter.list.rect(caret, theme.palette.accent, 0.0);
-    painter.list.pop_clip();
+    field_text(painter, area, field, style, PATH_INSET, baseline);
 }
 
 /// Where the path field goes, for the draw and for the hit test.
@@ -392,8 +374,26 @@ fn crumb_width(painter: &mut Painter<'_>, name: &str, size: f32, bold: bool) -> 
 fn text_width(painter: &mut Painter<'_>, text: &str, size: f32, bold: bool) -> f32 {
     let px_size = painter.px(size);
     let weight = if bold { Weight::Bold } else { Weight::Regular };
-    painter.cache.get_or_shape_label(text, weight, px_size, painter.fonts).advance / painter.scale
+    sk_ui::advance_of(painter.cache, painter.fonts, text, weight, px_size) / painter.scale
 }
+
+/// How far a field's text is shifted left so the caret stays inside its box.
+///
+/// **Derived from the caret, not remembered.** A field here is a filename or a
+/// path, open for a few seconds: shifting just enough that the caret is inside
+/// the box needs no state, cannot get out of step with the text, and is the same
+/// arithmetic on the draw and on the hit test. The cost is that walking left from
+/// the end slides the text right rather than moving the caret, which is unusual
+/// and legible; the alternative was a caret drawn past the end of the box, or
+/// clipped away entirely, which is what `Ctrl+L` did on any path longer than the
+/// bar.
+#[must_use]
+pub fn field_scroll(caret: f32, room: f32) -> f32 {
+    (caret + CARET_PAD - room).max(0.0)
+}
+
+/// How much of the box is kept to the right of the caret.
+const CARET_PAD: f32 = 12.0;
 
 /// The context menu, over everything else.
 ///
@@ -472,26 +472,50 @@ fn name_field_at(
     );
 
     let style = TextStyle::new(metrics.text_size, theme.palette.text);
-    let inner = painter.rect(area.x + 6.0, 0.0, area.width - 12.0, 0.0);
-    painter.label(&naming.field.text, style, inner, baseline);
+    field_text(painter, area, &naming.field, style, NAME_INSET, baseline);
+}
 
-    // The caret is measured by shaping what is before it, which is the only
-    // answer that survives a ligature or a combining mark.
-    let before = naming.field.before_caret();
-    let advance = if before.is_empty() {
-        0.0
-    } else {
-        let px_size = painter.px(style.size);
-        painter.cache.get_or_shape_label(before, style.weight, px_size, painter.fonts).advance
-    };
+/// The text and the caret inside a field's box.
+///
+/// One implementation for the two fields, because the caret's position and the
+/// text's origin are the same number offset by the same scroll — and the two of
+/// them living in two functions is how a caret ends up two characters from the
+/// character it is between.
+fn field_text(
+    painter: &mut Painter<'_>,
+    area: Area,
+    field: &Field,
+    style: TextStyle,
+    inset: f32,
+    baseline: f32,
+) {
+    let theme = *painter.theme;
+    let room = area.width - inset * 2.0;
+    // Shaping what is before the caret is the only measurement that survives a
+    // ligature or a combining mark.
+    let before = text_width(painter, field.before_caret(), style.size, false);
+    let scroll = field_scroll(before, room);
+    let full = text_width(painter, &field.text, style.size, false);
+
+    // Clipped to the box, and drawn as wide as the text: `label` ellipsizes
+    // whatever will not fit its own rectangle, and an ellipsis in a field being
+    // typed into is a character that is not there.
+    let box_rect = painter.rect(area.x, area.y, area.width, area.height);
+    painter.list.push_clip(box_rect);
+    let inner = painter.rect(area.x + inset - scroll, 0.0, full.max(room) + scroll, 0.0);
+    painter.label(&field.text, style, inner, baseline);
     let caret = sk_gpu::Rect::new(
-        painter.snap(area.x + 6.0) + advance,
+        painter.snap(area.x + inset - scroll + before),
         painter.snap(area.y + 3.0),
         painter.snap(1.5).max(1.0),
         painter.px(area.height - 6.0),
     );
     painter.list.rect(caret, theme.palette.accent, 0.0);
+    painter.list.pop_clip();
 }
+
+/// The text inset inside the name field, shared by the draw and the hit test.
+pub const NAME_INSET: f32 = 6.0;
 
 /// Where the name field goes for a row: the name column, at that row's height.
 ///
@@ -1151,34 +1175,41 @@ fn type_ahead(painter: &mut Painter<'_>, layout: &Layout, typed: &str) {
 const MAX_KEY_STEP: f32 = 24.0;
 const MIN_KEY_STEP: f32 = 17.0;
 
-fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, String)]) {
-    let theme = *painter.theme;
-    let metrics = theme.metrics;
-    // **The shape follows the window, not the other way round.** Two columns and
-    // a fixed row height were hardcoded, and the overlay grows by a row every
-    // time a command is added: five arrived with the operations and the last six
-    // fell off the bottom of the screen — a keyboard list that cannot be read
-    // being the one surface rule 4 is about.
-    //
-    // Rows are given up before columns are added, because a column costs width
-    // and width is what the labels need: "Extend selection down" ellipsized into
-    // the next column's keys the first time this had three of them.
-    // **The window, not the list.** The overlay is a panel over everything and
-    // it already covers the path bar and the status line, so bounding it by the
-    // body threw away a hundred pixels and cost a whole column: at forty
-    // commands the three-column arrangement truncates "Extend selection down"
-    // and the two-column one does not.
-    let chrome = 76.0;
-    let available = (layout.window.height - 16.0 - chrome).max(chrome);
-    let count = entries.len().max(1);
+/// The title, the padding and the panel's own edges — everything in the keyboard
+/// list that is not a row.
+const KEY_CHROME: f32 = 76.0;
+
+/// The widest a column of the keyboard list is worth making.
+const KEY_COLUMN: f32 = 340.0;
+
+/// How many columns the keyboard list takes, how many rows each holds, and how
+/// tall a row is.
+///
+/// **Rows are given up before columns are added, and the panel never outgrows
+/// its own space.** A column costs the width the labels need — "Extend selection
+/// down" ellipsized into the next column's keys the first time this had three of
+/// them — and the list is the one surface rule 4 is about, so it may cover the
+/// path bar and the status line rather than lose a label. Past four columns the
+/// rows are squeezed below the minimum instead, because four columns of
+/// [`KEY_COLUMN`] is already wider than most windows and a cramped row can still
+/// be read where a row off the bottom of the panel cannot.
+fn keys_shape(count: usize, available: f32) -> (usize, usize, f32) {
+    let count = count.max(1);
     let columns = (1..=4)
         .find(|columns| count.div_ceil(*columns) as f32 * MIN_KEY_STEP <= available)
         .unwrap_or(4);
     let per_column = count.div_ceil(columns);
-    let step = MAX_KEY_STEP.min(available / per_column as f32).max(MIN_KEY_STEP);
+    let fits = available / per_column as f32;
+    (columns, per_column, fits.min(MAX_KEY_STEP).max(MIN_KEY_STEP.min(fits)))
+}
 
-    let width = (340.0 * columns as f32).min(layout.window.width - 40.0);
-    let height = per_column as f32 * step + chrome;
+fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, String)]) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let available = (layout.window.height - 16.0 - KEY_CHROME).max(KEY_CHROME);
+    let (columns, per_column, step) = keys_shape(entries.len(), available);
+    let width = (KEY_COLUMN * columns as f32).min(layout.window.width - 40.0);
+    let height = per_column as f32 * step + KEY_CHROME;
     let area = Area {
         x: ((layout.window.width - width) / 2.0).max(0.0),
         y: ((layout.window.height - height) / 2.0).max(8.0),
@@ -1344,7 +1375,10 @@ fn fill(painter: &mut Painter<'_>, area: Area, color: Color) {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Chrome, Diagnostics, Hits, crumb_names, draw};
+    use super::{
+        CARET_PAD, Chrome, Diagnostics, Hits, KEY_CHROME, MAX_KEY_STEP, MIN_KEY_STEP, crumb_names,
+        draw, field_scroll, keys_shape,
+    };
     use crate::frames::Frames;
     use crate::layout::Layout;
     use crate::pane::{Jobs, Pane};
@@ -1407,6 +1441,7 @@ mod tests {
                 window: sk_plat::WindowState::default(),
                 menu: None,
                 path_entry: None,
+                hint: "",
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test
@@ -1527,5 +1562,55 @@ mod tests {
         );
         assert_ne!(with_warm_cache, parent, "the child frame is the parent frame");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Ctrl+L` opens with the whole path and the caret at the end, and a path
+    /// longer than the bar is ordinary — so the field that could not scroll drew
+    /// an ellipsis where the caret was and every keystroke edited an invisible
+    /// tail.
+    #[test]
+    fn a_field_scrolls_only_as_far_as_the_caret_needs() {
+        // Room to spare: nothing moves, and the head of the text stays put.
+        assert!(field_scroll(0.0, 200.0).abs() < f32::EPSILON);
+        assert!(field_scroll(150.0, 200.0).abs() < f32::EPSILON);
+        // Past the edge: shifted just enough to leave the caret inside.
+        assert!((field_scroll(200.0, 200.0) - CARET_PAD).abs() < f32::EPSILON);
+        assert!((field_scroll(500.0, 200.0) - 300.0 - CARET_PAD).abs() < f32::EPSILON);
+        // A box with no room shifts by the pad and clips to nothing, which is
+        // what a window narrower than its own chrome deserves — and never a
+        // negative shift, which would draw the text to the right of its box.
+        assert!(field_scroll(0.0, 0.0) >= 0.0);
+        assert!(field_scroll(0.0, -50.0) >= 0.0);
+    }
+
+    /// The keyboard list grows by a row every time a command is added, and it has
+    /// already lost its last six once. Whatever the count and whatever the
+    /// window, every row has to be inside the panel and the panel inside the
+    /// window.
+    #[test]
+    fn the_keyboard_list_always_fits_the_window_it_is_drawn_in() {
+        for height in [200.0f32, 300.0, 520.0, 720.0, 1400.0, 2160.0] {
+            let available = (height - 16.0 - KEY_CHROME).max(KEY_CHROME);
+            for count in [1usize, 12, 40, 41, 80, 200, 1000] {
+                let (columns, per_column, step) = keys_shape(count, available);
+                assert!((1..=4).contains(&columns), "{count} at {height}: {columns} columns");
+                assert!(
+                    columns * per_column >= count,
+                    "{count} at {height}: {columns}x{per_column} holds fewer than {count}"
+                );
+                assert!(step > 0.0, "{count} at {height}: a row of {step}");
+                assert!(step <= MAX_KEY_STEP, "{count} at {height}: a row of {step}");
+                let rows = per_column as f32 * step;
+                assert!(
+                    rows <= available + 0.01,
+                    "{count} at {height}: {rows} of rows in {available} of room"
+                );
+                // And the step is only squeezed below the minimum when four
+                // columns of the minimum genuinely will not fit.
+                if step < MIN_KEY_STEP {
+                    assert_eq!(columns, 4, "{count} at {height}: squeezed at {columns} columns");
+                }
+            }
+        }
     }
 }

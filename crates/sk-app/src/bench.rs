@@ -100,6 +100,27 @@ struct Trace {
     rasterized: usize,
 }
 
+/// What a trace draws that does not change between frames.
+struct Fixed {
+    types: sk_desktop::MimeDatabase,
+    places: Vec<crate::sidebar::Section>,
+    theme: Theme,
+    layout: Layout,
+    hint: String,
+}
+
+fn fixed(request: &Bench) -> Fixed {
+    let theme = Theme::dark();
+    let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
+    Fixed {
+        types: sk_desktop::MimeDatabase::load(),
+        places: crate::sidebar::sample(&request.path),
+        layout: Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, true),
+        theme,
+        hint: crate::commands::hint(&crate::commands::registry()),
+    }
+}
+
 /// Runs the trace and prints the result.
 pub fn run(request: &Bench) -> Result<(), Problem> {
     let mut session = Session::open(request.logical, request.scale_120)?;
@@ -108,16 +129,11 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
     let read_started = Instant::now();
     pane.reload(&session.jobs);
 
-    // The windowed loop asks the database once per visible row per frame, so a
-    // trace without one measures a frame the product does not draw.
-    let types = sk_desktop::MimeDatabase::load();
-    // The fixed set, for the same reason `--capture` uses it and one more: a
-    // trace without a sidebar measures a frame the window does not draw, and the
-    // sidebar narrows the list, which changes how many rows are visible.
-    let places = crate::sidebar::sample(&request.path);
-    let theme = Theme::dark();
-    let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
-    let layout = Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, true);
+    // Everything the trace draws that is not a row, built once. The windowed
+    // loop asks the MIME database once per visible row per frame and draws a
+    // sidebar that narrows the list, so a trace without either measures a frame
+    // the product does not draw.
+    let Fixed { types, places, theme, layout, hint } = fixed(request);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -195,6 +211,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 window: sk_plat::WindowState::default(),
                 menu: None,
                 path_entry: None,
+                hint: &hint,
             };
             view::draw(
                 &mut painter,

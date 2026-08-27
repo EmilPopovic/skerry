@@ -76,6 +76,10 @@ pub struct Edits {
     /// `New folder 2` on the job, and only the outcome says which.
     pub naming_owed: bool,
     pending: Option<Pending>,
+    /// Paths still to trash, next one last.
+    queue: Vec<PathBuf>,
+    /// How many were asked for, so the notice can count them.
+    queued: usize,
     done: Receiver<Outcome>,
     sender: Sender<Outcome>,
     wake: WakeHandle,
@@ -102,6 +106,8 @@ impl Edits {
             name_after_load: None,
             naming_owed: false,
             pending: None,
+            queue: Vec::new(),
+            queued: 0,
             done,
             sender,
             wake,
@@ -114,7 +120,10 @@ impl Edits {
     /// the undo stack's asynchronous driving honest.
     #[must_use]
     pub fn busy(&self) -> bool {
-        self.pending.is_some()
+        // The queue counts: a selection still going down it is an operation in
+        // flight, and `Ctrl+Z` between two of them would undo one file out of
+        // four with three more arriving behind it.
+        self.pending.is_some() || !self.queue.is_empty()
     }
 
     /// Makes a directory in `parent`, choosing a free name.
@@ -140,13 +149,45 @@ impl Edits {
         self.start(Pending::Doing, jobs, move || Outcome::Did(ops::rename(&path, &name)));
     }
 
-    /// Moves `paths` to the trash, one operation each.
+    /// Moves several paths to the trash, one at a time.
     ///
-    /// One at a time and not one batch, because the queue with honest progress is
-    /// M3's and this is not it: what a person selects here is a handful of files,
-    /// and each is its own undo entry.
-    pub fn trash(&mut self, path: PathBuf, jobs: &Jobs) {
+    /// **One at a time and one undo entry each**, which is what rule 3 asks for
+    /// and what the engine can honestly do today: M3's queue is the one with
+    /// progress, an ETA, a conflict dialogue and a compound undo. The notice
+    /// counts them as they go, which is the part of progress that costs nothing.
+    ///
+    /// A failure stops the rest. Continuing would trash some of a selection and
+    /// not others with only the last message visible, and "seven of nine went"
+    /// is not a state a person can act on.
+    pub fn trash_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
+        if self.pending.is_some() || paths.is_empty() {
+            return;
+        }
+        self.queued = paths.len();
+        // Reversed, so `pop` takes them in the order they were given — which is
+        // display order, so the notice counts down the list a person is looking
+        // at.
+        self.queue = paths;
+        self.queue.reverse();
+        self.next_in_queue(jobs);
+    }
+
+    /// Starts the next queued trash, if nothing is in flight.
+    pub fn next_in_queue(&mut self, jobs: &Jobs) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(path) = self.queue.pop() else {
+            self.queued = 0;
+            return;
+        };
         self.start(Pending::Doing, jobs, move || Outcome::Did(ops::trash(&path)));
+    }
+
+    /// How many are still to go, and how many there were.
+    #[must_use]
+    pub fn queue_state(&self) -> (usize, usize) {
+        (self.queue.len(), self.queued)
     }
 
     /// Undoes the most recent change.
@@ -176,7 +217,16 @@ impl Edits {
                     kept => Some(kept.subject().to_path_buf()),
                 };
                 self.history.record(change);
-                Some(Landed::Notice(sk_model::i18n::lookup("notice.done").to_owned(), subject))
+                let message = if self.queued > 1 {
+                    let done = self.queued - self.queue.len();
+                    sk_model::i18n::format("notice.trashed", &[&done, &self.queued])
+                } else {
+                    sk_model::i18n::lookup("notice.done").to_owned()
+                };
+                if self.queue.is_empty() {
+                    self.queued = 0;
+                }
+                Some(Landed::Notice(message, subject))
             }
             Outcome::Undid(Ok(())) => {
                 let subject =
@@ -195,6 +245,9 @@ impl Edits {
                 ))
             }
             Outcome::Did(Err(problem)) | Outcome::Redid(Err(problem)) => {
+                // The rest of a queue goes with the one that failed.
+                self.queue.clear();
+                self.queued = 0;
                 Some(Landed::Failed(problem.message()))
             }
             Outcome::Undid(Err(problem)) => Some(Landed::Failed(problem.message())),
@@ -220,6 +273,11 @@ impl Edits {
         let wake = self.wake.clone();
         // `Parallel`: one syscall on the device the listing is already on, and
         // the pane's lane is for reads that can flood it.
+        //
+        // **Not cancellable, deliberately.** A mutation that has started has
+        // either happened or not; abandoning it half way would leave the undo
+        // stack describing a change nobody can find. The token is what the pool
+        // takes, and this one is never signalled.
         jobs.pool.spawn(Lane::Parallel, Cancel::new(), move |_| {
             if sender.send(work()).is_ok() {
                 wake.wake();

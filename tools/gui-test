@@ -411,9 +411,9 @@ def expect(state: dict[str, str], **wanted) -> None:
 def make_fixture(root: Path, name: str = "fixture") -> Path:
     fixture = root / name
     shutil.rmtree(fixture, ignore_errors=True)
-    for name in ("alpha", "beta", "gamma"):
-        (fixture / name).mkdir(parents=True)
-        (fixture / name / "inner.txt").write_text("x" * 10)
+    for folder in ("alpha", "beta", "gamma"):
+        (fixture / folder).mkdir(parents=True)
+        (fixture / folder / "inner.txt").write_text("x" * 10)
     (fixture / "alpha" / "nested").mkdir()
     (fixture / "alpha" / "nested" / "deep.txt").write_text("y" * 20)
     for index in range(1, 7):
@@ -896,6 +896,44 @@ def a_field_follows_its_own_row(run: Run, fixture: Path) -> None:
     (fixture / doomed).unlink()
     run.drive("sleep 900\nkey f12\nsleep 200\n")
     expect(run.state(), naming="")
+
+
+@scenario("trash-a-whole-selection", fresh=True)
+def trash_a_whole_selection(run: Run, fixture: Path) -> None:
+    """Three files selected, one Delete, three undo entries.
+
+    It used to trash the first of the selection and say "One of 3. A queue for
+    the rest is not built yet." — while Copy on the same selection, reached from
+    the same menu, took all three. One at a time is still what the engine does;
+    the difference is that it now does all of them, counts them as it goes, and
+    each is its own entry on the one undo stack.
+    """
+    run.drive("sleep 500\nkey end\nkey shift+up\nkey shift+up\nsleep 250\nkey f12\nsleep 150\n")
+    chosen = run.state()
+    expect(chosen, selected="3", rows="9")
+
+    run.drive("key delete\nsleep 2000\nkey f12\nsleep 300\n")
+    gone = run.state()
+    expect(gone, rows="6", undo="true", busy="false", queue="0/0")
+    if "3 of 3" not in gone["notice"]:
+        raise Failure(f"the notice did not count them: {gone['notice']!r}")
+    trash = run.log.parent / "data" / "trash-a-whole-selection" / "Trash" / "files"
+    if not trash.is_dir() or len(list(trash.iterdir())) != 3:
+        found = sorted(p.name for p in trash.iterdir()) if trash.is_dir() else "no Trash at all"
+        raise Failure(f"the Trash holds {found}")
+
+    # The cursor is on something that survived, so a second Delete has a subject.
+    if not gone["cursor"]:
+        raise Failure("nothing is focused, so the next Delete would do nothing")
+
+    # Three entries, so three undos — and the directory comes back whole.
+    for _ in range(3):
+        run.drive("key ctrl+z\nsleep 900\n")
+    run.drive("key f12\nsleep 300\n")
+    back = run.state()
+    expect(back, rows="9", undo="false", redo="true")
+    if trash.is_dir() and list(trash.iterdir()):
+        raise Failure(f"undo left {sorted(p.name for p in trash.iterdir())} in the Trash")
 
 
 @scenario("context-menu-keyboard")

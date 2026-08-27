@@ -327,6 +327,24 @@ sends them.
 > **Fails if:** a test's name asserts a design decision that nobody outside the
 > function it tests would recognise.
 
+## A comment can be left on the wrong item, six times
+
+Inserting a function above an existing one, with no blank line between the two
+comments, gives the new item the old one's doc comment and leaves the old one
+with none. It happened **six times** while the operations and the context menu
+were written — the mechanical consequence of editing files with textual
+replacement — and two of them survived a commit. `missing_docs` catches only the
+cases where the orphaned item is public, which was one of the six.
+
+The shape turned out to be precise enough to check: this project's doc comments
+are a one-line summary, a blank `///`, then prose, so **a summary line followed
+immediately by the start of another sentence is two comments run together**.
+Measured against the whole tree before it was added: two hits, both real, no
+false positives. `tools/check-invariants.py` fails the build on it.
+
+> **Fails if:** a doc comment's second line begins a new sentence rather than
+> continuing the first.
+
 ## A bound has to be on the quantity that runs out
 
 The glyph atlas bounded uploads at **128 glyphs per frame**, to keep a cold cache

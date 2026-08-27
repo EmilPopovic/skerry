@@ -475,6 +475,23 @@ const POINTER_EXEMPT: &[(&str, &str)] = &[
     ("help.stats", "a diagnostic for a bug report, not an action on a file"),
 ];
 
+/// The hint in the corner of the path bar, from the registry.
+///
+/// **Not a hardcoded chord.** This string said `F2 stats` for two commits after
+/// `F2` became Rename, because it was a catalogue line nothing checked against
+/// the keymap. And **not the diagnostic key**: `F12` prints a report for a bug,
+/// which [`POINTER_EXEMPT`] describes as "not an action on a file" — advertising
+/// it in permanent chrome was the same mistake in the other direction.
+#[must_use]
+pub fn hint(registry: &Registry<App>) -> String {
+    let keys = registry
+        .find("help.keys")
+        .and_then(|id| registry.describe(id))
+        .map(|command| command.keys)
+        .unwrap_or_default();
+    sk_model::i18n::format("chrome.hint", &[&keys])
+}
+
 /// The keyboard overlay's rows: what to press, and what it does.
 ///
 /// Read out of the registry rather than written beside it, so the string on
@@ -497,7 +514,7 @@ pub fn overlay_rows(registry: &Registry<App>) -> Vec<(String, String)> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{POINTER_EXEMPT, overlay_rows, pointer_surfaces, registry};
+    use super::{POINTER_EXEMPT, hint, overlay_rows, pointer_surfaces, registry};
 
     /// Rule 2 and rule 4 as one assertion: the whole set is sound, every command
     /// has a name a person can read, and no two of them fight over a key.
@@ -568,6 +585,29 @@ mod tests {
         let named = pointer_surfaces().into_iter().chain(POINTER_EXEMPT.iter().copied());
         for (id, _) in named {
             assert!(registry.find(id).is_some(), "`{id}` is not a command");
+        }
+    }
+
+    /// The one string in permanent chrome that names a chord. It said `F2 stats`
+    /// for two commits after `F2` became Rename.
+    #[test]
+    fn the_hint_names_the_chord_that_is_actually_bound() {
+        let registry = registry();
+        let shown = hint(&registry);
+        let keys = registry
+            .describe(registry.find("help.keys").expect("help.keys"))
+            .expect("described")
+            .keys;
+        assert!(shown.contains(&keys), "{shown:?} does not name {keys:?}");
+        // And nothing else: a hint that lists a diagnostic is a diagnostic in
+        // permanent chrome.
+        for other in registry.iter().filter(|command| command.id != "help.keys") {
+            assert!(
+                !shown.contains(&other.keys),
+                "{shown:?} also names {}'s {:?}",
+                other.id,
+                other.keys
+            );
         }
     }
 

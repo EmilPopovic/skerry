@@ -67,6 +67,10 @@ FRAMES = [
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.
     ("path-entry", ["--size", "900x520", "--scale", "125", "--path-entry"]),
+    # The same field in a window too narrow for the path in it, which is where
+    # the scroll that keeps the caret inside the box is the only thing drawing
+    # anything legible at all.
+    ("path-entry-narrow", ["--size", "280x300", "--scale", "125", "--path-entry"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

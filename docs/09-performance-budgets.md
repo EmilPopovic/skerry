@@ -74,6 +74,15 @@ timing; and the clock inside the window started after those same steps had run.
 Both are fixed. The clock now starts when `pump` returns and stops at the
 submission, and the trace starts the read and lets it land underneath the scroll.
 
+**One click could break the budget on its own.** Placing the caret from a click
+in a text field is shaped rather than counted — a cluster is not a character —
+and the first version shaped every prefix, which is O(n) shapings of O(n) work
+each, on the UI thread, over a string bounded by `PATH_MAX`. Release build, 500
+clicks each: **133 µs at 26 characters, 460 µs at 49, 3.10 ms at 128 and 11.96 ms
+at 252**. Binary-searching the prefixes answers the same click in 47, 87, 257 and
+564 µs, and gives the same offset — asserted against the scan it replaced, over
+every character boundary of five strings.
+
 The scroll itself did not move: 0.19 ms p50, 0.34 ms p99, and it still does not
 depend on the entry count, because the loop runs once per *visible* row — about
 forty times — whatever the directory holds. What appeared is a second regime.

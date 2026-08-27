@@ -275,7 +275,6 @@ fn expand_home(typed: &str) -> Option<PathBuf> {
     }
 }
 
-/// Seconds since the epoch, for the `Modified` column's sense of "today".
 /// Which field is claiming the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Claim {
@@ -287,6 +286,7 @@ enum Claim {
     Path,
 }
 
+/// Seconds since the epoch, for the `Modified` column's sense of "today".
 fn clock_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
 }
@@ -392,6 +392,14 @@ pub struct App {
     refreshed: Instant,
     /// A change arrived inside [`REFRESH_FLOOR`] and is still owed a read.
     refresh_owed: bool,
+    /// When the sidebar last read the mount table, and whether it owes a read.
+    ///
+    /// The same floor the listing's refresh keeps, for the same reason: `snap`
+    /// brings up thirty squashfs mounts at login and a card reader announces one
+    /// per slot, and each delivery takes the highlight out from under the
+    /// pointer.
+    remounted: Instant,
+    mounts_owed: bool,
     /// Whether the watcher managed to arm on the current directory.
     watching: bool,
     /// The platform capabilities found at start-up, as one line.
@@ -432,6 +440,13 @@ pub struct App {
     hovered_tool: Option<crate::layout::Tool>,
     /// The hit regions the last frame produced.
     hits: crate::view::Hits,
+    /// The keyboard hint in the corner of the path bar.
+    ///
+    /// Built from the registry once, because it names a chord and a hardcoded
+    /// one drifts: this string said `F2 stats` for two commits after `F2` became
+    /// Rename. Held rather than formatted per frame — it never changes, and the
+    /// path bar draws it in every one.
+    hint: String,
     /// The path being typed over the breadcrumbs, while one is.
     typing_path: Option<crate::field::Field>,
     /// The context menu, while one is open.
@@ -537,6 +552,8 @@ impl App {
             watch_target,
             refreshed: Instant::now(),
             refresh_owed: false,
+            remounted: Instant::now(),
+            mounts_owed: false,
             watching: true,
             capabilities,
             measurer,
@@ -554,6 +571,7 @@ impl App {
             hovered_crumb: None,
             hovered_tool: None,
             hits: crate::view::Hits::default(),
+            hint: String::new(),
             typing_path: None,
             menu: None,
             menu_wanted: None,
@@ -593,6 +611,7 @@ impl App {
         // borrowed. It is built once; a command's `run` is a plain function
         // pointer, so there is nothing to keep warm.
         let commands = crate::commands::registry();
+        self.hint = crate::commands::hint(&commands);
         if !commands.problems().is_empty() {
             // A conflicting binding is a bug and a test fails on it, but a
             // release build that meets one should say so rather than silently
@@ -648,6 +667,7 @@ impl App {
             (!self.typed.is_empty())
                 .then(|| TYPE_AHEAD_WINDOW.saturating_sub(self.typed_at.elapsed())),
             self.refresh_owed.then(|| REFRESH_FLOOR.saturating_sub(self.refreshed.elapsed())),
+            self.mounts_owed.then(|| REFRESH_FLOOR.saturating_sub(self.remounted.elapsed())),
             self.notice.as_ref().map(|(_, at)| NOTICE_WINDOW.saturating_sub(at.elapsed())),
         ];
         deadlines.into_iter().flatten().min()
@@ -687,12 +707,19 @@ impl App {
     /// Applies change notifications, at most one read per [`REFRESH_FLOOR`].
     fn drain_changes(&mut self) {
         let mut owed = self.refresh_owed;
+        let mut mounted = self.mounts_owed;
         while let Ok(change) = self.changes.try_recv() {
             if change == sk_fs::Change::Mounts {
                 // A disk plugged in or unmounted. Only the sidebar's Volumes
                 // section is affected, and re-reading the listing for it would
                 // be a refresh of a directory nothing happened to.
-                self.sidebar.reload(&self.jobs);
+                //
+                // **Coalesced, like the listing's own refresh.** `snap` brings
+                // up thirty squashfs mounts at login and a card reader announces
+                // one per slot; a job each would parse `/proc/self/mountinfo`
+                // thirty times and take the highlight out from under the pointer
+                // on every delivery.
+                mounted = true;
                 continue;
             }
             // Every one of the other three means the same thing to a listing:
@@ -700,6 +727,13 @@ impl App {
             // with a message that says the directory is gone — which is the
             // honest thing to show, rather than the entries it used to have.
             owed = true;
+        }
+        if mounted {
+            self.mounts_owed = self.remounted.elapsed() < REFRESH_FLOOR;
+            if !self.mounts_owed {
+                self.remounted = Instant::now();
+                self.sidebar.reload(&self.jobs);
+            }
         }
         if !owed {
             return;
@@ -928,25 +962,15 @@ impl App {
     /// starts six logical pixels inside the box, which is where
     /// `view::name_field_at` draws it — the one number the two share.
     fn place_caret(&mut self, x: f32) {
-        let Some(naming) = self.edits.naming.as_mut() else { return };
-        let field = crate::view::name_field(
+        let Some(row) = self.edits.naming.as_ref().map(|naming| naming.row) else { return };
+        let area = crate::view::name_field(
             &self.layout,
             &self.theme.metrics,
-            naming.row,
+            row,
             self.pane.scroll.offset(),
         );
-        let scale = self.window.scale();
-        // The colour is not read: only the weight and the size decide an advance.
-        let style = sk_ui::TextStyle::new(self.theme.metrics.text_size, self.theme.palette.text);
-        naming.field.caret = sk_ui::caret_offset(
-            &mut self.cache,
-            &mut self.fonts,
-            &naming.field.text,
-            style,
-            style.size * scale,
-            (x - field.x - 6.0) * scale,
-        );
-        self.dirty = true;
+        let size = self.theme.metrics.text_size;
+        self.place_caret_in(Claim::Naming, area, size, crate::view::NAME_INSET, x);
     }
 
     /// The scroll extent, and the folder totals for what is on screen.
@@ -969,17 +993,37 @@ impl App {
 
     /// Puts the caret where a click in the path field landed.
     fn place_path_caret(&mut self, x: f32) {
-        let Some(field) = self.typing_path.as_mut() else { return };
         let area = crate::view::path_field(&self.layout, &self.theme.metrics);
+        let size = self.theme.metrics.path_size;
+        self.place_caret_in(Claim::Path, area, size, crate::view::PATH_INSET, x);
+    }
+
+    /// Puts the caret in one of the two fields where a click landed.
+    ///
+    /// The text is scrolled by however much the frame the person is looking at
+    /// scrolled it, so the click has to be read in the same coordinates the draw
+    /// used — the arithmetic is `view::field_scroll`, once, for both.
+    fn place_caret_in(&mut self, which: Claim, area: Area, size: f32, inset: f32, x: f32) {
+        let Some(field) = (match which {
+            Claim::Path => self.typing_path.as_mut(),
+            Claim::Naming => self.edits.naming.as_mut().map(|naming| &mut naming.field),
+            Claim::Filter => None,
+        }) else {
+            return;
+        };
         let scale = self.window.scale();
-        let style = sk_ui::TextStyle::new(self.theme.metrics.path_size, self.theme.palette.text);
+        let style = sk_ui::TextStyle::new(size, self.theme.palette.text);
+        let px_size = size * scale;
+        let Self { cache, fonts, .. } = self;
+        let before =
+            sk_ui::advance_of(cache, fonts, field.before_caret(), style.weight, px_size) / scale;
+        let scroll = crate::view::field_scroll(before, area.width - inset * 2.0);
         field.caret = sk_ui::caret_offset(
-            &mut self.cache,
-            &mut self.fonts,
+            fonts,
             &field.text,
             style,
-            style.size * scale,
-            (x - area.x - crate::view::PATH_INSET) * scale,
+            px_size,
+            (x - area.x - inset + scroll) * scale,
         );
         self.dirty = true;
     }
@@ -1237,32 +1281,42 @@ impl App {
     /// Moves what is selected to the trash.
     pub(crate) fn trash_selection(&mut self) {
         let paths = self.selected_paths();
-        // One at a time: the queue with honest progress is M3's and this is not
-        // it. What a person selects here is a handful of files, and each one is
-        // its own undo entry — so the first goes now and the rest are owed.
-        let Some(first) = paths.first().cloned() else { return };
-        // The cursor leaves the doomed row now rather than when the listing
-        // comes back: a person deleting four files presses Delete four times,
-        // and a cursor that lands nowhere makes the second press do nothing at
-        // all — `enabled` reads `focused`.
-        self.step_off_the_cursor();
-        if paths.len() > 1 {
-            self.notice = Some((
-                sk_model::i18n::format("notice.one_at_a_time", &[&paths.len()]),
-                Instant::now(),
-            ));
+        if paths.is_empty() {
+            return;
         }
-        self.edits.trash(first, &self.jobs);
+        // The cursor leaves the doomed rows now rather than when the listing
+        // comes back: a person deleting four files presses Delete four times, and
+        // a cursor that lands nowhere makes the second press do nothing at all —
+        // `enabled` reads `focused`.
+        self.step_off_the_selection(&paths);
+        self.edits.trash_all(paths, &self.jobs);
     }
 
-    /// Moves the cursor to the row after the one it is on, or the one before it
-    /// where there is no after.
-    fn step_off_the_cursor(&mut self) {
-        let Some(row) = self.pane.cursor_row() else { return };
-        let last = self.pane.listing.rows().saturating_sub(1);
-        let next = if row < last { row + 1 } else { row.saturating_sub(1) };
-        if next != row {
-            self.pane.cursor_to(next, false);
+    /// Moves the cursor to the first row that is not going.
+    ///
+    /// Below the selection where there is anything below it, and above where
+    /// there is not — which is where the eye already is, and which leaves the
+    /// next press of Delete with something to act on.
+    fn step_off_the_selection(&mut self, going: &[PathBuf]) {
+        let doomed: Vec<&std::ffi::OsStr> =
+            going.iter().filter_map(|path| path.file_name()).collect();
+        let survives = |app: &Self, row: usize| {
+            app.pane.listing.at(row).is_some_and(|id| {
+                let name = app.pane.listing.name(id);
+                !doomed.iter().any(|going| *going == name)
+            })
+        };
+        let rows = self.pane.listing.rows();
+        let from = self.pane.cursor_row().unwrap_or(0);
+        let next = (from + 1..rows)
+            .find(|row| survives(self, *row))
+            .or_else(|| (0..from).rev().find(|row| survives(self, *row)));
+        match next {
+            Some(row) => self.pane.cursor_to(row, false),
+            // Everything is going. Nothing to point at, and nothing to do.
+            None => {
+                self.pane.selection.set_cursor(None);
+            }
         }
     }
 
@@ -1542,6 +1596,9 @@ impl App {
                 message
             }
         };
+        // The next one in the queue starts here rather than in `drain`: the
+        // engine has no pool and this is where one is in reach.
+        self.edits.next_in_queue(&self.jobs);
         self.notice = Some((message, Instant::now()));
         self.dirty = true;
     }
@@ -1716,11 +1773,13 @@ impl App {
             self.typing_path.as_ref().map(|field| field.text.clone()).unwrap_or_default();
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
+        let (queue_left, queue_total) = self.edits.queue_state();
         format!(
             "path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
-naming={naming:?} naming_row={naming_row} path_entry={typing_path:?} undo={} redo={} busy={} \
+naming={naming:?} naming_row={naming_row} path_entry={typing_path:?} \
+undo={} redo={} busy={} queue={queue_left}/{queue_total} \
 filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
@@ -2147,6 +2206,38 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.hits.menu.iter().position(|area| area.contains(position.x, position.y))
     }
 
+    /// Asks the registry again which rows of an open menu can run.
+    ///
+    /// **Every frame, for the reason the navigation buttons' dimming is.** The
+    /// answers were taken once when the menu was built, so a menu opened while an
+    /// operation was in flight went on showing Rename and Undo dimmed after it
+    /// landed — and a click on a row that had become runnable was dropped
+    /// silently, because `menu_press` filters on the stale answer.
+    fn settle_menu_state(&mut self, commands: &Registry<Self>) {
+        let Some(menu) = self.menu.as_ref() else { return };
+        // On the stack rather than in a `Vec`: this runs in every frame a menu is
+        // open, and no menu in the program has half this many rows.
+        let mut wanted = [false; 32];
+        let rows = menu.items.len().min(wanted.len());
+        for (slot, item) in wanted.iter_mut().zip(&menu.items) {
+            *slot = commands.find(item.id).is_some_and(|id| commands.enabled(id, self));
+        }
+        let Some(menu) = self.menu.as_mut() else { return };
+        let mut moved = false;
+        for (item, enabled) in menu.items.iter_mut().zip(wanted).take(rows) {
+            moved |= item.enabled != enabled;
+            item.enabled = enabled;
+        }
+        // A highlight cannot sit on a row that has stopped being runnable.
+        if menu.active.is_some_and(|row| !menu.items.get(row).is_some_and(|item| item.enabled)) {
+            menu.active = None;
+            moved = true;
+        }
+        if moved {
+            self.dirty = true;
+        }
+    }
+
     /// A press while a menu is open: it runs a row, or it dismisses.
     ///
     /// **A dismissing press does nothing else.** The click that closes a menu
@@ -2302,7 +2393,6 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
     }
 
-    /// The scrollbar thumb's rectangle, if there is one.
     /// Where the scrollbar thumb is, in window coordinates.
     ///
     /// The geometry comes from `sk_ui::thumb`, which is also what draws it. The
@@ -2315,6 +2405,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         Some((self.layout.body.y + position, height))
     }
 
+    /// Where in the thumb a press landed, as a fraction of its height.
     fn thumb_at(&self, position: Point) -> Option<f32> {
         let (top, height) = self.thumb()?;
         // A generous grab region: the thumb is eight logical pixels wide and a
@@ -2360,6 +2451,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // whether each navigation command can run, and only the registry knows
         // that — rule 2 again, so the dimming and the click cannot disagree.
         let tools = tool_state(commands, self);
+        self.settle_menu_state(commands);
 
         self.list.begin(physical);
 
@@ -2393,6 +2485,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             desktop,
             window_state,
             hits,
+            hint,
             menu,
             typing_path,
             ..
@@ -2419,6 +2512,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             window: *window_state,
             menu: menu.as_ref(),
             path_entry: typing_path.as_ref(),
+            hint,
         };
         let now = clock_seconds();
         let mut diagnostics = diagnostics_for(

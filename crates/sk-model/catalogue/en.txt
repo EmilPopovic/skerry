@@ -42,7 +42,7 @@ name.new_folder = New folder
 # item count for a few seconds and the item count is what a person wants back.
 # More than one thing was selected and only the first was acted on. The queue
 # that does the rest is M3's; saying so is better than silently doing one.
-notice.one_at_a_time = One of {0}. A queue for the rest is not built yet.
+notice.trashed = Moved {0} of {1} to Trash
 notice.done = Done
 notice.undone = Undone
 notice.redone = Redone
@@ -163,7 +163,7 @@ action.sort_modified = Sort by date
 action.type_ahead = Jump to a name
 
 # Chrome.
-chrome.hint = F1 keys · F12 report
+chrome.hint = {0} keys
 keys.title = Keyboard
 keys.typing = Type any letters
 stats.title = Frames

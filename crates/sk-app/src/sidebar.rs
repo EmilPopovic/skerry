@@ -85,12 +85,15 @@ impl Sidebar {
 
     /// Reads the three sources again, on a job.
     ///
-    /// What `F5` does, and what a mount appearing would do if anything were
-    /// watching `/proc/self/mountinfo` — which is owed, and is why this is a
-    /// method rather than something that happens once at start-up.
+    /// What `F5` does, and what a mount appearing does — the watcher polls
+    /// `/proc/self/mountinfo`, which is why this is a method rather than
+    /// something that happens once at start-up.
     pub fn reload(&self, jobs: &Jobs) {
         let sender = self.sender.clone();
         let wake = self.wake.clone();
+        // **Not cancellable, and the token says so.** Three small file reads
+        // that finish in under a millisecond: a cancel would arrive after the
+        // work, and the reply is dropped anyway when the receiver is gone.
         jobs.pool.spawn(Lane::Parallel, Cancel::new(), move |_| {
             if sender.send(build()).is_ok() {
                 wake.wake();
