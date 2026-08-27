@@ -213,8 +213,16 @@ class Run:
         for line in self.log.read_text().splitlines():
             if not line.startswith("skerry-state "):
                 continue
-            fields = dict(re.findall(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)', line))
-            found.append({k: v.strip('"') for k, v in fields.items()})
+            pairs = re.findall(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)', line)
+            # **Unique keys, checked here.** A second `cursor=` on the line — one
+            # the listing writes and one the chrome writes — is silently the last
+            # one to a dict, and every scenario asserting about the first then
+            # fails with a value from somewhere else entirely.
+            names = [name for name, _ in pairs]
+            repeated = sorted({name for name in names if names.count(name) > 1})
+            if repeated:
+                raise Failure(f"the diagnostic line reports {', '.join(repeated)} twice")
+            found.append({k: v.strip('"') for k, v in pairs})
         return found
 
     def state(self, index: int = -1) -> dict[str, str]:
@@ -1686,6 +1694,53 @@ def cursor_shapes(run: Run, fixture: Path) -> None:
             raise Failure(f"the connection died: {own.err.read_text()[-300:]}")
     finally:
         own.close()
+
+
+@scenario("cursor-says-what-is-clickable", fresh=True)
+def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
+    """A hand where a click does something, and an arrow where it does not.
+
+    The shape itself cannot be read back from any compositor, so what is asserted
+    is what the program asked for — which is the half that decides whether the
+    interface agrees with itself. Two places got it wrong, and both are ones a
+    person meets in the first minute: Back is dimmed until there is somewhere to
+    go back to, and "Copy the text inside" is dimmed on a picture.
+    """
+    (fixture / "photo.png").write_bytes(bytes(range(256)) * 8)
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    state = run.state()
+    step = float(state["tool_w"])
+    if step <= 0.0:
+        raise Skipped("this window is too narrow for the navigation buttons")
+    middle = float(state["body_top"]) / 4.0
+
+    # Back, which has nowhere to go, and Reload, which always does.
+    for index, wanted, name in [(0, "arrow", "back"), (3, "hand", "reload")]:
+        x, y = aim(run, state, step * (index + 0.5), middle)
+        run.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 150\n")
+        over = run.state()
+        expect(over, tool_hover=name)
+        if over["pointer"] != wanted:
+            raise Failure(f"over {name} the pointer is a {over['pointer']}, wanted a {wanted}")
+
+    # Then a menu row that cannot run, and one that can.
+    run.drive("text photo.png\nsleep 400\nkey f12\nsleep 150\n")
+    at_image = run.state()
+    expect(at_image, cursor="photo.png")
+    point_at(run, int(at_image["cursor_row"]))
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if "file.copy_content" not in opened["menu_dim"]:
+        raise Failure(f"copy-content is not dimmed on a .png: {opened['menu_dim']!r}")
+    for command, wanted in [("file.copy_content", "arrow"), ("file.copy", "hand")]:
+        x, y = menu_aim(run, opened, command)
+        run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 150\n")
+        over = run.state()
+        if over["pointer"] != wanted:
+            raise Failure(
+                f"over {command} the pointer is a {over['pointer']}, wanted a {wanted}"
+            )
+    run.drive("key escape\nsleep 200\n")
 
 
 @scenario("window-close-command")

@@ -249,8 +249,16 @@ fn report_globals(window: &Window) {
 /// From the registry, because the button and the chord are the same action and a
 /// second copy of "is there anywhere to go back to" is a second copy that drifts.
 fn tool_state(commands: &Registry<App>, app: &App) -> [bool; 4] {
-    crate::layout::Tool::ALL
-        .map(|tool| commands.find(tool.command()).is_some_and(|id| commands.enabled(id, app)))
+    crate::layout::Tool::ALL.map(|tool| runnable(commands, app, tool.command()))
+}
+
+/// Whether the command behind a pointer target can run right now.
+///
+/// The one question behind both halves of a dimmed control: what it looks like,
+/// and what the pointer says about it. Asking it twice in two places is how an
+/// interface comes to disagree with itself.
+fn runnable(commands: &Registry<App>, app: &App, id: &str) -> bool {
+    commands.find(id).is_some_and(|command| commands.enabled(command, app))
 }
 
 /// `~` and `~/x` to a path under `$HOME`, or `None` for anything else.
@@ -461,6 +469,13 @@ pub struct App {
     hovered_tool: Option<crate::layout::Tool>,
     /// The hit regions the last frame produced.
     hits: crate::view::Hits,
+    /// The shape last asked of the pointer.
+    ///
+    /// A diagnostic: no compositor lets a client read the cursor back, so what
+    /// the program asked for is the only half a test can see — and it is the half
+    /// that decides whether the interface agrees with itself about what is
+    /// clickable.
+    cursor: sk_plat::Cursor,
     /// The keyboard hint in the corner of the path bar.
     ///
     /// Built from the registry once, because it names a chord and a hardcoded
@@ -578,6 +593,7 @@ impl App {
             hovered_crumb: None,
             hovered_tool: None,
             hits: crate::view::Hits::default(),
+            cursor: sk_plat::Cursor::Arrow,
             hint: String::new(),
             typing_path: None,
             menu: None,
@@ -858,7 +874,7 @@ impl App {
             Event::CloseRequested => self.closing = true,
             Event::Focused(_) => self.dirty = true,
             Event::KeyDown(key) => self.key(key, commands),
-            Event::PointerMoved { position, .. } => self.moved(*position),
+            Event::PointerMoved { position, .. } => self.moved(*position, commands),
             Event::PointerLeft => {
                 // Every hover, and each of them taken: `||` short-circuits, so a
                 // pointer leaving a row left a breadcrumb lit and a window button
@@ -1900,6 +1916,12 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             Some(crate::layout::Tool::Reload) => "reload",
             None => "none",
         };
+        let cursor_shape = match self.cursor {
+            sk_plat::Cursor::Arrow => "arrow".to_owned(),
+            sk_plat::Cursor::Hand => "hand".to_owned(),
+            sk_plat::Cursor::Grabbing => "grabbing".to_owned(),
+            sk_plat::Cursor::Resize(edge) => format!("resize-{edge:?}").to_lowercase(),
+        };
         let place_hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         let place_name = self
             .sidebar
@@ -1950,7 +1972,7 @@ frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
 crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 menu={menu_rows} menu_active={menu_active} menu_id={menu_id:?} menu_aim={menu_aim:?} \
 menu_dim={dimmed:?} \
-tool_w={tool_w:.1} tool_hover={tool_hover} \
+tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
 logical={:.0}x{:.0} scale_120={} \
@@ -2141,19 +2163,31 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// something on a press and nothing to look at is a feature discoverable
     /// only by trying it, and the first thing a person tries is dragging the
     /// edge of a window.
-    fn cursor_at(&self, position: Point) -> sk_plat::Cursor {
+    fn cursor_at(&self, position: Point, commands: &Registry<Self>) -> sk_plat::Cursor {
         if self.thumb_grab.is_some() {
             return sk_plat::Cursor::Grabbing;
         }
         if let Some(edge) = self.layout.edge_at(position.x, position.y) {
             return sk_plat::Cursor::Resize(edge);
         }
-        if self.crumb_at(position).is_some()
+        // A dimmed navigation button is not clickable, and Back is dimmed for the
+        // first navigation of every session — so it is the first thing a pointer
+        // lands on that used to promise a click and do nothing. Asked of the
+        // registry, which is where the dimming comes from.
+        let over_tool = self
+            .layout
+            .tool_at(position.x, position.y)
+            .is_some_and(|tool| runnable(commands, self, tool.command()));
+        if over_tool
+            || self.crumb_at(position).is_some()
             || self.layout.button_at(position.x, position.y).is_some()
-            || self.layout.tool_at(position.x, position.y).is_some()
             || self.place_at(position).is_some()
         {
             return sk_plat::Cursor::Hand;
+        }
+        // Over a button that is drawn and dimmed, and nothing else is under it.
+        if self.layout.tool_at(position.x, position.y).is_some() {
+            return sk_plat::Cursor::Arrow;
         }
         if self.layout.header.contains(position.x, position.y)
             && self.column_at(position.x).is_some()
@@ -2161,6 +2195,18 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return sk_plat::Cursor::Hand;
         }
         sk_plat::Cursor::Arrow
+    }
+
+    /// Sets the pointer's shape, and remembers what was asked for.
+    ///
+    /// Remembered because **the shape itself cannot be read back** — no
+    /// compositor exposes it — so the only observable half is what the program
+    /// asked for, and that is the half that is ours to be right about. It goes on
+    /// the diagnostic line, which is how `cursor-says-what-is-clickable` can
+    /// assert about it at all.
+    fn point(&mut self, cursor: sk_plat::Cursor) {
+        self.cursor = cursor;
+        self.window.set_cursor(cursor);
     }
 
     /// Which sidebar row is under a point, if any.
@@ -2393,17 +2439,23 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         true
     }
 
-    fn moved(&mut self, position: Point) {
+    fn moved(&mut self, position: Point, commands: &Registry<Self>) {
         self.pointer = position;
         // An open menu is over everything, so nothing under it hovers: a row
         // lighting up behind a menu reads as a click that will land there.
         if self.menu.is_some() {
             let row = self.menu_at(position);
+            // **Only where a click would do something.** `menu_at` answers where
+            // the pointer is and not whether anything is there to run, so a
+            // dimmed row was reported as a hand — the interface promising a click
+            // that `menu_press` then dropped.
+            let clickable = row
+                .and_then(|row| self.menu.as_ref()?.items.get(row))
+                .is_some_and(|item| item.enabled);
             if self.menu.as_mut().is_some_and(|menu| menu.hover(row)) {
                 self.dirty = true;
             }
-            let cursor = if row.is_some() { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow };
-            self.window.set_cursor(cursor);
+            self.point(if clickable { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow });
             return;
         }
         let over = self.layout.button_at(position.x, position.y);
@@ -2426,7 +2478,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.sidebar.hover = place;
             self.dirty = true;
         }
-        self.window.set_cursor(self.cursor_at(position));
+        let cursor = self.cursor_at(position, commands);
+        self.point(cursor);
         if let Some(grab) = self.thumb_grab {
             self.drag_thumb(position, grab);
             self.dirty = true;
