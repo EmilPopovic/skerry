@@ -1944,6 +1944,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// file manager does and the only behaviour under which "Move to Trash" is
     /// safe to have on a menu at all.
     fn open_menu(&mut self, position: Point) {
+        // Whatever else this press does, it closes the menu that is up: every
+        // path out of this function is a different menu or none, and leaving the
+        // old one behind made a click on the sidebar look like it had opened the
+        // list's menu.
+        if self.menu.take().is_some() {
+            self.dirty = true;
+        }
         // A secondary click inside a text field belongs to the field. Without
         // this the path bar — which is the title bar — answered one with the
         // compositor's window menu, over a field with a caret in it.
@@ -1957,6 +1964,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // top" and "move to workspace" live. Ours to offer and not ours to draw.
         if self.layout.drag.contains(position.x, position.y) {
             self.window.show_window_menu(position);
+            return;
+        }
+        // **Not over the sidebar.** Every action on the background menu is about
+        // the directory the list is showing, and a sidebar row is a different
+        // directory — a menu offering New folder over `Downloads` would make it
+        // somewhere else. What a place's own menu should offer is Open in a new
+        // tab and Pin, and neither is a command yet.
+        if self.layout.sidebar.contains(position.x, position.y) {
             return;
         }
         if self.edits.naming.is_some() {

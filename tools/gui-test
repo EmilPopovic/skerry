@@ -847,14 +847,28 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
     if "file.trash" not in opened["menu_aim"]:
         raise Failure(f"the row menu has no Move to Trash: {opened['menu_aim']}")
 
-    # A press that dismisses a menu dismisses it and nothing else: the row under
-    # the click must not take the selection.
-    away = aim(run, opened, 40.0, float(opened["body_top"]) + 4.0)
+    # A press that dismisses a menu dismisses it and nothing else: aimed at
+    # another row, so a click that got through would move the cursor and say so.
+    away = aim(
+        run,
+        opened,
+        float(opened["name_x"]) + 30.0,
+        float(opened["body_top"]) + float(opened["row_h"]) * 6.5,
+    )
     run.drive(
         f"move {away[0]:.1f} {away[1]:.1f}\nsleep 150\nclick\nsleep 300\nkey f12\nsleep 150\n"
     )
-    dismissed = run.state()
-    expect(dismissed, menu="0", cursor=wanted, selected="1")
+    expect(run.state(), menu="0", cursor=wanted, selected="1")
+
+    # And no menu over the sidebar, whose rows are a different directory from the
+    # one every action on the background menu is about.
+    if float(opened["sidebar_w"]) > 0.0:
+        aside = aim(run, opened, float(opened["sidebar_w"]) / 2.0, float(opened["body_top"]) + 40.0)
+        run.drive(
+            f"move {aside[0]:.1f} {aside[1]:.1f}\n"
+            "sleep 150\nclick right\nsleep 350\nkey f12\nsleep 150\n"
+        )
+        expect(run.state(), menu="0", cursor=wanted)
 
 
 @scenario("mouse-only-trash-and-undo", fresh=True)
