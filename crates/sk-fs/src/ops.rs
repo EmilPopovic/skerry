@@ -180,16 +180,39 @@ pub fn trash(path: &Path) -> Result<Change, Problem> {
 ///
 /// **Runs on a job.** The engine is `crate::copy`, ported from Spike E; this is
 /// the part that turns its result into something the undo stack can hold.
-pub fn copy_into(source: &Path, into: &Path) -> Result<Change, Problem> {
+pub fn copy_into(
+    source: &Path,
+    into: &Path,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(crate::copy::Progress),
+) -> Result<Change, Problem> {
+    let Some(name) = source.file_name() else {
+        return Err(Problem::new(
+            ProblemKind::BadName,
+            source.display().to_string(),
+            "no name to copy it under",
+        ));
+    };
+    let destination = into.join(name);
     let mut progress = crate::copy::Progress::default();
-    let destination = crate::copy::copy_into(
+    match crate::copy::copy_into(
         source,
         into,
         crate::copy::Options::default(),
-        &sk_util::Cancel::new(),
+        cancel,
         &mut progress,
-    )?;
-    Ok(Change::Copied { source: source.to_path_buf(), destination })
+        watch,
+    ) {
+        Ok(destination) => Ok(Change::Copied { source: source.to_path_buf(), destination }),
+        // **A cancelled copy is still a change.** It stopped part way and left
+        // what it had written, and the only thing that can take that back is the
+        // undo stack — so it is recorded rather than reported as a failure with
+        // files on disk that nothing describes.
+        Err(_) if cancel.is_cancelled() && destination.exists() => {
+            Ok(Change::Copied { source: source.to_path_buf(), destination })
+        }
+        Err(problem) => Err(problem),
+    }
 }
 
 /// Moves `source` into the directory `into`.
@@ -198,14 +221,20 @@ pub fn copy_into(source: &Path, into: &Path) -> Result<Change, Problem> {
 /// and what its undo has to do either way.
 ///
 /// **Runs on a job.**
-pub fn move_into(source: &Path, into: &Path) -> Result<Change, Problem> {
+pub fn move_into(
+    source: &Path,
+    into: &Path,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(crate::copy::Progress),
+) -> Result<Change, Problem> {
     let mut progress = crate::copy::Progress::default();
     let destination = crate::copy::move_into(
         source,
         into,
         crate::copy::Options::default(),
-        &sk_util::Cancel::new(),
+        cancel,
         &mut progress,
+        watch,
     )?;
     Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
 }
@@ -276,7 +305,7 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
                     "no parent",
                 ));
             };
-            copy_into(source, into)
+            copy_into(source, into, &sk_util::Cancel::new(), &mut |_| {})
         }
         // Re-trashed from scratch rather than by moving the same bytes back into
         // the same slot: the slot may have been taken, and `trash` is the thing
@@ -430,7 +459,8 @@ mod tests {
         std::fs::create_dir(&into).unwrap();
         std::fs::write(from.join("folder/inside.txt"), b"contents").unwrap();
 
-        let change = copy_into(&from.join("folder"), &into).expect("copied");
+        let change = copy_into(&from.join("folder"), &into, &sk_util::Cancel::new(), &mut |_| {})
+            .expect("copied");
         let landed = into.join("folder");
         assert_eq!(change.subject(), landed);
         assert!(landed.join("inside.txt").is_file());
@@ -453,7 +483,7 @@ mod tests {
         let into = root.join("into");
         std::fs::write(&from, b"x").unwrap();
         std::fs::create_dir(&into).unwrap();
-        let change = copy_into(&from, &into).expect("copied");
+        let change = copy_into(&from, &into, &sk_util::Cancel::new(), &mut |_| {}).expect("copied");
         assert_eq!(change.origin(), Some(from.as_path()));
     }
 
@@ -466,7 +496,7 @@ mod tests {
         std::fs::write(&from, b"contents").unwrap();
         std::fs::create_dir(&into).unwrap();
 
-        let change = move_into(&from, &into).expect("moved");
+        let change = move_into(&from, &into, &sk_util::Cancel::new(), &mut |_| {}).expect("moved");
         assert!(!from.exists());
         assert!(into.join("one.txt").is_file());
 
@@ -486,7 +516,8 @@ mod tests {
         std::fs::create_dir(&into).unwrap();
         std::fs::write(into.join("one.txt"), b"old").unwrap();
 
-        let refused = copy_into(&from, &into).expect_err("refused");
+        let refused =
+            copy_into(&from, &into, &sk_util::Cancel::new(), &mut |_| {}).expect_err("refused");
         assert_eq!(refused.kind(), ProblemKind::NameTaken);
         assert_eq!(std::fs::read(into.join("one.txt")).unwrap(), b"old");
     }

@@ -402,6 +402,18 @@ fn file(registry: &mut Registry<App>) {
             run: App::copy_content,
         },
         CommandSpec {
+            id: "edit.cancel",
+            name: "action.cancel",
+            group: Group::Edit,
+            // No file manager binds this, because every one of them puts a Cancel
+            // button in a progress window. There is no progress window here — the
+            // count is in the status line — so the chord is the affordance, and
+            // it is also on the menus and in the palette.
+            keys: &["ctrl+."],
+            enabled: App::can_cancel,
+            run: App::cancel_operation,
+        },
+        CommandSpec {
             id: "file.cut",
             name: "action.cut",
             group: Group::File,

@@ -66,6 +66,13 @@ error.too_large = {0} is too large to copy as text. Open it instead.
 error.full = There is no room for {0}. Free some space, or copy it somewhere else.
 error.not_copyable = {0} is a device or a pipe. There is nothing in it to copy.
 error.clipboard_no_files = The clipboard holds no files to paste.
+verb.copying = Copying
+verb.moving = Moving
+verb.trashing = Moving to Trash
+notice.progress = {0}… {1} of {2}
+notice.progress_rate = {0}… {1} of {2}, {3} at {4}/s
+notice.cancelled = Stopped. What was already copied is still there — Ctrl+Z takes it back.
+action.cancel = Stop the operation
 error.not_text = {0} is not text. Open it to see what it is.
 error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
 

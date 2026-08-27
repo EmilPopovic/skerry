@@ -58,6 +58,25 @@ pub struct Naming {
     pub field: Field,
 }
 
+/// One update from a running tree operation.
+#[derive(Clone, Copy, Debug)]
+struct Progress {
+    done: u64,
+    bytes: u64,
+}
+
+/// What is in flight, for the status line.
+struct Running {
+    /// The catalogue key for the word: copying, moving, or trashing.
+    verb: &'static str,
+    /// Entries finished by the operation in flight.
+    done: u64,
+    /// Bytes written, carried across the whole queue — so a selection of nine
+    /// reads as one operation with one rate rather than nine that each start over.
+    bytes: u64,
+    started: std::time::Instant,
+}
+
 /// Everything the frame loop needs to know about mutations.
 pub struct Edits {
     /// One stack for every mutation — [rule 3](../../../docs/03-principles.md).
@@ -76,6 +95,14 @@ pub struct Edits {
     /// `New folder 2` on the job, and only the outcome says which.
     pub naming_owed: bool,
     pending: Option<Pending>,
+    /// The token for the operation in flight, for the ones worth stopping.
+    stop: Option<Cancel>,
+    /// Whether the queue in flight was stopped, so the notice says so once.
+    cancelled_queue: bool,
+    /// How far the operation in flight has got, and when it started.
+    running: Option<Running>,
+    progress: Receiver<Progress>,
+    progress_tx: Sender<Progress>,
     /// What the queue is doing to each path it holds.
     doing: Queued,
     /// Paths still to work through, next one last.
@@ -121,6 +148,7 @@ impl Edits {
     #[must_use]
     pub fn new(wake: WakeHandle) -> Self {
         let (sender, done) = std::sync::mpsc::channel();
+        let (progress_tx, progress) = std::sync::mpsc::channel();
         // Two hundred is a long session's worth of mutations and a bounded
         // amount of memory. Rule 3 asks for visible history, not infinite.
         Self {
@@ -129,6 +157,11 @@ impl Edits {
             name_after_load: None,
             naming_owed: false,
             pending: None,
+            stop: None,
+            cancelled_queue: false,
+            running: None,
+            progress,
+            progress_tx,
             doing: Queued::Trash,
             queue: Vec::new(),
             queued: 0,
@@ -152,7 +185,7 @@ impl Edits {
 
     /// Makes a directory in `parent`, choosing a free name.
     pub fn new_directory(&mut self, parent: PathBuf, jobs: &Jobs) {
-        self.start(Pending::Doing, jobs, move || {
+        self.start(Pending::Doing, jobs, move |_| {
             // `New folder`, then `New folder 2`, and so on. `create_directory`
             // refuses a name that is taken, so the loop is the answer rather
             // than a check that races with it.
@@ -170,7 +203,7 @@ impl Edits {
 
     /// Renames `path` to `name`.
     pub fn rename(&mut self, path: PathBuf, name: String, jobs: &Jobs) {
-        self.start(Pending::Doing, jobs, move || Outcome::Did(ops::rename(&path, &name)));
+        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::rename(&path, &name)));
     }
 
     /// Moves several paths to the trash, one at a time.
@@ -221,11 +254,43 @@ impl Edits {
             return;
         };
         let doing = self.doing.clone();
-        self.start(Pending::Doing, jobs, move || {
+        let verb = match doing {
+            Queued::Trash => "verb.trashing",
+            Queued::Copy { .. } => "verb.copying",
+            Queued::Move { .. } => "verb.moving",
+        };
+        // Carried across the queue rather than reset per entry, so nine files
+        // read as one operation with one rate.
+        let carried = self.running.take().filter(|_| !self.queue.is_empty());
+        self.running = Some(carried.unwrap_or(Running {
+            verb,
+            done: 0,
+            bytes: 0,
+            started: std::time::Instant::now(),
+        }));
+        let updates = self.progress_tx.clone();
+        let wake = self.wake.clone();
+        let carried_bytes = self.running.as_ref().map_or(0, |it| it.bytes);
+        self.start(Pending::Doing, jobs, move |cancel| {
+            // Throttled to ten a second: a copy of ten thousand small files would
+            // otherwise wake the frame loop ten thousand times, and the loop
+            // exists to sleep.
+            let mut last = std::time::Instant::now();
+            let mut watch = |progress: sk_fs::copy::Progress| {
+                if last.elapsed() < std::time::Duration::from_millis(100) {
+                    return;
+                }
+                last = std::time::Instant::now();
+                let update =
+                    Progress { done: progress.done, bytes: carried_bytes + progress.bytes };
+                if updates.send(update).is_ok() {
+                    wake.wake();
+                }
+            };
             Outcome::Did(match doing {
                 Queued::Trash => ops::trash(&path),
-                Queued::Copy { into } => ops::copy_into(&path, &into),
-                Queued::Move { into } => ops::move_into(&path, &into),
+                Queued::Copy { into } => ops::copy_into(&path, &into, cancel, &mut watch),
+                Queued::Move { into } => ops::move_into(&path, &into, cancel, &mut watch),
             })
         });
     }
@@ -239,19 +304,25 @@ impl Edits {
     /// Undoes the most recent change.
     pub fn undo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_undo().cloned() else { return };
-        self.start(Pending::Undoing, jobs, move || Outcome::Undid(ops::revert(&change)));
+        self.start(Pending::Undoing, jobs, move |_| Outcome::Undid(ops::revert(&change)));
     }
 
     /// Does the most recently undone change again.
     pub fn redo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_redo().cloned() else { return };
-        self.start(Pending::Redoing, jobs, move || Outcome::Redid(ops::apply(&change)));
+        self.start(Pending::Redoing, jobs, move |_| Outcome::Redid(ops::apply(&change)));
     }
 
     /// Takes delivery of a finished operation.
     pub fn drain(&mut self) -> Option<Landed> {
         let outcome = self.done.try_recv().ok()?;
         self.pending = None;
+        self.stop = None;
+        // The queue carries the count and the rate across its entries, so this
+        // goes only when there is nothing left to carry them for.
+        if self.queue.is_empty() {
+            self.running = None;
+        }
         match outcome {
             Outcome::Did(Ok(change)) => {
                 // **A trashed file has no row to point at.** The cursor moved to
@@ -268,6 +339,15 @@ impl Edits {
                     sk_model::i18n::format("notice.trashed", &[&done, &self.queued])
                 } else {
                     sk_model::i18n::lookup("notice.done").to_owned()
+                };
+                // Not `queued > 1`, because a cancelled queue of nine has one
+                // entry done and eight dropped, and "1 of 9" would read as still
+                // running.
+                let message = if self.cancelled_queue {
+                    self.cancelled_queue = false;
+                    sk_model::i18n::lookup("notice.cancelled").to_owned()
+                } else {
+                    message
                 };
                 if self.queue.is_empty() {
                     self.queued = 0;
@@ -309,7 +389,7 @@ impl Edits {
         &mut self,
         kind: Pending,
         jobs: &Jobs,
-        work: impl FnOnce() -> Outcome + Send + 'static,
+        work: impl FnOnce(&Cancel) -> Outcome + Send + 'static,
     ) {
         if self.pending.is_some() {
             return;
@@ -320,14 +400,86 @@ impl Edits {
         // `Parallel`: one syscall on the device the listing is already on, and
         // the pane's lane is for reads that can flood it.
         //
-        // **Not cancellable, deliberately.** A mutation that has started has
-        // either happened or not; abandoning it half way would leave the undo
-        // stack describing a change nobody can find. The token is what the pool
-        // takes, and this one is never signalled.
-        jobs.pool.spawn(Lane::Parallel, Cancel::new(), move |_| {
-            if sender.send(work()).is_ok() {
+        // **Only a tree operation reads the token.** A rename, a `mkdir` or a
+        // trash is one syscall that has either happened or not, and abandoning
+        // one half way would leave the undo stack describing a change nobody can
+        // find. A tree copy is different: it can stop between files, it leaves
+        // what it wrote, and what it wrote is recorded so `Ctrl+Z` can take it
+        // back.
+        let stop = Cancel::new();
+        self.stop = Some(stop.clone());
+        jobs.pool.spawn(Lane::Parallel, stop, move |cancel| {
+            if sender.send(work(cancel)).is_ok() {
                 wake.wake();
             }
         });
+    }
+
+    /// Stops the operation in flight and drops the rest of the queue.
+    ///
+    /// A tree copy stops between files and keeps what it wrote — the undo entry
+    /// covers it. Anything smaller than that ignores this and finishes, because
+    /// there is nothing between its start and its end to stop at.
+    pub fn cancel(&mut self) {
+        self.cancelled_queue = self.busy();
+        self.queue.clear();
+        if let Some(stop) = self.stop.as_ref() {
+            stop.cancel();
+        }
+    }
+
+    /// Whether there is something worth stopping.
+    #[must_use]
+    pub fn cancellable(&self) -> bool {
+        self.busy() && !matches!(self.doing, Queued::Trash)
+    }
+
+    /// What to say about the operation in flight, if anything.
+    ///
+    /// **Counted, never estimated from a guess.** The total is not known until
+    /// the walk finds the last file, so this says what has been done — and the
+    /// rate, once there is enough of a sample for one. [Rule
+    /// 7](../../../docs/03-principles.md) is that progress is honest, and a bar
+    /// derived from a prediction is what it exists to forbid.
+    #[must_use]
+    pub fn progress_line(&self) -> Option<String> {
+        let running = self.running.as_ref()?;
+        let elapsed = running.started.elapsed().as_secs_f64();
+        let queued = self.queued.max(1);
+        let left = self.queue.len();
+        // A rate needs a sample. Under a quarter of a second of it is noise, and
+        // a number that jumps between 4 MB/s and 900 MB/s is worse than none.
+        let rate =
+            (elapsed > 0.25 && running.bytes > 0).then(|| (running.bytes as f64 / elapsed) as u64);
+        let of = queued - left;
+        Some(match rate {
+            Some(rate) => sk_model::i18n::format(
+                "notice.progress_rate",
+                &[
+                    &sk_model::i18n::lookup(running.verb),
+                    &of,
+                    &queued,
+                    &sk_ui::format::size(running.bytes),
+                    &sk_ui::format::size(rate),
+                ],
+            ),
+            None => sk_model::i18n::format(
+                "notice.progress",
+                &[&sk_model::i18n::lookup(running.verb), &of, &queued],
+            ),
+        })
+    }
+
+    /// Takes delivery of progress updates. Returns whether anything moved.
+    pub fn drain_progress(&mut self) -> bool {
+        let mut moved = false;
+        while let Ok(update) = self.progress.try_recv() {
+            if let Some(running) = self.running.as_mut() {
+                running.done = update.done;
+                running.bytes = update.bytes;
+                moved = true;
+            }
+        }
+        moved
     }
 }

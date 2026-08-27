@@ -289,14 +289,19 @@ to have run.
 | | What | From | Bar |
 | --- | --- | --- | --- |
 | 4 | ~~**Copy, move and permanent delete**~~ **Done.** Spike E's engine is `sk-fs::copy`: reflink, `copy_file_range` per extent, a hole-preserving floor, temp-then-rename, the three-step placement chain, recursive trees, symlinks recreated, and cancellation | M3 | Per-extent `copy_file_range` and the placement chain survive as tests rather than being rediscovered — met. The sparse test was watched failing against the naive loop: **131,072 blocks against 32** |
-| 5 | **The queue: honest progress, a real ETA, pause and cancel** | M3, [rule 7](03-principles.md#7-honest-progress) | No frame over 8 ms while a 4 GiB copy runs; cancel leaves no partial file; the ETA's method written down beside the number it produces |
+| 5 | **The queue: honest progress and cancel** — done. **An ETA and pause** — not | M3, [rule 7](03-principles.md#7-honest-progress) | The status line counts entries and reports a measured rate; `Ctrl+.` stops a tree copy between files and the partial copy is one undo entry. **No ETA**: a rate needs a total and the total is not known until the walk finds the last file, so what is shown is what has happened. **No pause**: stopping and restarting is not pausing, and a real one needs the job to block |
 | 6 | ~~**A paste that pastes files, and Cut**~~ **Mostly done.** `Ctrl+V` pastes what the clipboard names, `Ctrl+X` cuts, both undoable, both on the menus. `Ctrl+V` took over from *Go to the copied folder*, which moved to `Ctrl+Shift+V` | M0 owed | A file copied in Nautilus pastes here — **unverified**, and the reverse needs `x-special/gnome-copied-files` for a cut to arrive as a move rather than a copy. That marker is what is left |
 | 7 | **Undo across copy and move** — done — **and a visible history**, which is not | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation: met, and asserted through the window for a file, a cut and a whole folder. Undoing a copy removes only what the copy made, which is why its inverse may be recursive at all |
 
-Four and five are one decision apart and should not be split: a copy with no
-progress is a frozen window on a 4 GiB file, and [rule 1](03-principles.md#1-never-block-the-frame)
-means the engine has to be on the pool from its first commit rather than moved
-there afterwards. This is also the group that makes the *worst frame in the
+Four and five were one decision apart and were not split: a copy with no progress
+is a frozen window on a 4 GiB file, and [rule 1](03-principles.md#1-never-block-the-frame)
+means the engine had to be on the pool from its first commit rather than moved
+there afterwards.
+
+**A cancelled copy is still a change**, which is the part that took the thinking.
+It stopped part way and left what it wrote, and the only thing that can take that
+back is the undo stack — so it is recorded as a copy rather than reported as a
+failure with files on disk that nothing describes. This is also the group that makes the *worst frame in the
 product* worth fixing — 3.5–6.1 ms today, in the window where a 200,000-entry read
 lands, and [09-performance-budgets.md](09-performance-budgets.md#what-m0-measured)
 already names it as the frame to fix when the queue makes a read concurrent with an

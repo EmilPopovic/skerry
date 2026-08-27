@@ -2028,6 +2028,57 @@ def paste_a_folder(run: Run, fixture: Path) -> None:
         raise Failure("the undo reached into the original")
 
 
+@scenario("a-big-copy-shows-progress-and-stops-when-told", fresh=True)
+def progress_and_cancel(run: Run, fixture: Path) -> None:
+    """A copy large enough to watch, a status line that counts, and Ctrl+. stops it.
+
+    **Large enough to be watchable is the whole difficulty**, and bytes are the
+    wrong lever: 240 MB of tmpfs copies through `copy_file_range` faster than one
+    frame. What makes a copy slow is syscalls per file — six of them each — so the
+    fixture is thirty thousand small files in nested folders — four megabytes of
+    memory, and about a second of copying. Twelve thousand was not enough: tmpfs
+    finished them inside 350 ms, which is one frame's worth of margin.
+    """
+    big = fixture / "big"
+    for bucket in range(30):
+        (big / f"bucket-{bucket:02}").mkdir(parents=True)
+        for index in range(1000):
+            (big / f"bucket-{bucket:02}" / f"part-{index:04}.bin").write_bytes(b"x" * 128)
+    (fixture / "target").mkdir()
+
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    run.drive("text big\nsleep 400\nkey ctrl+c\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), cursor="big")
+
+    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 800\nkey ctrl+v\nsleep 300\nkey f12\nsleep 100\n")
+    during = run.state()
+    if "opying" not in during["progress"]:
+        raise Failure(
+            f"during a copy the progress line says {during['progress']!r} "
+            f"and the notice says {during['notice']!r}"
+        )
+
+    # And stopping it leaves what it wrote, with an undo entry over it.
+    run.drive("key ctrl+.\nsleep 1500\nkey f12\nsleep 200\n")
+    stopped = run.state()
+    if "Stopped" not in stopped["notice"]:
+        raise Failure(f"after stopping, the status line says {stopped['notice']!r}")
+    expect(stopped, undo="true")
+    partial = fixture / "target/big"
+    if not partial.is_dir():
+        raise Failure("a stopped copy left nothing at all, so there is nothing to undo")
+    kept = sum(1 for _ in partial.rglob("*.bin"))
+    if kept >= 30_000:
+        raise Failure(f"the copy finished all {kept} files rather than stopping")
+    if kept == 0:
+        raise Failure("the copy had not started, so stopping it proved nothing")
+
+    # The undo takes the partial copy away, which is the only thing that can.
+    run.drive("key ctrl+z\nsleep 2000\nkey f12\nsleep 200\n")
+    if partial.exists():
+        raise Failure(f"the partial copy survived its undo: {partial}")
+
+
 @scenario("the-frame-is-at-the-compositors-scale")
 def first_frame_scale(run: Run, fixture: Path) -> None:
     """What the program scales by is what the compositor asked for.

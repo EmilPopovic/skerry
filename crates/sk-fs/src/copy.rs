@@ -243,6 +243,7 @@ pub fn copy_into(
     options: Options,
     cancel: &sk_util::Cancel,
     progress: &mut Progress,
+    watch: &mut dyn FnMut(Progress),
 ) -> Result<PathBuf, Problem> {
     let Some(name) = source.file_name() else {
         return Err(Problem::new(
@@ -261,7 +262,7 @@ pub fn copy_into(
             "a folder cannot be copied into itself",
         ));
     }
-    copy_any(source, &destination, options, cancel, progress, 0)?;
+    copy_any(source, &destination, options, cancel, progress, watch, 0)?;
     Ok(destination)
 }
 
@@ -277,6 +278,7 @@ pub fn move_into(
     options: Options,
     cancel: &sk_util::Cancel,
     progress: &mut Progress,
+    watch: &mut dyn FnMut(Progress),
 ) -> Result<PathBuf, Problem> {
     let Some(name) = source.file_name() else {
         return Err(Problem::new(
@@ -301,7 +303,7 @@ pub fn move_into(
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, &destination, "rename")),
     }
-    copy_any(source, &destination, options, cancel, progress, 0)?;
+    copy_any(source, &destination, options, cancel, progress, watch, 0)?;
     // Only now, and only because the copy above returned `Ok`.
     remove_tree(source, cancel)?;
     Ok(destination)
@@ -338,6 +340,7 @@ fn copy_any(
     options: Options,
     cancel: &sk_util::Cancel,
     progress: &mut Progress,
+    watch: &mut dyn FnMut(Progress),
     depth: u32,
 ) -> Result<(), Problem> {
     if cancel.is_cancelled() {
@@ -353,6 +356,7 @@ fn copy_any(
             let copied = copy_file(source, destination, options)?;
             progress.done += 1;
             progress.bytes += copied.bytes;
+            watch(*progress);
             Ok(())
         }
         // Recreated rather than followed. A link is 40 bytes and what it points at
@@ -363,10 +367,11 @@ fn copy_any(
             fs::symlinkat(target.as_c_str(), fs::CWD, destination)
                 .map_err(|error| at(error, destination, "symlink"))?;
             progress.done += 1;
+            watch(*progress);
             Ok(())
         }
         fs::FileType::Directory => {
-            copy_directory(source, destination, options, cancel, progress, depth, &stat)
+            copy_directory(source, destination, options, cancel, progress, watch, depth, &stat)
         }
         // A fifo, a socket or a device. Recreating one needs `mknod` and, for a
         // device, privilege this process does not have — and skipping it silently
@@ -379,12 +384,18 @@ fn copy_any(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one walk's worth of state, and \
+    bundling it into a struct would put a lifetime on every recursive call"
+)]
 fn copy_directory(
     source: &Path,
     destination: &Path,
     options: Options,
     cancel: &sk_util::Cancel,
     progress: &mut Progress,
+    watch: &mut dyn FnMut(Progress),
     depth: u32,
     stat: &Stat,
 ) -> Result<(), Problem> {
@@ -403,6 +414,7 @@ fn copy_directory(
             options,
             cancel,
             progress,
+            watch,
             depth + 1,
         )?;
     }
@@ -412,6 +424,7 @@ fn copy_directory(
     let _ = fs::chmodat(fs::CWD, destination, mode, AtFlags::empty());
     let _ = fs::utimensat(fs::CWD, destination, &times_of(stat), AtFlags::empty());
     progress.done += 1;
+    watch(*progress);
     Ok(())
 }
 
@@ -996,6 +1009,7 @@ mod tests {
             Options::default(),
             &sk_util::Cancel::new(),
             &mut progress,
+            &mut |_| {},
         )
         .expect("copied");
         assert_eq!(landed, into.join("tree"));
@@ -1025,6 +1039,7 @@ mod tests {
             Options::default(),
             &sk_util::Cancel::new(),
             &mut super::Progress::default(),
+            &mut |_| {},
         )
         .expect("copied");
         let link = landed.join("pointer");
@@ -1044,6 +1059,7 @@ mod tests {
                 Options::default(),
                 &sk_util::Cancel::new(),
                 &mut super::Progress::default(),
+                &mut |_| {},
             )
             .expect_err("refused");
             assert!(refused.message().contains("itself"), "{}", refused.message());
@@ -1063,6 +1079,7 @@ mod tests {
             Options::default(),
             &sk_util::Cancel::new(),
             &mut super::Progress::default(),
+            &mut |_| {},
         )
         .expect("moved");
         assert!(!source.exists(), "the source survived");
@@ -1093,6 +1110,7 @@ mod tests {
             Options::default(),
             &cancel,
             &mut super::Progress::default(),
+            &mut |_| {},
         )
         .expect_err("stopped");
         assert!(stopped.message().to_lowercase().contains("cancel"), "{}", stopped.message());
@@ -1125,6 +1143,7 @@ mod tests {
             Options::default(),
             &sk_util::Cancel::new(),
             &mut super::Progress::default(),
+            &mut |_| {},
         )
         .expect_err("refused");
         assert!(refused.message().contains("device or a pipe"), "{}", refused.message());

@@ -688,6 +688,9 @@ impl App {
             self.drain_paste();
             self.drain_content();
             self.drain_launches();
+            if self.edits.drain_progress() {
+                self.dirty = true;
+            }
             self.drain_edits();
             if self.sidebar.drain() {
                 self.dirty = true;
@@ -1490,6 +1493,22 @@ impl App {
         self.cutting = !self.selected_paths().is_empty();
     }
 
+    /// Stops the operation in flight and drops the rest of the queue.
+    pub(crate) fn cancel_operation(&mut self) {
+        if !self.edits.cancellable() {
+            return;
+        }
+        self.edits.cancel();
+        self.notice = Some((sk_model::i18n::lookup("notice.cancelled").to_owned(), Instant::now()));
+        self.dirty = true;
+    }
+
+    /// Whether there is anything worth stopping.
+    #[must_use]
+    pub fn can_cancel(&self) -> bool {
+        self.edits.cancellable()
+    }
+
     /// Whether there is anything on the clipboard worth pasting.
     ///
     /// Asked of what the peer *offers*, not of what it holds: reading the bytes
@@ -2005,13 +2024,14 @@ impl App {
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
         let (queue_left, queue_total) = self.edits.queue_state();
         let cursor_row = self.pane.cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        let progress = self.edits.progress_line().unwrap_or_default();
         format!(
             "path={:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} path_entry={typing_path:?} \
-undo={} redo={} busy={} queue={queue_left}/{queue_total} \
+undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
@@ -2962,13 +2982,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
         // Built only when the overlay is up, which is why it may allocate.
         let rows = show_keys.then(|| crate::commands::overlay_rows(commands));
+        let progress = edits.progress_line();
         let chrome = Chrome {
             keys: rows.as_deref(),
             stats: *show_stats,
             typed: (!typed.is_empty()).then_some(typed.as_str()),
             band: *band,
             watching: *watching,
-            notice: notice.as_ref().map(|(message, _)| message.as_str()),
+            // Progress wins over a notice while an operation is running: what a
+            // person wants to see during a copy is the copy, and the notice that
+            // preceded it has already been read.
+            notice: progress.as_deref().or(notice.as_ref().map(|(message, _)| message.as_str())),
             hovered_button: *hovered_button,
             hovered_crumb: *hovered_crumb,
             hovered_tool: *hovered_tool,
