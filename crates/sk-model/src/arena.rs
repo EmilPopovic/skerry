@@ -77,6 +77,19 @@ impl StrArena {
         }
     }
 
+    /// The bytes `reference` points at, without the UTF-8 check [`StrArena::get`]
+    /// pays for.
+    ///
+    /// For a caller that works in bytes anyway. Building a collation key for a
+    /// million names revalidated 27 MB of UTF-8 that [`StrArena::push`] had
+    /// already validated on the way in.
+    #[must_use]
+    pub fn raw(&self, reference: StrRef) -> &[u8] {
+        let start = reference.offset as usize;
+        let end = start + reference.len as usize;
+        self.bytes.get(start..end).unwrap_or(&[])
+    }
+
     /// Bytes currently held, which is what the store reports as its name cost.
     #[must_use]
     pub fn bytes(&self) -> usize {

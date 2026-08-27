@@ -27,6 +27,7 @@ pub mod collate;
 pub mod i18n;
 pub mod listing;
 pub mod problem;
+pub mod radix;
 pub mod selection;
 pub mod sort;
 
@@ -35,5 +36,6 @@ pub use bitset::BitSet;
 pub use collate::natural_cmp;
 pub use listing::{EntryId, Flags, Listing};
 pub use problem::{Problem, ProblemKind};
+pub use radix::KeySet;
 pub use selection::Selection;
 pub use sort::{Sort, SortColumn};

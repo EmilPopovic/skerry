@@ -56,7 +56,7 @@ the same renderer and the same glyph atlas the window uses.
 | Keystroke to frame | < 8 ms | frame p99 **0.342 ms** median of 5 runs at 200,000 entries; **worst 5.0 ms**, while the read is landing | met |
 | Open a 10k-entry directory | < 30 ms | **23.9 ms** to a sorted, painted listing | met |
 | Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% | met at 200,000; 1M unmeasured |
-| Sort a large listing | < 120 ms at 1M | **150.2 ms** median at 200,000, on a job | **missed**, see below |
+| Sort a large listing | < 120 ms at 1M | **166.0 ms** median of 5 at 973,759, on a job — down from 1,460 ms | **missed** by 1.4×, see below |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
 | RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |
@@ -168,17 +168,50 @@ persisted pipeline cache and presenting a first frame from a software buffer whi
 the device opens, and neither is M0's. The 2,654 ms outlier appeared once in
 twelve runs and once more after a rebuild; it is recorded rather than explained.
 
-**The 1M sort budget is missed by an order of magnitude, and now for a known
-reason.** 150 ms at 200,000 entries extrapolates to roughly 1.4 s at a million.
-[Spike F](../spikes/f-index-and-search/README.md) measured 152 ms for a million
-names and proposed an eight-byte prefix key with a radix pass. **That key cannot
-work for this comparison**, and the counterexample is a test in
-`sk_model::collate`: natural order is not lexical order, so a lexical key decides
+**The 1M sort budget was missed by an order of magnitude and is now missed by
+1.4×.** The comparison sort measured **1,460 ms** at 973,759 entries — the 150 ms
+figure was at 200,000 and extrapolated badly. It is now **166.0 ms**, an **8.8×**
+improvement, measured as five alternating pairs of this binary and the commit
+before it at a one-minute load average of **2.4**, on the flat million-entry
+fixture Spike F built. Median of five each: before 1,424–1,522, after
+165.0–169.7. The row stays at 120 ms and stays marked missed.
+
+What changed is *what is sorted*, which is what
+[Spike F](../spikes/f-index-and-search/README.md) said it would have to be. The
+spike proposed an eight-byte lexical prefix key with a radix pass; **that key
+cannot work for this comparison**, and the counterexample is still a test in
+`sk_model::collate` — natural order is not lexical order, so a lexical key decides
 `img10.png` against `img2.png` before the tiebreak runs, and decides it wrongly.
-An MSD string radix over the name arena — which Spike F named and did not measure
-— is now the only path to that row. Two things reduce the harm meanwhile: the
-first sort runs inside the directory-reading job, and a re-sort above 8,192
-entries runs on a job over a clone, so the UI thread never blocks on it.
+So the key became a **collation key whose byte order is `natural_cmp` exactly**:
+folded letters, digit runs as a length prefix and their significant digits, a
+leading-zero signature, and the raw bytes to keep the order total. A byte-wise MSD
+radix over that produces a natural order without ever comparing two names, and
+`sk_model::listing`'s tests run both and require the same answer over every sort a
+person can ask for.
+
+Three things were tried, measured and kept or dropped:
+
+- **A two-byte pass** for runs over 65,536. Worth 129 → 127 ms, which is nothing:
+  the cost is the *number of levels*, and these names share long word prefixes —
+  25,926 passes visited items 16.5 million times, 17 bytes of depth per name.
+- **Comparing the packed key head as one `u64`** before touching the arena. Also
+  worth nothing on its own, and kept because it is free and the arena is 63 MB.
+- **The leaf cutoff**, which is what actually moved: 24 gives a 124 ms radix, 256
+  gives 117, 1024 gives 101. Above 1024 the difference is inside the run-to-run
+  spread on a machine in use.
+
+Key construction was 105 of the first 237 ms and is now 53. Two causes, both
+measured: pushing one lowercased byte at a time where `make_ascii_lowercase` over
+a slice is vectorised, and `StrArena::get` revalidating 27 MB of UTF-8 that
+`push` had already validated. The key builder now takes bytes.
+
+**Getting inside 120 ms from here is parallelism**, and it is not available inside
+`sk-model`: the job pool is `sk-util`, which is the same level, so the edge would
+be sideways. Spike F measured threaded buckets at 367 → 216 ms on a Pi and 69 → 23
+ms on a laptop, so the headroom is real and the work is an API that hands buckets
+to a caller above. Two things reduce the harm meanwhile: the first sort runs
+inside the directory-reading job, and a re-sort above 8,192 entries runs on a job
+over a clone, so the UI thread never blocks on it.
 
 **The RSS target is below the driver's floor.** 116.3 MB with 154 entries on
 screen is what the process costs before any of our data exists, and 10,000

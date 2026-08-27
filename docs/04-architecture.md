@@ -312,8 +312,10 @@ a sort that reads sequentially: a radix pass over the keys is **17.8 ms** and br
 full name sort to **96.6 ms**, inside the budget. The remaining 79 ms is repairing ties,
 because 94% of filenames share their first eight bytes and widening the key to sixteen was
 measured and does not help. A fixed-width prefix key is the wrong shape for names that
-collide on long prefixes; an MSD string radix over the arena is the direction, and is
-unmeasured.
+collide on long prefixes. What shipped instead is an MSD radix over a **collation key
+whose byte order is `natural_cmp` exactly**, in `sk_model::radix`: 1,460 → 166 ms at
+973,759 entries, and never a comparison between two names. See
+[09-performance-budgets.md](09-performance-budgets.md#what-m0-measured).
 
 Enumeration goes through raw `getdents64` (via `rustix`) rather than `std::fs::read_dir`,
 because `d_type` yields file-versus-directory for free and lets `statx` be deferred to a

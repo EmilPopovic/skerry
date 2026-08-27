@@ -21,7 +21,6 @@
 
 use crate::arena::{StrArena, StrRef};
 
-use crate::collate::natural_cmp;
 use crate::sort::{Sort, SortColumn};
 
 /// An index into one listing's parallel arrays.
@@ -365,9 +364,7 @@ impl Listing {
 
     /// Rebuilds the display order for `sort`, keeping or dropping dotfiles.
     ///
-    /// A comparison sort over the permutation, with no precomputed key: see
-    /// [`crate::collate`] for the counterexample that ruled the key out. The
-    /// secondary key is always the name, so every order is total and a listing
+    /// The secondary key is always the name, so every order is total and a listing
     /// cannot reshuffle between two frames.
     pub fn reorder(&mut self, sort: Sort, show_hidden: bool, filter: &str) {
         self.order = self.compute_order(sort, show_hidden, filter);
@@ -385,9 +382,14 @@ impl Listing {
 
     /// The display order for `sort`, without applying it.
     ///
-    /// Takes `&self` so it can run on a job over a clone. This is the function
-    /// that costs 272 ms at 200,000 entries, and the reason it is not called from
-    /// the frame loop.
+    /// Takes `&self` so it can run on a job over a clone.
+    ///
+    /// **A radix sort over collation keys, not a comparison sort.** One key per
+    /// surviving entry — the bytes of the column ahead of the bytes of the name —
+    /// and then [`crate::radix::order`] walks them a byte at a time and never
+    /// compares two names. The comparison sort this replaced was 1.40 s at
+    /// 974,000 entries against a 120 ms budget; the numbers and the method are in
+    /// [09-performance-budgets.md](../../../docs/09-performance-budgets.md#what-m0-measured).
     #[must_use]
     pub fn compute_order(&self, sort: Sort, show_hidden: bool, filter: &str) -> Vec<EntryId> {
         // **Not lowercased.** `contains_folded` compares with
@@ -396,56 +398,81 @@ impl Listing {
         // the needle lowercased, `Ä` matched `äpfel` and not `Äpfel`, and
         // `İstanbul` matched nothing at all.
         let needle = filter;
-        let mut order: Vec<EntryId> = (0..self.name.len() as u32)
+        let kept: Vec<EntryId> = (0..self.name.len() as u32)
             .map(EntryId)
             .filter(|id| show_hidden || !self.flags[id.index()].has(Flags::HIDDEN))
             .filter(|id| needle.is_empty() || contains_folded(self.name(*id), needle))
             .collect();
 
-        let (names, name_refs, mtime, flags) = (&self.names, &self.name, &self.mtime, &self.flags);
-        let name_of = |index: usize| names.get(name_refs[index]);
-        // Resolved once rather than per comparison: a sort does O(n log n)
-        // comparisons and this is O(n), so the branch on "is it a directory"
-        // happens two hundred thousand times instead of three million.
-        //
-        // And only when the comparison reads it. A name sort never does, and a
-        // name sort is what every keystroke of a filter re-runs — on the frame
-        // loop below `SORT_INLINE`, where a 200,000-element pass nobody looks at
-        // is the whole of the cost.
-        let sizes: Vec<u64> = if sort.column == SortColumn::Size {
-            (0..self.name.len()).map(|index| self.sort_size(EntryId(index as u32))).collect()
-        } else {
-            Vec::new()
-        };
+        let reserve: usize = kept
+            .iter()
+            .map(|id| crate::collate::key_capacity(self.name[id.index()].len()) + PREFIX_MAX)
+            .sum();
+        let mut keys = crate::radix::KeySet::with_capacity(kept.len(), reserve);
+        let mut prefix = [0u8; PREFIX_MAX];
+        for id in &kept {
+            let width = self.write_prefix(*id, sort, &mut prefix);
+            keys.push(&prefix[..width], self.names.raw(self.name[id.index()]));
+        }
 
-        order.sort_unstable_by(|a, b| {
-            let (a, b) = (a.index(), b.index());
-            if sort.dirs_first {
-                let (left, right) = (flags[a].has(Flags::DIR), flags[b].has(Flags::DIR));
-                if left != right {
-                    return right.cmp(&left);
-                }
-            }
-            let primary = match sort.column {
-                SortColumn::Name => natural_cmp(name_of(a), name_of(b)),
-                SortColumn::Size => {
-                    sizes[a].cmp(&sizes[b]).then_with(|| natural_cmp(name_of(a), name_of(b)))
-                }
-                SortColumn::Modified => {
-                    mtime[a].cmp(&mtime[b]).then_with(|| natural_cmp(name_of(a), name_of(b)))
-                }
-            };
-            if sort.descending { primary.reverse() } else { primary }
-        });
+        let mut order: Vec<EntryId> =
+            crate::radix::order(&keys).iter().map(|at| kept[*at as usize]).collect();
+        if sort.descending {
+            self.reverse_within_groups(&mut order, sort.dirs_first);
+        }
         order
     }
+
+    /// The bytes that sort ahead of the name, and how many there are.
+    ///
+    /// Directories first is one byte because it is a grouping rather than an
+    /// order: it is not reversed by `descending`, which is why it goes ahead of
+    /// everything and why the reversal below happens inside each group.
+    fn write_prefix(&self, id: EntryId, sort: Sort, prefix: &mut [u8; PREFIX_MAX]) -> usize {
+        let mut width = 0;
+        if sort.dirs_first {
+            prefix[0] = u8::from(!self.flags[id.index()].has(Flags::DIR));
+            width = 1;
+        }
+        let column = match sort.column {
+            SortColumn::Name => return width,
+            SortColumn::Size => self.sort_size(id),
+            // Sign flipped into the top bit, because a big-endian `u64` compares
+            // as an unsigned number and a timestamp before 1970 is negative.
+            SortColumn::Modified => (self.mtime(id) as u64) ^ (1 << 63),
+        };
+        prefix[width..width + 8].copy_from_slice(&column.to_be_bytes());
+        width + 8
+    }
+
+    /// Reverses each directories-first group in place.
+    ///
+    /// `descending` reverses the column and the name tiebreak together, so the
+    /// descending order is the ascending one backwards — but only within a group,
+    /// because grouping directories ahead of files is not part of the order the
+    /// user asked to reverse.
+    fn reverse_within_groups(&self, order: &mut [EntryId], dirs_first: bool) {
+        if !dirs_first {
+            order.reverse();
+            return;
+        }
+        let directories =
+            order.iter().take_while(|id| self.flags[id.index()].has(Flags::DIR)).count();
+        let (dirs, files) = order.split_at_mut(directories);
+        dirs.reverse();
+        files.reverse();
+    }
 }
+
+/// Room for the widest sort prefix: one grouping byte and one eight-byte column.
+const PREFIX_MAX: usize = 9;
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{EntryId, Flags, Listing};
+    use crate::collate::natural_cmp;
     use crate::sort::{Sort, SortColumn};
 
     fn fixture() -> Listing {
@@ -464,6 +491,159 @@ mod tests {
 
     fn names(listing: &Listing) -> Vec<&str> {
         (0..listing.rows()).filter_map(|row| listing.at(row)).map(|id| listing.name(id)).collect()
+    }
+
+    /// The comparison sort the radix replaced, kept as the reference it has to
+    /// agree with.
+    ///
+    /// Not dead code and not a second implementation: it is the *definition* of
+    /// the order, and the only way to know the accelerator produces it is to run
+    /// both. [12-measurement.md](../../../docs/12-measurement.md) has this as its
+    /// own rule, learned from an accelerator that disagreed with the order it was
+    /// accelerating.
+    fn by_comparison(
+        listing: &Listing,
+        sort: Sort,
+        show_hidden: bool,
+        filter: &str,
+    ) -> Vec<EntryId> {
+        let mut order: Vec<EntryId> = (0..listing.name.len())
+            .map(|index| EntryId(index as u32))
+            .filter(|id| show_hidden || !listing.flags[id.index()].has(Flags::HIDDEN))
+            .filter(|id| filter.is_empty() || super::contains_folded(listing.name(*id), filter))
+            .collect();
+        order.sort_by(|a, b| {
+            let (left, right) = (a.index(), b.index());
+            if sort.dirs_first {
+                let (a_dir, b_dir) =
+                    (listing.flags[left].has(Flags::DIR), listing.flags[right].has(Flags::DIR));
+                if a_dir != b_dir {
+                    return b_dir.cmp(&a_dir);
+                }
+            }
+            let primary = match sort.column {
+                SortColumn::Name => natural_cmp(listing.name(*a), listing.name(*b)),
+                SortColumn::Size => listing
+                    .sort_size(*a)
+                    .cmp(&listing.sort_size(*b))
+                    .then_with(|| natural_cmp(listing.name(*a), listing.name(*b))),
+                SortColumn::Modified => listing
+                    .mtime(*a)
+                    .cmp(&listing.mtime(*b))
+                    .then_with(|| natural_cmp(listing.name(*a), listing.name(*b))),
+            };
+            if sort.descending { primary.reverse() } else { primary }
+        });
+        order
+    }
+
+    /// Names chosen for what breaks a key rather than for what looks like a
+    /// directory: digits against punctuation, three depths of leading zero, case
+    /// that only differs, a shared prefix longer than the packed head, and bytes
+    /// above ASCII.
+    fn adversarial() -> Listing {
+        let mut listing = Listing::with_capacity(64);
+        let names: &[(&str, Flags)] = &[
+            ("img10.png", Flags::NONE),
+            ("img2.png", Flags::NONE),
+            ("img1.png", Flags::NONE),
+            ("IMG2.PNG", Flags::NONE),
+            ("src", Flags::DIR),
+            ("Src", Flags::DIR),
+            ("a.b", Flags::NONE),
+            ("a1b", Flags::NONE),
+            ("a-b", Flags::NONE),
+            ("a~b", Flags::NONE),
+            ("007", Flags::NONE),
+            ("07", Flags::NONE),
+            ("7", Flags::NONE),
+            (".hidden", Flags::NONE),
+            (".config", Flags::DIR),
+            ("Makefile", Flags::NONE),
+            ("makefile", Flags::NONE),
+            ("main.c", Flags::NONE),
+            ("résumé-2.py", Flags::NONE),
+            ("résumé-10.py", Flags::NONE),
+            ("회의록-2", Flags::NONE),
+            ("회의록-10", Flags::NONE),
+            ("shared-prefix-beyond-eight-0001", Flags::NONE),
+            ("shared-prefix-beyond-eight-0002", Flags::NONE),
+            ("shared-prefix-beyond-eight-0010", Flags::NONE),
+            ("v08", Flags::NONE),
+            ("v9", Flags::NONE),
+            ("v10", Flags::NONE),
+            ("2024-01-02", Flags::NONE),
+            ("2024-1-2", Flags::NONE),
+        ];
+        for (index, (name, flags)) in names.iter().enumerate() {
+            let id = listing.push(name, *flags);
+            // Sizes and times that collide on purpose, so the name tiebreak is
+            // exercised on both columns rather than only on the name column.
+            let size = (index as u64 % 4) * 1024;
+            let mtime = i64::try_from(index % 3).unwrap_or(0) - 1;
+            listing.set_meta(id, size, mtime, Flags::NONE);
+        }
+        listing
+    }
+
+    /// The one assertion that makes the radix safe to have replaced a comparison
+    /// sort: every sort a person can ask for, against the comparator that defines
+    /// it, with and without dotfiles and under a filter.
+    #[test]
+    fn the_radix_order_is_the_comparison_order_for_every_sort() {
+        let listing = adversarial();
+        for column in [SortColumn::Name, SortColumn::Size, SortColumn::Modified] {
+            for descending in [false, true] {
+                for dirs_first in [false, true] {
+                    let sort = Sort { column, descending, dirs_first };
+                    for show_hidden in [false, true] {
+                        for filter in ["", "img", "a", "É"] {
+                            let wanted = by_comparison(&listing, sort, show_hidden, filter);
+                            let got = listing.compute_order(sort, show_hidden, filter);
+                            let shown = |order: &[EntryId]| -> Vec<&str> {
+                                order.iter().map(|id| listing.name(*id)).collect()
+                            };
+                            assert_eq!(
+                                shown(&got),
+                                shown(&wanted),
+                                "{column:?} descending={descending} dirs_first={dirs_first} \
+                                 hidden={show_hidden} filter={filter:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// At a size that forces the counting pass rather than the insertion cutoff,
+    /// on all three columns.
+    #[test]
+    fn the_radix_agrees_at_a_size_that_takes_the_counting_path() {
+        let mut listing = Listing::with_capacity(4_000);
+        for index in 0..4_000u64 {
+            let name = match index % 5 {
+                0 => format!("report-{index}.txt"),
+                1 => format!("{:06}-padded.log", index % 211),
+                2 => format!("a-long-shared-prefix-{index}"),
+                3 => format!("MiXeD-{index}"),
+                _ => format!("résumé-{index}.pdf"),
+            };
+            let flags = if index % 7 == 0 { Flags::DIR } else { Flags::NONE };
+            let id = listing.push(&name, flags);
+            let mtime = i64::try_from(index % 13).unwrap_or(0) - 6;
+            listing.set_meta(id, index % 97, mtime, Flags::NONE);
+        }
+        for column in [SortColumn::Name, SortColumn::Size, SortColumn::Modified] {
+            let sort = Sort { column, descending: false, dirs_first: true };
+            let wanted: Vec<&str> = by_comparison(&listing, sort, true, "")
+                .iter()
+                .map(|id| listing.name(*id))
+                .collect();
+            let got: Vec<&str> =
+                listing.compute_order(sort, true, "").iter().map(|id| listing.name(*id)).collect();
+            assert_eq!(got, wanted, "{column:?}");
+        }
     }
 
     #[test]

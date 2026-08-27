@@ -265,7 +265,7 @@ are ratios for ordering, not a schedule.
 
 | | What | From | Bar |
 | --- | --- | --- | --- |
-| 1 | **An MSD string radix over the name arena.** The sort row is the only budget miss with its fix already located | M0 budget | Sort 1M under 120 ms, and the radix agrees with the comparison order it replaces over the adversarial name set — [an accelerator has to agree with the thing it accelerates](12-measurement.md#an-accelerator-has-to-agree-with-the-thing-it-accelerates) |
+| 1 | ~~**An MSD string radix over the name arena.**~~ **Done, and the row is still missed.** 1,460 ms → **166.0 ms** at 973,759 entries, 8.8×, against a 120 ms target. The remaining gap is parallelism, which needs an API that hands buckets to a caller above `sk-model` | M0 budget | Sort 1M under 120 ms — **not met**. The radix agrees with the comparison order it replaces over every sort a person can ask for, which is met and is a test |
 | 2 | **The command palette.** A fuzzy filter over the one registry, in the text field that already exists, drawing the list the keyboard overlay already draws | M6 | Every registry entry reachable in three keystrokes; no frame over 8 ms while typing over the full set |
 | 3 | **The 1×1 pre-map probe**, so the scale is known before the first frame instead of after it | M0 | Frame 1 drawn at the final scale, with a golden frame at 125% to prove it |
 
@@ -370,11 +370,10 @@ compositor bug. M3 owes the copy engine's two, from
 `copy_file_range` per extent, and a placement fallback chain. Both sets are already
 written as tests; what M0 and M3 have to do is not delete them.
 
-Six measurements are still owed. One of them now blocks a budget row rather than a
-milestone — see the sort row in
-[09-performance-budgets.md](09-performance-budgets.md#what-m0-measured), which needs
-an MSD string radix over the name arena and cannot use the prefix key Spike F
-proposed.
+Six measurements are still owed. One of them blocked a budget row rather than a
+milestone; the sort row is now 8.8× better and still missed by 1.4×, and what it
+needs next is threads rather than a better key — see
+[09-performance-budgets.md](09-performance-budgets.md#what-m0-measured).
 
 - **An Intel integrated GPU** for Spike A. Absent from every machine available, and the
   most common Linux GPU.
