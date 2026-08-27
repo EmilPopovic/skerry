@@ -655,6 +655,46 @@ def copy_to_clipboard(run: Run, fixture: Path) -> None:
         raise Failure(f"copying said {state.get('notice')!r}")
 
 
+@scenario("filter-narrows-the-list")
+def filter_narrows_the_list(run: Run, fixture: Path) -> None:
+    """`/` opens the filter, typing narrows, Escape puts everything back.
+
+    The keyboard belongs to the field while it is open — a filter you cannot type
+    `h` into because `Ctrl+H` is bound is not a filter — but the arrows do not,
+    so a narrowed list can still be moved through and acted on.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 200\n")
+    everything = int(run.state()["rows"])
+    if everything < 9:
+        raise Failure(f"the fixture has only {everything} rows")
+
+    run.drive("key /\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), filtering="true", filter="")
+
+    # `alpha` is the only name with a `p` in it that is not a `file-N.txt`.
+    run.drive("key f\nkey i\nkey l\nsleep 300\nkey f12\nsleep 200\n")
+    state = run.state()
+    expect(state, filtering="true", filter="fil")
+    narrowed = int(state["rows"])
+    if narrowed != 6:
+        raise Failure(f"{narrowed} rows match 'fil', wanted the six file-N.txt")
+
+    # The arrows still reach the list while the field is open.
+    run.drive("key down\nsleep 200\nkey f12\nsleep 150\n")
+    if not run.state()["cursor"].startswith("file-"):
+        raise Failure(f"the cursor landed on {run.state()['cursor']!r}, not a match")
+
+    # Backspace narrows back out, one character at a time.
+    run.drive("key backspace\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), filter="fi")
+
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
+    state = run.state()
+    expect(state, filtering="false", filter="")
+    if int(state["rows"]) != everything:
+        raise Failure(f"{state['rows']} rows after clearing, wanted {everything}")
+
+
 @scenario("breadcrumb-navigation")
 def breadcrumb_navigation(run: Run, fixture: Path) -> None:
     """Clicking a path component goes there, and hovering says which.

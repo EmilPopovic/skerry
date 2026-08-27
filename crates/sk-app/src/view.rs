@@ -44,6 +44,8 @@ pub struct Chrome<'a> {
     pub hovered_button: Option<Button>,
     /// The path component under the pointer.
     pub hovered_crumb: Option<usize>,
+    /// Whether the filter field has the keyboard.
+    pub filtering: bool,
     /// What the compositor says the window is, for the frame the window draws.
     pub window: WindowState,
 }
@@ -582,22 +584,44 @@ fn status(
     let theme = *painter.theme;
     let metrics = theme.metrics;
     fill(painter, layout.status, theme.palette.chrome);
-    painter.hairline(0.0, layout.status.y, layout.status.width, theme.palette.divider);
-    let baseline = painter.baseline(layout.status.y, layout.status.height, metrics.header_size);
+    if chrome.filtering {
+        // A mode that takes the keyboard has to look like one, or the first thing
+        // a person learns is that typing stopped doing what it did. A tint alone
+        // is not enough at these alphas, so the strip also gets an accent rule
+        // along its top edge where the hairline would be.
+        fill(painter, layout.status, theme.palette.accent.with_alpha(30));
+        let rule = painter.rect(0.0, layout.status.y, layout.status.width, 2.0);
+        painter.list.rect(rule, theme.palette.accent, 0.0);
+    } else {
+        painter.hairline(0.0, layout.status.y, layout.status.width, theme.palette.divider);
+    }
+    let size = if chrome.filtering { metrics.path_size } else { metrics.header_size };
+    let baseline = painter.baseline(layout.status.y, layout.status.height, size);
 
     let rows = pane.listing.rows();
     let selected = pane.selection.count();
-    let left = if let Some(notice) = chrome.notice {
+    let left = if chrome.filtering {
+        // The prompt owns the line while the field has the keyboard: it is what
+        // the keys are going into, and a count beside it would compete with the
+        // thing being typed.
+        i18n::format("status.filter_prompt", &[&pane.filter])
+    } else if let Some(notice) = chrome.notice {
         notice.to_owned()
     } else if pane.loading {
         i18n::format("status.loading", &[&format::grouped(rows)])
+    } else if !pane.filter.is_empty() {
+        i18n::format(
+            "status.filtered",
+            &[&format::grouped(rows), &format::grouped(pane.listing.len()), &pane.filter],
+        )
     } else if selected > 0 {
         i18n::format("status.counts", &[&format::grouped(rows), &format::grouped(selected)])
     } else {
         i18n::format("status.counts.none", &[&format::grouped(rows)])
     };
     let left = if chrome.watching { left } else { i18n::format("status.unwatched", &[&left]) };
-    let style = TextStyle::new(metrics.header_size, theme.palette.dim);
+    let ink = if chrome.filtering { theme.palette.text } else { theme.palette.dim };
+    let style = TextStyle::new(size, ink);
     line(painter, &left, style, metrics.gutter, layout.status.width * 0.6, baseline);
 
     // The frame cost, always visible and always honest: our own work, with the
@@ -607,6 +631,9 @@ fn status(
     let p99 = f64::from(diagnostics.frames.percentile(0.99)) / 1000.0;
     let right = i18n::format("status.frame_cost", &[&format!("{p50:.2}"), &format!("{p99:.2}")]);
     let style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
+    // Its own baseline: the left half changes size when the filter is open and
+    // this half does not, and two strings on one strip have to sit on one line.
+    let baseline = painter.baseline(layout.status.y, layout.status.height, metrics.header_size);
     line(painter, &right, style, 0.0, layout.status.width - metrics.gutter, baseline);
 }
 
@@ -850,6 +877,7 @@ mod tests {
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,
+                filtering: false,
                 window: sk_plat::WindowState::default(),
             };
             // A fixed timestamp: the Modified column is relative to "now", and a

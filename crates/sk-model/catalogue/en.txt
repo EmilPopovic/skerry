@@ -21,6 +21,9 @@ status.counts.none = {0} items
 status.loading = Reading {0}…
 status.empty = This folder is empty
 status.filtered = {0} of {1} items match “{2}”
+# The prompt while the filter has the keyboard, caret included: one string, so a
+# translation can put the caret where its script wants it.
+status.filter_prompt = Filter: {0}▏
 
 # Sizes. A file manager writes these thousands of times per session, so the
 # unit is a separate string rather than concatenated onto a number.
@@ -102,6 +105,7 @@ action.open = Open
 action.parent = Parent folder
 action.select_all = Select all
 action.clear_selection = Clear selection
+action.filter = Filter the list
 action.toggle_hidden = Show hidden files
 action.reload = Reload
 action.toggle_theme = Light / dark

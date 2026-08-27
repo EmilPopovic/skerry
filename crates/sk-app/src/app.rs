@@ -126,6 +126,62 @@ fn read_desktop_databases(
     receiver
 }
 
+/// Everything that starts before the GPU does.
+///
+/// The pool and the directory read start **before** the GPU on purpose: opening
+/// a Vulkan instance costs 67–100 ms on this machine and 193–220 ms on the
+/// NVIDIA proprietary driver, while the read costs single-digit milliseconds. So
+/// overlapping them does not make the first frame sooner — it makes the first
+/// frame contain the directory instead of an empty list.
+struct Background {
+    waker: Waker,
+    jobs: Jobs,
+    updates: Receiver<Message>,
+    pane: Pane,
+    desktop_rx: Receiver<std::sync::Arc<Desktop>>,
+    paste_tx: std::sync::mpsc::Sender<Pasted>,
+    paste_rx: Receiver<Pasted>,
+    launched_tx: std::sync::mpsc::Sender<Launched>,
+    launched_rx: Receiver<Launched>,
+    watcher: sk_fs::Watcher,
+    changes: Receiver<sk_fs::Change>,
+}
+
+impl Background {
+    fn start(path: PathBuf) -> Result<Self, Problem> {
+        let waker = Waker::new().map_err(|error| {
+            Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
+        })?;
+        let (sender, updates) = mpsc::channel();
+        let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
+        let mut pane = Pane::new(path);
+        pane.reload(&jobs);
+
+        let desktop_rx = read_desktop_databases(&jobs, &waker);
+        let (paste_tx, paste_rx) = mpsc::channel();
+        let (launched_tx, launched_rx) = mpsc::channel();
+        let (watch_sender, changes) = mpsc::channel();
+        let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
+            Problem::plain(ProblemKind::OutOfResources, format!("inotify: {error}"))
+        })?;
+        watcher.watch(pane.path.clone());
+
+        Ok(Self {
+            waker,
+            jobs,
+            updates,
+            pane,
+            desktop_rx,
+            paste_tx,
+            paste_rx,
+            launched_tx,
+            launched_rx,
+            watcher,
+            changes,
+        })
+    }
+}
+
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
 fn clock_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
@@ -285,6 +341,8 @@ pub struct App {
     show_keys: bool,
     show_stats: bool,
     typed: String,
+    /// Whether the filter field has the keyboard.
+    filtering: bool,
     typed_at: Instant,
     pointer: Point,
     /// Where a rubber band started, and where it is now.
@@ -307,28 +365,19 @@ impl App {
         })?;
         let window_us = window_started.elapsed().as_micros();
 
-        // The pool and the directory read start **before** the GPU. Opening a
-        // Vulkan instance costs 67–100 ms on this machine and the read costs
-        // single-digit milliseconds, so overlapping them does not make the first
-        // frame sooner — it makes the first frame contain the directory instead
-        // of an empty list.
-        let waker = Waker::new().map_err(|error| {
-            Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
-        })?;
-        let (sender, updates) = mpsc::channel();
-        let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
-        let mut pane = Pane::new(options.path);
-        pane.reload(&jobs);
-
-        let desktop_rx = read_desktop_databases(&jobs, &waker);
-
-        let (paste_tx, paste_rx) = mpsc::channel();
-        let (launched_tx, launched_rx) = mpsc::channel();
-        let (watch_sender, changes) = mpsc::channel();
-        let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
-            Problem::plain(ProblemKind::OutOfResources, format!("inotify: {error}"))
-        })?;
-        watcher.watch(pane.path.clone());
+        let Background {
+            waker,
+            jobs,
+            updates,
+            pane,
+            desktop_rx,
+            paste_tx,
+            paste_rx,
+            launched_tx,
+            launched_rx,
+            watcher,
+            changes,
+        } = Background::start(options.path)?;
         let watch_target = pane.path.clone();
 
         let gpu_started = Instant::now();
@@ -417,6 +466,7 @@ impl App {
             show_keys: false,
             show_stats: options.stats,
             typed: String::new(),
+            filtering: false,
             typed_at: now,
             pointer: Point::default(),
             band: None,
@@ -662,6 +712,13 @@ impl App {
     }
 
     fn key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) {
+        // The filter takes the keyboard while it is open, before the registry
+        // sees it: a filter you cannot type the letter `h` into because `Ctrl+H`
+        // is bound is not a filter. Bare characters only, so every chord still
+        // reaches its command.
+        if self.filtering && self.filter_key(event) {
+            return;
+        }
         if let Some(command) = commands.resolve(event) {
             // A disabled command consumes its key and does nothing, which is the
             // same thing a dimmed menu item does. Falling through to type-ahead
@@ -680,10 +737,59 @@ impl App {
         }
     }
 
+    /// Feeds one key to the open filter. Returns whether it was consumed.
+    fn filter_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
+        let mut wanted = self.pane.filter.clone();
+        match event.key {
+            sk_plat::Key::Named(sk_plat::Named::Backspace) if event.mods.none() => {
+                if wanted.pop().is_none() {
+                    // Backspace on an empty filter closes it, which is what
+                    // every search field a person has met does.
+                    self.filtering = false;
+                    self.dirty = true;
+                    return true;
+                }
+            }
+            // Escape and Enter leave the field. Escape also clears, so "never
+            // mind" is one key here as it is everywhere else.
+            sk_plat::Key::Named(sk_plat::Named::Escape) => {
+                self.filtering = false;
+                wanted.clear();
+            }
+            sk_plat::Key::Named(sk_plat::Named::Enter) => {
+                self.filtering = false;
+                self.dirty = true;
+                return false;
+            }
+            _ => match keys::type_ahead(event) {
+                Some(text) => wanted.push_str(text),
+                // Arrows, Page Down, `Ctrl+A`: still the list's, so a filtered
+                // list can be moved through and acted on without closing it.
+                None => return false,
+            },
+        }
+        if self.pane.set_filter(wanted, &self.jobs) {
+            self.reveal_cursor();
+        }
+        self.dirty = true;
+        true
+    }
+
     // ------------------------------------------------------------------
     // What the commands in `crate::commands` do. One method each, so the
     // registry holds function pointers and nothing else.
     // ------------------------------------------------------------------
+
+    /// Opens the filter, or closes and clears it if it is already open.
+    pub(crate) fn toggle_filter(&mut self) {
+        if self.filtering {
+            self.filtering = false;
+            self.pane.set_filter(String::new(), &self.jobs);
+        } else {
+            self.filtering = true;
+        }
+        self.dirty = true;
+    }
 
     /// Opens the focused entry: a directory in this window, a file in whatever
     /// the desktop says owns it.
@@ -916,6 +1022,8 @@ impl App {
     pub(crate) fn clear(&mut self) {
         self.pane.selection.clear();
         self.typed.clear();
+        self.filtering = false;
+        self.pane.set_filter(String::new(), &self.jobs);
         self.show_keys = false;
         self.show_stats = false;
     }
@@ -995,6 +1103,8 @@ impl App {
         // of the metrics it is testing.
         let close = self.layout.buttons[2];
         let close_x = close.x + close.width / 2.0;
+        let filtering = self.filtering;
+        let filter = self.pane.filter.clone();
         let crumbs = self.hits.crumbs.len();
         let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         // The middle of the crumb one level up, which is the one a test clicks.
@@ -1012,6 +1122,7 @@ hover={hover} hover_name={hover_name:?} \
 body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={maximized} close_x={close_x:.1} \
 crumbs={crumbs} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
+filtering={filtering} filter={filter:?} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
 jobs={jobs}/{panics} keys={} stats={}",
@@ -1345,6 +1456,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             capabilities,
             hovered_button,
             hovered_crumb,
+            filtering,
             window_state,
             hits,
             ..
@@ -1361,6 +1473,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             notice: notice.as_ref().map(|(message, _)| message.as_str()),
             hovered_button: *hovered_button,
             hovered_crumb: *hovered_crumb,
+            filtering: *filtering,
             window: *window_state,
         };
         let now = clock_seconds();
@@ -1394,22 +1507,31 @@ jobs={jobs}/{panics} keys={} stats={}",
 
         if !self.first_frame_reported {
             self.first_frame_reported = true;
-            let (window_us, gpu_us, font_us) = self.open_time;
-            eprintln!(
-                "skerry: first frame in {:.1} ms — window {:.1}, gpu {:.1}, fonts {:.1}, \
-                 frame {:.1}; {} on {}, surface {}×{} at {}%; platform: {}",
-                self.started.elapsed().as_secs_f64() * 1000.0,
-                window_us as f64 / 1000.0,
-                gpu_us as f64 / 1000.0,
-                font_us as f64 / 1000.0,
-                (turn_us + stats.cpu_us) as f64 / 1000.0,
-                self.adapter,
-                self.backend,
-                physical.0,
-                physical.1,
-                self.scale_120 * 100 / 120,
-                self.capabilities,
-            );
+            self.report_first_frame(turn_us + stats.cpu_us, physical);
         }
+    }
+
+    /// The cold-start attribution, once.
+    ///
+    /// Every number in it has been the answer to a real question: which of the
+    /// four stages the 80 ms budget went into, which adapter was chosen on a
+    /// hybrid machine, and whether this compositor decorates.
+    fn report_first_frame(&self, frame_us: u64, physical: (u32, u32)) {
+        let (window_us, gpu_us, font_us) = self.open_time;
+        eprintln!(
+            "skerry: first frame in {:.1} ms — window {:.1}, gpu {:.1}, fonts {:.1}, \
+             frame {:.1}; {} on {}, surface {}×{} at {}%; platform: {}",
+            self.started.elapsed().as_secs_f64() * 1000.0,
+            window_us as f64 / 1000.0,
+            gpu_us as f64 / 1000.0,
+            font_us as f64 / 1000.0,
+            frame_us as f64 / 1000.0,
+            self.adapter,
+            self.backend,
+            physical.0,
+            physical.1,
+            self.scale_120 * 100 / 120,
+            self.capabilities,
+        );
     }
 }

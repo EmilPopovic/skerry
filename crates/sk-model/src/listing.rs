@@ -132,6 +132,21 @@ pub struct Listing {
     pending: usize,
 }
 
+/// Whether `haystack` contains `needle`, ignoring ASCII case.
+///
+/// `needle` is already lowercased by the caller. ASCII-folded only, the same
+/// bargain [`crate::collate`] makes and the same one type-ahead makes: full
+/// Unicode case folding is a table, and it belongs with the search work rather
+/// than with a substring test. A Turkish `İ` therefore matches only itself.
+fn contains_folded(haystack: &str, needle: &str) -> bool {
+    let (hay, needle) = (haystack.as_bytes(), needle.as_bytes());
+    if needle.len() > hay.len() {
+        return false;
+    }
+    hay.windows(needle.len())
+        .any(|window| window.iter().zip(needle).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+}
+
 /// Hands out a distinct version to every listing ever built in this process.
 ///
 /// This exists to make one class of bug impossible rather than remembered. An
@@ -346,8 +361,8 @@ impl Listing {
     /// [`crate::collate`] for the counterexample that ruled the key out. The
     /// secondary key is always the name, so every order is total and a listing
     /// cannot reshuffle between two frames.
-    pub fn reorder(&mut self, sort: Sort, show_hidden: bool) {
-        self.order = self.compute_order(sort, show_hidden);
+    pub fn reorder(&mut self, sort: Sort, show_hidden: bool, filter: &str) {
+        self.order = self.compute_order(sort, show_hidden, filter);
     }
 
     /// Replaces the display order with one computed elsewhere.
@@ -366,10 +381,14 @@ impl Listing {
     /// that costs 272 ms at 200,000 entries, and the reason it is not called from
     /// the frame loop.
     #[must_use]
-    pub fn compute_order(&self, sort: Sort, show_hidden: bool) -> Vec<EntryId> {
+    pub fn compute_order(&self, sort: Sort, show_hidden: bool, filter: &str) -> Vec<EntryId> {
+        // Folded once rather than per entry: at 200,000 names the needle would
+        // otherwise be lowercased 200,000 times to be compared against one.
+        let needle = filter.to_lowercase();
         let mut order: Vec<EntryId> = (0..self.name.len() as u32)
             .map(EntryId)
             .filter(|id| show_hidden || !self.flags[id.index()].has(Flags::HIDDEN))
+            .filter(|id| needle.is_empty() || contains_folded(self.name(*id), &needle))
             .collect();
 
         let (names, name_refs, mtime, flags) = (&self.names, &self.name, &self.mtime, &self.flags);
@@ -461,16 +480,16 @@ mod tests {
     #[test]
     fn directories_lead_and_names_are_natural() {
         let mut listing = fixture();
-        listing.reorder(Sort::default(), false);
+        listing.reorder(Sort::default(), false, "");
         assert_eq!(names(&listing), vec!["src", "img2.png", "img10.png", "Makefile"]);
     }
 
     #[test]
     fn hidden_entries_appear_only_when_asked_for() {
         let mut listing = fixture();
-        listing.reorder(Sort::default(), false);
+        listing.reorder(Sort::default(), false, "");
         assert_eq!(listing.rows(), 4);
-        listing.reorder(Sort::default(), true);
+        listing.reorder(Sort::default(), true, "");
         assert_eq!(listing.rows(), 5);
         assert!(names(&listing).contains(&".hidden"));
     }
@@ -478,8 +497,46 @@ mod tests {
     #[test]
     fn descending_reverses_the_names_but_not_the_directory_grouping() {
         let mut listing = fixture();
-        listing.reorder(Sort { descending: true, ..Sort::default() }, false);
+        listing.reorder(Sort { descending: true, ..Sort::default() }, false, "");
         assert_eq!(names(&listing), vec!["src", "Makefile", "img10.png", "img2.png"]);
+    }
+
+    /// The filter narrows the display order and leaves the entries alone: an
+    /// `EntryId` still names what it named, so a selection carried across one is
+    /// still a selection of the same files.
+    #[test]
+    fn a_filter_narrows_what_is_shown_and_not_what_exists() {
+        let mut listing = fixture();
+        let before = listing.len();
+        listing.reorder(Sort::default(), false, "img");
+        assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
+        assert_eq!(listing.len(), before, "the filter removed entries rather than hiding them");
+
+        // Case-insensitive, and a substring rather than a prefix.
+        listing.reorder(Sort::default(), false, "MAKE");
+        assert_eq!(names(&listing), vec!["Makefile"]);
+        listing.reorder(Sort::default(), false, "PNG");
+        assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
+
+        // Nothing matching is an empty list, not the whole list.
+        listing.reorder(Sort::default(), false, "zzz");
+        assert!(names(&listing).is_empty());
+
+        // And an empty filter is every row back, in the order it had.
+        listing.reorder(Sort::default(), false, "");
+        assert_eq!(names(&listing), vec!["src", "img2.png", "img10.png", "Makefile"]);
+    }
+
+    /// A filter and the hidden flag are separate questions, and a dotfile that
+    /// matches must still not appear while dotfiles are hidden.
+    #[test]
+    fn a_filter_does_not_reveal_hidden_entries() {
+        let mut listing = fixture();
+        listing.push(".imgcache", Flags::NONE);
+        listing.reorder(Sort::default(), false, "img");
+        assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
+        listing.reorder(Sort::default(), true, "img");
+        assert_eq!(names(&listing), vec![".imgcache", "img2.png", "img10.png"]);
     }
 
     #[test]
@@ -488,6 +545,7 @@ mod tests {
         listing.reorder(
             Sort { column: SortColumn::Size, dirs_first: false, descending: false },
             false,
+            "",
         );
         // Every size is still 0, so the tiebreak is the whole order.
         assert_eq!(names(&listing), vec!["img2.png", "img10.png", "Makefile", "src"]);
@@ -496,7 +554,7 @@ mod tests {
     #[test]
     fn row_of_finds_what_at_returns() {
         let mut listing = fixture();
-        listing.reorder(Sort::default(), true);
+        listing.reorder(Sort::default(), true, "");
         for row in 0..listing.rows() {
             let id = listing.at(row).unwrap();
             assert_eq!(listing.row_of(id), Some(row));

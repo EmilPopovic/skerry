@@ -101,6 +101,12 @@ pub struct Pane {
     pub scroll: sk_ui::Scroll,
     /// In what order.
     pub sort: Sort,
+    /// What the list is narrowed to, or empty for everything.
+    ///
+    /// A view of the listing and not a property of it: the entries are all still
+    /// there, so an `EntryId` still names what it named and a selection survives
+    /// a filter being typed or cleared.
+    pub filter: String,
     /// Whether dotfiles are shown.
     pub show_hidden: bool,
     /// Whether a read is still running.
@@ -164,6 +170,7 @@ impl Pane {
             selection: Selection::default(),
             scroll: sk_ui::Scroll::default(),
             sort: Sort::default(),
+            filter: String::new(),
             show_hidden: false,
             loading: false,
             problem: None,
@@ -273,6 +280,7 @@ impl Pane {
         let wake = jobs.wake.clone();
         let sort = self.sort;
         let show_hidden = self.show_hidden;
+        let filter = self.filter.clone();
         // One job, so `Parallel` costs at most one worker even on a mount that
         // never answers. The lane that matters is the metadata fan-out's, and
         // this job is what discovers it.
@@ -286,7 +294,7 @@ impl Pane {
                     // rule 1's canonical failure.
                     let mut listing = found.listing;
                     let started = std::time::Instant::now();
-                    listing.set_order(listing.compute_order(sort, show_hidden));
+                    listing.set_order(listing.compute_order(sort, show_hidden, &filter));
                     Update::Names {
                         listing: Box::new(listing),
                         names: found.names,
@@ -470,7 +478,7 @@ impl Pane {
     pub fn reorder(&mut self, jobs: &Jobs) {
         if self.listing.rows() <= SORT_INLINE && self.listing.len() <= SORT_INLINE {
             let started = std::time::Instant::now();
-            self.listing.reorder(self.sort, self.show_hidden);
+            self.listing.reorder(self.sort, self.show_hidden, &self.filter);
             self.sort_us = started.elapsed().as_micros() as u64;
             self.forget_hidden_cursor();
             return;
@@ -488,13 +496,14 @@ impl Pane {
         // and metadata slices are still landing on it.
         let snapshot = self.listing.clone();
         let (sort, show_hidden) = (self.sort, self.show_hidden);
+        let filter = self.filter.clone();
         let sender = jobs.sender.clone();
         let wake = jobs.wake.clone();
         let generation = self.generation;
         let epoch = self.sort_epoch;
         jobs.pool.spawn(self.lane, self.sort_cancel.clone(), move |cancel| {
             let started = std::time::Instant::now();
-            let order = snapshot.compute_order(sort, show_hidden);
+            let order = snapshot.compute_order(sort, show_hidden, &filter);
             if cancel.is_cancelled() {
                 return;
             }
@@ -512,6 +521,21 @@ impl Pane {
     pub fn sort_by(&mut self, column: SortColumn, jobs: &Jobs) {
         self.sort = self.sort.toggled(column);
         self.reorder(jobs);
+    }
+
+    /// Narrows the list to names containing `filter`. Returns whether it moved.
+    ///
+    /// The selection is left alone. An `EntryId` still names the same file, and
+    /// a filter is a view: typing one should not silently drop what was picked
+    /// out before it, and clearing it should bring the rows back selected.
+    pub fn set_filter(&mut self, filter: String, jobs: &Jobs) -> bool {
+        if filter == self.filter {
+            return false;
+        }
+        self.filter = filter;
+        self.reorder(jobs);
+        self.forget_hidden_cursor();
+        true
     }
 
     /// Shows or hides dotfiles.

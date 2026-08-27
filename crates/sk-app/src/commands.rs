@@ -183,6 +183,17 @@ fn select(registry: &mut Registry<App>) {
 fn view(registry: &mut Registry<App>) {
     for spec in [
         CommandSpec {
+            id: "view.filter",
+            name: "action.filter",
+            group: Group::View,
+            // `/` as well as `Ctrl+F`, which is what every list a keyboard user
+            // has met does, and which costs nothing: a filename cannot contain
+            // a slash, so no type-ahead is lost to it.
+            keys: &["ctrl+f", "/"],
+            enabled: |app: &App| !app.pane.listing.is_empty(),
+            run: App::toggle_filter,
+        },
+        CommandSpec {
             id: "view.hidden",
             name: "action.toggle_hidden",
             group: Group::View,

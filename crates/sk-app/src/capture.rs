@@ -148,6 +148,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,
+                filtering: false,
                 window: sk_plat::WindowState::default(),
             };
             view::draw(
