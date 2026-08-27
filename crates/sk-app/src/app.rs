@@ -126,6 +126,11 @@ fn read_desktop_databases(
     receiver
 }
 
+/// Seconds since the epoch, for the `Modified` column's sense of "today".
+fn clock_seconds() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
+}
+
 /// What frame this window has to draw, and what belongs in it.
 ///
 /// Every part of it comes from the compositor: whether it decorates, whether the
@@ -257,6 +262,10 @@ pub struct App {
     window_state: sk_plat::WindowState,
     /// The window button under the pointer.
     hovered_button: Option<crate::layout::Button>,
+    /// The path component under the pointer.
+    hovered_crumb: Option<usize>,
+    /// The hit regions the last frame produced.
+    hits: crate::view::Hits,
     /// Bytes read from a peer's clipboard, once the job that read them is done.
     paste_rx: Receiver<Pasted>,
     paste_tx: std::sync::mpsc::Sender<Pasted>,
@@ -393,6 +402,8 @@ impl App {
             notice: None,
             window_state: sk_plat::WindowState::default(),
             hovered_button: None,
+            hovered_crumb: None,
+            hits: crate::view::Hits::default(),
             paste_rx,
             paste_tx,
             frames: Frames::new(),
@@ -984,12 +995,23 @@ impl App {
         // of the metrics it is testing.
         let close = self.layout.buttons[2];
         let close_x = close.x + close.width / 2.0;
+        let crumbs = self.hits.crumbs.len();
+        let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        // The middle of the crumb one level up, which is the one a test clicks.
+        let parent_crumb_x = self
+            .hits
+            .crumbs
+            .len()
+            .checked_sub(2)
+            .and_then(|index| self.hits.crumbs.get(index))
+            .map_or(0.0, |area| area.x + area.width / 2.0);
         println!(
             "skerry-state path={:?} rows={} hidden={} sort={:?} descending={} cursor={cursor:?} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
 body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={maximized} close_x={close_x:.1} \
+crumbs={crumbs} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
 jobs={jobs}/{panics} keys={} stats={}",
@@ -1050,6 +1072,18 @@ jobs={jobs}/{panics} keys={} stats={}",
                 }
                 crate::layout::Button::Close => self.window.request_close(),
             }
+            return;
+        }
+        // A breadcrumb before the drag region, because the breadcrumbs are *in*
+        // the drag region: the path bar is the title bar, and a component that
+        // moved the window instead of navigating would be a component nobody
+        // could click.
+        // A breadcrumb before the drag region, because the breadcrumbs are *in*
+        // the drag region: the path bar is the title bar, and a component that
+        // moved the window instead of navigating would be a component nobody
+        // could click.
+        if let Some(depth) = self.crumb_at(position) {
+            self.go_to_crumb(depth);
             return;
         }
         if self.layout.drag.contains(position.x, position.y) {
@@ -1119,6 +1153,40 @@ jobs={jobs}/{panics} keys={} stats={}",
         }
     }
 
+    /// Which path component is under a point, if any.
+    ///
+    /// The last component is excluded: it is where you already are, and a
+    /// breadcrumb that navigates to the current directory is a reload wearing a
+    /// disguise. The regions come from the last frame, which is the only place
+    /// the shaped width of a name is known.
+    fn crumb_at(&self, position: Point) -> Option<usize> {
+        let last = self.hits.crumbs.len().checked_sub(1)?;
+        self.hits.crumbs[..last]
+            .iter()
+            .position(|area| area.width > 0.0 && area.contains(position.x, position.y))
+    }
+
+    /// Navigates to the prefix of the current path a breadcrumb names.
+    fn go_to_crumb(&mut self, depth: usize) {
+        let mut path = std::path::PathBuf::from("/");
+        let names: Vec<_> = self
+            .pane
+            .path
+            .components()
+            .filter_map(|part| match part {
+                std::path::Component::Normal(name) => Some(name.to_owned()),
+                _ => None,
+            })
+            .collect();
+        // `depth` counts the root as component zero, so it is also how many
+        // named components to keep.
+        for name in names.iter().take(depth) {
+            path.push(name);
+        }
+        self.pane.open(path, &self.jobs);
+        self.dirty = true;
+    }
+
     /// The compositor's own window menu, which is where "always on top" and
     /// "move to workspace" live. Ours to offer and not ours to draw.
     fn frame_menu(&mut self, position: Point) {
@@ -1132,6 +1200,11 @@ jobs={jobs}/{panics} keys={} stats={}",
         let over = self.layout.button_at(position.x, position.y);
         if self.hovered_button != over {
             self.hovered_button = over;
+            self.dirty = true;
+        }
+        let crumb = self.crumb_at(position);
+        if self.hovered_crumb != crumb {
+            self.hovered_crumb = crumb;
             self.dirty = true;
         }
         if let Some(grab) = self.thumb_grab {
@@ -1177,17 +1250,16 @@ jobs={jobs}/{panics} keys={} stats={}",
     }
 
     /// The scrollbar thumb's rectangle, if there is one.
+    /// Where the scrollbar thumb is, in window coordinates.
+    ///
+    /// The geometry comes from `sk_ui::thumb`, which is also what draws it. The
+    /// two used to be separate copies of the same arithmetic and had already
+    /// drifted into two spellings of one clamp, one of which panicked.
     fn thumb(&self) -> Option<(f32, f32)> {
-        let height = self.theme.metrics.row_height;
-        let content = self.pane.listing.rows() as f32 * height;
-        let track = self.layout.body.height;
-        if content <= track || track <= 0.0 {
-            return None;
-        }
-        let thumb = (track * track / content).max(28.0).min(track);
-        let extent = (content - track).max(1.0);
-        let position = (self.pane.scroll.offset() / extent).clamp(0.0, 1.0) * (track - thumb);
-        Some((self.layout.body.y + position, thumb))
+        let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
+        let (position, height) =
+            sk_ui::thumb(self.pane.scroll.offset(), content, self.layout.body.height)?;
+        Some((self.layout.body.y + position, height))
     }
 
     fn thumb_at(&self, position: Point) -> Option<f32> {
@@ -1229,9 +1301,6 @@ jobs={jobs}/{panics} keys={} stats={}",
             self.physical = physical;
         }
         let scale = self.window.scale();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs().cast_signed());
 
         let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
         self.pane.scroll.set_extent(content, self.layout.body.height);
@@ -1275,7 +1344,9 @@ jobs={jobs}/{panics} keys={} stats={}",
             notice,
             capabilities,
             hovered_button,
+            hovered_crumb,
             window_state,
+            hits,
             ..
         } = self;
 
@@ -1289,8 +1360,10 @@ jobs={jobs}/{panics} keys={} stats={}",
             watching: *watching,
             notice: notice.as_ref().map(|(message, _)| message.as_str()),
             hovered_button: *hovered_button,
+            hovered_crumb: *hovered_crumb,
             window: *window_state,
         };
+        let now = clock_seconds();
         let mut diagnostics = diagnostics_for(
             frames,
             *last,
@@ -1306,7 +1379,7 @@ jobs={jobs}/{panics} keys={} stats={}",
 
         {
             let mut painter = Painter { list, fonts, cache, theme, scale };
-            view::draw(&mut painter, pane, layout, now, &chrome, &mut diagnostics);
+            view::draw(&mut painter, pane, layout, now, &chrome, &mut diagnostics, hits);
         }
         // Everything the loop did this turn, up to the submission. The renderer's
         // own wall time is not usable here because it contains the wait for a

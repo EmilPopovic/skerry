@@ -32,6 +32,10 @@ It found three defects on its first run, one of which no unit test could have:
 `select_all` filled the whole bitset rather than the display order and the tenth
 was a dotfile.
 
+One clicks a **breadcrumb** in the path bar, which is the first thing here whose
+hit regions come from the frame that drew them: the width of a path component is
+the shaped width of a directory name and is known nowhere else.
+
 Two of them drive the window frame the program draws for itself — the one GNOME
 requires, because mutter advertises no decoration manager at all. They start the
 window with `--own-frame`, which asks the compositor for a client-side frame *and*

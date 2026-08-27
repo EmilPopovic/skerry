@@ -655,6 +655,33 @@ def copy_to_clipboard(run: Run, fixture: Path) -> None:
         raise Failure(f"copying said {state.get('notice')!r}")
 
 
+@scenario("breadcrumb-navigation")
+def breadcrumb_navigation(run: Run, fixture: Path) -> None:
+    """Clicking a path component goes there, and hovering says which.
+
+    The regions come from the frame that drew them, because the width of a
+    breadcrumb is the shaped width of a directory name and is known nowhere
+    else. This walks two levels down and clicks its way back up one.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 200\n")
+    # Into `alpha`, then into `nested`, so there is a parent worth clicking.
+    run.drive("key down\nkey enter\nsleep 500\nkey f12\nsleep 200\n")
+    state = run.state()
+    expect(state, path=str(fixture / "alpha"))
+    deep = int(state["crumbs"])
+    if deep < 3:
+        raise Failure(f"only {deep} path components under {state['path']}")
+
+    x, y = aim(run, state, float(state["parent_crumb_x"]), float(state["body_top"]) / 4.0)
+    run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 200\n")
+    hovered = run.state()["crumb_hover"]
+    if hovered != str(deep - 2):
+        raise Failure(f"the parent component reads as crumb {hovered}, wanted {deep - 2}")
+
+    run.drive("click\nsleep 600\nkey f12\nsleep 200\n")
+    expect(run.state(), path=str(fixture))
+
+
 @scenario("own-frame-close-button")
 def own_frame_close_button(run: Run, fixture: Path) -> None:
     """The close button in the frame this program draws has to close it.

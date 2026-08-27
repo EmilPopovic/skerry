@@ -42,8 +42,24 @@ pub struct Chrome<'a> {
     pub watching: bool,
     /// The window button under the pointer, if the window draws its own frame.
     pub hovered_button: Option<Button>,
+    /// The path component under the pointer.
+    pub hovered_crumb: Option<usize>,
     /// What the compositor says the window is, for the frame the window draws.
     pub window: WindowState,
+}
+
+/// Hit regions this frame produced, for the next event to test against.
+///
+/// A breadcrumb's rectangle is a function of the shaped width of a directory
+/// name, so it is known where the text is drawn and nowhere else. Recording it
+/// as the frame is built is the immediate-mode answer; the alternative is
+/// measuring every component twice, once to draw and once to hit-test, and the
+/// two measurements drifting apart at 125%.
+#[derive(Default)]
+pub struct Hits {
+    /// One rectangle per path component, root first. The index is the number of
+    /// components to keep when it is clicked.
+    pub crumbs: Vec<Area>,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -82,8 +98,9 @@ pub fn draw(
     now: i64,
     chrome: &Chrome<'_>,
     diagnostics: &mut Diagnostics<'_>,
+    hits: &mut Hits,
 ) {
-    path_bar(painter, pane, layout, chrome);
+    path_bar(painter, pane, layout, chrome, hits);
     window_buttons(painter, layout, chrome);
     header(painter, pane, layout);
     body(painter, pane, layout, now, chrome);
@@ -116,7 +133,13 @@ fn line(
     painter.label(text, style, box_rect, baseline)
 }
 
-fn path_bar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, _chrome: &Chrome<'_>) {
+fn path_bar(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &Layout,
+    chrome: &Chrome<'_>,
+    hits: &mut Hits,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     // The whole strip, buttons included: the path area stops short of them and a
@@ -136,28 +159,111 @@ fn path_bar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, _chrome: &C
         baseline,
     ) / painter.scale;
 
-    // The final component answers "where am I"; the rest is context. Drawing
-    // them in one weight is what makes a path bar unreadable at a glance, and a
-    // breadcrumb with hit regions belongs to M2 rather than here.
-    let full = pane.path.to_string_lossy();
-    // `/` and `/home/emil` split differently and both have to read correctly:
-    // the root has no leaf of its own, so it becomes the leaf.
-    let (parent, leaf) = match full.rsplit_once('/') {
-        Some((parent, leaf)) if !leaf.is_empty() => (parent, leaf),
-        _ => ("", full.as_ref()),
-    };
-
+    hits.crumbs.clear();
     let available = layout.path.width - metrics.gutter * 2.0 - hint_width - 12.0;
-    let mut cursor = metrics.gutter;
-    if !parent.is_empty() {
-        let style = TextStyle::new(metrics.path_size, theme.palette.dim);
-        let with_separator = format!("{parent}/");
-        let used = line(painter, &with_separator, style, cursor, available * 0.65, baseline);
-        cursor += used / painter.scale;
+    let names = crumb_names(pane);
+    let widths: Vec<f32> = names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let bold = index + 1 == names.len();
+            crumb_width(painter, name, metrics.path_size, bold)
+                + CRUMB_PAD * 2.0
+                + if index + 1 == names.len() || index == 0 { 0.0 } else { SEPARATOR }
+        })
+        .collect();
+
+    // From the right, because the leaf answers "where am I" and everything to
+    // its left is context: a path too long for the bar loses its middle and
+    // keeps its end, which is the half a person is reading. The root stays,
+    // because "/" is one glyph and dropping it makes an absolute path look
+    // relative.
+    let root = widths.first().copied().unwrap_or_default();
+    let mut first = 1;
+    let mut total = root;
+    for index in (1..names.len()).rev() {
+        if total + widths[index] > available && index > 1 {
+            first = index + 1;
+            break;
+        }
+        total += widths[index];
     }
-    let leaf_style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
-    let remaining = (available + metrics.gutter - cursor).max(0.0);
-    line(painter, leaf, leaf_style, cursor, remaining, baseline);
+    let elided = first > 1;
+    let mut cursor = metrics.gutter;
+
+    // Clipped to its own region, so a path that will not fit cannot draw over
+    // the keyboard hint or under the window buttons.
+    let region = painter.rect(0.0, layout.path.y, layout.path.width, layout.path.height);
+    painter.list.push_clip(region);
+    for (index, name) in names.iter().enumerate() {
+        if index > 0 && index < first {
+            continue;
+        }
+        let last = index + 1 == names.len();
+        let width = widths[index];
+        let area = Area { x: cursor, y: layout.path.y, width, height: layout.path.height };
+        while hits.crumbs.len() < index {
+            hits.crumbs.push(Area::default());
+        }
+        hits.crumbs.push(area);
+
+        if chrome.hovered_crumb == Some(index) && !last {
+            let shape =
+                painter.rect(area.x, area.y + 6.0, area.width - SEPARATOR, area.height - 12.0);
+            painter.list.rect(shape, theme.palette.hover, painter.px(metrics.radius));
+        }
+        let style = if last {
+            TextStyle::new(metrics.path_size, theme.palette.text).bold()
+        } else {
+            TextStyle::new(metrics.path_size, theme.palette.dim)
+        };
+        line(painter, name, style, cursor + CRUMB_PAD, width - CRUMB_PAD, baseline);
+        cursor += width;
+        // The root is its own separator, so it does not get another one — the
+        // first draft read `/ / home / emil`.
+        if !last && index > 0 {
+            let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(120));
+            line(painter, "/", style, cursor - SEPARATOR, SEPARATOR, baseline);
+        }
+        if index == 0 && elided {
+            let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(150));
+            cursor += line(painter, "… /", style, cursor, available, baseline) / painter.scale
+                + CRUMB_PAD;
+        }
+    }
+    painter.list.pop_clip();
+}
+
+/// Room for the `/` between two components, in logical pixels.
+const SEPARATOR: f32 = 10.0;
+
+/// Space each side of a breadcrumb's text, so the hover shape is not tight
+/// against the glyphs and the target is bigger than the word.
+const CRUMB_PAD: f32 = 6.0;
+
+/// The path's components, root first, with `/` as its own first component.
+///
+/// `/` and `/home/emil` split differently and both have to read correctly: the
+/// root has no name of its own, so it is drawn as the separator it is.
+fn crumb_names(pane: &Pane) -> Vec<String> {
+    let mut names = vec!["/".to_owned()];
+    names.extend(
+        pane.path
+            .components()
+            .filter_map(|part| match part {
+                std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .filter(|name| !name.is_empty()),
+    );
+    names
+}
+
+/// How wide a breadcrumb's text is, in logical pixels.
+fn crumb_width(painter: &mut Painter<'_>, name: &str, size: f32, bold: bool) -> f32 {
+    let px_size = painter.px(size);
+    let weight = if bold { Weight::Bold } else { Weight::Regular };
+    painter.cache.get_or_shape_label(name, weight, px_size, painter.fonts).advance / painter.scale
 }
 
 /// The width the window buttons take, or zero when the compositor draws them.
@@ -456,13 +562,10 @@ fn metadata_cells(
 fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
     let theme = *painter.theme;
     let content = pane.listing.rows() as f32 * theme.metrics.row_height;
-    let track = layout.body.height;
-    if content <= track || track <= 0.0 {
+    let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, layout.body.height)
+    else {
         return;
-    }
-    let thumb = (track * track / content).clamp(28.0, track);
-    let extent = (content - track).max(1.0);
-    let position = (pane.scroll.offset() / extent).clamp(0.0, 1.0) * (track - thumb);
+    };
     let width = 8.0;
     let rect =
         painter.rect(layout.body.right() - width - 3.0, layout.body.y + position, width, thumb);
@@ -695,7 +798,7 @@ fn fill(painter: &mut Painter<'_>, area: Area, color: Color) {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Chrome, Diagnostics, draw};
+    use super::{Chrome, Diagnostics, Hits, crumb_names, draw};
     use crate::frames::Frames;
     use crate::layout::Layout;
     use crate::pane::{Jobs, Pane};
@@ -746,12 +849,21 @@ mod tests {
                 watching: true,
                 notice: None,
                 hovered_button: None,
+                hovered_crumb: None,
                 window: sk_plat::WindowState::default(),
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test
             // is looking for.
-            draw(&mut painter, pane, &layout, 1_787_000_000, &chrome, &mut diagnostics);
+            draw(
+                &mut painter,
+                pane,
+                &layout,
+                1_787_000_000,
+                &chrome,
+                &mut diagnostics,
+                &mut Hits::default(),
+            );
         }
         list.glyphs().map(|(key, x, y)| (key, x.to_bits(), y.to_bits())).collect()
     }
@@ -793,6 +905,27 @@ mod tests {
     /// after navigating into a subdirectory two of its four rows were drawn with
     /// the parent's names and the parent's sizes. Every unit test passed. This is
     /// the assertion that does not.
+    /// The root is a component and is drawn as the separator it is; `/` and
+    /// `/home/emil` split differently and both have to read correctly.
+    #[test]
+    fn the_root_is_its_own_crumb_and_is_never_empty() {
+        let crumbs = |path: &str| {
+            let pane = Pane::new(std::path::PathBuf::from(path));
+            crumb_names(&pane)
+        };
+        assert_eq!(crumbs("/"), vec!["/"]);
+        assert_eq!(crumbs("/home"), vec!["/", "home"]);
+        assert_eq!(crumbs("/home/emil"), vec!["/", "home", "emil"]);
+        // Trailing and doubled separators are components the path type folds
+        // away, and a crumb per empty string would be a crumb per slash.
+        assert_eq!(crumbs("/home//emil/"), vec!["/", "home", "emil"]);
+        // A name with a space in it is one component, not two.
+        assert_eq!(
+            crumbs("/home/emil/VirtualBox VMs"),
+            vec!["/", "home", "emil", "VirtualBox VMs"]
+        );
+    }
+
     #[test]
     fn a_warm_cache_draws_the_same_frame_as_a_cold_one_after_navigating() {
         let Ok(mut fonts) = Fonts::discover() else { return };

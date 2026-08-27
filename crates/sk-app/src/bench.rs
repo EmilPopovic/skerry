@@ -161,9 +161,18 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 watching: true,
                 notice: None,
                 hovered_button: None,
+                hovered_crumb: None,
                 window: sk_plat::WindowState::default(),
             };
-            view::draw(&mut painter, &pane, &layout, now, &chrome, &mut diagnostics);
+            view::draw(
+                &mut painter,
+                &pane,
+                &layout,
+                now,
+                &chrome,
+                &mut diagnostics,
+                &mut crate::view::Hits::default(),
+            );
         }
         let turn_us = started.elapsed().as_micros() as u64;
         stats = session.renderer.draw(&mut list, &mut session.fonts, theme.palette.background);

@@ -27,6 +27,7 @@ use sk_ui::{Painter, Theme};
 use crate::frames::Frames;
 use crate::headless::{READ_DEADLINE, Session};
 use crate::layout::Layout;
+use crate::pane::Pane;
 use crate::view::{self, Chrome, Diagnostics};
 
 /// Rows selected in a capture, and which of them carries the cursor.
@@ -146,9 +147,18 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 watching: true,
                 notice: None,
                 hovered_button: None,
+                hovered_crumb: None,
                 window: sk_plat::WindowState::default(),
             };
-            view::draw(&mut painter, &pane, &layout, now, &chrome, &mut diagnostics);
+            view::draw(
+                &mut painter,
+                &pane,
+                &layout,
+                now,
+                &chrome,
+                &mut diagnostics,
+                &mut crate::view::Hits::default(),
+            );
         }
         stats = session.renderer.draw(&mut list, &mut session.fonts, theme.palette.background);
     }
@@ -157,7 +167,13 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         Problem::plain(ProblemKind::NoGpu, "the offscreen target could not be read back")
     })?;
     write(&request.file, session.physical, &pixels)?;
+    report(request, &session, &pane, stats);
+    Ok(())
+}
 
+/// What the capture contained, so a golden frame is comparable to the run that
+/// produced it without opening the file.
+fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) {
     eprintln!(
         "skerry: wrote {} — {}×{} at {}%, {} entries, {} quads, {} draws, {} glyphs",
         request.file.display(),
@@ -169,7 +185,6 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         stats.draws,
         session.renderer.atlas_stats().0,
     );
-    Ok(())
 }
 
 fn write(file: &Path, physical: (u32, u32), pixels: &[u8]) -> Result<(), Problem> {

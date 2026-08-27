@@ -20,7 +20,7 @@ pub mod scroll;
 pub mod theme;
 
 pub use painter::{Align, Painter, TextStyle};
-pub use scroll::{Scroll, visible_rows};
+pub use scroll::{MIN_THUMB, Scroll, thumb, visible_rows};
 pub use theme::{Metrics, Palette, Theme};
 
 // Re-exported so a view needs one `use` for the drawing vocabulary rather than

@@ -115,6 +115,34 @@ impl Scroll {
     }
 }
 
+/// The shortest a scrollbar thumb may be, in logical pixels.
+///
+/// Below this it stops being a thing a pointer can grab.
+pub const MIN_THUMB: f32 = 28.0;
+
+/// Where the scrollbar thumb goes, or `None` when there is nothing to scroll.
+///
+/// Returns its offset from the top of the track and its height, both in logical
+/// pixels. **One function because there were two**: the view drew the thumb and
+/// the hit test found it, from the same arithmetic written out twice — which is
+/// the drift a layout module exists to prevent, and which had already produced
+/// two spellings of the same clamp, one of which panicked.
+///
+/// That panic is the reason for the `min` below: a window short enough that the
+/// list is twenty pixels tall asks for `clamp(28.0, 20.0)`, and `f32::clamp`
+/// panics on a minimum above its maximum. The floor is a minimum only while
+/// there is room for it.
+#[must_use]
+pub fn thumb(offset: f32, content: f32, track: f32) -> Option<(f32, f32)> {
+    if content <= track || track <= 0.0 {
+        return None;
+    }
+    let height = (track * track / content).clamp(MIN_THUMB.min(track), track);
+    let extent = (content - track).max(1.0);
+    let position = (offset / extent).clamp(0.0, 1.0) * (track - height);
+    Some((position, height))
+}
+
 /// Which rows a viewport of `height` logical pixels can see.
 ///
 /// One row of overscan on each side, so a partially visible row at either edge
@@ -152,6 +180,28 @@ mod tests {
             let _ = &(0..400).collect::<Vec<_>>()[rows];
         }
         assert_eq!(visible_rows(1e9, 500.0, 26.0, 0), 0..0);
+    }
+
+    /// A window short enough that the list is shorter than the thumb's own
+    /// floor. `f32::clamp` panics when its minimum is above its maximum, and
+    /// resizing the window until it did is how this was found.
+    #[test]
+    fn a_track_shorter_than_the_thumbs_floor_does_not_panic() {
+        let (top, height) = super::thumb(0.0, 4000.0, 20.0).expect("something to scroll");
+        assert!(height <= 20.0 && height > 0.0, "a {height} thumb in a 20 track");
+        assert!(top >= 0.0 && top + height <= 20.0 + f32::EPSILON);
+        assert_eq!(super::thumb(0.0, 100.0, 500.0), None, "nothing to scroll");
+        assert_eq!(super::thumb(0.0, 4000.0, 0.0), None, "no track at all");
+    }
+
+    /// The thumb reaches the bottom of the track exactly when the scroll does,
+    /// or the last row is unreachable by dragging.
+    #[test]
+    fn the_thumb_spans_the_track_from_end_to_end() {
+        let (top, height) = super::thumb(0.0, 4000.0, 500.0).expect("a thumb");
+        assert!(top.abs() < f32::EPSILON);
+        let (bottom, _) = super::thumb(3500.0, 4000.0, 500.0).expect("a thumb");
+        assert!((bottom + height - 500.0).abs() < 0.01, "ends at {}", bottom + height);
     }
 
     #[test]
