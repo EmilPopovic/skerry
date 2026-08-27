@@ -5,6 +5,12 @@
 # `winit` is here as the subject of the measurement, not as a candidate for
 # `sk-plat`. The question is [ADR 0002](../../docs/adr/0002-own-platform-layer.md)'s
 # revisit trigger, and the answer has to be a table rather than an opinion.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
 [package]
 name = "spike-d-platform-winit"
 version = "0.0.0"

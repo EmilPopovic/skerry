@@ -2,6 +2,12 @@
 # layering, lint and dependency rules (spikes/README.md). It exists to put a
 # number on the alternative to ADR 0001 — a framework that already solved the
 # virtualized list — so the choice is measured rather than argued.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
 [package]
 name = "spike-a-million-rows-gpui"
 version = "0.0.0"

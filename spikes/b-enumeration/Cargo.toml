@@ -4,6 +4,12 @@
 # `rustix` is the crate under test — the question is what getdents64 and statx
 # buy over std. `fuser` is a measurement instrument: it builds the hung mount
 # that rule 1's canonical test needs, without root and without a network.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
 [package]
 name = "spike-b-enumeration"
 version = "0.0.0"

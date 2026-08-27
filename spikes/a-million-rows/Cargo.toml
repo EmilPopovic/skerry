@@ -2,6 +2,12 @@
 # layering, lint and dependency rules (spikes/README.md). Every entry here is a
 # measurement instrument, not a shipping decision — except wgpu and swash, which
 # are exactly the choices under test.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
 [package]
 name = "spike-a-million-rows"
 version = "0.0.0"

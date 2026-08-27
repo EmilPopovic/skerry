@@ -4,6 +4,12 @@
 # `rustix` only. A fuzzy matcher and a flat-file index are exactly the two places
 # a spike is tempted to reach for a crate, and measuring the design in
 # 04-architecture means writing both — see the README.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
 [package]
 name = "spike-f-index-and-search"
 version = "0.0.0"

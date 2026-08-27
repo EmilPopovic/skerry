@@ -5,6 +5,12 @@
 # becomes the permanent torture matrix, and M3 is gated on it. So it is written to
 # be re-run against a filesystem it has never seen: the filesystem list is probed,
 # never compiled in.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
 [package]
 name = "spike-e-operations"
 version = "0.0.0"

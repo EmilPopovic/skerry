@@ -24,11 +24,15 @@ mod inject;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `get(1..)` and not `&args[1..]`: with no arguments at all the slice is
+    // empty and the index panics, and no arguments at all is the documented way
+    // to run this — one binary that discovers which filesystems to test.
+    let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str).unwrap_or("run") {
-        "probe" => probe_mode(&args[1..]),
-        "run" => run_mode(&args[1..]),
+        "probe" => probe_mode(rest),
+        "run" => run_mode(rest),
         #[cfg(feature = "inject")]
-        "inject" => inject::main(&args[1..]),
+        "inject" => inject::main(rest),
         other => {
             eprintln!("modes: probe | run [dir...] | inject <mnt> <mode> <n>");
             eprintln!("unknown mode {other:?}");
