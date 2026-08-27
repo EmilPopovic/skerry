@@ -56,6 +56,39 @@ icon long before they notice a frame time.
 - Single-instance behaviour over the same bus name: opening a folder reuses the running
   window as a new tab, with `--new-window` to opt out.
 
+## The window frame
+
+`zxdg_decoration_manager_v1` decides who draws the title bar, and **GNOME does not
+advertise it at all** — measured, not assumed, in
+[06-portability.md](06-portability.md). A client that does not draw a frame has no
+title bar, no close button and no resize edges on the most common Linux desktop.
+
+So the window draws one, and **the path bar is it**. Not a strip added above:
+a strip that says where you are is already the strip a person reaches for to drag
+the window, and a second one costs 36 logical pixels of list for a duplicate of
+the same information. Drag it to move, double-click to maximize, right-click for
+the compositor's own window menu, and three buttons at its right end.
+
+Everything in it is read rather than assumed, because every part of it differs
+between compositors:
+
+- **Which buttons exist** comes from `xdg_toplevel.wm_capabilities`. Hyprland
+  offers no minimise, so there are two there and three elsewhere. The absent one
+  gets no slot: a gap where a button would be reads as a bug, and a button that
+  does nothing reads as a worse one.
+- **Whether the edges can be pulled** comes from the configure states. A
+  maximized, fullscreen or tiled window has none, and an invisible six-pixel band
+  that swallows clicks at the top of a maximized list is worse than no resize.
+- **Whether to draw a frame at all** comes from what the decoration manager
+  answered, and `--own-frame` asks for one everywhere — which is two things,
+  because Hyprland refuses the `client_side` request and a preference a compositor
+  can silently veto is not a preference.
+
+Owed: no drop shadow, and so no shadow margin. A shadow needs a surface larger
+than the window with `xdg_surface.set_window_geometry` naming the part that is the
+window, which is also where a resize target beyond the edge would live. Six
+logical pixels inside the frame is what there is today.
+
 ## Clipboard and drag-and-drop interop
 
 The one integration nobody can fake, because it is judged against other applications:

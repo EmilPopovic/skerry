@@ -9,10 +9,26 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | # | Decision | Status |
 | --- | --- | --- |
 | [0001](0001-custom-gpu-ui.md) | A custom GPU UI layer instead of GTK or Qt | Accepted |
-| [0002](0002-own-platform-layer.md) | Own the Wayland/X11 platform layer instead of using `winit` | Accepted, pending Spike D |
+| [0002](0002-own-platform-layer.md) | Own the Wayland/X11 platform layer instead of using `winit` | Accepted — [Spike D](../../spikes/d-platform-and-dnd/README.md) resolved its revisit trigger |
 | [0003](0003-wgpu-first-backend.md) | `wgpu` as the first GPU backend, behind a `Renderer` seam | Accepted |
 | [0004](0004-swash-for-text.md) | `swash` for shaping and rasterization; our own line layout | Accepted |
 | [0005](0005-no-async-runtime.md) | One owned job pool; no async runtime in the core | Accepted |
 | [0006](0006-out-of-process-decoders.md) | Decoders in sandboxed helper processes | Accepted |
 | [0007](0007-runtime-capability-detection.md) | Runtime capability probing, never build-time features | Accepted |
 | [0008](0008-persistent-index-is-required.md) | A persistent filename index in `sk-index`, not an optional extra | Accepted |
+
+## Triggers that have been answered
+
+**0002's** was: *if Spike D demonstrates that a general-purpose windowing crate
+can act as a drag-and-drop source against GTK and Qt on both display servers and
+handle `text-input-v3` adequately, take it and delete this decision.* Spike D
+measured `winit` reaching five of the nine capabilities
+[05-platform-integration.md](../05-platform-integration.md) requires; the four it
+misses are drag-source, primary selection, `text-input-v3` and exact fractional
+scale. The trigger did not fire and the decision stands.
+
+Two things since have been the decision earning itself rather than costing:
+GNOME advertises no `zxdg_decoration_manager_v1`, so the window draws its own
+frame — which is a thing to *have* implemented rather than to hope for from a
+crate — and the compositor's own GPU is read from `zwp_linux_dmabuf_v1`, which is
+a question a windowing crate does not know it is being asked.
