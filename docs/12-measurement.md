@@ -404,6 +404,28 @@ log file that had been written to disk the whole time.
 > **Fails if:** an unexplained failure in somebody else's component is recorded
 > as unexplained without reading what that component said about it.
 
+## Contention and waiting look the same and are not the same
+
+The worst frame in the product is the one where a large directory lands, 2.5–6.2
+ms of an 8 ms budget, and the pool is as wide as the machine — so every core is
+inside `statx` while the loop is trying to draw. Lowering the workers to nice +5
+is the obvious fix and it is worse: eight runs each, 2.6–6.2 ms before and
+3.8–9.5 ms after, with the only over-budget frame ever recorded on this machine
+among the niced ones.
+
+It is worse because the loop is not only competing with the pool for a core; it
+is *waiting* for the pool to hand it something to draw. Making the workers slower
+lengthens the window in which there is anything to contend over at all. A
+priority change helps a loop that would have work to do anyway, and this one
+would not.
+
+The rule: **before lowering something's priority, establish that the thing being
+protected is not blocked on it.** The two are indistinguishable in a profile that
+shows only CPU time.
+
+> **Fails if:** a scheduling change is made on the strength of "these threads are
+> busy" without a measurement of the thing they are supposedly starving.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

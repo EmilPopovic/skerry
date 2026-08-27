@@ -201,6 +201,18 @@ impl Drop for Pool {
     }
 }
 
+/// Workers run at the **same** priority as the frame loop, and that was measured.
+///
+/// The obvious idea is to nice them down: the pool is as wide as the machine, so
+/// while a directory lands every core is inside `statx` and the loop is trying to
+/// draw. Tried at nice +5 on a 24-thread machine over 200,000 entries, eight runs
+/// each: the worst frame while the listing lands was 2.6–6.2 ms before and
+/// 3.8–9.5 ms after, and the only frame ever measured over the 8 ms budget was
+/// one of the niced ones. It does not help because the loop is not only competing
+/// with the pool, it is *waiting* for it — slowing the workers lengthens the
+/// window in which there is anything to compete over.
+///
+/// Recorded here rather than deleted, so it is not tried a third time.
 fn worker(shared: &Arc<Shared>) {
     loop {
         let job = {

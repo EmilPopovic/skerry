@@ -85,8 +85,13 @@ before, and it is a real cost the old harness was constructed not to see:
   runs, the frame where a directory first appears — paid 0.7 ms more than one that
   shaped 8, so shaping is the smaller half.
 - It is still inside 8 ms, and it is the single most expensive frame the product
-  has. Lowering the priority of the pool's threads is the obvious lever and it has
-  not been measured.
+  has. **Lowering the priority of the pool's threads does not help, and that was
+  measured rather than assumed.** At nice +5, eight runs each: 2.6–6.2 ms before
+  and 3.8–9.5 ms after, and the only frame ever recorded over the 8 ms budget on
+  this machine was one of the niced ones. The loop is not only competing with the
+  pool, it is *waiting* for it, so slowing the workers lengthens the window in
+  which there is anything to compete over. The negative result is a comment on
+  `sk_util::pool::worker` so it is not tried a third time.
 
 `skerry --bench` reports it as its own row so it cannot be averaged away.
 
