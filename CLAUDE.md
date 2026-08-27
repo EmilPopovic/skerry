@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for an afternoon.** Twelve crates,
-310 tests, every gate green: a Details view over a real directory at a **0.445 ms
+313 tests, every gate green: a Details view over a real directory at a **0.342 ms
 frame p99 with 200,000 entries in it**, live under inotify, with folder totals,
 Back and Forward, a sidebar, a command registry behind every key and a context
 menu over the same registry, new-folder / rename / Move to Trash with one undo

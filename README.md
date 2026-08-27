@@ -6,10 +6,13 @@ is a **latency product and an interaction-design product** — not a feature che
 Status: **M0, in progress.** Phase 0's six spikes are resolved and there is a window
 on screen: twelve crates, a Wayland platform layer, a GPU renderer, real text shaping,
 and a Details view over a real directory that stays live under inotify, shows folder
-totals as they are computed, filters as you type, navigates by breadcrumb, opens files
-in whatever the desktop says owns them, copies to the clipboard, and draws its own
-window frame where the compositor declines to. What is done and what is owed is in
-[docs/08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer).
+totals as they are computed, filters as you type, navigates by breadcrumb and by typed
+path, makes and renames and trashes things with one undo stack over all of it, opens
+files in whatever the desktop says owns them, copies to the clipboard, lists the
+volumes as they are mounted, and draws its own window frame where the compositor
+declines to. **Every action is reachable with the keyboard alone and with the pointer
+alone**, and a test fails the build for one that is not. What is done and what is owed
+is in [docs/08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer).
 
 ```
 cargo run --release -- ~/Downloads      # a window; F1 lists the keyboard
@@ -24,10 +27,11 @@ method, and the three budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares rendered frames to committed
-references on lavapipe, `tools/gui-test` presses keys and moves a pointer through a
-nested compositor, and `spikes/e-operations` is a filesystem torture matrix that is a
-CI job rather than thrown-away spike code.
+defect nothing else could: `tools/golden` compares ten rendered frames to committed
+references on lavapipe, `tools/gui-test` presses keys and moves a pointer through
+thirty-eight scenarios in a nested compositor — one of which mounts a filesystem in a
+namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
+filesystem torture matrix that is a CI job rather than thrown-away spike code.
 
 ## The thesis in one paragraph
 
