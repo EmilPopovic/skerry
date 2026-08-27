@@ -9,6 +9,7 @@ it to be seen.
 
     tools/gui-test                 # run every scenario
     tools/gui-test --keep          # leave the fixture and the log behind
+    tools/gui-test --scale=1.25    # nest the compositor at a fractional scale
     tools/gui-test selection       # run the scenarios whose name matches
 
 **It needs a nested compositor and refuses to run without one.** Synthetic input
@@ -74,12 +75,16 @@ def instances() -> set[str]:
     return {p.name for p in runtime.glob("*")} if runtime.is_dir() else set()
 
 
-def start_compositor(work: Path) -> tuple[subprocess.Popen, str, str]:
+def start_compositor(work: Path, scale: str = "1") -> tuple[subprocess.Popen, str, str]:
     config = work / "hypr.conf"
     config.write_text(
         # No bars, no animations, no rounding: the window under test should be
         # the only thing on this output, and a frame should be what it drew.
-        "monitor = , 1600x1000@60, 0x0, 1\n"
+        #
+        # The scale is an argument because `--scale` exists: a fractional one is
+        # the only way to tell whether the program reads the compositor's scale
+        # or assumes 100%, and at 1 that assertion cannot fail.
+        f"monitor = , 1600x1000@60, 0x0, {scale}\n"
         "animations { enabled = false }\n"
         "decoration { blur { enabled = false } rounding = 0 shadow { enabled = false } }\n"
         "general { border_size = 0, gaps_in = 0, gaps_out = 0 }\n"
@@ -314,6 +319,21 @@ def output_size(run: Run) -> tuple[int, int]:
     )
     first = json.loads(monitors.stdout)[0]
     return first["width"], first["height"]
+
+
+def output_scale(run: Run) -> float:
+    """What the compositor says its scale is.
+
+    Asked rather than assumed, so the assertion is about the program agreeing
+    with the compositor and not about a number written into a test.
+    """
+    monitors = subprocess.run(
+        ["hyprctl", "-j", "monitors"],
+        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
+        capture_output=True,
+        text=True,
+    )
+    return float(json.loads(monitors.stdout)[0]["scale"])
 
 
 def aim(run: Run, state: dict[str, str], x: float, y: float) -> tuple[float, float]:
@@ -1919,6 +1939,33 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
     run.drive("key escape\nsleep 200\n")
 
 
+@scenario("the-frame-is-at-the-compositors-scale")
+def first_frame_scale(run: Run, fixture: Path) -> None:
+    """What the program scales by is what the compositor asked for.
+
+    **Run this with `--scale=1.25`.** At scale 1 it cannot fail, which is most of
+    what it is here to say: `120` is also what a program that never read
+    `wp_fractional_scale_v1` would report, so the assertion only has teeth on a
+    fractional output. It is the assertion the 1×1 pre-map probe in
+    docs/08-roadmap.md would exist to satisfy — a compositor that sends the scale
+    only after the first buffer is attached would fail it.
+    """
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    state = run.state()
+    scale = output_scale(run)
+    wanted = round(scale * 120)
+    if int(state["scale_120"]) != wanted:
+        raise Failure(f"the compositor is at {scale} and the program scales by {state['scale_120']}/120")
+    # And the frame that matters: the first one. A compositor that sends the
+    # scale only after the first buffer is attached would have this at 120 with
+    # the one above already right — one frame at the wrong size.
+    if int(state["first_frame_scale_120"]) != wanted:
+        raise Failure(
+            f"the compositor is at {scale}, the first frame was drawn at "
+            f"{int(state['first_frame_scale_120']) / 120}"
+        )
+
+
 @scenario("window-close-command")
 def window_close_command(run: Run, fixture: Path) -> None:
     """`Ctrl+W` closes the window, and it is the same action as the button.
@@ -2004,6 +2051,10 @@ def no_cpu_when_idle(run: Run, fixture: Path) -> None:
 def main(argv: list[str]) -> int:
     wanted = [a for a in argv[1:] if not a.startswith("--")]
     keep = "--keep" in argv
+    scale = "1"
+    for argument in argv[1:]:
+        if argument.startswith("--scale="):
+            scale = argument.removeprefix("--scale=")
 
     for binary in (SKERRY, DRIVE):
         if not binary.is_file():
@@ -2014,8 +2065,8 @@ def main(argv: list[str]) -> int:
     compositor = None
     passed, failed = 0, []
     try:
-        compositor, display, instance = start_compositor(work)
-        print(f"nested compositor on {display}")
+        compositor, display, instance = start_compositor(work, scale)
+        print(f"nested compositor on {display} at scale {scale}")
         fixture = make_fixture(work)
 
         for name, function in SCENARIOS.items():

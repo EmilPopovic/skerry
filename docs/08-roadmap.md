@@ -144,7 +144,7 @@ defects they exposed.
 | Done | Owed |
 | --- | --- |
 | Wayland windowing, `xdg_shell`, decoration negotiation and the client-drawn frame that GNOME requires | **X11**, and the whole of `x11rb` |
-| Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change | The 1×1 pre-map probe that would make **frame 1** right and not just frame 2 |
+| Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change, **frame 1 included** — a one-pixel buffer maps the surface first, because the scale arrives at map and not before it | — |
 | Keyboard through `xkbcommon`, with key repeat implemented client-side | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
 | **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural | A paste that pastes *files*, which needs M3's operation engine |
@@ -267,7 +267,7 @@ are ratios for ordering, not a schedule.
 | --- | --- | --- | --- |
 | 1 | ~~**An MSD string radix over the name arena.**~~ **Done, and the row is still missed.** 1,460 ms → **166.0 ms** at 973,759 entries, 8.8×, against a 120 ms target. The remaining gap is parallelism, which needs an API that hands buckets to a caller above `sk-model` | M0 budget | Sort 1M under 120 ms — **not met**. The radix agrees with the comparison order it replaces over every sort a person can ask for, which is met and is a test |
 | 2 | ~~**The command palette.**~~ **Done.** A fuzzy filter over the one registry, in the text field that already existed, drawing the list the keyboard overlay already drew. `Ctrl+Shift+P` or `Ctrl+P`, and a row on the background menu so a pointer alone reaches it | M6 | Every registry entry reachable in three keystrokes — met, and the ranking is tested against the case that broke the first version. Pointer-reachable to the last of forty-one results, which is what the wheel is for |
-| 3 | **The 1×1 pre-map probe**, so the scale is known before the first frame instead of after it | M0 | Frame 1 drawn at the final scale, with a golden frame at 125% to prove it |
+| 3 | ~~**The 1×1 pre-map probe**~~ **Done.** The scale is known before the first frame instead of after it | M0 | Frame 1 drawn at the final scale — met, and asserted by a GUI scenario against the scale the compositor reports, at 1, 1.25, 1.5 and 2. A golden frame could not have proved it: a capture is told its scale |
 
 The palette was out of order on purpose. It is
 [rule 4](03-principles.md#4-discoverable-not-just-configurable)'s headline feature

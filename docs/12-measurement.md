@@ -539,6 +539,33 @@ are decoration, and both look like diligence in a diff.
 > **Fails if:** a pattern in a gate has never been run against the output it
 > claims to match.
 
+## A defect at frame 1 needs a harness that can see frame 1
+
+[08-roadmap.md](08-roadmap.md) owed a 1×1 pre-map probe so that the first frame
+would be at the right scale. Nothing here could show that it was wrong. A capture
+is *told* its scale, so a golden frame proves nothing about it; and the GUI
+harness ran its nested compositor at scale 1, where 120 is both the right answer
+and the answer a program that never read `wp_fractional_scale_v1` would give.
+
+Two things made it measurable, and neither was the fix:
+
+- **The harness takes `--scale`**, so the compositor can be nested at 1.25. At 1
+  the assertion cannot fail, which is most of what it is there to say.
+- **The program reports the scale it drew its first frame at**, kept for no other
+  purpose. Without it the scenario reads the scale 700 ms after start-up, by which
+  time it is right — the defect is one frame wide and the state line is the only
+  place a test can see one frame.
+
+With both, the failure was one line: *the compositor is at 1.25, the first frame
+was drawn at 1.0*. The cause is in the protocol rather than in the code —
+`preferred_scale` arrives when the surface enters an output, a surface enters an
+output when it is mapped, and a surface maps on the first commit that carries a
+buffer. So a client that waits for the scale waits forever and one that draws
+first draws at 100%.
+
+> **Fails if:** a defect one frame wide is chased with a harness whose finest
+> resolution is a second.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

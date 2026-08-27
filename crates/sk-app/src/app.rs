@@ -510,6 +510,14 @@ pub struct App {
     logical: Size,
     physical: (u32, u32),
     scale_120: u32,
+    /// The scale the very first frame was drawn at.
+    ///
+    /// Kept only so a scenario can assert about it. `wp_fractional_scale_v1`
+    /// sends its first `preferred_scale` at a moment the protocol does not pin
+    /// down, and a compositor that waits for the first buffer would have this
+    /// report 120 where the output is at 125% — one frame at the wrong size,
+    /// which is the row docs/08-roadmap.md owes a 1×1 pre-map probe for.
+    first_frame_scale_120: Option<u32>,
 
     dirty: bool,
     closing: bool,
@@ -610,6 +618,7 @@ impl App {
             logical,
             physical,
             scale_120,
+            first_frame_scale_120: None,
             dirty: true,
             closing: false,
             show_keys: false,
@@ -672,6 +681,11 @@ impl App {
             self.drain_sizes();
             self.advance();
             if self.dirty {
+                // Recorded before the frame rather than after: what a scenario
+                // asks about is the scale this frame was drawn at.
+                if self.first_frame_scale_120.is_none() {
+                    self.first_frame_scale_120 = Some(self.scale_120);
+                }
                 self.render(&commands, turn);
                 self.dirty = false;
             }
@@ -2045,7 +2059,7 @@ crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
-logical={:.0}x{:.0} scale_120={} \
+logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.layout.body.y,
             self.layout.body.height,
@@ -2062,6 +2076,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.logical.width,
             self.logical.height,
             self.scale_120,
+            self.first_frame_scale_120.unwrap_or(0),
             self.frames.percentile(0.5),
             self.frames.percentile(0.99),
             self.frames.budget().0,

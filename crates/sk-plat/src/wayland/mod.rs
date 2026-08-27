@@ -29,7 +29,8 @@ use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_compositor, wl_data_device_manager, wl_output, wl_registry, wl_seat, wl_surface,
+    wl_buffer, wl_compositor, wl_data_device_manager, wl_output, wl_registry, wl_seat, wl_shm,
+    wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::cursor_shape::v1::client::{
@@ -451,6 +452,7 @@ impl Window {
                 Problem::plain(ProblemKind::NoDisplay, format!("roundtrip: {error}"))
             })?;
         }
+        probe_scale(&globals, &handle, &mut queue, &mut state);
         state.events.clear();
         state.cursor = dress_pointer(cursor_shapes, &state.seat, &handle);
 
@@ -1062,6 +1064,63 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
     }
 }
 
+/// Maps the surface with a one-pixel buffer, so the compositor says what scale it
+/// is at before the first real frame is drawn.
+///
+/// **`wp_fractional_scale_v1` sends `preferred_scale` when the surface enters an
+/// output, and a surface enters an output when it is mapped** — which happens on
+/// the first commit that carries a buffer. So a client that waits for the scale
+/// before drawing waits forever, and one that draws first draws a frame at 100%
+/// and corrects it on the next: measured on Hyprland at an output scale of 1.25,
+/// the first frame went out at 1.0.
+///
+/// One pixel of transparent `ARGB8888` is enough to map it. The memory is never
+/// written and never mapped into this process: a fresh `memfd` reads as zeros,
+/// which is the colour wanted.
+///
+/// Best effort throughout. A compositor with no `wl_shm`, or one that refuses the
+/// pool, leaves the scale where it was and the second frame corrects it — which
+/// is the behaviour this replaces, not a regression on it.
+fn probe_scale(
+    globals: &GlobalList,
+    handle: &QueueHandle<State>,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+) {
+    if !state.capabilities.fractional_scale {
+        return;
+    }
+    let Some(shm): Option<wl_shm::WlShm> = bind(globals, handle, 1..=2) else { return };
+    let Ok(memory) =
+        rustix::fs::memfd_create("skerry-scale-probe", rustix::fs::MemfdFlags::CLOEXEC)
+    else {
+        return;
+    };
+    // One pixel, four bytes.
+    if rustix::fs::ftruncate(&memory, 4).is_err() {
+        return;
+    }
+    let pool = shm.create_pool(memory.as_fd(), 4, handle, ());
+    let buffer = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, handle, ());
+    state.surface.attach(Some(&buffer), 0, 0);
+    state.surface.damage_buffer(0, 0, 1, 1);
+    state.surface.commit();
+
+    // Two round trips rather than a wait: the scale arrives on the first one that
+    // follows the map, and a client that blocks until it does is a client that
+    // never starts on a compositor that does not send it.
+    for _ in 0..2 {
+        if queue.roundtrip(state).is_err() {
+            break;
+        }
+        if state.reported.is_some() {
+            break;
+        }
+    }
+    buffer.destroy();
+    pool.destroy();
+}
+
 macro_rules! ignore_events {
     ($($object:path),* $(,)?) => { $(
         impl Dispatch<$object, ()> for State {
@@ -1079,6 +1138,9 @@ macro_rules! ignore_events {
 }
 
 ignore_events!(
+    wl_shm::WlShm,
+    wl_shm_pool::WlShmPool,
+    wl_buffer::WlBuffer,
     wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
     wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
     zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
