@@ -23,7 +23,6 @@ status.empty = This folder is empty
 status.filtered = {0} of {1} items match “{2}”
 # The prompt while the filter has the keyboard, caret included: one string, so a
 # translation can put the caret where its script wants it.
-status.filter_prompt = Filter: {0}▏
 
 # Sizes. A file manager writes these thousands of times per session, so the
 # unit is a separate string rather than concatenated onto a number.
@@ -73,6 +72,8 @@ notice.progress = {0}… {1} of {2}
 notice.progress_rate = {0}… {1} of {2}, {3} at {4}/s
 notice.cancelled = Stopped. What was already copied is still there — Ctrl+Z takes it back.
 action.cancel = Stop the operation
+find.prompt = Filter this folder
+find.count = {0} of {1}
 error.not_text = {0} is not text. Open it to see what it is.
 error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
 

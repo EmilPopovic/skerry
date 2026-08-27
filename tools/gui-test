@@ -2079,6 +2079,31 @@ def progress_and_cancel(run: Run, fixture: Path) -> None:
         raise Failure(f"the partial copy survived its undo: {partial}")
 
 
+@scenario("a-held-backspace-does-not-walk-out-of-the-folder")
+def backspace_in_the_filter(run: Run, fixture: Path) -> None:
+    """Backspace on an empty filter does nothing, and Escape is what leaves.
+
+    The reported defect: key repeat does not stop because a mode ended, so a held
+    Backspace emptied the filter, closed it, and handed the next repeat to the
+    list — where `Backspace` is Parent folder. Holding it walked out of the
+    directory being searched, one level per repeat.
+    """
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    start = run.state()
+    run.drive("key ctrl+f\nsleep 250\ntext im\nsleep 400\nkey f12\nsleep 150\n")
+    typed = run.state()
+    expect(typed, filtering="true", filter="im")
+
+    # Five backspaces for two characters, which is what holding the key does.
+    run.drive("key backspace\n" * 5 + "sleep 400\nkey f12\nsleep 200\n")
+    after = run.state()
+    expect(after, filtering="true", filter="", path=start["path"])
+
+    # And Escape is what leaves, still in the same folder.
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), filtering="false", filter="", path=start["path"])
+
+
 @scenario("the-frame-is-at-the-compositors-scale")
 def first_frame_scale(run: Run, fixture: Path) -> None:
     """What the program scales by is what the compositor asked for.

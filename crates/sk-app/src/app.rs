@@ -1244,11 +1244,15 @@ impl App {
         let mut wanted = self.pane.filter.clone();
         match event.key {
             sk_plat::Key::Named(sk_plat::Named::Backspace) if event.mods.none() => {
+                // **An empty filter swallows Backspace rather than closing.**
+                // Closing on it looks harmless and is not: key repeat does not
+                // stop because a mode ended, so a held Backspace emptied the
+                // filter, closed it, and handed the next repeat to the list —
+                // where `Backspace` is Parent folder. Holding it walked out of
+                // the directory being searched, one level per repeat. `Escape`
+                // is the key that leaves, and it is the one every other field
+                // here leaves on.
                 if wanted.pop().is_none() {
-                    // Backspace on an empty filter closes it, which is what
-                    // every search field a person has met does.
-                    self.filtering = false;
-                    self.dirty = true;
                     return true;
                 }
             }

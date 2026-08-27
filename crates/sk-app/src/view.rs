@@ -156,6 +156,9 @@ pub fn draw(
     header(painter, pane, layout);
     body(painter, pane, layout, now, chrome);
     status(painter, pane, layout, chrome, diagnostics);
+    if chrome.filtering {
+        find_popup(painter, pane, layout);
+    }
     if chrome.stats {
         stats_overlay(painter, pane, layout, diagnostics);
     }
@@ -330,7 +333,7 @@ fn path_entry(painter: &mut Painter<'_>, layout: &Layout, field: &Field, baselin
     );
 
     let style = TextStyle::new(metrics.path_size, theme.palette.text);
-    field_text(painter, area, field, style, PATH_INSET, baseline);
+    field_text(painter, area, &field.text, field.caret, style, PATH_INSET, baseline);
 }
 
 /// Where the path field goes, for the draw and for the hit test.
@@ -492,7 +495,8 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
         let room = area.width - INSET * 2.0;
         line(painter, i18n::lookup("palette.prompt"), prompt, area.x + INSET, room, baseline);
     }
-    field_text(painter, field_area, &palette.query, style, INSET, baseline);
+    let query = &palette.query;
+    field_text(painter, field_area, &query.text, query.caret, style, INSET, baseline);
     painter.hairline(area.x, area.y + FIELD, area.width, theme.palette.divider);
 
     hits.palette.clear();
@@ -531,6 +535,76 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
     let _ = VISIBLE;
 }
 
+/// The filter, as a panel over the top-right of the list.
+///
+/// **A strip at the bottom of the window is the wrong place for a field.** It was
+/// in the status line, sixteen pixels tall, at the far edge from where the eye is
+/// — so a person typing could not see what they had typed.
+///
+/// **Bottom-right of the list, not top-right.** An editor puts this widget at the
+/// top because the interesting line is wherever the caret is; a filtered list's
+/// interesting rows are always the first few, and a panel there covers the one
+/// thing the filter was typed to find. The bottom is empty exactly when the filter
+/// has done its job.
+///
+/// The count comes with it, because "no matches" and "one match" are the two
+/// answers a filter is asked for and neither is visible in the list itself.
+fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let count = i18n::format(
+        "find.count",
+        &[&format::grouped(pane.listing.rows()), &format::grouped(pane.listing.len())],
+    );
+    let count_width = text_width(painter, &count, metrics.header_size, false);
+    let typed = text_width(painter, &pane.filter, metrics.path_size, false);
+    let room = (layout.body.width - FIND_MARGIN * 2.0).max(FIND_WIDTH.0);
+    let width = (typed + count_width + FIND_INSET * 3.0)
+        .clamp(FIND_WIDTH.0.min(room), FIND_WIDTH.1.min(room));
+    let area = Area {
+        x: layout.body.x + layout.body.width - width - FIND_MARGIN,
+        y: (layout.body.y + layout.body.height - FIND_HEIGHT - FIND_MARGIN).max(layout.body.y),
+        width,
+        height: FIND_HEIGHT,
+    };
+    panel(painter, area);
+    // An accent outline rather than a tinted strip somewhere else: the border is
+    // on the thing that has the keyboard, which is what makes it a mode marker
+    // rather than a decoration.
+    let outline = painter.rect(area.x, area.y, area.width, area.height);
+    painter.list.stroke(
+        outline,
+        theme.palette.accent,
+        painter.px(metrics.radius),
+        painter.snap(1.0).max(1.0),
+    );
+
+    let baseline = painter.baseline(area.y, area.height, metrics.path_size);
+    let counted = TextStyle::new(metrics.header_size, theme.palette.dim).right();
+    line(painter, &count, counted, area.x + FIND_INSET, area.width - FIND_INSET * 2.0, baseline);
+
+    // The field stops short of the count, so a long filter scrolls under its own
+    // caret instead of running into the number.
+    let field = Area { width: area.width - count_width - FIND_INSET, ..area };
+    if pane.filter.is_empty() {
+        let prompt = TextStyle::new(metrics.path_size, theme.palette.dim);
+        let room = field.width - FIND_INSET * 2.0;
+        line(painter, i18n::lookup("find.prompt"), prompt, field.x + FIND_INSET, room, baseline);
+    }
+    let style = TextStyle::new(metrics.path_size, theme.palette.text);
+    let caret = pane.filter.len();
+    field_text(painter, field, &pane.filter, caret, style, FIND_INSET, baseline);
+}
+
+/// The narrowest and widest the find popup may be.
+const FIND_WIDTH: (f32, f32) = (240.0, 460.0);
+/// How tall it is: one line of text with room around it.
+const FIND_HEIGHT: f32 = 38.0;
+/// The text inset at each side.
+const FIND_INSET: f32 = 12.0;
+/// How far it sits from the list's bottom and right edges.
+const FIND_MARGIN: f32 = 10.0;
+
 /// The name being typed, drawn over the row it belongs to.
 fn name_field_at(
     painter: &mut Painter<'_>,
@@ -555,7 +629,7 @@ fn name_field_at(
     );
 
     let style = TextStyle::new(metrics.text_size, theme.palette.text);
-    field_text(painter, area, &naming.field, style, NAME_INSET, baseline);
+    field_text(painter, area, &naming.field.text, naming.field.caret, style, NAME_INSET, baseline);
 }
 
 /// The text and the caret inside a field's box.
@@ -564,10 +638,17 @@ fn name_field_at(
 /// text's origin are the same number offset by the same scroll — and the two of
 /// them living in two functions is how a caret ends up two characters from the
 /// character it is between.
+/// One line of text in a box, with a caret in it, clipped and scrolled.
+///
+/// Takes the text and the caret rather than a [`Field`] because the filter is not
+/// one: it is a `String` that only ever grows and shrinks at the end. One
+/// implementation regardless, because a second caret is a second thing to get
+/// wrong — the first one was as tall as its box.
 fn field_text(
     painter: &mut Painter<'_>,
     area: Area,
-    field: &Field,
+    text: &str,
+    caret: usize,
     style: TextStyle,
     inset: f32,
     baseline: f32,
@@ -576,9 +657,9 @@ fn field_text(
     let room = area.width - inset * 2.0;
     // Shaping what is before the caret is the only measurement that survives a
     // ligature or a combining mark.
-    let before = text_width(painter, field.before_caret(), style.size, false);
+    let before = text_width(painter, text.get(..caret).unwrap_or(text), style.size, false);
     let scroll = field_scroll(before, room);
-    let full = text_width(painter, &field.text, style.size, false);
+    let full = text_width(painter, text, style.size, false);
 
     // Clipped to the box, and drawn as wide as the text: `label` ellipsizes
     // whatever will not fit its own rectangle, and an ellipsis in a field being
@@ -586,13 +667,8 @@ fn field_text(
     let box_rect = painter.rect(area.x, area.y, area.width, area.height);
     painter.list.push_clip(box_rect);
     let inner = painter.rect(area.x + inset - scroll, 0.0, full.max(room) + scroll, 0.0);
-    painter.label(&field.text, style, inner, baseline);
-    let caret = sk_gpu::Rect::new(
-        painter.snap(area.x + inset - scroll + before),
-        painter.snap(area.y + 3.0),
-        painter.snap(1.5).max(1.0),
-        painter.px(area.height - 6.0),
-    );
+    painter.label(text, style, inner, baseline);
+    let caret = painter.caret(area.x + inset - scroll + before, baseline, style.size);
     painter.list.rect(caret, theme.palette.accent, 0.0);
     painter.list.pop_clip();
 }
@@ -1185,28 +1261,16 @@ fn status(
     let theme = *painter.theme;
     let metrics = theme.metrics;
     fill(painter, layout.status, theme.palette.chrome);
-    if chrome.filtering {
-        // A mode that takes the keyboard has to look like one, or the first thing
-        // a person learns is that typing stopped doing what it did. A tint alone
-        // is not enough at these alphas, so the strip also gets an accent rule
-        // along its top edge where the hairline would be.
-        fill(painter, layout.status, theme.palette.accent.with_alpha(30));
-        let rule = painter.rect(0.0, layout.status.y, layout.status.width, 2.0);
-        painter.list.rect(rule, theme.palette.accent, 0.0);
-    } else {
-        painter.hairline(0.0, layout.status.y, layout.status.width, theme.palette.divider);
-    }
-    let size = if chrome.filtering { metrics.path_size } else { metrics.header_size };
+    painter.hairline(0.0, layout.status.y, layout.status.width, theme.palette.divider);
+    let size = metrics.header_size;
     let baseline = painter.baseline(layout.status.y, layout.status.height, size);
 
     let rows = pane.listing.rows();
     let selected = pane.selection.count();
-    let left = if chrome.filtering {
-        // The prompt owns the line while the field has the keyboard: it is what
-        // the keys are going into, and a count beside it would compete with the
-        // thing being typed.
-        i18n::format("status.filter_prompt", &[&pane.filter])
-    } else if let Some(notice) = chrome.notice {
+    // **No special case for the filter any more.** The query used to own this line
+    // and be the only place it appeared; it is a panel over the list now, and one
+    // mode marker is enough.
+    let left = if let Some(notice) = chrome.notice {
         notice.to_owned()
     } else if pane.loading {
         i18n::format("status.loading", &[&format::grouped(rows)])
@@ -1221,8 +1285,7 @@ fn status(
         i18n::format("status.counts.none", &[&format::grouped(rows)])
     };
     let left = if chrome.watching { left } else { i18n::format("status.unwatched", &[&left]) };
-    let ink = if chrome.filtering { theme.palette.text } else { theme.palette.dim };
-    let style = TextStyle::new(size, ink);
+    let style = TextStyle::new(size, theme.palette.dim);
     line(painter, &left, style, metrics.gutter, layout.status.width * 0.6, baseline);
 
     // The frame cost, always visible and always honest: our own work, with the

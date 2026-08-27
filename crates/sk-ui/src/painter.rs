@@ -329,6 +329,29 @@ impl Painter<'_> {
         (top + (height - (metrics.ascent + metrics.descent)) / 2.0 + metrics.ascent).round()
     }
 
+    /// The caret for a text field, sized by the text rather than by the box.
+    ///
+    /// **A caret as tall as its box is a caret that looks wrong in every box but
+    /// one.** The three fields here are 40, 28 and 22 logical pixels tall around
+    /// the same 13-pixel text, so a caret derived from the box was a thin cursor
+    /// in one and a scrollbar in another. Ascent plus descent of the face it sits
+    /// in is what every text field on the desktop draws, and it is the same
+    /// number `baseline` already asks the face for.
+    ///
+    /// `x` is logical; `baseline` is what [`Painter::baseline`] returned, which is
+    /// already in device pixels.
+    #[must_use]
+    pub fn caret(&mut self, x: f32, baseline: f32, logical_size: f32) -> Rect {
+        let px_size = self.px(logical_size);
+        let metrics = self.fonts.metrics(Weight::Regular, px_size);
+        Rect::new(
+            self.snap(x),
+            (baseline - metrics.ascent).round(),
+            self.snap(1.5).max(1.0),
+            (metrics.ascent + metrics.descent).round().max(1.0),
+        )
+    }
+
     /// The mark for a directory: a folder, from two rounded rectangles.
     ///
     /// Geometric rather than from an icon theme, because icon themes belong to

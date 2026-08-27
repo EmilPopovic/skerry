@@ -28,7 +28,7 @@ method, and the three budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares twelve rendered frames to committed
+defect nothing else could: `tools/golden` compares thirteen rendered frames to committed
 references on lavapipe, `tools/gui-test` presses keys and moves a pointer through
 fifty-two scenarios in a nested compositor — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a

@@ -64,10 +64,10 @@ crate cannot be the one that violates them.
 
 ## Golden frames
 
-`tools/golden` renders twelve frames — four scales, both palettes, the keyboard
-overlay, the context menu, the command palette, the path bar as a field at two
-widths, a window too narrow for the metadata columns, and the frame GNOME
-requires — and compares them to committed references. It is what catches a glyph that moved half a pixel, a
+`tools/golden` renders thirteen frames — four scales, both palettes, the keyboard
+overlay, the context menu, the command palette, the find popup, the path bar as a
+field at two widths, a window too narrow for the metadata columns, and the frame
+GNOME requires — and compares them to committed references. It is what catches a glyph that moved half a pixel, a
 colour that lost its alpha, a column that stopped shedding, and a row that draws
 under the status bar at 200%.
 

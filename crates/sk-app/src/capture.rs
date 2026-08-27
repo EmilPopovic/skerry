@@ -63,6 +63,8 @@ pub struct Capture {
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
     pub palette: bool,
+    /// Whether to draw the find popup, with a query narrowing the list.
+    pub filter: bool,
     /// Whether to draw the sidebar.
     pub sidebar: bool,
     /// Whether to draw the window frame the program draws for itself.
@@ -123,6 +125,35 @@ fn sample_path_entry(path: &std::path::Path) -> crate::field::Field {
         field.step(true);
     }
     field
+}
+
+/// Every overlay a capture was asked for, built once.
+///
+/// One struct rather than four locals because `run` is at the hundred-line limit
+/// and the four of them are the same thing: a thing the window would be showing,
+/// stated rather than reached.
+struct Overlays {
+    menu: Option<crate::menu::Menu>,
+    path_entry: Option<crate::field::Field>,
+    palette: Option<crate::palette::Palette>,
+}
+
+fn sample_overlays(
+    request: &Capture,
+    layout: &Layout,
+    pane: &mut Pane,
+    jobs: &crate::pane::Jobs,
+) -> Overlays {
+    // A query that matches some of the fixture and not all of it, so the frame
+    // carries the count as well as the field.
+    if request.filter {
+        pane.set_filter("im".to_owned(), jobs);
+    }
+    Overlays {
+        menu: request.menu.then(|| sample_menu(layout)).flatten(),
+        path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
+        palette: request.palette.then(sample_palette),
+    }
 }
 
 /// Walks every visible folder to completion, so the frame is reproducible.
@@ -207,9 +238,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().cast_signed());
 
-    let menu = request.menu.then(|| sample_menu(&layout)).flatten();
-    let path_entry = request.path_entry.then(|| sample_path_entry(&request.path));
-    let palette = request.palette.then(sample_palette);
+    let overlays = sample_overlays(request, &layout, &mut pane, &session.jobs);
 
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
@@ -263,7 +292,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 // having a golden frame of, since it is the one with two of the
                 // four dimmed.
                 tools: [false, false, true, true],
-                filtering: false,
+                filtering: request.filter,
                 types: Some(&types),
                 window: sk_plat::WindowState {
                     activated: true,
@@ -271,9 +300,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                     can_minimize: true,
                     ..sk_plat::WindowState::default()
                 },
-                menu: menu.as_ref(),
-                path_entry: path_entry.as_ref(),
-                palette: palette.as_ref(),
+                menu: overlays.menu.as_ref(),
+                path_entry: overlays.path_entry.as_ref(),
+                palette: overlays.palette.as_ref(),
                 hint: &keyboard_hint,
             };
             view::draw(
