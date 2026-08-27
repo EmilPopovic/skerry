@@ -13,6 +13,9 @@ level = 1
 sk-util = { workspace = true }
 sk-model = { workspace = true }
 rustix = { workspace = true }
+# Only for `localtime_r`: the trash specification wants a local deletion time.
+# Already in the graph through `rustix` — see docs/07-dependencies.md.
+libc = { workspace = true }
 
 [lints]
 workspace = true

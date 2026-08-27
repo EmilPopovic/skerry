@@ -20,7 +20,9 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod chord;
+pub mod history;
 pub mod registry;
 
 pub use chord::Chord;
+pub use history::History;
 pub use registry::{CommandId, CommandSpec, Group, Registry};

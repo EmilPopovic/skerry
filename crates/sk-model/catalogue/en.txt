@@ -43,6 +43,12 @@ error.no_gpu = No usable GPU. Install a Vulkan driver, or mesa's software render
 error.no_font = No usable font found. Install a font package such as dejavu-fonts or noto-fonts.
 # Names the limit and how to raise it, because nothing else about the message
 # would tell anyone which knob to turn.
+# Refusals from an operation. Each says what happened and what to do about it,
+# and each is a thing a person can fix.
+error.bad_name = “{0}” cannot be a name. Names cannot be empty or contain “/”.
+error.name_taken = Something is already called “{0}”. Choose another name.
+error.across_filesystems = {0} is on another filesystem. Moving it there is not possible yet — copy it instead.
+error.not_empty = {0} is not empty any more, so undoing that would delete what is in it.
 error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
 
 # Key names, for the keyboard overlay and anywhere else a chord is shown. As

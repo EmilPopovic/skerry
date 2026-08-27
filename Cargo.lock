@@ -723,6 +723,7 @@ dependencies = [
 name = "sk-fs"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "rustix",
  "sk-model",
  "sk-util",

@@ -16,6 +16,7 @@
 
 pub mod device;
 pub mod mounts;
+pub mod ops;
 pub mod scan;
 pub mod watch;
 

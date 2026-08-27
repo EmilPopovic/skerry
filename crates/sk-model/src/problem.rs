@@ -36,6 +36,21 @@ pub enum ProblemKind {
     /// hypothetical error path — and it used to be reported as `NoDisplay`,
     /// which told the user to set `WAYLAND_DISPLAY`.
     OutOfResources,
+    /// A name that cannot be one: empty, or with a separator in it.
+    BadName,
+    /// Something is already called that.
+    ///
+    /// Its own kind because it is the one failure a person can fix in the field
+    /// they are already typing in, and because every mutation here refuses to
+    /// replace rather than replacing — so this is the common answer, not an edge.
+    NameTaken,
+    /// The source and the destination are on different filesystems.
+    ///
+    /// A rename cannot cross one and neither can a move to the home trash. The
+    /// specification's per-volume `.Trash-$uid` is what fixes it and is owed.
+    AcrossFilesystems,
+    /// A directory that has to be empty is not.
+    NotEmpty,
 }
 
 impl ProblemKind {
@@ -47,6 +62,10 @@ impl ProblemKind {
             Self::NoGpu => "error.no_gpu",
             Self::NoFont => "error.no_font",
             Self::OutOfResources => "error.out_of_resources",
+            Self::BadName => "error.bad_name",
+            Self::NameTaken => "error.name_taken",
+            Self::AcrossFilesystems => "error.across_filesystems",
+            Self::NotEmpty => "error.not_empty",
         }
     }
 }
