@@ -27,6 +27,14 @@ use crate::view::{self, Chrome, Diagnostics};
 /// abandoned one.
 const TYPE_AHEAD_WINDOW: Duration = Duration::from_secs(1);
 
+/// How far a press may move and still be a click rather than a drag.
+///
+/// Four logical pixels, a little under the double-click slop: a click is never
+/// perfectly still, and a hand on a touchpad moves a pixel while the button is
+/// down. Below this the title bar opens the path for typing; above it, the
+/// compositor takes over and moves the window.
+const DRAG_THRESHOLD: f32 = 4.0;
+
 /// How long a message stays in the status line.
 ///
 /// Four seconds: long enough to read a sentence, short enough that it is gone
@@ -553,6 +561,17 @@ pub struct App {
     /// stays in: dragging out of the box and back must not move the selection to
     /// whatever the pointer passed over.
     text_drag: Option<Claim>,
+    /// Where a press on the window's own title bar landed, until it is decided.
+    ///
+    /// **The same press is a drag and a click**, and which one it is is not known
+    /// until the pointer either moves or comes up: moving starts the compositor's
+    /// window move, and coming up opens the path for typing. `xdg_toplevel.move`
+    /// takes the last button serial, which is still this press's, so starting the
+    /// move a few milliseconds later is the same grab.
+    title_press: Option<Point>,
+    /// Whether the path field was opened by the click that just happened on the
+    /// title bar, so the second click of a double click can take it back.
+    path_from_title: bool,
     last_frame: Instant,
     started: Instant,
     first_frame_reported: bool,
@@ -652,6 +671,8 @@ impl App {
             band: None,
             thumb_grab: None,
             text_drag: None,
+            title_press: None,
+            path_from_title: false,
             last_frame: now,
             started: options.started,
             first_frame_reported: false,
@@ -994,6 +1015,10 @@ impl App {
     }
 
     fn key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) {
+        // Any key ends the double-click window: a field opened with `Ctrl+L` was
+        // not opened by a click on the title bar, and a double click in it belongs
+        // to the caret.
+        self.path_from_title = false;
         // An open menu takes the keyboard first, and gives back everything it
         // has no use for.
         if self.menu.is_some() && self.menu_key(event, commands) {
@@ -1238,6 +1263,33 @@ impl App {
         let area = crate::view::path_field(&self.layout, &self.theme.metrics);
         let size = self.theme.metrics.path_size;
         self.place_caret_in(Claim::Path, area, size, crate::view::PATH_INSET, x);
+    }
+
+    /// A press on the path strip, beside the breadcrumbs. Returns whether it was.
+    ///
+    /// Two answers, because the same strip is two things. **Where the window draws
+    /// its own frame** it is the title bar, and the press waits: the compositor
+    /// takes the pointer the moment `start_move` is asked, so asking on the press
+    /// would make every click a drag. **Where the compositor draws the frame**
+    /// there is no drag region and nothing else wants the press, so it opens the
+    /// path for typing straight away — which the address bar in every browser
+    /// does, and which the breadcrumbs beside it already did.
+    fn press_on_the_path_strip(&mut self, position: Point, clicks: u8) -> bool {
+        if self.layout.drag.contains(position.x, position.y) {
+            // A double click on a title bar toggles maximize everywhere else, so
+            // it does here.
+            if clicks >= 2 {
+                self.toggle_maximized();
+            } else {
+                self.title_press = Some(position);
+            }
+            return true;
+        }
+        if self.layout.path.contains(position.x, position.y) {
+            self.toggle_path_entry();
+            return true;
+        }
+        false
     }
 
     /// A press inside an open text field: the caret goes there and a drag begins.
@@ -2559,6 +2611,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // breadcrumb is: a press in a text field belongs to the caret, and a
         // press that moved the window instead would make the field unusable.
         if self.typing_path.is_some() {
+            // The second click of a double click on the title bar. The first one
+            // opened this field on its release, so taking it back is what makes
+            // "double click to maximise" survive "click to type a path".
+            if clicks >= 2 && self.path_from_title {
+                self.typing_path = None;
+                self.path_from_title = false;
+                self.toggle_maximized();
+                self.dirty = true;
+                return;
+            }
             let field = crate::view::path_field(&self.layout, &self.theme.metrics);
             if field.contains(position.x, position.y) {
                 self.place_path_caret(position.x);
@@ -2576,17 +2638,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.go_to_crumb(depth);
             return;
         }
-        if self.layout.drag.contains(position.x, position.y) {
-            // A double click on a title bar toggles maximize everywhere else, so
-            // it does here.
-            if clicks >= 2 {
-                self.toggle_maximized();
-            } else {
-                // Nothing to fall through to: the title bar holds no rows, and
-                // the breadcrumbs were tested above. A refused grab is a press
-                // that does nothing, which is what it looked like anyway.
-                let _ = self.window.start_move();
-            }
+        if self.press_on_the_path_strip(position, clicks) {
             return;
         }
         if self.layout.header.contains(position.x, position.y) {
@@ -2638,6 +2690,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let ended = self.band.take().is_some();
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
+        // A press on the title bar that never moved: the person clicked the path
+        // strip, which is a request to type a path.
+        if self.title_press.take().is_some() {
+            self.toggle_path_entry();
+            self.path_from_title = self.typing_path.is_some();
+        }
         if ended || released || dragged {
             self.dirty = true;
         }
@@ -3045,6 +3103,19 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
     fn moved(&mut self, position: Point, commands: &Registry<Self>) {
         self.pointer = position;
+        // A press on the title bar that has now moved is a window drag after all.
+        // The threshold is what separates the two: a click is never perfectly
+        // still, and a hand on a touchpad moves a pixel while the button is down.
+        if let Some(from) = self.title_press {
+            let moved = (position.x - from.x).abs().max((position.y - from.y).abs());
+            if moved > DRAG_THRESHOLD {
+                self.title_press = None;
+                // A refused grab is a press that does nothing, which is what it
+                // looked like anyway.
+                let _ = self.window.start_move();
+            }
+            return;
+        }
         // A drag inside a field selects text. Before the palette's branch, because
         // a drag that started in a field belongs to that field until the button
         // comes up — and after nothing, because it is the most specific thing the

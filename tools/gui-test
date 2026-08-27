@@ -480,7 +480,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 59
+FEWEST_SCENARIOS = 60
 
 
 def scenario(name, fresh: bool = False):
@@ -2288,6 +2288,39 @@ def word_editing(run: Run, fixture: Path) -> None:
     run.drive("key ctrl+y\nsleep 250\nkey f12\nsleep 150\n")
     expect(run.state(), naming="file-two")
     run.drive("key escape\nsleep 250\n")
+
+
+@scenario("clicking-beside-the-breadcrumbs-opens-the-path")
+def click_the_path_strip(run: Run, fixture: Path) -> None:
+    """The empty part of the path bar opens the path for typing.
+
+    The breadcrumbs were already clickable and the space around them did nothing
+    at all — which is a strip of chrome that looks like an address bar and is not
+    one. Where the window draws its own frame that same strip is the drag region,
+    so the press waits to see whether the pointer moves; here the compositor draws
+    the frame and there is nothing else the press could mean.
+    """
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    start = run.state()
+    expect(start, path_entry="")
+    crumbs = int(start["crumbs"])
+    if crumbs < 2:
+        raise Failure("this fixture has no breadcrumbs to sit beside")
+
+    # Well right of the last crumb and left of the hint, at the strip's height.
+    left, top, width, height = (float(value) for value in start["path_field"].split(","))
+    empty = aim(run, start, left + width * 0.75, top + height / 2.0)
+    run.drive(f"move {empty[0]:.2f} {empty[1]:.2f}\nsleep 200\nclick\nsleep 400\n")
+    run.drive("key f12\nsleep 150\n")
+    opened = run.state()
+    if opened["path_entry"] != opened["path"]:
+        raise Failure(f"the click opened {opened['path_entry']!r} for {opened['path']!r}")
+
+    # And it is a live field: typing goes into it, and Escape puts the crumbs back.
+    run.drive("key ctrl+a\nsleep 200\ntext /tmp\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="/tmp")
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="", path=start["path"])
 
 
 @scenario("a-pointer-selects-text-in-the-path-field")

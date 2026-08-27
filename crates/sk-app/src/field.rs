@@ -71,13 +71,19 @@ enum Edit {
 /// than a filename receives and a bounded amount of memory either way.
 const HISTORY: usize = 64;
 
-/// Whether a character separates two words of a name.
+/// Whether a character separates two words of a name or a path.
 ///
-/// **A filename's own punctuation, not prose's.** `holiday-2024.jpeg` is four
+/// **A filename's own punctuation, not prose's.** `holiday-2024.jpeg` is three
 /// words to somebody editing it, and a word rule that only breaks on spaces makes
 /// `Ctrl ←` jump the whole name — which is what `Home` already does.
+///
+/// **`/` among them**, because the same one line of text is the path bar: a word
+/// there is a path component, so `Ctrl+Backspace` walks back up a path one
+/// directory at a time. A component with a hyphen in it is still two words, which
+/// is the same rule rather than an exception to it.
 fn is_separator(character: char) -> bool {
-    character.is_whitespace() || matches!(character, '-' | '_' | '.' | ',' | '(' | ')' | '[' | ']')
+    character.is_whitespace()
+        || matches!(character, '/' | '-' | '_' | '.' | ',' | '(' | ')' | '[' | ']')
 }
 
 impl Field {
@@ -601,6 +607,36 @@ mod tests {
             back.push(field.caret);
         }
         assert_eq!(back, vec![17, 13, 8, 0, 0]);
+    }
+
+    /// The same one line of text is the path bar, so a word there is a path
+    /// component and `Ctrl+Backspace` walks back up a directory at a time.
+    #[test]
+    fn a_word_in_a_path_is_a_component() {
+        let mut field = Field::new("/home/emil/repos/skerry".to_owned());
+        field.delete_word(false);
+        assert_eq!(field.text, "/home/emil/repos/");
+        field.delete_word(false);
+        assert_eq!(field.text, "/home/emil/");
+        field.delete_word(false);
+        assert_eq!(field.text, "/home/");
+        // The leading `/` is a component boundary of its own, so the last press
+        // leaves the root rather than an empty field.
+        field.delete_word(false);
+        assert_eq!(field.text, "/");
+        field.delete_word(false);
+        assert_eq!(field.text, "");
+    }
+
+    /// A component with punctuation in it is more than one word, which is the
+    /// same rule and not an exception to it.
+    #[test]
+    fn a_hyphenated_component_is_still_two_words() {
+        let mut field = Field::new("/tmp/skerry-golden/fixture".to_owned());
+        field.step_word(false);
+        assert_eq!(field.caret, 19, "the caret is before `fixture`");
+        field.step_word(false);
+        assert_eq!(&field.text[field.caret..], "golden/fixture");
     }
 
     #[test]

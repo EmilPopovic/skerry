@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates, 399 tests, 59 GUI scenarios and fourteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 401 tests, 60 GUI scenarios and fourteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -148,7 +148,7 @@ defects they exposed.
 | Keyboard through `xkbcommon`, with key repeat implemented client-side | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
 | **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural, and a paste that pastes **files** | `x-special/gnome-copied-files`, which is what makes a cut arrive in Nautilus as a move rather than a copy — and interop in either direction, which is unverified |
-| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | The fifty-nine GUI scenarios **in** CI: they drive a real nested compositor for the virtual-input protocols, and a runner has no seat to give one |
+| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | The sixty GUI scenarios **in** CI: they drive a real nested compositor for the virtual-input protocols, and a runner has no seat to give one |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, and Spike E's matrix nightly on four filesystems it builds itself | A second runner architecture — the matrix and the frames are both `x86_64` today, and [06-portability.md](06-portability.md) names `aarch64` |
 | Eleven golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on | A perceptual diff. Two channel levels of 255 is a threshold, not a metric, and it cannot tell a moved glyph from a re-blended one |
@@ -360,7 +360,7 @@ Three rows claim a gate that does not exist. Each is a job in
   required"* in [07-dependencies.md](07-dependencies.md#budgets-and-enforcement).
 - **`cargo-deny`**, which is the whole evidence behind *"permissive licences only,
   rejected at the gate"* in the same table.
-- **The fifty-nine GUI scenarios**, which need a compositor that will hand out
+- **The sixty GUI scenarios**, which need a compositor that will hand out
   `zwp_virtual_keyboard_v1` on a runner with no seat. The answer is a headless
   backend or nothing; until then a scenario is a person's job before pushing.
 
