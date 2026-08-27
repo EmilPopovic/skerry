@@ -53,7 +53,13 @@ pub enum Selection {
 #[derive(Clone, Debug, Default)]
 pub struct Content {
     /// MIME type to bytes, in the order they are offered.
-    pub types: Vec<(String, Vec<u8>)>,
+    ///
+    /// `Arc`, not `Vec`: a peer asking for the selection gets a handle to the
+    /// bytes rather than a copy of them. `Ctrl+A` over the 200,000 entries the
+    /// budgets are written for builds a multi-megabyte `text/uri-list`, and
+    /// copying it inside `wl_data_source::Send` — which is dispatched from the
+    /// frame loop — was a memcpy of that inside a frame, once per asking peer.
+    pub types: Vec<(String, std::sync::Arc<[u8]>)>,
 }
 
 impl Content {
@@ -72,12 +78,12 @@ impl Content {
             .join("\n");
         Self {
             types: vec![
-                ("text/uri-list".to_owned(), uris.into_bytes()),
-                ("text/plain;charset=utf-8".to_owned(), text.clone().into_bytes()),
-                ("text/plain".to_owned(), text.into_bytes()),
+                ("text/uri-list".to_owned(), uris.into_bytes().into()),
+                ("text/plain;charset=utf-8".to_owned(), text.clone().into_bytes().into()),
+                ("text/plain".to_owned(), text.into_bytes().into()),
                 // X11's name for UTF-8 text, which GTK and Qt both still offer
                 // and some applications still ask for by preference.
-                ("UTF8_STRING".to_owned(), Vec::new()),
+                ("UTF8_STRING".to_owned(), std::sync::Arc::from(&[][..])),
             ],
         }
         .with_utf8_alias()
@@ -86,11 +92,11 @@ impl Content {
     /// Plain text.
     #[must_use]
     pub fn text(value: &str) -> Self {
-        let bytes = value.as_bytes().to_vec();
+        let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(value.as_bytes());
         Self {
             types: vec![
-                ("text/plain;charset=utf-8".to_owned(), bytes.clone()),
-                ("text/plain".to_owned(), bytes.clone()),
+                ("text/plain;charset=utf-8".to_owned(), std::sync::Arc::clone(&bytes)),
+                ("text/plain".to_owned(), std::sync::Arc::clone(&bytes)),
                 ("UTF8_STRING".to_owned(), bytes),
             ],
         }
@@ -112,8 +118,16 @@ impl Content {
         self
     }
 
-    fn bytes_for(&self, mime: &str) -> Option<&[u8]> {
-        self.types.iter().find(|(name, _)| name == mime).map(|(_, bytes)| bytes.as_slice())
+    /// A handle to the bytes for `mime`, without copying them.
+    fn share(&self, mime: &str) -> Option<std::sync::Arc<[u8]>> {
+        self.types.iter().find(|(name, _)| name == mime).map(|(_, bytes)| bytes.clone())
+    }
+
+    /// The bytes for `mime`, borrowed. For tests and for anything that wants to
+    /// look without taking a handle.
+    #[must_use]
+    pub fn bytes_for(&self, mime: &str) -> Option<&[u8]> {
+        self.types.iter().find(|(name, _)| name == mime).map(|(_, bytes)| &bytes[..])
     }
 }
 
@@ -307,7 +321,7 @@ pub(super) fn open(
 /// overflow case is not exotic, it is the case the product is measured on.
 pub(super) struct Transfer {
     fd: OwnedFd,
-    bytes: Vec<u8>,
+    bytes: std::sync::Arc<[u8]>,
     written: usize,
 }
 
@@ -341,24 +355,35 @@ impl Transfer {
 /// hold the window still, `xdg_wm_base.ping` included, until the compositor gave
 /// up on it. What does not fit is parked and finished by `Window::pump`, which
 /// waits on the pipe for room alongside the display connection.
-pub(super) fn send_to(pending: &mut Vec<Transfer>, fd: OwnedFd, bytes: &[u8]) {
+pub(super) fn send_to(pending: &mut Vec<Transfer>, fd: OwnedFd, bytes: std::sync::Arc<[u8]>) {
     let flags = rustix::fs::fcntl_getfl(&fd).unwrap_or(rustix::fs::OFlags::empty());
     if rustix::fs::fcntl_setfl(&fd, flags | rustix::fs::OFlags::NONBLOCK).is_err() {
+        // The peer asked, we said yes, and now nothing is coming. Dropping the
+        // descriptor turns that into an end-of-file it can act on rather than a
+        // wait it cannot.
         return;
     }
-    let mut transfer = Transfer { fd, bytes: Vec::new(), written: 0 };
-    // The common case writes everything and allocates nothing: the copy only
-    // happens for the remainder, and only when there is one.
-    match rustix::io::write(&transfer.fd, bytes) {
-        Ok(count) if count >= bytes.len() => return,
-        Ok(count) => transfer.bytes = bytes[count..].to_vec(),
-        Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => transfer.bytes = bytes.to_vec(),
-        Err(_) => return,
-    }
+    // Nothing is copied at any point: the payload is shared with the published
+    // selection and a transfer is an index into it.
+    let mut transfer = Transfer { fd, bytes, written: 0 };
     if transfer.resume() {
+        // **Bounded.** A peer that asks and then reads slowly, or loops on
+        // `receive`, would otherwise hold a descriptor and a payload handle each
+        // until this process ran out of descriptors. The oldest goes first: it
+        // is the one whose peer has had the longest to read.
+        if pending.len() >= MAX_TRANSFERS {
+            pending.remove(0);
+        }
         pending.push(transfer);
     }
 }
+
+/// How many unfinished selection writes to keep at once.
+///
+/// A peer that asks for the selection and reads it takes microseconds. One that
+/// does not has stopped, and eight of them is already more applications than
+/// have a paste target open.
+const MAX_TRANSFERS: usize = 8;
 
 /// Finishes what it can of every parked transfer, keeping the rest.
 pub(super) fn resume_all(pending: &mut Vec<Transfer>) {
@@ -450,12 +475,9 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for State {
                     .clipboard
                     .published
                     .as_ref()
-                    .and_then(|content| content.bytes_for(&mime_type))
-                    .unwrap_or_default()
-                    // Copied rather than borrowed: the bytes and the pending list
-                    // are both fields of the same `State`.
-                    .to_vec();
-                send_to(&mut state.transfers, fd, &bytes);
+                    .and_then(|content| content.share(&mime_type))
+                    .unwrap_or_else(|| std::sync::Arc::from(&[][..]));
+                send_to(&mut state.transfers, fd, bytes);
             }
             wl_data_source::Event::Cancelled => {
                 // Somebody else took the clipboard. Ours is no longer the
@@ -534,10 +556,9 @@ impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()> 
                     .clipboard
                     .published_primary
                     .as_ref()
-                    .and_then(|content| content.bytes_for(&mime_type))
-                    .unwrap_or_default()
-                    .to_vec();
-                send_to(&mut state.transfers, fd, &bytes);
+                    .and_then(|content| content.share(&mime_type))
+                    .unwrap_or_else(|| std::sync::Arc::from(&[][..]));
+                send_to(&mut state.transfers, fd, bytes);
             }
             zwp_primary_selection_source_v1::Event::Cancelled => {
                 if state.clipboard.primary_source.as_ref() == Some(source) {
@@ -601,11 +622,12 @@ mod tests {
     fn a_selection_larger_than_a_pipe_does_not_block_the_caller() {
         let (read, write) =
             rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
-        let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|index| (index % 251) as u8).collect();
+        let payload: std::sync::Arc<[u8]> =
+            (0..4 * 1024 * 1024).map(|index| (index % 251) as u8).collect();
 
         let mut pending: Vec<Transfer> = Vec::new();
         let started = Instant::now();
-        send_to(&mut pending, write, &payload);
+        send_to(&mut pending, write, std::sync::Arc::clone(&payload));
         assert!(
             started.elapsed().as_millis() < 200,
             "the write blocked for {:?} with nobody reading",
@@ -625,7 +647,7 @@ mod tests {
                 Err(error) => panic!("read: {error}"),
             }
         }
-        assert_eq!(got, payload, "the peer got something other than what was published");
+        assert_eq!(got, &payload[..], "the peer got something other than what was published");
         assert!(pending.is_empty(), "a finished transfer stayed parked");
     }
 
@@ -639,9 +661,27 @@ mod tests {
         // Rust's runtime ignores `SIGPIPE`, so the write returns `EPIPE` rather
         // than killing the process.
         let mut pending: Vec<Transfer> = Vec::new();
-        send_to(&mut pending, write, &vec![0u8; 4 * 1024 * 1024]);
+        send_to(&mut pending, write, std::sync::Arc::from(vec![0u8; 4 * 1024 * 1024]));
         resume_all(&mut pending);
         assert!(pending.is_empty(), "a transfer to a closed pipe was kept");
+    }
+
+    /// A peer that asks for the selection and never reads it holds a descriptor
+    /// and a payload handle. One that loops on `receive` holds one of each per
+    /// call, until this process runs out of descriptors.
+    #[test]
+    fn a_peer_that_never_reads_cannot_accumulate_transfers_without_bound() {
+        let payload: std::sync::Arc<[u8]> = std::sync::Arc::from(vec![7u8; 4 * 1024 * 1024]);
+        let mut pending: Vec<Transfer> = Vec::new();
+        // The read ends are kept, so every pipe stays open and full.
+        let mut ends = Vec::new();
+        for _ in 0..64 {
+            let (read, write) =
+                rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).expect("a pipe");
+            ends.push(read);
+            send_to(&mut pending, write, std::sync::Arc::clone(&payload));
+        }
+        assert_eq!(pending.len(), super::MAX_TRANSFERS, "{} parked", pending.len());
     }
 
     #[test]

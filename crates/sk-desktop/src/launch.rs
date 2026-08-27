@@ -169,24 +169,26 @@ fn is_field_code(token: &str) -> bool {
 
 /// The first terminal emulator on `PATH`, `$TERMINAL` first.
 fn find_terminal() -> Option<PathBuf> {
-    let named =
-        std::env::var_os("TERMINAL").map(PathBuf::from).filter(|it| !it.as_os_str().is_empty());
+    // `$TERMINAL` is a program, not a command line: `urxvt -depth 32` is one
+    // string here and would be looked up as a filename with a space in it. The
+    // first word is the program a person meant; the arguments beside it are not
+    // ours to pass on, because the command goes after `-e`.
+    let named = std::env::var("TERMINAL")
+        .ok()
+        .and_then(|value| value.split_whitespace().next().map(PathBuf::from));
     let candidates = named.into_iter().chain(TERMINALS.iter().map(PathBuf::from));
     for candidate in candidates {
         if candidate.is_absolute() {
-            // `continue`, not `return`: a `$TERMINAL` pointing at something that
-            // is no longer installed would otherwise disable terminal launching
+            // `continue`, not `return`: a `$TERMINAL` pointing at something no
+            // longer installed would otherwise disable terminal launching
             // entirely, and the message a user then sees is "set $TERMINAL" —
             // advice for the variable that is already set and is the cause.
-            if candidate.is_file() {
+            if executable(&candidate) {
                 return Some(candidate);
             }
             continue;
         }
-        let found = std::env::var_os("PATH").map(|path| {
-            std::env::split_paths(&path).map(|dir| dir.join(&candidate)).find(|it| it.is_file())
-        });
-        if let Some(Some(found)) = found {
+        if let Some(found) = find_on_path(&candidate.to_string_lossy()) {
             return Some(found);
         }
     }
@@ -245,10 +247,22 @@ fn split(exec: &str) -> Option<Vec<String>> {
 pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     let path = Path::new(binary);
     if path.is_absolute() {
-        return path.is_file().then(|| path.to_path_buf());
+        return executable(path).then(|| path.to_path_buf());
     }
     let value = std::env::var_os("PATH")?;
-    std::env::split_paths(&value).map(|dir| dir.join(binary)).find(|candidate| candidate.is_file())
+    std::env::split_paths(&value).map(|dir| dir.join(binary)).find(|it| executable(it))
+}
+
+/// Whether a path names something that can actually be run.
+///
+/// `is_file` is not the question: a file on `PATH` without the executable bit is
+/// still a file, and `exec` on it is `EACCES`. Checked here rather than left to
+/// the spawn, so a `TryExec=` naming a stub is one entry skipped rather than one
+/// launch that fails after the notice has said it worked.
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(test)]

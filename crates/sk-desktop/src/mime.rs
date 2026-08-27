@@ -270,7 +270,13 @@ fn sniff(path: &Path) -> Option<String> {
 /// file anyone can drop into `~/.local/share/mime/`, and the name is a filename.
 /// The greedy form below is O(pattern × name) and needs no stack.
 fn matches(glob: &str, name: &str) -> bool {
-    let (pattern, text) = (glob.as_bytes(), name.as_bytes());
+    // Characters, not bytes: `?` means one character, and over a byte slice it
+    // matched one *byte* of a multi-byte one, so `?.txt` did not match `é.txt`
+    // and a class range compared bytes of a UTF-8 sequence. Names are short and
+    // this runs only for the handful of globs that are not `*.ext`.
+    let pattern: Vec<char> = glob.chars().collect();
+    let text: Vec<char> = name.chars().collect();
+    let (pattern, text) = (&pattern[..], &text[..]);
     let (mut at, mut index) = (0usize, 0usize);
     // Where to resume from if the greedy star took too much.
     let mut star: Option<(usize, usize)> = None;
@@ -278,7 +284,7 @@ fn matches(glob: &str, name: &str) -> bool {
         if let Some(next) = element(pattern, at, text[index]) {
             at = next;
             index += 1;
-        } else if pattern.get(at) == Some(&b'*') {
+        } else if pattern.get(at) == Some(&'*') {
             star = Some((at, index));
             at += 1;
         } else if let Some((from, taken)) = star {
@@ -289,42 +295,68 @@ fn matches(glob: &str, name: &str) -> bool {
             return false;
         }
     }
-    while pattern.get(at) == Some(&b'*') {
+    while pattern.get(at) == Some(&'*') {
         at += 1;
     }
     at == pattern.len()
 }
 
-/// Matches one pattern element against one byte.
+/// Matches one pattern element against one character.
 ///
 /// Returns where the pattern continues, or `None` if it did not match — which
 /// `*` always is, because a star is not an element and is handled by the caller.
-fn element(pattern: &[u8], at: usize, byte: u8) -> Option<usize> {
+///
+/// The bracket rules are `fnmatch`'s, checked against it: an unterminated `[` is
+/// a literal `[`, and a `]` immediately after the opening bracket (or after its
+/// negation) is a member of the set rather than its end. Both were wrong here,
+/// and both are reachable from a `globs2` line, which is a file anyone can write.
+fn element(pattern: &[char], at: usize, character: char) -> Option<usize> {
     match pattern.get(at)? {
-        b'?' => Some(at + 1),
-        b'*' => None,
-        b'[' => {
-            let close = at + pattern[at..].iter().position(|it| *it == b']')?;
-            let set = &pattern[at + 1..close];
-            let (negated, set) = match set.first() {
-                Some(b'^' | b'!') => (true, &set[1..]),
-                _ => (false, set),
-            };
-            let mut hit = false;
-            let mut cursor = 0;
-            while cursor < set.len() {
-                if cursor + 2 < set.len() && set[cursor + 1] == b'-' {
-                    hit |= (set[cursor]..=set[cursor + 2]).contains(&byte);
-                    cursor += 3;
-                } else {
-                    hit |= set[cursor] == byte;
-                    cursor += 1;
-                }
-            }
-            (hit != negated).then_some(close + 1)
-        }
-        other => (*other == byte).then_some(at + 1),
+        '?' => Some(at + 1),
+        '*' => None,
+        '[' => match class_end(pattern, at) {
+            Some(close) => in_class(&pattern[at + 1..close], character).then_some(close + 1),
+            // No closing bracket anywhere: a literal `[`, which is what
+            // `fnmatch` does and what a filename containing one needs.
+            None => (character == '[').then_some(at + 1),
+        },
+        other => (*other == character).then_some(at + 1),
     }
+}
+
+/// Where the bracket opened at `at` closes, if it does.
+///
+/// The first `]` cannot end it if it is the first member: `[]]` is a set holding
+/// a right bracket, and `[!]]` is everything except one.
+fn class_end(pattern: &[char], at: usize) -> Option<usize> {
+    let mut cursor = at + 1;
+    if matches!(pattern.get(cursor), Some('^' | '!')) {
+        cursor += 1;
+    }
+    if pattern.get(cursor) == Some(&']') {
+        cursor += 1;
+    }
+    (cursor..pattern.len()).find(|index| pattern[*index] == ']')
+}
+
+/// Whether `character` is in the set between the brackets.
+fn in_class(set: &[char], character: char) -> bool {
+    let (negated, set) = match set.first() {
+        Some('^' | '!') => (true, &set[1..]),
+        _ => (false, set),
+    };
+    let mut hit = false;
+    let mut cursor = 0;
+    while cursor < set.len() {
+        if cursor + 2 < set.len() && set[cursor + 1] == '-' {
+            hit |= (set[cursor]..=set[cursor + 2]).contains(&character);
+            cursor += 3;
+        } else {
+            hit |= set[cursor] == character;
+            cursor += 1;
+        }
+    }
+    hit != negated
 }
 
 #[cfg(test)]
@@ -371,7 +403,24 @@ mod tests {
             ("*[0-9].log", "server7.log", true),
             ("*[0-9].log", "server.log", false),
             ("*.tar.*", "archive.tar.gz", true),
+            // `fnmatch`'s bracket rules, checked against `fnmatch` itself: an
+            // unterminated `[` is a literal one, and a `]` in the first position
+            // is a member of the set rather than its end.
             ("[unclosed", "u", false),
+            ("[unclosed", "[unclosed", true),
+            ("a[bc", "a[bc", true),
+            ("[]]", "]", true),
+            ("[]a]", "a", true),
+            ("[]a]", "]", true),
+            ("[!]]", "x", true),
+            ("[!]]", "]", false),
+            // A character is a character, not a byte: `?` matched one byte of a
+            // multi-byte one, so a name with an accent in it was unreachable.
+            ("?.txt", "é.txt", true),
+            ("?.txt", "ab.txt", false),
+            ("[à-ÿ]x", "éx", true),
+            ("[à-ÿ]x", "ax", false),
+            ("*é*", "café.txt", true),
         ] {
             assert_eq!(matches(glob, name), wanted, "{glob:?} against {name:?}");
         }
