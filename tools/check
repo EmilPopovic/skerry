@@ -15,5 +15,14 @@ if [ -f Cargo.toml ]; then
     cargo test --workspace || status=1
 fi
 
+# Golden frames. Last because it needs a release binary and renders seven of
+# them; it runs on lavapipe, so it needs no GPU and no display server, and it
+# says so and passes where lavapipe or Pillow is missing.
+if [ -x target/release/skerry ]; then
+    python3 tools/golden || status=1
+else
+    echo "  skip  golden frames: no release build"
+fi
+
 [ "$status" -eq 0 ] && echo "\nall gates pass" || echo "\ngates failed"
 exit "$status"

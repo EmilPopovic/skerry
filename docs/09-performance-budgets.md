@@ -39,7 +39,7 @@ Not performance, but they run in the same CI stage and fail the build the same w
 | Every command is in the palette | Registry introspection — rule 2 as an assertion |
 | Every fallback path works | The forced-degradation matrix from [06-portability.md](06-portability.md) |
 | Adversarial filenames render and round-trip | A fixture directory: RTL, combining marks, emoji, 255-byte names, embedded newlines, invalid UTF-8 |
-| Golden frames at 100/125/150/200% | Perceptual diff against references, on llvmpipe |
+| Golden frames at 100/125/150/200% | `tools/golden`, on lavapipe, against `tests/golden`. Per-channel tolerance **2**, which is the measured spread between llvmpipe, RADV and NVIDIA proprietary on this machine |
 
 ## What M0 measured
 

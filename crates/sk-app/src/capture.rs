@@ -80,6 +80,13 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         }
         std::thread::yield_now();
     }
+    // **One more pass after the loop ends.** `drain` records a total into the
+    // cache and `update` is what copies it into the listing, so the last walk to
+    // finish was recorded and never applied — and the frame drew a dash for a
+    // folder whose size was known. It depended on which side of the last `drain`
+    // the walk landed, which made the golden frames flicker between two images
+    // and is exactly the kind of thing they exist to catch.
+    measurer.update(&mut pane, rows, &session.jobs);
     measurer.stop();
 
     for row in SELECTED {

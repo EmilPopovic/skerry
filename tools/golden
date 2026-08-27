@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Golden frames: render the interface and compare it to what it looked like.
+
+    tools/golden              # compare against tests/golden
+    tools/golden --bless      # accept what it renders now as the reference
+    tools/golden path         # only the frames whose name matches
+
+Every other test here asserts about a number the program reports. These assert
+about the pixels, which is the only way to catch a glyph that moved half a pixel,
+a colour that lost its alpha, a column that stopped shedding, or a row that draws
+under the status bar at 200%.
+
+**Rendered on lavapipe**, Mesa's software Vulkan, so the reference does not
+depend on whose GPU produced it. Measured on this machine, the same frame differs
+by at most **two channel levels of 255** between llvmpipe, RADV and the NVIDIA
+proprietary driver — one level between the two hardware ones. Blending in an
+sRGB target is not bit-exact across implementations, so the comparison allows
+that much and nothing more: a real regression moves a glyph or changes a colour,
+which is tens or hundreds of levels, never two.
+
+The fixture lives at a **fixed absolute path**, because the path bar is part of
+the frame and `mkdtemp` would put a different string in every reference. Its
+modification times are fixed in 2001 for the same reason: a date in a past year
+renders as `3 Feb 2001` and stays that way, where a recent one becomes a clock
+time and then a date the next day.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SKERRY = ROOT / "target" / "release" / "skerry"
+REFERENCES = ROOT / "tests" / "golden"
+FIXTURE = Path("/tmp/skerry-golden")
+
+# How far a channel may differ from the reference before it is a regression.
+TOLERANCE = 2
+
+# A fixed instant in a past year, so the Modified column renders as a date and
+# not as a clock time that changes at midnight.
+FIXED_MTIME = 981_158_400  # 2001-02-03T00:00:00Z
+
+FRAMES = [
+    ("scale-100", ["--size", "900x520", "--scale", "100"]),
+    ("scale-125", ["--size", "900x520", "--scale", "125"]),
+    ("scale-150", ["--size", "900x520", "--scale", "150"]),
+    ("scale-200", ["--size", "760x440", "--scale", "200"]),
+    ("light", ["--size", "900x520", "--scale", "125", "--light"]),
+    ("keyboard-overlay", ["--size", "900x520", "--scale", "125", "--keys"]),
+    # **Not the statistics overlay.** Its content is job counts and cache
+    # hit rates, which differ between two runs of the same binary by design —
+    # a golden frame of it would either be flaky or would have to mask the only
+    # thing it shows. The keyboard overlay covers "an overlay draws correctly"
+    # and its content comes from the command registry, which does not vary.
+    ("narrow", ["--size", "340x300", "--scale", "125"]),
+]
+
+
+class Failure(Exception):
+    pass
+
+
+def build_fixture() -> Path:
+    """A directory whose contents are the same on every machine.
+
+    The names are the adversarial set docs/09 asks a golden frame to cover:
+    right-to-left script, combining marks, an emoji, a long name, and a name
+    that is only punctuation. A name containing a newline is **not** here — it
+    renders, but it also breaks every line-oriented tool that reads this
+    harness's output, and what it would prove is a shaping question already
+    covered by the sk-text suite.
+    """
+    directory = FIXTURE / "fixture"
+    shutil.rmtree(FIXTURE, ignore_errors=True)
+    for name in ("build", "documents", "مستندات"):
+        (directory / name).mkdir(parents=True)
+        (directory / name / "inner.bin").write_bytes(b"x" * 4096)
+    entries = [
+        ("report.pdf", 1_048_576),
+        ("archive.tar.gz", 12_582_912),
+        ("Makefile", 812),
+        ("img2.png", 4_096),
+        ("img10.png", 40_960),
+        ("étude.txt", 300),          # combining acute, not precomposed
+        ("שלום-עולם.md", 640),             # right to left
+        ("holiday 🏖️.jpeg", 2_202_010),
+        ("a-name-long-enough-to-be-elided-in-the-name-column-and-then-some.log", 77),
+        ("...", 1),
+        (".hidden-config", 55),
+    ]
+    for name, size in entries:
+        (directory / name).write_bytes(b"\0" * min(size, 4096))
+    # Fixed sizes without fixed bytes: the size column reads the size from
+    # `statx`, and truncating to it costs nothing where writing it costs 2 MB.
+    for name, size in entries:
+        os.truncate(directory / name, size)
+    for path in sorted(directory.rglob("*")) + [directory]:
+        os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+    return directory
+
+
+def render(name: str, arguments: list[str], into: Path) -> None:
+    raw = into.with_suffix(".raw.png")
+    done = subprocess.run(
+        [str(SKERRY), "--capture", str(raw), *arguments, str(FIXTURE / "fixture")],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, VK_LOADER_DRIVERS_SELECT="lvp_icd.json"),
+    )
+    if done.returncode != 0:
+        raise Failure(f"{name}: {done.stderr.strip()[:300]}")
+    from PIL import Image
+
+    # Re-encoded rather than kept: our own writer emits stored deflate blocks, so
+    # a frame is 7 MB of it. What is compared is decoded pixels, so the reference
+    # may be written by whatever compresses it.
+    with Image.open(raw) as image:
+        image.convert("RGB").save(into, optimize=True)
+    raw.unlink()
+
+
+def compare(name: str, fresh: Path, reference: Path) -> None:
+    from PIL import Image, ImageChops
+
+    if not reference.is_file():
+        raise Failure(f"{name}: no reference — run tools/golden --bless")
+    with Image.open(fresh) as a, Image.open(reference) as b:
+        a, b = a.convert("RGB"), b.convert("RGB")
+        if a.size != b.size:
+            raise Failure(f"{name}: {a.size} against a {b.size} reference")
+        difference = ImageChops.difference(a, b)
+        worst = max(max(band.getextrema()) for band in difference.split())
+        if worst <= TOLERANCE:
+            return
+        over = sum(sum(band.histogram()[TOLERANCE + 1 :]) for band in difference.split())
+        box = difference.getbbox()
+        raise Failure(
+            f"{name}: {over} samples differ by more than {TOLERANCE} "
+            f"(worst {worst}) inside {box}"
+        )
+
+
+def main(argv: list[str]) -> int:
+    wanted = [a for a in argv[1:] if not a.startswith("--")]
+    bless = "--bless" in argv
+
+    if not SKERRY.is_file():
+        print(f"missing {SKERRY}; run `cargo build --release` first")
+        return 2
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        print("  skip  golden frames: Pillow is not installed")
+        return 0
+    if not any(Path(d).joinpath("lvp_icd.x86_64.json").is_file() or
+               Path(d).joinpath("lvp_icd.json").is_file()
+               for d in ("/usr/share/vulkan/icd.d", "/usr/local/share/vulkan/icd.d")):
+        print("  skip  golden frames: lavapipe is not installed")
+        return 0
+
+    build_fixture()
+    REFERENCES.mkdir(parents=True, exist_ok=True)
+    work = FIXTURE / "rendered"
+    work.mkdir(parents=True, exist_ok=True)
+
+    passed, failed = 0, []
+    for name, arguments in FRAMES:
+        if wanted and not any(needle in name for needle in wanted):
+            continue
+        fresh = work / f"{name}.png"
+        reference = REFERENCES / f"{name}.png"
+        try:
+            render(name, arguments, fresh)
+            if bless:
+                shutil.copyfile(fresh, reference)
+                print(f"  bless {name}  {reference.stat().st_size // 1024} KiB")
+            else:
+                compare(name, fresh, reference)
+                print(f"  ok    {name}")
+            passed += 1
+        except Failure as problem:
+            print(f"  FAIL  {problem}")
+            failed.append(name)
+
+    print(f"\n{passed} passed, {len(failed)} failed")
+    if failed:
+        print(f"rendered frames left in {work} for a look")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
