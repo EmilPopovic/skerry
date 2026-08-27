@@ -490,6 +490,55 @@ so the count is a crowd of ghosts.
 
 > **Fails if:** a test harness starts a process it does not confirm the death of.
 
+## A reference is only valid against inputs that are not in the repository
+
+`tools/golden` compares eleven rendered frames to committed PNGs at a tolerance of
+**two channel levels of 255**, which is what makes it able to catch a glyph that
+moved half a pixel. That sensitivity means every input has to be pinned, and two
+of them were not:
+
+- **The timezone.** The Modified column is `localtime_r` of a fixed epoch second.
+  Fixed as `2001-02-03T00:00:00Z`, which is 3 February anywhere east of UTC and
+  2 February anywhere west of it.
+- **The fonts.** The fixture holds Hebrew, Arabic and an emoji on purpose, so the
+  whole fallback chain is in the image. The references here were rendered with
+  Noto; a machine that has Inter installed renders a different frame from the same
+  commit, and the comparison reports several hundred thousand differing samples
+  and implicates the renderer.
+
+The chain is now recorded in `tests/golden/faces.txt` **by the hash of each file**
+and checked once, before the first comparison. The hash and not the name, because
+the name is identical on machines whose font packages are not: Ubuntu 24.04 ships
+`NotoColorEmoji.ttf` at 2.047 where 26.04 ships 2.051, and the beach umbrella in
+the fixture is a different bitmap in each. This is what makes the frames runnable
+in CI at all — and what turned "the golden frames only pass on one laptop" from an
+unknown into a message that names the file.
+
+> **Fails if:** a comparison against a stored artifact cannot say what it was
+> stored against.
+
+## An assertion has to be watched matching real output, not plausible output
+
+The CI job for Spike E's matrix asserts on the one machine-readable line the
+matrix prints:
+
+```
+  counts pass=37 fail=0 limitation=6 owed=3 total=46
+```
+
+The assertion was written as `grep -q '^counts .*fail=0'` from the line as it
+appears in the spike's own README — where it is shown unindented. The matrix
+prints it indented by two spaces, so the pattern matches nothing, and the gate
+would have failed every run for a reason having nothing to do with any
+filesystem. It was caught by running the matrix and grepping the real output,
+which took a minute.
+
+A gate that can only fail is the same defect as a test that can only pass: both
+are decoration, and both look like diligence in a diff.
+
+> **Fails if:** a pattern in a gate has never been run against the output it
+> claims to match.
+
 ## The bar is quoted before the code and never adjusted after
 
 Written into [08-roadmap.md](08-roadmap.md) for the spikes and

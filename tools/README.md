@@ -11,7 +11,7 @@ dependency policy the product has, applied to the thing that enforces it.
 | `dep-budget.py` | Every dependency has a row in [07-dependencies.md](../docs/07-dependencies.md); transitive counts inside budget, with the GPU stack found by reachability from the `wgpu` edge | manifests, `cargo`, `rustc` |
 | `check-invariants.py` | Banned crates, capability feature flags, crate lints, the GPU seam, ADR immutability | manifests, sources |
 | `make-listing-fixture` | Not a gate. Builds a directory of N files so the frame and listing numbers in [09-performance-budgets.md](../docs/09-performance-budgets.md) have a method that can be re-run | — |
-| `golden` | Renders the interface on lavapipe and compares it to `tests/golden`, which is the only assertion here about *pixels* rather than about a number the program reports. `--bless` accepts what it renders now | Pillow, lavapipe, a release build |
+| `golden` | Renders the interface on lavapipe and compares it to `tests/golden`, which is the only assertion here about *pixels* rather than about a number the program reports. `--bless` accepts what it renders now | Pillow, lavapipe, a release build, the fonts in `tests/golden/faces.txt` |
 | `gui-test` | Not in `check`, because it needs a compositor. Drives the real window with real input through a nested Hyprland and asserts on the state `F12` prints, and in one scenario on the pixels | `Hyprland`, a release build; `grim` and Pillow for the pixel scenario |
 | `skerry-drive` | The input half of `gui-test`: replays a script of keys, clicks, drags and scrolls into a compositor | — |
 
@@ -64,9 +64,10 @@ crate cannot be the one that violates them.
 
 ## Golden frames
 
-`tools/golden` renders seven frames — four scales, both palettes, the keyboard
-overlay and a window too narrow for the metadata columns — and compares them to
-committed references. It is what catches a glyph that moved half a pixel, a
+`tools/golden` renders eleven frames — four scales, both palettes, the keyboard
+overlay, the context menu, the path bar as a field at two widths, a window too
+narrow for the metadata columns, and the frame GNOME requires — and compares them
+to committed references. It is what catches a glyph that moved half a pixel, a
 colour that lost its alpha, a column that stopped shedding, and a row that draws
 under the status bar at 200%.
 
@@ -84,11 +85,42 @@ The fixture is at a **fixed absolute path** with modification times fixed in
 Its names are the adversarial set: right-to-left script, a combining acute, an
 emoji, a name long enough to be elided, and two that are hidden.
 
+Two inputs come from the machine and both are pinned: the timezone, because the
+`Modified` column is `localtime_r` of a fixed second and west of UTC that second
+is the previous day; and **the fonts**, which decide most of the pixels. Hebrew,
+Arabic and an emoji are in the fixture on purpose, so the whole fallback chain is
+in the image. `tests/golden/faces.txt` records that chain **by the hash of each
+file**, and a run that would shape with anything else refuses to compare and says
+which file changed. The hash rather than the name: Ubuntu 24.04 ships
+`NotoColorEmoji.ttf` at 2.047 where 26.04 ships 2.051, and the beach umbrella is a
+different bitmap in each. Without that, the frames only ever passed on one laptop.
+
 It found a bug on its first run. `--capture` drained every folder walk and then
 broke out of the loop *before* applying what the last one reported, so a frame
 drew a dash for a folder whose total was already known — depending on which side
 of the last drain the walk landed. Two runs of the same binary produced two
 different images.
+
+## What runs on a push, and what does not
+
+[`.github/workflows/check.yml`](../.github/workflows/check.yml) calls `tools/check`
+verbatim on every push and pull request, then the golden frames on lavapipe in a
+job of their own, then `cargo check` on the oldest toolchain `rust-version`
+claims. [`torture.yml`](../.github/workflows/torture.yml) runs Spike E's matrix
+nightly, and on any change to it or to `sk-fs`, over btrfs, xfs, exFAT and vfat
+that the job builds on loop devices for it — which is what makes *"M3 does not
+ship until the Spike E matrix is green in CI"* a gate rather than a sentence.
+
+Both workflows pin the runner image, the toolchain and every action by commit. The
+image is pinned because it is an input: the golden frames need its font packages
+to the byte.
+
+Two things stay local deliberately. `tools/gui-test` needs a compositor that hands
+out `zwp_virtual_keyboard_v1` and `zwlr_virtual_pointer_v1`, and a runner has no
+seat to give one. And `--bench` on a shared runner measures the runner's
+neighbours — [12-measurement.md](../docs/12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded)
+prices a number taken on a loaded machine at 6× less, so the frame budget is
+defended by a person on an idle machine and the regression gate is M8's.
 
 ## Levels come from the manifests
 

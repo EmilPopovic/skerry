@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for an afternoon.** Twelve crates,
-324 tests, every gate green: a Details view over a real directory at a **0.342 ms
+325 tests, every gate green: a Details view over a real directory at a **0.342 ms
 frame p99 with 200,000 entries in it**, live under inotify, with folder totals,
 Back and Forward, a sidebar, a command registry behind every key and a context
 menu over the same registry, new-folder / rename / Move to Trash with one undo
@@ -39,7 +39,7 @@ Phase 0's six spikes are all resolved and none of them said no:
 | [B](spikes/b-enumeration/README.md) | `getdents64` + batched `statx` | **Go**, but sits *on* the 1 s bar on a Pi 5 |
 | [C](spikes/c-watching/README.md) | inotify at scale | **Go**, three things to design |
 | [D](spikes/d-platform-and-dnd/README.md) | platform layer and drag-and-drop | **Go**, and three limitations report no error at all |
-| [E](spikes/e-operations/README.md) | operation engine correctness | **Go**, all three conditions on seven filesystems; eight defects found that would have shipped |
+| [E](spikes/e-operations/README.md) | operation engine correctness | **Go**, all three conditions on seven filesystems; four defects found that would have shipped |
 | [F](spikes/f-index-and-search/README.md) | index and flattened search | **Go on the index**; sorting misses its budget |
 
 Spikes live in [spikes/](spikes/), are exempt from the layering, lint and
@@ -62,7 +62,9 @@ attached**, which is a design constraint rather than a bug to fix.
 
 **Spike E's code is the one exception to "spike code is thrown away."** It is the
 permanent torture matrix, M3 is gated on it, and it is a CI job today — one binary
-with no arguments that discovers which filesystems to test.
+with no arguments that discovers which filesystems to test, run nightly by
+[torture.yml](.github/workflows/torture.yml) over four filesystems the job builds
+on loop devices for it.
 
 ## The craft bar
 
@@ -123,6 +125,15 @@ retrofitting extraction across twelve crates costs weeks.
 ```
 ./tools/check          # links, layering, dependency budget, invariants
 ```
+
+That is also all CI runs — [check.yml](.github/workflows/check.yml) calls the same
+script, because a gate that exists only in a workflow file is a gate nobody can
+reproduce. Alongside it: the golden frames on lavapipe, and `cargo check` on the
+oldest toolchain `rust-version` claims. **Two harnesses stay local on purpose.**
+`tools/gui-test` needs a compositor advertising the virtual-input protocols and a
+runner has no seat to give one, and `--bench` on a shared runner measures the
+runner's neighbours — so a scenario or a frame time is *your* job before you push,
+not CI's after.
 
 Then: **is this in [docs/11-non-goals.md](docs/11-non-goals.md)?** That list
 exists so declined features are declined by pointing, not by re-arguing. A

@@ -23,7 +23,7 @@ there is a codebase to rewrite.**
 | [B](../spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
 | [C](../spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
 | [D](../spikes/d-platform-and-dnd/README.md) | **Go, three things to design.** Files land on disk from a drag we start; every Wayland pair passes and two of the peers pass on X11 too; four compositor limitations are documented and three of them report no error at all. `winit` reaches 5 of 9 capabilities, so [ADR 0002](adr/0002-own-platform-layer.md) is Accepted rather than pending |
-| [E](../spikes/e-operations/README.md) | **Go.** All three conditions met on seven filesystems: 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks. `ENOSPC` clean at an exact byte; reflink consumes 0 KiB against 192 MiB. **Eight** defects found by a check failing |
+| [E](../spikes/e-operations/README.md) | **Go.** All three conditions met on seven filesystems: 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks. `ENOSPC` clean at an exact byte; reflink consumes 0 KiB against 192 MiB. **Four** defects found by a check failing |
 | [F](../spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
 
 **Spike F is not one of the original five.** It exists because
@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates, 324 tests, every gate green. What "the least to show" turned out to mean in practice:
+crates, 325 tests, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -148,10 +148,11 @@ defects they exposed.
 | Keyboard through `xkbcommon`, with key repeat implemented client-side | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
 | **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural | A paste that pastes *files*, which needs M3's operation engine |
-| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | A headless compositor fixture and input-trace replay in CI |
+| A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle** | The forty-four GUI scenarios **in** CI: they drive a real nested compositor for the virtual-input protocols, and a runner has no seat to give one |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
-| Offscreen rendering, PNG capture, and a comparable glyph stream — the golden-frame harness minus its references | The reference images, the perceptual diff, and llvmpipe in CI |
-| `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8) |
+| **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, and Spike E's matrix nightly on four filesystems it builds itself | A second runner architecture — the matrix and the frames are both `x86_64` today, and [06-portability.md](06-portability.md) names `aarch64` |
+| Eleven golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on | A perceptual diff. Two channel levels of 255 is a threshold, not a metric, and it cannot tell a moved glyph from a re-blended one |
+| `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8). **Deliberately not in CI**: a shared runner's worst frame says more about its neighbours than about this code, and [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded) prices that at 6× |
 
 The two capabilities left are the expensive ones, and Spike D already knows what
 each of them costs and which ordering invariants they have to hold. Drag-and-drop

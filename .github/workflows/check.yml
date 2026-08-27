@@ -1,0 +1,153 @@
+# Every gate, on every push and every pull request.
+#
+# `tools/check` is the whole definition of what passing means, and CI adds
+# nothing of its own: a gate that exists only here is a gate nobody can
+# reproduce, and one that exists only on a laptop is decoration. The jobs below
+# differ in what they have to install, not in what they ask.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push is asking the same question about better code.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, and a bump is a commit. `clippy -- -D warnings` against a floating
+  # `stable` turns a Rust release into a red build on a day nobody touched the
+  # code, and the argument about a new lint belongs in a diff.
+  RUST: "1.96.1"
+  # `rust-version` in Cargo.toml claims this. The `msrv` job is what makes it a
+  # claim with a gate behind it.
+  MSRV: "1.90"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  gates:
+    # Pinned rather than `ubuntu-latest`, and 26.04 rather than 24.04: the
+    # `frames` job needs this image's font packages to the byte, and one image
+    # across the workflow means one story about what CI is.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Packages
+        # `libxkbcommon-dev` because `#[link(name = "xkbcommon")]` needs the
+        # linker symlink. The fonts because twelve places in the tests open with
+        # `let Ok(fonts) = Fonts::discover() else { return }` and pass while
+        # measuring nothing where there are none — `frames` is what proves the
+        # program actually loaded these ones.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal \
+            --component clippy,rustfmt --no-self-update
+          rustup default "$RUST"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: gates-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: gates-${{ env.RUST }}-
+      - name: Lockfile
+        # `--locked` here and not in `tools/check`: it is the one question only
+        # CI has to ask. A person's checkout may update a lockfile; a build of
+        # somebody's pull request may not.
+        run: cargo fetch --locked
+      - name: tools/check
+        run: ./tools/check
+
+  frames:
+    # The golden frames, which need a software Vulkan, Pillow, and the exact fonts
+    # the references were rendered with. The first two are asserted below rather
+    # than trusted, because `tools/golden` *skips* where either is missing —
+    # right for a person, decoration here. The fonts the harness checks itself,
+    # against the hash of every file in `tests/golden/faces.txt`.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev mesa-vulkan-drivers python3-pil \
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: frames-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: frames-${{ env.RUST }}-
+      - name: What the frames need
+        # Either name, because the packaging has used both: this repository's own
+        # machine has `lvp_icd.json` where the harness also looks for
+        # `lvp_icd.x86_64.json`, and asserting one of them is a precondition that
+        # fails on the wrong thing.
+        run: |
+          ls /usr/share/vulkan/icd.d/lvp_icd.json \
+             /usr/share/vulkan/icd.d/lvp_icd.x86_64.json 2>/dev/null | grep -q lvp
+          python3 -c "import PIL"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Golden frames
+        run: python3 tools/golden
+      - name: Keep what it rendered
+        # A pixel difference is only a bug report if somebody can look at it.
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: rendered-frames
+          path: /tmp/skerry-golden/rendered
+          if-no-files-found: ignore
+          retention-days: 7
+
+  msrv:
+    # `rust-version = "1.90"` is a promise to anyone whose distribution is a
+    # release or two behind. A `check` is enough to keep it: what breaks an MSRV
+    # is syntax and library items, not codegen.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$MSRV" --profile minimal --no-self-update
+          rustup default "$MSRV"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: msrv-${{ env.MSRV }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: msrv-${{ env.MSRV }}-
+      - name: Build with the oldest supported toolchain
+        run: cargo check --workspace --all-targets --locked

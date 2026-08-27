@@ -1,0 +1,92 @@
+# Spike E's torture matrix, which is M3's gate: *"M3 does not ship until the
+# Spike E matrix is green in CI"* — docs/08-roadmap.md.
+#
+# Its own workflow because it needs what `check` must not: root, four
+# filesystems built on loop devices, and minutes. The matrix itself runs
+# unprivileged and discovers what to test, so this job installs `mkfs` and gets
+# out of the way. Four defects that would have shipped were found by a check in
+# here failing, and none of them would have been found by reading a manual page.
+name: torture
+
+on:
+  schedule:
+    # Nightly. A filesystem's behaviour changes with the kernel, not with our
+    # commits, so time is one of the inputs worth re-running against.
+    - cron: "0 3 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "spikes/e-operations/**"
+      - "crates/sk-fs/**"
+      - ".github/workflows/torture.yml"
+  pull_request:
+    # Spelled twice rather than shared through a YAML anchor, which this
+    # workflow parser does not resolve.
+    paths:
+      - "spikes/e-operations/**"
+      - "crates/sk-fs/**"
+      - ".github/workflows/torture.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Tracks check.yml's pin. A drift between the two is harmless here — this job
+  # runs no lints, and the matrix asserts about filesystems rather than about
+  # the compiler.
+  RUST: "1.96.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  matrix:
+    runs-on: ubuntu-26.04
+    # A filesystem that stops answering is one of the things this matrix exists
+    # to provoke, so the job needs a bound of its own rather than the six-hour
+    # default.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: The filesystems the matrix cannot create for itself
+        # `exfatprogs` and `dosfstools` for the two that have no concept of
+        # ownership, `btrfs-progs` and `xfsprogs` for the two that can reflink —
+        # which is one of the three conditions in the bar. FUSE is the injector
+        # that fails at an exact byte, and without it the `ENOSPC` result is a
+        # story rather than a number.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            btrfs-progs xfsprogs exfatprogs dosfstools \
+            nfs-kernel-server libfuse3-dev fuse3
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+      - name: Build
+        # Standalone by design: `spikes/e-operations` carries its own empty
+        # `[workspace]` so it is not a member of ours.
+        working-directory: spikes/e-operations
+        run: cargo build --release --locked
+      - name: Run it
+        working-directory: spikes/e-operations
+        run: |
+          # `tee` alone would report the exit status of `tee`.
+          set -o pipefail
+          sudo ./with-root.sh /var/tmp/skerry-spike-e | tee /tmp/matrix.log
+          # The matrix already exits non-zero on a failing check, so this is the
+          # second lock on the same door — and the one that fires when the counts
+          # line is absent, which is what a matrix that never reached its checks
+          # looks like. Anchored to the start of the *indented* line the matrix
+          # actually prints: `^counts` matches nothing, and a pattern that cannot
+          # match is a gate that can only fail.
+          grep -qE '^[[:space:]]*counts .*[[:space:]]fail=0[[:space:]]' /tmp/matrix.log
+      - name: What it counted
+        if: always()
+        run: |
+          {
+            echo '## Spike E'
+            echo '```'
+            grep -E '^[[:space:]]*counts ' /tmp/matrix.log 2>/dev/null \
+              || echo 'no counts line — the matrix did not reach its checks'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

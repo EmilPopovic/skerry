@@ -7,7 +7,7 @@
 //! resampled — which is why `sk-plat` reports a physical size and this crate
 //! takes a device size rather than a logical one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sk_model::{Problem, ProblemKind};
 use swash::scale::image::Content;
@@ -90,9 +90,9 @@ pub struct Metrics {
 
 /// A read-only mapping of a font file.
 ///
-/// Mapped rather than read. `NotoSansCJK-Regular.ttc` is 20 MB and a UI session
+/// Mapped rather than read. `NotoSansCJK-Regular.ttc` is 18 MiB and a UI session
 /// touches a few kilobytes of it — the tables it needs and the outlines for the
-/// glyphs it draws. Reading the file copied all 20 MB into the process before
+/// glyphs it draws. Reading the file copied all 18 MiB into the process before
 /// the first frame; mapping it costs one syscall and lets the kernel fault in
 /// what is actually used.
 ///
@@ -156,6 +156,10 @@ pub(crate) struct Face {
     offset: u32,
     key: CacheKey,
     name: String,
+    /// Kept alongside the name because the name does not identify the bytes: two
+    /// machines can hold the same `NotoColorEmoji.ttf` from two font packages
+    /// and shape the same string into different pixels.
+    path: PathBuf,
 }
 
 impl Face {
@@ -164,7 +168,7 @@ impl Face {
         let font = FontRef::from_index(data.bytes(), 0)?;
         let (offset, key) = (font.offset, font.key);
         let name = path.file_name()?.to_string_lossy().into_owned();
-        Some(Self { data, offset, key, name })
+        Some(Self { data, offset, key, name, path: path.to_path_buf() })
     }
 
     pub(crate) fn as_ref(&self) -> FontRef<'_> {
@@ -242,18 +246,28 @@ impl Fonts {
         let candidates = discover::scan();
         let mut faces = Vec::new();
         let mut missing = Vec::new();
+        let mut opened = std::collections::HashSet::new();
 
-        let regular = take(&mut faces, &candidates, UI_REGULAR, &mut missing, "a UI sans");
-        let bold = take(&mut faces, &candidates, UI_BOLD, &mut missing, "a bold UI sans")
-            // A machine with one font is a machine that still has to draw a
-            // column header. Faux bold is worse than one weight, so the regular
-            // face stands in and the header is distinguished by colour instead.
-            .or(regular);
+        let regular =
+            take(&mut faces, &mut opened, &candidates, UI_REGULAR, &mut missing, "a UI sans");
+        let bold =
+            take(&mut faces, &mut opened, &candidates, UI_BOLD, &mut missing, "a bold UI sans")
+                // A machine with one font is a machine that still has to draw a
+                // column header. Faux bold is worse than one weight, so the regular
+                // face stands in and the header is distinguished by colour instead.
+                .or(regular);
 
+        // Deduplicated by path, because two needles can name one file:
+        // `notosanscjkregular` and `notosanscjk` both resolve to
+        // NotoSansCJK-Regular.ttc, and the chain held it twice — a second
+        // mapping of 18 MiB, and a second miss for every glyph the first copy
+        // did not have.
         for wanted in FALLBACK {
-            if let Some(face) = discover::pick(&candidates, &[wanted])
-                .and_then(|candidate| Face::open(&candidate.path))
-            {
+            let Some(candidate) = discover::pick(&candidates, &[wanted]) else { continue };
+            if !opened.insert(candidate.path.clone()) {
+                continue;
+            }
+            if let Some(face) = Face::open(&candidate.path) {
                 faces.push(face);
             }
         }
@@ -293,6 +307,15 @@ impl Fonts {
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
         self.faces.iter().map(|face| face.name.as_str()).collect()
+    }
+
+    /// The file behind each face, in chain order.
+    ///
+    /// Separate from [`Fonts::names`] because the golden-frame harness hashes
+    /// them: the names are the same on two machines whose font packages are not.
+    #[must_use]
+    pub fn paths(&self) -> Vec<&Path> {
+        self.faces.iter().map(|face| face.path.as_path()).collect()
     }
 
     /// Faces that were wanted and not found.
@@ -362,6 +385,7 @@ impl Fonts {
 
 fn take(
     faces: &mut Vec<Face>,
+    opened: &mut std::collections::HashSet<std::path::PathBuf>,
     candidates: &[Candidate],
     wanted: &[&str],
     missing: &mut Vec<&'static str>,
@@ -372,6 +396,7 @@ fn take(
         missing.push(label);
         return None;
     };
+    opened.insert(candidate.path.clone());
     faces.push(face);
     Some((faces.len() - 1) as u16)
 }
@@ -393,6 +418,21 @@ mod tests {
         let Some(fonts) = fonts() else { return };
         assert!(!fonts.is_empty());
         assert!(!fonts.names().is_empty());
+    }
+
+    /// A face in the chain twice is a second mapping of the same file and a
+    /// second miss for every glyph it does not have. Two `FALLBACK` needles
+    /// resolving to one file is enough to produce one: `notosanscjkregular` and
+    /// `notosanscjk` both name NotoSansCJK-Regular.ttc, and this asserted
+    /// nothing while the chain on this machine held it twice.
+    #[test]
+    fn no_face_is_in_the_chain_twice() {
+        let Some(fonts) = fonts() else { return };
+        let mut names = fonts.names();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "{:?}", fonts.names());
     }
 
     /// Every number here is checked against the *size it was asked for*, not

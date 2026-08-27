@@ -23,6 +23,19 @@ the frame and `mkdtemp` would put a different string in every reference. Its
 modification times are fixed in 2001 for the same reason: a date in a past year
 renders as `3 Feb 2001` and stays that way, where a recent one becomes a clock
 time and then a date the next day.
+
+Two inputs to a frame come from the machine rather than from the repository, and
+both are pinned here:
+
+* **The timezone**, because the Modified column is `localtime_r` of a fixed
+  epoch second, and west of UTC that second is the previous day.
+* **The fonts**, which decide most of the pixels. The fixture holds Hebrew,
+  Arabic and an emoji on purpose, so the whole fallback chain is in the image.
+  `faces.txt` records the chain the references were blessed on **by the hash of
+  each file**, and a run that would shape with anything else **refuses to
+  compare** — rather than reporting a million differing samples and implicating
+  the renderer. The hash and not the name: Ubuntu 24.04 ships NotoColorEmoji
+  2.047 where 26.04 ships 2.051, both as `NotoColorEmoji.ttf`.
 """
 
 from __future__ import annotations
@@ -37,6 +50,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKERRY = ROOT / "target" / "release" / "skerry"
 REFERENCES = ROOT / "tests" / "golden"
+# The face chain the references were blessed with, written by --bless.
+FACES = REFERENCES / "faces.txt"
 FIXTURE = Path("/tmp/skerry-golden")
 
 # How far a channel may differ from the reference before it is a regression.
@@ -122,16 +137,22 @@ def build_fixture() -> Path:
     return directory
 
 
-def render(name: str, arguments: list[str], into: Path) -> None:
+def render(name: str, arguments: list[str], into: Path) -> list[str]:
+    """Renders one frame and returns the paths of the faces it shaped with."""
     raw = into.with_suffix(".raw.png")
     done = subprocess.run(
         [str(SKERRY), "--capture", str(raw), *arguments, str(FIXTURE / "fixture")],
         capture_output=True,
         text=True,
-        env=dict(os.environ, VK_LOADER_DRIVERS_SELECT="lvp_icd.json"),
+        env=dict(os.environ, VK_LOADER_DRIVERS_SELECT="lvp_icd.json", TZ="UTC"),
     )
     if done.returncode != 0:
         raise Failure(f"{name}: {done.stderr.strip()[:300]}")
+    chain = [
+        line.removeprefix("skerry: face ").strip()
+        for line in done.stderr.splitlines()
+        if line.startswith("skerry: face ")
+    ]
     from PIL import Image
 
     # Re-encoded rather than kept: our own writer emits stored deflate blocks, so
@@ -140,6 +161,81 @@ def render(name: str, arguments: list[str], into: Path) -> None:
     with Image.open(raw) as image:
         image.convert("RGB").save(into, optimize=True)
     raw.unlink()
+    return chain
+
+
+def fingerprint(chain: list[str]) -> list[tuple[str, str]]:
+    """Each face as (twelve hex digits of its sha256, its file name).
+
+    The bytes and not the name, because the name is the same on two machines
+    whose font packages are not: Ubuntu 24.04 ships NotoColorEmoji 2.047 where
+    26.04 ships 2.051, and the beach umbrella in the fixture is a different
+    bitmap in each.
+    """
+    import hashlib
+
+    out = []
+    for path in chain:
+        digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+        out.append((digest, Path(path).name))
+    return out
+
+
+def write_faces(marks: list[tuple[str, str]]) -> None:
+    lines = [
+        "# The fonts the references were rendered with, in chain order.",
+        "# Written by tools/golden --bless. See the module docstring.",
+    ]
+    lines += [f"{digest}  {name}" for digest, name in marks]
+    FACES.write_text("\n".join(lines) + "\n")
+
+
+def read_faces() -> list[tuple[str, str]]:
+    marks = []
+    for line in FACES.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            digest, name = line.split()
+            marks.append((digest, name))
+    return marks
+
+
+def faces_differ(chain: list[str]) -> str | None:
+    """Why this machine's fonts make a pixel comparison meaningless, or `None`.
+
+    Checked once, before the first comparison. A font mismatch fails every frame
+    at once with hundreds of thousands of differing samples, and the message that
+    names the cause has to arrive before all of them.
+    """
+    if not FACES.is_file():
+        return "no recorded font set — run tools/golden --bless"
+    recorded, here = read_faces(), fingerprint(chain)
+    if recorded == here:
+        return None
+
+    was, now = [name for _, name in recorded], [name for _, name in here]
+    gone = [name for name in was if name not in now]
+    extra = [name for name in now if name not in was]
+    if gone or extra:
+        detail = []
+        if gone:
+            detail.append(f"missing {' '.join(gone)}")
+        if extra:
+            detail.append(f"unexpected {' '.join(extra)}")
+        return "fonts: a different chain — " + "; ".join(detail)
+
+    if was != now:
+        return f"fonts: the same faces in a different order — {' '.join(now)}"
+
+    moved = [
+        f"{name} is {mine}, blessed on {theirs}"
+        for (theirs, name), (mine, _) in zip(recorded, here)
+        if theirs != mine
+    ]
+    return (
+        "fonts: the same faces, different files — a font package here is not the "
+        "one the references were blessed on\n        " + "\n        ".join(moved)
+    )
 
 
 def compare(name: str, fresh: Path, reference: Path) -> None:
@@ -187,13 +283,21 @@ def main(argv: list[str]) -> int:
     work.mkdir(parents=True, exist_ok=True)
 
     passed, failed = 0, []
+    checked_faces = False
     for name, arguments in FRAMES:
         if wanted and not any(needle in name for needle in wanted):
             continue
         fresh = work / f"{name}.png"
         reference = REFERENCES / f"{name}.png"
         try:
-            render(name, arguments, fresh)
+            chain = render(name, arguments, fresh)
+            if bless:
+                write_faces(fingerprint(chain))
+            elif not checked_faces:
+                checked_faces = True
+                if trouble := faces_differ(chain):
+                    print(f"  FAIL  {trouble}")
+                    return 1
             if bless:
                 shutil.copyfile(fresh, reference)
                 print(f"  bless {name}  {reference.stat().st_size // 1024} KiB")

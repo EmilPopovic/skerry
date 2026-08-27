@@ -277,6 +277,12 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 
 /// What the capture contained, so a golden frame is comparable to the run that
 /// produced it without opening the file.
+///
+/// The face chain is on its own line because it is the input that decides most
+/// of the pixels and the only one that comes from outside the repository: the
+/// fixture holds Hebrew, Arabic and an emoji, so a machine with a different set
+/// of fonts installed renders a different frame from the same commit. A harness
+/// comparing against a stored reference has to be able to say so.
 fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) {
     eprintln!(
         "skerry: wrote {} — {}×{} at {}%, {} entries, {} quads, {} draws, {} glyphs",
@@ -289,6 +295,9 @@ fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) 
         stats.draws,
         session.renderer.atlas_stats().0,
     );
+    for path in session.fonts.paths() {
+        eprintln!("skerry: face {}", path.display());
+    }
 }
 
 fn write(file: &Path, physical: (u32, u32), pixels: &[u8]) -> Result<(), Problem> {
