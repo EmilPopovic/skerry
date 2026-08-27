@@ -296,6 +296,17 @@ fn view(registry: &mut Registry<App>) {
             run: App::toggle_path_entry,
         },
         CommandSpec {
+            id: "view.palette",
+            name: "action.palette",
+            group: Group::Help,
+            // `Ctrl+Shift+P` from VS Code and `Ctrl+P` from everything that has
+            // a palette at all. Both, because the first is the one people who
+            // know palettes reach for and the second is shorter.
+            keys: &["ctrl+shift+p", "ctrl+p"],
+            enabled: |_| true,
+            run: App::toggle_palette,
+        },
+        CommandSpec {
             id: "view.menu",
             name: "action.menu",
             group: Group::View,

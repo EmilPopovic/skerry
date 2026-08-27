@@ -9,10 +9,9 @@
 //! context a command runs against, which is what keeps a level-2 crate from
 //! needing to know about level 4.
 //!
-//! What is here and what is owed: the registry and chord resolution are here.
-//! The palette index and the undo stack are also this crate's by
-//! [docs/04-architecture.md](../../../docs/04-architecture.md#crate-responsibilities)
-//! and arrive with M6 and M3.
+//! What is here and what is owed: the registry, chord resolution, the undo stack
+//! and the palette's ranking. The palette's *surface* is `sk-app`'s, because it
+//! draws — see [docs/04-architecture.md](../../../docs/04-architecture.md#crate-responsibilities).
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 // `missing_docs` and `clippy::pedantic` are warned workspace-wide from the lint
@@ -20,9 +19,11 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod chord;
+pub mod fuzzy;
 pub mod history;
 pub mod registry;
 
 pub use chord::Chord;
+pub use fuzzy::score;
 pub use history::History;
 pub use registry::{CommandId, CommandSpec, Group, Registry};

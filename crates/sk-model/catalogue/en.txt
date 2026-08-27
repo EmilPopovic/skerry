@@ -150,6 +150,7 @@ action.undo = Undo
 action.redo = Redo
 action.filter = Filter the list
 action.menu = Show the menu
+action.palette = Find a command
 action.path_entry = Type a path
 action.minimize = Minimise the window
 action.maximize = Maximise or restore
@@ -167,6 +168,7 @@ action.type_ahead = Jump to a name
 # Chrome.
 chrome.hint = {0} keys
 keys.title = Keyboard
+palette.prompt = Type to find a command
 keys.typing = Type any letters
 stats.title = Frames
 stats.frame = frame p50 / p99 / worst

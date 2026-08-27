@@ -284,6 +284,8 @@ enum Claim {
     Naming,
     /// A path being typed over the breadcrumbs.
     Path,
+    /// The command palette's query.
+    Palette,
 }
 
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
@@ -485,6 +487,8 @@ pub struct App {
     hint: String,
     /// The path being typed over the breadcrumbs, while one is.
     typing_path: Option<crate::field::Field>,
+    /// The command palette, while it is open.
+    palette: Option<crate::palette::Palette>,
     /// The context menu, while one is open.
     menu: Option<crate::menu::Menu>,
     /// A menu a command asked for, and where it goes.
@@ -596,6 +600,7 @@ impl App {
             cursor: sk_plat::Cursor::Arrow,
             hint: String::new(),
             typing_path: None,
+            palette: None,
             menu: None,
             menu_wanted: None,
             replies,
@@ -899,7 +904,15 @@ impl App {
                 _ => {}
             },
             Event::Scroll { delta, precise, .. } => {
-                self.pane.scroll.by(delta.y, *precise);
+                // The palette takes the wheel while it is open. Without this the
+                // twelfth result of fifty is unreachable by pointer alone, and
+                // the listing scrolls behind a panel covering it.
+                eprintln!("SCROLLDEBUG delta={:?} palette={}", delta, self.palette.is_some());
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.wheel(delta.y);
+                } else {
+                    self.pane.scroll.by(delta.y, *precise);
+                }
                 self.dirty = true;
             }
             Event::KeyUp(_) | Event::Woken => {}
@@ -924,6 +937,12 @@ impl App {
         // An open menu takes the keyboard first, and gives back everything it
         // has no use for.
         if self.menu.is_some() && self.menu_key(event, commands) {
+            return;
+        }
+        // The palette takes the keyboard next, and takes nearly all of it: it is
+        // a modal field over the whole window, and a chord that ran a command
+        // behind it would run one the palette was about to offer.
+        if self.palette.is_some() && self.palette_key(event, commands) {
             return;
         }
         // The path bar takes the keyboard while it is open, for the same reason
@@ -1030,6 +1049,7 @@ impl App {
         let Some(field) = (match which {
             Claim::Path => self.typing_path.as_mut(),
             Claim::Naming => self.edits.naming.as_mut().map(|naming| &mut naming.field),
+            Claim::Palette => self.palette.as_mut().map(|palette| &mut palette.query),
             Claim::Filter => None,
         }) else {
             return;
@@ -1116,6 +1136,9 @@ impl App {
         if keep != Claim::Path && self.typing_path.take().is_some() {
             self.dirty = true;
         }
+        if keep != Claim::Palette && self.palette.take().is_some() {
+            self.dirty = true;
+        }
     }
 
     /// Closes every field and the menu, because the directory changed under them.
@@ -1128,6 +1151,7 @@ impl App {
             self.edits.stop_naming(),
             self.typing_path.take().is_some(),
             self.menu.take().is_some(),
+            self.palette.take().is_some(),
             std::mem::take(&mut self.filtering),
         ];
         if closed.contains(&true) {
@@ -1895,6 +1919,78 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
         )
     }
 
+    /// The open menu, for a scenario: how many rows, which is highlighted, which
+    /// are dimmed, and where each one can be clicked.
+    ///
+    /// "Dimmed rather than absent" is a claim about the interface and not an
+    /// implementation detail, so it is reported. The aim points are the middle of
+    /// each row, so a scenario names a command instead of copying the menu's own
+    /// constants — which would then be a second copy to keep right.
+    fn menu_report(&self) -> String {
+        let menu = self.menu.as_ref();
+        let rows = menu.map_or(0, |menu| menu.items.len());
+        let active = menu
+            .and_then(|menu| menu.active)
+            .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let id = menu.and_then(super::menu::Menu::active_id).unwrap_or_default();
+        let dimmed = menu.map_or_else(String::new, |menu| {
+            menu.items
+                .iter()
+                .filter(|item| !item.enabled)
+                .map(|item| item.id)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        let aim = menu.map_or_else(String::new, |menu| {
+            menu.items
+                .iter()
+                .zip(&self.hits.menu)
+                .map(|(item, area)| {
+                    format!("{}@{:.0}:{:.0}", item.id, area.x + 20.0, area.y + area.height / 2.0)
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        format!(
+            "menu={rows} menu_active={active} menu_id={id:?} menu_aim={aim:?} menu_dim={dimmed:?}"
+        )
+    }
+
+    /// The open palette, reported the way the menu is.
+    ///
+    /// `-1` results rather than `0` when it is closed, because a query that
+    /// matches nothing is a real state and has to be distinguishable from no
+    /// palette at all.
+    fn palette_report(&self) -> String {
+        let palette = self.palette.as_ref();
+        let rows = palette.map_or(-1, |it| i64::try_from(it.shown.len()).unwrap_or(-1));
+        let query = palette.map(|it| it.query.text.clone()).unwrap_or_default();
+        let id = palette.and_then(crate::palette::Palette::active_id).unwrap_or_default();
+        let scroll = palette.map_or(-1, |it| i64::try_from(it.scroll).unwrap_or(-1));
+        let aim = palette.map_or_else(String::new, |palette| {
+            let (first, _) = palette.window();
+            self.hits
+                .palette
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, area)| {
+                    let row = palette.row(first + offset)?;
+                    Some(format!(
+                        "{}@{:.0}:{:.0}",
+                        row.id,
+                        area.x + 20.0,
+                        area.y + area.height / 2.0
+                    ))
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        format!(
+            "palette={rows} palette_query={query:?} palette_id={id:?} \
+             palette_scroll={scroll} palette_aim={aim:?}"
+        )
+    }
+
     /// Where everything is, so a scenario can aim at it without a copy of the
     /// metrics it is testing.
     fn chrome_state(&mut self) -> String {
@@ -1919,6 +2015,7 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
         let cursor_shape = match self.cursor {
             sk_plat::Cursor::Arrow => "arrow".to_owned(),
             sk_plat::Cursor::Hand => "hand".to_owned(),
+            sk_plat::Cursor::Text => "text".to_owned(),
             sk_plat::Cursor::Grabbing => "grabbing".to_owned(),
             sk_plat::Cursor::Resize(edge) => format!("resize-{edge:?}").to_lowercase(),
         };
@@ -1930,34 +2027,8 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             .map(|entry| entry.label.clone())
             .unwrap_or_default();
         let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
-        let menu = self.menu.as_ref();
-        let menu_rows = menu.map_or(0, |menu| menu.items.len());
-        let menu_active = menu
-            .and_then(|menu| menu.active)
-            .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
-        let menu_id = menu.and_then(super::menu::Menu::active_id).unwrap_or_default();
-        // Which rows are drawn dimmed, because "dimmed rather than absent" is a
-        // claim about the interface and not an implementation detail.
-        let dimmed = menu.map_or_else(String::new, |menu| {
-            menu.items
-                .iter()
-                .filter(|item| !item.enabled)
-                .map(|item| item.id)
-                .collect::<Vec<_>>()
-                .join(",")
-        });
-        // The middle of each menu row, so a scenario can aim at one by name
-        // rather than by arithmetic over constants it would have to copy.
-        let menu_aim = menu.map_or_else(String::new, |menu| {
-            menu.items
-                .iter()
-                .zip(&self.hits.menu)
-                .map(|(item, area)| {
-                    format!("{}@{:.0}:{:.0}", item.id, area.x + 20.0, area.y + area.height / 2.0)
-                })
-                .collect::<Vec<_>>()
-                .join(",")
-        });
+        let menu_report = self.menu_report();
+        let palette_report = self.palette_report();
         // The middle of the crumb one level up, which is the one a test clicks.
         let parent_crumb_x = self
             .hits
@@ -1970,8 +2041,7 @@ filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
 crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
-menu={menu_rows} menu_active={menu_active} menu_id={menu_id:?} menu_aim={menu_aim:?} \
-menu_dim={dimmed:?} \
+{menu_report} {palette_report} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
@@ -2020,6 +2090,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         commands: &Registry<Self>,
     ) {
         self.pointer = position;
+        if self.palette.is_some() {
+            self.palette_press(position, commands);
+            return;
+        }
         if self.menu.is_some() {
             self.menu_press(position, commands);
             return;
@@ -2194,6 +2268,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         {
             return sk_plat::Cursor::Hand;
         }
+        // A field with a caret in it is not a thing to click, it is text to put
+        // the caret into — and both of these fields already accept a click that
+        // does exactly that.
+        let over_field = self.typing_path.is_some()
+            && crate::view::path_field(&self.layout, &self.theme.metrics)
+                .contains(position.x, position.y)
+            || self.edits.naming.is_some() && self.naming_field().contains(position.x, position.y);
+        if over_field {
+            return sk_plat::Cursor::Text;
+        }
         sk_plat::Cursor::Arrow
     }
 
@@ -2337,6 +2421,34 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             .filter(|row| *row < self.pane.listing.rows())
     }
 
+    /// Which drawn palette result is under a point, if the palette is open.
+    ///
+    /// An offset from the first drawn row, which is what the hit rectangles are
+    /// built from.
+    fn palette_at(&self, position: Point) -> Option<usize> {
+        self.palette.as_ref()?;
+        self.hits.palette.iter().position(|area| area.contains(position.x, position.y))
+    }
+
+    /// A press while the palette is open: a result, the field, or dismiss.
+    ///
+    /// **A dismissing press does nothing else**, for the reason a menu's does
+    /// not: the click that closes a modal surface must not also land on the row
+    /// underneath it.
+    fn palette_press(&mut self, position: Point, commands: &Registry<Self>) {
+        if let Some(offset) = self.palette_at(position) {
+            self.run_palette_row(offset, commands);
+            return;
+        }
+        if let Some(area) = self.hits.palette_field.filter(|a| a.contains(position.x, position.y)) {
+            let size = self.theme.metrics.path_size;
+            self.place_caret_in(Claim::Palette, area, size, crate::palette::INSET, position.x);
+            return;
+        }
+        self.palette = None;
+        self.dirty = true;
+    }
+
     /// Which menu row is under a point, if a menu is open.
     fn menu_at(&self, position: Point) -> Option<usize> {
         self.menu.as_ref()?;
@@ -2439,8 +2551,107 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         true
     }
 
+    /// Opens the palette, or closes it if it is already open.
+    pub(crate) fn toggle_palette(&mut self) {
+        if self.palette.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        self.claim_keyboard(Claim::Palette);
+        // Built here rather than held, so what it lists is what can run *now* —
+        // the same question a menu row asks when it opens.
+        let commands = crate::commands::registry();
+        self.palette = Some(crate::palette::open(&commands, |id| {
+            commands.find(id).is_some_and(|command| commands.enabled(command, self))
+        }));
+        self.dirty = true;
+    }
+
+    /// The palette's keys: the field, the arrows, `Enter` and `Escape`.
+    ///
+    /// Returns whether it consumed the press. Almost everything is consumed —
+    /// see [`App::palette_key`]'s caller — and the two exceptions are the
+    /// diagnostic report, for the reason the menu lets it through, and the chord
+    /// that opened it, so the same key closes it again.
+    fn palette_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let opener =
+            commands.resolve(event).and_then(|id| commands.describe(id)).map(|command| command.id);
+        if opener == Some("help.dump") {
+            return false;
+        }
+        if opener == Some("view.palette") {
+            self.palette = None;
+            self.dirty = true;
+            return true;
+        }
+        let Some(palette) = self.palette.as_mut() else { return false };
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.palette = None,
+            Key::Named(Named::Down) if bare => palette.step(true),
+            Key::Named(Named::Up) if bare => palette.step(false),
+            Key::Named(Named::Enter) => {
+                let chosen = palette.active_id();
+                self.palette = None;
+                if let Some(id) = chosen.and_then(|id| commands.find(id)) {
+                    commands.run(id, self);
+                }
+            }
+            _ => {
+                // Every other press goes to the field, which is what makes this
+                // a search box rather than a list with a text box beside it.
+                if palette.query.key(event) {
+                    palette.refilter();
+                } else {
+                    return false;
+                }
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Runs the palette result a click landed on.
+    ///
+    /// `offset` counts from the first *drawn* row, because that is what the hit
+    /// rectangles are built from — a palette scrolled down four rows would
+    /// otherwise run the fourth command above the one the pointer was on.
+    fn run_palette_row(&mut self, offset: usize, commands: &Registry<Self>) {
+        let chosen = self.palette.as_ref().and_then(|palette| {
+            let (first, _) = palette.window();
+            palette.row(first + offset).filter(|row| row.enabled).map(|row| row.id)
+        });
+        self.palette = None;
+        self.dirty = true;
+        if let Some(id) = chosen.and_then(|id| commands.find(id)) {
+            commands.run(id, self);
+        }
+    }
+
     fn moved(&mut self, position: Point, commands: &Registry<Self>) {
         self.pointer = position;
+        // The palette is over everything the menu is over, and over the menu, so
+        // it answers first and nothing beneath it hovers.
+        if self.palette.is_some() {
+            let offset = self.palette_at(position);
+            let (first, _) = self.palette.as_ref().map_or((0, 0), crate::palette::Palette::window);
+            let clickable = offset
+                .and_then(|offset| self.palette.as_ref()?.row(first + offset))
+                .is_some_and(|row| row.enabled);
+            let hovered = offset.map(|offset| first + offset);
+            if self.palette.as_mut().is_some_and(|palette| palette.hover(hovered)) {
+                self.dirty = true;
+            }
+            let over_field =
+                self.hits.palette_field.is_some_and(|a| a.contains(position.x, position.y));
+            self.point(match (clickable, over_field) {
+                (true, _) => sk_plat::Cursor::Hand,
+                (false, true) => sk_plat::Cursor::Text,
+                (false, false) => sk_plat::Cursor::Arrow,
+            });
+            return;
+        }
         // An open menu is over everything, so nothing under it hovers: a row
         // lighting up behind a menu reads as a click that will land there.
         if self.menu.is_some() {
@@ -2632,6 +2843,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hint,
             menu,
             typing_path,
+            palette,
             ..
         } = self;
 
@@ -2656,6 +2868,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             window: *window_state,
             menu: menu.as_ref(),
             path_entry: typing_path.as_ref(),
+            palette: palette.as_ref(),
             hint,
         };
         let now = clock_seconds();

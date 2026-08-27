@@ -33,7 +33,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["edit.undo", "edit.redo"],
     &["select.all", "view.filter"],
     &["view.hidden", "view.theme", "view.sidebar"],
-    &["view.path_entry", "go.reload", "help.keys"],
+    &["view.path_entry", "go.reload", "view.palette", "help.keys"],
 ];
 
 /// One row of an open menu.

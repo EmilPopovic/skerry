@@ -639,18 +639,42 @@ def pointer_rubber_band(run: Run, fixture: Path) -> None:
         raise Failure(f"a rubber band across several rows selected {banded['selected']}")
 
 
-@scenario("pointer-scroll")
+@scenario("pointer-scroll", fresh=True)
 def pointer_scroll(run: Run, fixture: Path) -> None:
-    # A directory with more rows than fit, so there is somewhere to scroll to.
+    """A wheel notch scrolls the list.
+
+    **Its own fixture, filled until there is somewhere to scroll to.** This used
+    to run against the shared nine-row fixture and return early because the
+    content was shorter than the window — so it passed without asserting
+    anything, for as long as it existed, while `skerry-drive` sent a scroll the
+    compositor translated to a delta of zero. A test that can only pass has
+    measured nothing; see docs/12-measurement.md.
+    """
     run.drive("sleep 400\nkey f12\nsleep 100\n")
     start = run.state()
-    run.drive("move 50 50\nsleep 100\nscroll 5\nsleep 400\nkey f12\nsleep 200\n")
+    for index in range(200):
+        (fixture / f"filler-{index:03}.txt").write_text("x")
+    # inotify, rather than a reload: the rows have to arrive by themselves for
+    # the assertion below to be about scrolling and not about `F5`.
+    for _ in range(40):
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+        filled = run.state()
+        if int(filled["rows"]) > 200:
+            break
+    else:
+        raise Failure(f"the filler files never arrived: {filled['rows']} rows")
+    content = int(filled["rows"]) * float(filled["row_h"])
+    if content <= float(filled["body_height"]):
+        raise Failure(f"{filled['rows']} rows still fit in {filled['body_height']}")
+
+    run.drive("move 50 50\nsleep 150\nscroll 5\nsleep 400\nkey f12\nsleep 200\n")
     after = run.state()
-    content = int(after["rows"]) * float(after["row_h"])
-    if content <= float(after["body_height"]):
-        return  # nothing to scroll; the fixture is smaller than the window
     if float(after["scroll"]) <= float(start["scroll"]):
         raise Failure(f"a wheel scroll moved nothing: {after['scroll']}")
+    # And back up again, because a scroll that only goes one way is half tested.
+    run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 400\nkey f12\nsleep 200\n")
+    if float(run.state()["scroll"]) >= float(after["scroll"]):
+        raise Failure("scrolling up moved nothing")
 
 
 @scenario("type-ahead")
@@ -1074,6 +1098,145 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
             x, _, y = point.partition(":")
             return aim(run, state, float(x), float(y))
     raise Failure(f"{command} is not on the open menu: {state.get('menu_aim')!r}")
+
+
+def palette_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, float]:
+    """Where to click one palette result, as the driver's percentages.
+
+    The same trade `menu_aim` makes: the window reports the middle of every drawn
+    row, so a test aims by command identifier rather than by arithmetic over the
+    palette's own constants.
+    """
+    for entry in state.get("palette_aim", "").split(","):
+        name, _, point = entry.partition("@")
+        if name == command:
+            x, _, y = point.partition(":")
+            return aim(run, state, float(x), float(y))
+    raise Failure(f"{command} is not on the open palette: {state.get('palette_aim')!r}")
+
+
+@scenario("palette-by-keyboard")
+def palette_by_keyboard(run: Run, fixture: Path) -> None:
+    """Ctrl+Shift+P, type, arrow, Enter — and the command runs."""
+    run.drive("sleep 500\nkey ctrl+shift+p\nsleep 300\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if int(opened["palette"]) < 20:
+        raise Failure(f"the palette opened with {opened['palette']} results")
+    expect(opened, palette_query="")
+
+    # Typing narrows it, and the highlight lands on something that can run.
+    run.drive("text hid\nsleep 300\nkey f12\nsleep 150\n")
+    narrowed = run.state()
+    expect(narrowed, palette_query="hid")
+    if int(narrowed["palette"]) >= int(opened["palette"]):
+        raise Failure(f"typing did not narrow: {narrowed['palette']} of {opened['palette']}")
+    if narrowed["palette_id"] != "view.hidden":
+        raise Failure(f"`hid` highlighted {narrowed['palette_id']!r}")
+
+    # Enter runs it, which is observable: dotfiles appear.
+    before = int(opened["rows"])
+    run.drive("key enter\nsleep 400\nkey f12\nsleep 150\n")
+    after = run.state()
+    expect(after, palette="-1", hidden="true")
+    if int(after["rows"]) <= before:
+        raise Failure(f"showing hidden files did not add rows: {before} then {after['rows']}")
+
+    # And the same chord closes it again, rather than needing Escape.
+    run.drive("key ctrl+shift+p\nsleep 250\nkey ctrl+shift+p\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), palette="-1")
+
+
+@scenario("palette-by-pointer")
+def palette_by_pointer(run: Run, fixture: Path) -> None:
+    """Opened from the background menu, and a result clicked. No keys at all.
+
+    Except `F12`, which is how a scenario reads any state, and the type-ahead the
+    other palette scenario covers — the point here is that a pointer alone can
+    reach a command that has no button.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 100\n")
+    start = run.state()
+    # A secondary click on empty space below the rows opens the background menu.
+    empty = aim(
+        run,
+        start,
+        float(start["name_x"]) + 30.0,
+        float(start["body_top"]) + float(start["body_height"]) - 20.0,
+    )
+    run.drive(
+        f"move {empty[0]:.1f} {empty[1]:.1f}\nsleep 150\nclick right\nsleep 400\n"
+        "key f12\nsleep 150\n"
+    )
+    menu = run.state()
+    if "view.palette" not in menu["menu_aim"]:
+        raise Failure(f"the background menu has no palette row: {menu['menu_aim']}")
+
+    at = menu_aim(run, menu, "view.palette")
+    run.drive(f"move {at[0]:.1f} {at[1]:.1f}\nsleep 150\nclick\nsleep 400\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if int(opened["palette"]) < 20:
+        raise Failure(f"clicking the menu row opened {opened['palette']} results")
+
+    # A result past the eleventh, reached with the wheel — which is the whole of
+    # why the palette takes the wheel: with fifty commands and eleven rows drawn,
+    # a pointer with no keyboard could otherwise reach only the first eleven.
+    #
+    # The move and the scroll go in one script: each `drive` is a fresh process
+    # with a fresh virtual pointer, and a pointer that has never moved has no
+    # position for the compositor to route an axis event by.
+    over = palette_aim(run, opened, "go.open")
+    scrolled = opened
+    for _ in range(8):
+        if "view.hidden" in scrolled["palette_aim"]:
+            break
+        run.drive(
+            f"move {over[0]:.1f} {over[1]:.1f}\nsleep 120\nscroll 5\nsleep 300\n"
+            "key f12\nsleep 150\n"
+        )
+        moved = run.state()
+        if moved["palette_scroll"] == scrolled["palette_scroll"]:
+            raise Failure(f"the wheel stopped at {moved['palette_scroll']} of {moved['palette']}")
+        scrolled = moved
+    else:
+        raise Failure(f"scrolling never reached it: {scrolled['palette_aim']}")
+    target = palette_aim(run, scrolled, "view.hidden")
+    run.drive(
+        f"move {target[0]:.1f} {target[1]:.1f}\nsleep 200\nkey f12\nsleep 150\n"
+    )
+    hovering = run.state()
+    expect(hovering, palette_id="view.hidden", pointer="hand")
+    run.drive("click\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), palette="-1", hidden="true")
+
+
+@scenario("a-palette-press-that-dismisses-does-nothing-else")
+def palette_dismiss(run: Run, fixture: Path) -> None:
+    """The click that closes the palette must not land on the row beneath it."""
+    run.drive("sleep 500\nkey f12\nsleep 100\n")
+    pointing = point_at(run, 2)
+    wanted = pointing["hover_name"]
+    run.drive("click\nsleep 250\nkey ctrl+shift+p\nsleep 300\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if int(opened["palette"]) < 20:
+        raise Failure(f"the palette opened with {opened['palette']} results")
+
+    # Below the panel and over the empty part of the list, so a click that got
+    # through would move the cursor and the state would say so.
+    #
+    # **Not `body_top + 8.5 rows`**, which the context menu's version of this
+    # scenario uses: the palette is a centred panel four hundred pixels tall, and
+    # that point is inside it — the first version of this test clicked the
+    # palette's own *Move up* row and then blamed the code for moving the cursor.
+    away = aim(
+        run,
+        opened,
+        float(opened["name_x"]) + 30.0,
+        float(opened["body_top"]) + float(opened["body_height"]) - 24.0,
+    )
+    run.drive(
+        f"move {away[0]:.1f} {away[1]:.1f}\nsleep 150\nclick\nsleep 300\nkey f12\nsleep 150\n"
+    )
+    expect(run.state(), palette="-1", cursor=wanted)
 
 
 @scenario("select-all-and-clear")
@@ -1740,6 +1903,19 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
             raise Failure(
                 f"over {command} the pointer is a {over['pointer']}, wanted a {wanted}"
             )
+    run.drive("key escape\nsleep 200\n")
+
+    # And an I-beam over text a click puts a caret into, rather than the hand
+    # that says "this does something" or the arrow that says "this does not".
+    run.drive("key ctrl+l\nsleep 300\nkey f12\nsleep 150\n")
+    typing = run.state()
+    if not typing["path_entry"]:
+        raise Failure("Ctrl+L opened no path field")
+    x, y = aim(run, typing, float(typing["name_x"]) + 20.0, float(typing["body_top"]) / 4.0)
+    run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 150\n")
+    over = run.state()
+    if over["pointer"] != "text":
+        raise Failure(f"over the path field the pointer is a {over['pointer']}, wanted a text")
     run.drive("key escape\nsleep 200\n")
 
 

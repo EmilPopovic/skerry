@@ -86,6 +86,9 @@ FRAMES = [
     # the scroll that keeps the caret inside the box is the only thing drawing
     # anything legible at all.
     ("path-entry-narrow", ["--size", "280x300", "--scale", "125", "--path-entry"]),
+    # The palette: a query narrowing the registry, with the ranking, a dimmed
+    # row, the highlight and the count of what did not fit all in one frame.
+    ("palette", ["--size", "900x520", "--scale", "125", "--palette"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

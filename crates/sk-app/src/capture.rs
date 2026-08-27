@@ -61,6 +61,8 @@ pub struct Capture {
     pub menu: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
+    /// Whether to draw the command palette, with a query typed into it.
+    pub palette: bool,
     /// Whether to draw the sidebar.
     pub sidebar: bool,
     /// Whether to draw the window frame the program draws for itself.
@@ -87,6 +89,24 @@ fn sample_menu(layout: &Layout) -> Option<crate::menu::Menu> {
     menu.step(true);
     menu.step(true);
     Some(menu)
+}
+
+/// The palette with a query in it, narrowed but not to one row.
+///
+/// `co` rather than nothing and rather than something exact: an empty query is a
+/// frame of the whole registry, which is the keyboard overlay's job, and a query
+/// matching one command would not show the ranking, the dimmed rows or the
+/// highlight together. Dimmed the way a fresh window dims them — nothing done,
+/// nothing copied — which is the same set `sample_menu` states and for the same
+/// reason.
+fn sample_palette() -> crate::palette::Palette {
+    let commands = crate::commands::registry();
+    let mut palette = crate::palette::open(&commands, |id| {
+        !matches!(id, "edit.undo" | "edit.redo" | "file.paste_location")
+    });
+    palette.query = crate::field::Field::new("co".to_owned());
+    palette.refilter();
+    palette
 }
 
 /// The path bar as a field, with the caret five sixths of the way along it.
@@ -189,6 +209,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 
     let menu = request.menu.then(|| sample_menu(&layout)).flatten();
     let path_entry = request.path_entry.then(|| sample_path_entry(&request.path));
+    let palette = request.palette.then(sample_palette);
 
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
@@ -252,6 +273,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 },
                 menu: menu.as_ref(),
                 path_entry: path_entry.as_ref(),
+                palette: palette.as_ref(),
                 hint: &keyboard_hint,
             };
             view::draw(

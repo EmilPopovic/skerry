@@ -33,6 +33,7 @@ mod headless;
 mod keys;
 mod layout;
 mod menu;
+mod palette;
 mod pane;
 mod sidebar;
 mod sizes;

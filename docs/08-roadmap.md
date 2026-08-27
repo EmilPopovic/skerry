@@ -266,13 +266,23 @@ are ratios for ordering, not a schedule.
 | | What | From | Bar |
 | --- | --- | --- | --- |
 | 1 | ~~**An MSD string radix over the name arena.**~~ **Done, and the row is still missed.** 1,460 ms → **166.0 ms** at 973,759 entries, 8.8×, against a 120 ms target. The remaining gap is parallelism, which needs an API that hands buckets to a caller above `sk-model` | M0 budget | Sort 1M under 120 ms — **not met**. The radix agrees with the comparison order it replaces over every sort a person can ask for, which is met and is a test |
-| 2 | **The command palette.** A fuzzy filter over the one registry, in the text field that already exists, drawing the list the keyboard overlay already draws | M6 | Every registry entry reachable in three keystrokes; no frame over 8 ms while typing over the full set |
+| 2 | ~~**The command palette.**~~ **Done.** A fuzzy filter over the one registry, in the text field that already existed, drawing the list the keyboard overlay already drew. `Ctrl+Shift+P` or `Ctrl+P`, and a row on the background menu so a pointer alone reaches it | M6 | Every registry entry reachable in three keystrokes — met, and the ranking is tested against the case that broke the first version. Pointer-reachable to the last of forty-one results, which is what the wheel is for |
 | 3 | **The 1×1 pre-map probe**, so the scale is known before the first frame instead of after it | M0 | Frame 1 drawn at the final scale, with a golden frame at 125% to prove it |
 
-The palette is out of order on purpose. It is [rule 4](03-principles.md#4-discoverable-not-just-configurable)'s
-headline feature and it costs a fuzzy matcher, because `sk-cmd`'s registry, `Field`
-and the overlay were all built before it. Every command added after it is
-discoverable for free; every command added before it was not.
+The palette was out of order on purpose. It is
+[rule 4](03-principles.md#4-discoverable-not-just-configurable)'s headline feature
+and it cost a fuzzy matcher, because `sk-cmd`'s registry, `Field` and the overlay
+were all built before it. Every command added after it is discoverable for free;
+every command added before it was not.
+
+What it cost that was not planned: a **greedy** subsequence matcher ranks
+*Show the sidebar* above *Show hidden files* for `hid`, because it takes the `h`
+inside *Show* and earns no word-start bonus. That is a dynamic program, not a
+heuristic, and it is forty lines. And the palette needed the **wheel**, because
+eleven of forty-one results are drawn and a pointer with no keyboard could
+otherwise reach only the first eleven — which is where `skerry-drive`'s scroll
+turned out never to have worked, and the scenario that covered it turned out never
+to have run.
 
 ### Then — the operations engine, which is the actual gap
 

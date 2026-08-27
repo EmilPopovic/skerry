@@ -211,6 +211,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 window: sk_plat::WindowState::default(),
                 menu: None,
                 path_entry: None,
+                palette: None,
                 hint: &hint,
             };
             view::draw(

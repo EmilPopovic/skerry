@@ -229,11 +229,22 @@ impl Driver {
         self.pointer.frame();
     }
 
+    /// One wheel notch per step, as a discrete axis with a source.
+    ///
+    /// **`axis` alone produced nothing.** Hyprland forwarded a bare
+    /// `virtual_pointer.axis` to the client as `wl_pointer.axis` with a value of
+    /// **zero**, and `axis_value120` zero beside it, so twelve notches scrolled
+    /// nothing at all — and the scenario that was supposed to cover this returned
+    /// early on a fixture smaller than the window, so nothing ever failed.
+    /// `axis_discrete` with `axis_source` is what a real wheel sends and what the
+    /// compositor translates.
     fn scroll(&mut self, notches: i32) {
         for _ in 0..notches.abs() {
             let time = self.tick();
-            let direction = if notches < 0 { -1.0 } else { 1.0 };
-            self.pointer.axis(time, wl_pointer::Axis::VerticalScroll, direction * 15.0);
+            let steps = if notches < 0 { -1 } else { 1 };
+            let distance = f64::from(steps) * 15.0;
+            self.pointer.axis_source(wl_pointer::AxisSource::Wheel);
+            self.pointer.axis_discrete(time, wl_pointer::Axis::VerticalScroll, distance, steps);
             self.pointer.frame();
         }
     }

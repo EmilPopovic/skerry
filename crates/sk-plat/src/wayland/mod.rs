@@ -165,6 +165,8 @@ pub enum Cursor {
     Arrow,
     /// Over something that acts on a click: a breadcrumb, a column header.
     Hand,
+    /// Over text a click would put a caret into.
+    Text,
     /// Over a resize edge, named by the edge.
     Resize(Edge),
     /// Dragging something that follows the pointer.
@@ -177,6 +179,7 @@ impl Cursor {
         match self {
             Self::Arrow => Shape::Default,
             Self::Hand => Shape::Pointer,
+            Self::Text => Shape::Text,
             Self::Grabbing => Shape::Grabbing,
             Self::Resize(edge) => match edge {
                 Edge::Top => Shape::NResize,

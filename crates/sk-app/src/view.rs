@@ -16,6 +16,7 @@ use crate::field::Field;
 use crate::frames::{BUDGET_US, Frames};
 use crate::layout::{Area, Button, Layout, Tool};
 use crate::menu::Menu;
+use crate::palette::Palette;
 use crate::pane::Pane;
 use crate::sidebar::{Entry, Mark, Section};
 
@@ -75,6 +76,8 @@ pub struct Chrome<'a> {
     pub menu: Option<&'a Menu>,
     /// The path being typed, which replaces the breadcrumbs while it is up.
     pub path_entry: Option<&'a Field>,
+    /// The command palette, while it is open.
+    pub palette: Option<&'a Palette>,
     /// The keyboard hint in the corner of the path bar, from the registry.
     pub hint: &'a str,
 }
@@ -100,6 +103,12 @@ pub struct Hits {
     /// same story as the breadcrumbs': the rectangle is known where the text is
     /// measured, and the next event tests against it.
     pub menu: Vec<Area>,
+    /// One rectangle per *drawn* palette result, in draw order — so the index a
+    /// click reports is an offset from the palette's scroll rather than an index
+    /// into the whole result list.
+    pub palette: Vec<Area>,
+    /// The palette's query field, so a click into it can place the caret.
+    pub palette_field: Option<Area>,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -152,6 +161,9 @@ pub fn draw(
     }
     if let Some(rows) = chrome.keys {
         keys_overlay(painter, layout, rows);
+    }
+    if let Some(palette) = chrome.palette {
+        command_palette(painter, layout, palette, hits);
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, layout, typed);
@@ -446,6 +458,77 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
         let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
         line(painter, &item.keys, keys_style, x, inner, baseline);
     }
+}
+
+/// The command palette: a query field over the results it narrows.
+///
+/// Centred horizontally and near the top, which is where every palette a person
+/// has used puts it, and a fixed height so the list does not jump as a query
+/// narrows.
+fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette, hits: &mut Hits) {
+    use crate::palette::{FIELD, INSET, SPACING, STEP, TOP, VISIBLE, WIDTH};
+
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let (first, last) = palette.window();
+    let width = (layout.window.width - 80.0).clamp(WIDTH.0.min(layout.window.width), WIDTH.1);
+    let height = crate::palette::height(last - first);
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: TOP.min((layout.window.height - height).max(8.0)),
+        width,
+        height,
+    };
+    panel(painter, area);
+
+    let field_area = Area { x: area.x, y: area.y, width: area.width, height: FIELD };
+    hits.palette_field = Some(field_area);
+    let baseline = painter.baseline(area.y, FIELD, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, theme.palette.text);
+    if palette.query.text.is_empty() {
+        // Behind the caret rather than instead of it: an empty field with no
+        // caret looks like a field that is not taking input.
+        let prompt = TextStyle::new(metrics.path_size, theme.palette.dim);
+        let room = area.width - INSET * 2.0;
+        line(painter, i18n::lookup("palette.prompt"), prompt, area.x + INSET, room, baseline);
+    }
+    field_text(painter, field_area, &palette.query, style, INSET, baseline);
+    painter.hairline(area.x, area.y + FIELD, area.width, theme.palette.divider);
+
+    hits.palette.clear();
+    let tops: Vec<f32> = crate::palette::row_tops(last - first, area).collect();
+    for (offset, top) in tops.into_iter().enumerate() {
+        let Some(row) = palette.row(first + offset) else { continue };
+        hits.palette.push(Area { x: area.x, y: top, width: area.width, height: STEP });
+        let highlighted = palette.active == first + offset;
+        if highlighted {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let (name_colour, keys_colour) = match (row.enabled, highlighted) {
+            (false, _) => (theme.palette.dim.with_alpha(110), theme.palette.dim.with_alpha(80)),
+            (true, true) => (theme.palette.selected_text, theme.palette.selected_text),
+            (true, false) => (theme.palette.text, theme.palette.dim),
+        };
+        let baseline = painter.baseline(top, STEP, metrics.text_size);
+        let inner = area.width - INSET * 2.0;
+        let keys_width = text_width(painter, &row.keys, metrics.header_size, true);
+        let name_style = TextStyle::new(metrics.text_size, name_colour);
+        let x = area.x + INSET;
+        line(painter, &row.name, name_style, x, inner - keys_width - SPACING * 0.5, baseline);
+        let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
+        line(painter, &row.keys, keys_style, x, inner, baseline);
+    }
+    // How much of the list is not on screen, because a palette that silently
+    // shows eleven of fifty is a palette that looks like it has eleven commands.
+    let hidden = palette.shown.len().saturating_sub(last - first);
+    if hidden > 0 {
+        let note = format!("+{hidden}");
+        let style = TextStyle::new(metrics.header_size, theme.palette.dim).right();
+        let baseline = painter.baseline(area.y, FIELD, metrics.header_size);
+        line(painter, &note, style, area.x + INSET, area.width - INSET * 2.0, baseline);
+    }
+    let _ = VISIBLE;
 }
 
 /// The name being typed, drawn over the row it belongs to.
@@ -1441,6 +1524,7 @@ mod tests {
                 window: sk_plat::WindowState::default(),
                 menu: None,
                 path_entry: None,
+                palette: None,
                 hint: "",
             };
             // A fixed timestamp: the Modified column is relative to "now", and a

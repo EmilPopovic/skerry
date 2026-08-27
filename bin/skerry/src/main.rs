@@ -22,6 +22,7 @@ fn main() -> std::process::ExitCode {
     let mut keys = false;
     let mut menu = false;
     let mut path_entry = false;
+    let mut palette = false;
     let mut own_frame = false;
     let mut no_sidebar = false;
     let mut capture = None;
@@ -37,6 +38,7 @@ fn main() -> std::process::ExitCode {
             "--keys" => keys = true,
             "--menu" => menu = true,
             "--path-entry" => path_entry = true,
+            "--palette" => palette = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
             "--capture" => match arguments.next() {
@@ -82,6 +84,7 @@ fn main() -> std::process::ExitCode {
             keys,
             menu,
             path_entry,
+            palette,
             stats,
             own_frame,
             sidebar: !no_sidebar,
@@ -148,6 +151,7 @@ skerry [OPTIONS] [PATH]
   --keys           show the keyboard overlay
   --menu           show the context menu, for a golden frame of it
   --path-entry     show the path bar as a field, for a golden frame of it
+  --palette        show the command palette, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,
