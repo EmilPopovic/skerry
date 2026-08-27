@@ -160,7 +160,7 @@ is deliberately after X11: XDND has five actions where Wayland has three, and an
 API designed against one dialect would be wrong in a way that is expensive to
 correct.
 
-**Eight things arrived ahead of their milestone**, each into the crate the table
+**Ten things arrived ahead of their milestone**, each into the crate the table
 in [04-architecture.md](04-architecture.md#crate-responsibilities) already names
 for it, because each one is what a person reaches for on the first day of
 dogfooding:
@@ -246,6 +246,106 @@ full filesystem matrix nightly, the forced-degradation matrix from
 for both architectures.
 
 ---
+
+## The next twelve things, in order
+
+The work below does not run down the milestone list, and neither did the last two
+months: **ten things have already arrived ahead of their milestone**, each because it
+was what a person reached for on the first day of dogfooding. This is the same
+argument continued with one rule added — *a step that makes the next step cheaper
+comes first* — and one observation that decides most of the ordering: **the product
+cannot copy a file.** New folder, rename and Move to Trash are in; copy and move are
+not, so the single largest gap between this and a file manager is one milestone's
+worth of work that Spike E has already proved out on seven filesystems.
+
+Every row names the milestone it belongs to, so the table above stays the map. Sizes
+are ratios for ordering, not a schedule.
+
+### First — three that are cheap and close a red cell each
+
+| | What | From | Bar |
+| --- | --- | --- | --- |
+| 1 | **An MSD string radix over the name arena.** The sort row is the only budget miss with its fix already located | M0 budget | Sort 1M under 120 ms, and the radix agrees with the comparison order it replaces over the adversarial name set — [an accelerator has to agree with the thing it accelerates](12-measurement.md#an-accelerator-has-to-agree-with-the-thing-it-accelerates) |
+| 2 | **The command palette.** A fuzzy filter over the one registry, in the text field that already exists, drawing the list the keyboard overlay already draws | M6 | Every registry entry reachable in three keystrokes; no frame over 8 ms while typing over the full set |
+| 3 | **The 1×1 pre-map probe**, so the scale is known before the first frame instead of after it | M0 | Frame 1 drawn at the final scale, with a golden frame at 125% to prove it |
+
+The palette is out of order on purpose. It is [rule 4](03-principles.md#4-discoverable-not-just-configurable)'s
+headline feature and it costs a fuzzy matcher, because `sk-cmd`'s registry, `Field`
+and the overlay were all built before it. Every command added after it is
+discoverable for free; every command added before it was not.
+
+### Then — the operations engine, which is the actual gap
+
+| | What | From | Bar |
+| --- | --- | --- | --- |
+| 4 | **Copy, move and permanent delete**, porting Spike E's engine into `sk-fs` behind the `Change` model the three existing mutations already use | M3 | The matrix stays green in CI — already a gate. Per-extent `copy_file_range` and the placement fallback chain survive as tests rather than being rediscovered |
+| 5 | **The queue: honest progress, a real ETA, pause and cancel** | M3, [rule 7](03-principles.md#7-honest-progress) | No frame over 8 ms while a 4 GiB copy runs; cancel leaves no partial file; the ETA's method written down beside the number it produces |
+| 6 | **A paste that pastes files, and Cut** — the row owed since the clipboard landed | M0 owed | A file copied in Nautilus pastes here, and the reverse, on GTK and Qt |
+| 7 | **Undo across copy and move**, and a visible history | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation, and undoing a copy never deletes a file that was already there |
+
+Four and five are one decision apart and should not be split: a copy with no
+progress is a frozen window on a 4 GiB file, and [rule 1](03-principles.md#1-never-block-the-frame)
+means the engine has to be on the pool from its first commit rather than moved
+there afterwards. This is also the group that makes the *worst frame in the
+product* worth fixing — 3.5–6.1 ms today, in the window where a 200,000-entry read
+lands, and [09-performance-budgets.md](09-performance-budgets.md#what-m0-measured)
+already names it as the frame to fix when the queue makes a read concurrent with an
+operation.
+
+### Then — the M0 tail, in this order and not another
+
+| | What | From | Bar |
+| --- | --- | --- | --- |
+| 8 | **X11, through `x11rb`** — window, keyboard through `xkbcommon-x11`, pointer, clipboard, scaling | M0 | Everything the Wayland backend does, at the same budgets, with the dependency ratchet in [07-dependencies.md](07-dependencies.md#budgets-and-enforcement) raised in the same commit |
+| 9 | **Drag-and-drop, as source and as target, on both display servers** | M0 | Spike D's pairs work or the failure is a documented compositor limitation with a fallback |
+| 10 | **IME through `text-input-v3`** | M0 | CJK composes into all three fields — filter, rename and the path bar |
+
+**Drag-and-drop is third of the three, and that is a constraint rather than a
+preference.** It sits behind X11 because XDND has five actions where Wayland has
+three, and an API designed against one dialect is wrong in a way that costs weeks
+to correct. It sits behind the operations engine because a drop that lands on a
+directory has to *copy or move something*, and until item 4 exists a drag is a
+gesture with nothing at the end of it. Its own design constraint is already
+recorded: three capabilities are [absent with no error attached](../spikes/d-platform-and-dnd/README.md#what-this-changed),
+so no policy above `sk-plat` may depend on `dnd_finished` arriving.
+
+### Then — the layout model, because it is the one that cannot be retrofitted
+
+| | What | From | Bar |
+| --- | --- | --- | --- |
+| 11 | **Tabs, the split-pane tree, and per-folder view settings** | M2 | A pane tree of any shape survives a resize and a scale change with no reflow above 8 ms |
+| 12 | **Session persistence**, and the config file that is a serialization of the same registry | M2, [rule 6](03-principles.md#6-state-survives-everything) | Every tab, pane, scroll offset, sort and filter survives `kill -9` |
+
+M2 says the layout model is the hardest thing to retrofit later, which is an
+argument for doing it earlier than this. The reason it is not earlier: a split pane
+whose two halves cannot copy a file between them is the demo version of the feature,
+and the operations engine is what makes the second pane worth having.
+
+### Owed, and cheap now that there is somewhere to run them
+
+Three rows claim a gate that does not exist. Each is a job in
+[check.yml](../.github/workflows/check.yml) rather than a milestone:
+
+- **A clean-container build**, which is the whole evidence behind *"no C toolchain
+  required"* in [07-dependencies.md](07-dependencies.md#budgets-and-enforcement).
+- **`cargo-deny`**, which is the whole evidence behind *"permissive licences only,
+  rejected at the gate"* in the same table.
+- **The forty-four GUI scenarios**, which need a compositor that will hand out
+  `zwp_virtual_keyboard_v1` on a runner with no seat. The answer is a headless
+  backend or nothing; until then a scenario is a person's job before pushing.
+
+### After those, and in this order
+
+**Search** (M4) over the index [Spike F](../spikes/f-index-and-search/README.md) said
+go on, then **quick look and the inspector** (M5), then **desktop citizenship** (M7)
+— FileManager1, udisks2, portals, the GoTo popup — then **M8**, whose first job is the
+performance regression gate that CI deliberately does not have yet.
+
+Two things are further down than their obvious priority, and for the same reason:
+**gestures** and **the grid view with thumbnails** are both large, both visible, and
+neither serves a rule that is currently unserved. A thumbnail is a decoder, a cache
+format and a sandbox — [ADR 0006](adr/0006-out-of-process-decoders.md) — and it is
+worth that when the file manager underneath it can already move a file.
 
 ## What comes next
 
