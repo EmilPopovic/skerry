@@ -480,7 +480,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 57
+FEWEST_SCENARIOS = 59
 
 
 def scenario(name, fresh: bool = False):
@@ -1502,11 +1502,14 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
 def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
     """A caret in two places at once is a keyboard nobody can predict.
 
-    Three fields take the keyboard — the filter, a name and a path — so all three
-    pairs are here. Opening one over another commits a pending rename, which is
-    what a click outside the field already did; and a secondary click *inside*
-    the path field belongs to the field, not to the compositor's window menu,
-    which the path bar being the title bar made the default answer.
+    **A field is left before another opens, and a keystroke cannot swap them.**
+    That used to be the other way round: `Ctrl+L` inside a rename field committed
+    the rename and opened the path bar, so a stray chord renamed a file to whatever
+    had been typed so far. A field now rejects what does not apply to it, and the
+    invariant holds because the second field never opens at all.
+
+    The filter is the exception and stays one: it is a `String` with no caret, not
+    a field, so a chord still reaches its command from inside it.
     """
     run.drive("sleep 500\nkey down\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
     naming = run.state()
@@ -1514,11 +1517,24 @@ def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
     if not original:
         raise Failure("F2 opened no field")
 
+    # A chord that would open another field does nothing at all, and — the part
+    # that matters — does not rename anything on the way.
     run.drive("key home\ntext two-\nsleep 150\nkey ctrl+l\nsleep 800\nkey f12\nsleep 200\n")
+    held = run.state()
+    expect(held, naming=f"two-{original}", path_entry="")
+    if (fixture / f"two-{original}").exists():
+        raise Failure("Ctrl+L committed a half-typed rename as a side effect")
+
+    # Leaving it first is what opens the other one.
+    run.drive("key escape\nsleep 250\nkey ctrl+l\nsleep 400\nkey f12\nsleep 200\n")
     swapped = run.state()
     expect(swapped, naming="", path_entry=str(fixture))
-    if not (fixture / f"two-{original}").exists():
-        raise Failure(f"the rename was abandoned rather than committed: {swapped}")
+    if (fixture / f"two-{original}").exists():
+        raise Failure("Escape committed the rename rather than abandoning it")
+
+    # And the same in the other direction: the path field rejects Ctrl+F.
+    run.drive("key ctrl+f\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), filtering="false", path_entry=str(fixture))
 
     # A secondary click in the field leaves it open and opens no menu at all.
     inside = aim(run, swapped, float(swapped["name_x"]) - 100.0, 22.0)
@@ -1528,26 +1544,24 @@ def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
     )
     expect(run.state(), menu="0", path_entry=str(fixture))
 
-    # The filter over the path bar, and the path bar over the filter. Each pair
-    # in both directions, because the guard was one-sided the first time.
-    run.drive("key ctrl+f\ntext al\nsleep 250\nkey f12\nsleep 150\n")
+    # The filter is not a field, so a chord still reaches its command from inside
+    # it — and opening a field from the filter closes the filter.
+    run.drive("key escape\nsleep 200\nkey ctrl+f\ntext al\nsleep 300\nkey f12\nsleep 150\n")
     expect(run.state(), filtering="true", path_entry="", filter="al")
     run.drive("key ctrl+l\nsleep 300\nkey f12\nsleep 150\n")
     expect(run.state(), filtering="false", filter="", path_entry=str(fixture))
-    run.drive("key ctrl+f\nsleep 250\nkey f12\nsleep 150\n")
-    expect(run.state(), filtering="true", path_entry="")
 
-    # And the filter over a rename.
-    run.drive("key escape\nsleep 150\nkey end\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    run.drive("key escape\nsleep 200\nkey ctrl+f\nsleep 250\nkey f2\nsleep 300\nkey f12\n")
+    run.drive("sleep 150\n")
     named = run.state()
     if not named["naming"]:
-        raise Failure(f"F2 opened no field: {named}")
-    run.drive("key ctrl+f\nsleep 300\nkey f12\nsleep 150\n")
-    expect(run.state(), naming="", filtering="true")
+        raise Failure(f"F2 from the filter opened no field: {named}")
+    expect(named, filtering="false")
 
-    # Navigating closes whatever is open: a field belongs to the directory it
-    # was opened in, and its subject is in that one.
-    run.drive("key escape\nsleep 150\nkey ctrl+l\nsleep 250\nkey alt+up\nsleep 800\nkey f12\nsleep 200\n")
+    # Navigating closes whatever is open: a field belongs to the directory it was
+    # opened in, and its subject is in that one. `Alt ↑` is a window-and-listing
+    # command, so it is one of the ones a field rejects — hence the Escape first.
+    run.drive("key escape\nsleep 200\nkey alt+up\nsleep 800\nkey f12\nsleep 200\n")
     left = run.state()
     expect(left, path_entry="", naming="", filtering="false")
     if left["path"] == str(fixture):
@@ -2203,6 +2217,77 @@ def rename_a_directory(run: Run, fixture: Path) -> None:
         raise Failure("the folder was not renamed")
     if (fixture / "photos.2024").exists():
         raise Failure("the old name is still there")
+
+
+@scenario("nothing-reaches-the-listing-while-a-name-is-being-typed", fresh=True)
+def a_field_rejects_the_rest(run: Run, fixture: Path) -> None:
+    """The reported defect: the selection moved under the name being typed.
+
+    Keys the field did not handle fell through to the registry and then to the
+    type-ahead, so `Ctrl+Backspace` — which was not a text operation yet — jumped
+    the cursor to another row. `Ctrl+Shift+N` made a folder, and `Ctrl+Z` walked
+    back the last operation on disk.
+    """
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    before = run.state()
+    rows = int(before["rows"])
+    run.drive("text file-1.txt\nsleep 400\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+    opened = run.state()
+    expect(opened, cursor="file-1.txt", naming="file-1.txt", selected="1")
+
+    # Every one of these used to reach the listing. None of them may now.
+    for chord in ["ctrl+shift+n", "alt+left", "alt+up", "f5", "ctrl+h", "alt+2", "f9"]:
+        run.drive(f"key {chord}\nsleep 200\nkey f12\nsleep 120\n")
+        after = run.state()
+        if not after["naming"]:
+            raise Failure(f"{chord} closed the rename field")
+        for key in ("cursor", "path", "rows", "hidden", "sort", "selected"):
+            if after[key] != opened[key]:
+                raise Failure(
+                    f"{chord} changed {key}: {opened[key]!r} became {after[key]!r}"
+                )
+
+    # And the diagnostic still gets through, which is how this scenario can see
+    # anything at all — plus the window's own commands, which is the other half of
+    # the line.
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 150\n")
+    ended = run.state()
+    expect(ended, naming="", rows=str(rows))
+
+
+@scenario("a-field-edits-text-by-word", fresh=True)
+def word_editing(run: Run, fixture: Path) -> None:
+    """Ctrl+Backspace, Ctrl+Shift+arrows and the field's own undo.
+
+    A word here is a **part of a name**: `file-1.txt` is three of them, because the
+    parts are what a person editing a filename edits. Going left skips the
+    separators and then the word, so from the end of `file-1.` the word behind the
+    caret is `1.` and not `.` — which is what GTK does and what makes a second
+    press remove `file-`'s last part rather than one character of punctuation.
+    """
+    run.drive("sleep 700\ntext file-1.txt\nsleep 500\nkey f2\nsleep 300\n")
+    run.drive("key end\nsleep 150\nkey ctrl+backspace\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="file-1.")
+
+    # The separators and then the word.
+    run.drive("key ctrl+shift+left\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), naming_selected="1.")
+
+    # And a Backspace over a selection takes all of it.
+    run.drive("key ctrl+backspace\nsleep 250\ntext two\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="file-two")
+
+    # The field's own undo takes back the run of typing, and leaves the file undo
+    # stack alone — `undo=false` is the whole point, because there has been no
+    # operation on disk to take back.
+    run.drive("key ctrl+z\nsleep 250\nkey f12\nsleep 150\n")
+    undone = run.state()
+    expect(undone, naming="file-", undo="false")
+
+    # Ctrl+Y puts it back.
+    run.drive("key ctrl+y\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="file-two")
+    run.drive("key escape\nsleep 250\n")
 
 
 @scenario("a-pointer-selects-text-in-the-path-field")

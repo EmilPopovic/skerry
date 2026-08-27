@@ -1139,14 +1139,14 @@ fn row_at(
         if !background.is_invisible() {
             painter.list.rect(pill, background, painter.px(metrics.radius));
         }
-        // **Not while a name is being typed over this row.** The field draws its
-        // own accent box, and the ring around the whole row put a second one
-        // around it — two nested rounded rectangles in the same colour, which
-        // reads as a rendering fault rather than as a focus ring. The field's box
-        // is the marker while it is up; the row still has its selected fill, so
-        // which row is being renamed is not in doubt.
-        let renaming_here = naming.is_some_and(|naming| naming.row == row);
-        if cursor == Some(id) && !renaming_here {
+        // **No focus ring anywhere while a name is being typed.** The ring means
+        // the keyboard is on this row, and while a field is open the keyboard is
+        // in the field — so on the row being renamed it drew a second accent box
+        // around the field's own, and on any *other* row it claimed the focus was
+        // somewhere it was not. The screenshot that prompted this had both: a
+        // field on one row and a ring on another. Rows keep their selected fill,
+        // so which ones are chosen is never in doubt.
+        if cursor == Some(id) && naming.is_none() {
             painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
         }
 

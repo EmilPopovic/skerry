@@ -537,6 +537,8 @@ const POINTER_EXEMPT: &[(&str, &str)] = &[
     ("field.copy", "a pointer has the middle-click selection and the drag"),
     ("field.cut", "a pointer has the drag; a menu over a field would close it"),
     ("field.paste", "a pointer has the middle-click paste"),
+    ("field.undo", "a field action; the pointer has no gesture for it either"),
+    ("field.redo", "a field action; the pointer has no gesture for it either"),
 ];
 
 /// The hint in the corner of the path bar, from the registry.
@@ -566,9 +568,12 @@ pub fn hint(registry: &Registry<App>) -> String {
 /// rather than actions.
 ///
 /// Every one of them is dimmed unless a field has the keyboard, which is what the
-/// palette shows. Their **names start with "In a field:"** for the same reason:
-/// the keyboard overlay is a reference, and four chords listed twice with no
-/// indication of when reads as a contradiction rather than as a scope.
+/// palette shows. Their **names end with ", in a field"** for the same reason: the
+/// keyboard overlay is a reference, and a chord listed twice with no indication of
+/// when reads as a contradiction rather than as a scope. At the end rather than the
+/// start, because the overlay truncates a long row — the qualifier first left
+/// `In a field: copy the selec…`, where the half that distinguishes it is the half
+/// that went.
 fn field(registry: &mut Registry<App>) {
     for spec in [
         CommandSpec {
@@ -594,6 +599,25 @@ fn field(registry: &mut Registry<App>) {
             keys: &["ctrl+x"],
             enabled: App::in_a_field,
             run: App::cut_text,
+        },
+        CommandSpec {
+            id: "field.undo",
+            name: "action.undo_text",
+            group: Group::Edit,
+            // **The other dangerous one.** `Ctrl+Z` while typing a name walked
+            // back the last operation on disk, which is the opposite of what
+            // anybody means by it inside a field.
+            keys: &["ctrl+z"],
+            enabled: App::in_a_field,
+            run: App::undo_text,
+        },
+        CommandSpec {
+            id: "field.redo",
+            name: "action.redo_text",
+            group: Group::Edit,
+            keys: &["ctrl+shift+z", "ctrl+y"],
+            enabled: App::in_a_field,
+            run: App::redo_text,
         },
         CommandSpec {
             id: "field.paste",

@@ -14,6 +14,16 @@
 //! with the name selected and the extension not, so typing replaces the part being
 //! changed. Before it, renaming `holiday-2024-portugal.jpeg` was twenty-six
 //! presses of Backspace, or a `Ctrl+U` that took the extension with it.
+//!
+//! **A word here is a part of a name.** `holiday-2024.jpeg` is three of them,
+//! because the parts are what somebody editing a filename edits — a word rule that
+//! breaks only on spaces makes `Ctrl ←` jump the whole name, which is what `Home`
+//! already does.
+//!
+//! And the history is the field's own. `Ctrl+Z` while typing a name means "undo
+//! what I just typed"; the same chord outside a field walks back the last operation
+//! on disk, and letting it through from inside one is how a rename undid somebody's
+//! Move to Trash.
 
 use sk_plat::{Key, KeyEvent, Named};
 
@@ -30,13 +40,63 @@ pub struct Field {
     /// definition: every edit collapses to the caret, and the anchor is the thing
     /// that moved away from it.
     pub anchor: Option<usize>,
+    /// States to go back to, oldest first.
+    history: Vec<Snapshot>,
+    /// States to go forward to, most recently undone last.
+    redo: Vec<Snapshot>,
+    /// What the last edit was, so a run of typing groups into one undo entry.
+    last: Edit,
+}
+
+/// One state of a field, for its own undo.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Snapshot {
+    text: String,
+    caret: usize,
+}
+
+/// What kind of edit an operation is, for grouping the undo history.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Edit {
+    /// Characters arriving one at a time. A run of them is one entry.
+    Typing,
+    /// Anything else: a deletion, a paste, a replacement.
+    #[default]
+    Structural,
+}
+
+/// How many states a field remembers.
+///
+/// A field holds one line and lives for a few seconds. Sixty-four is more edits
+/// than a filename receives and a bounded amount of memory either way.
+const HISTORY: usize = 64;
+
+/// Whether a character separates two words of a name.
+///
+/// **A filename's own punctuation, not prose's.** `holiday-2024.jpeg` is four
+/// words to somebody editing it, and a word rule that only breaks on spaces makes
+/// `Ctrl ←` jump the whole name — which is what `Home` already does.
+fn is_separator(character: char) -> bool {
+    character.is_whitespace() || matches!(character, '-' | '_' | '.' | ',' | '(' | ')' | '[' | ']')
 }
 
 impl Field {
+    /// The parts every constructor shares.
+    fn empty() -> Self {
+        Self {
+            text: String::new(),
+            caret: 0,
+            anchor: None,
+            history: Vec::new(),
+            redo: Vec::new(),
+            last: Edit::Structural,
+        }
+    }
+
     /// A field holding `text`, with the caret at the end and nothing selected.
     #[must_use]
     pub fn new(text: String) -> Self {
-        Self { caret: text.len(), text, anchor: None }
+        Self { caret: text.len(), text, anchor: None, ..Self::empty() }
     }
 
     /// A field holding a filename, with everything before the extension selected.
@@ -55,7 +115,7 @@ impl Field {
     #[must_use]
     pub fn naming(text: String) -> Self {
         let end = stem_end(&text);
-        Self { caret: end, anchor: Some(0), text }
+        Self { caret: end, anchor: Some(0), text, ..Self::empty() }
     }
 
     /// A field holding a name with all of it selected.
@@ -65,7 +125,7 @@ impl Field {
     /// parts to it.
     #[must_use]
     pub fn naming_all(text: String) -> Self {
-        Self { caret: text.len(), anchor: Some(0), text }
+        Self { caret: text.len(), anchor: Some(0), text, ..Self::empty() }
     }
 
     /// Selects everything.
@@ -143,6 +203,8 @@ impl Field {
 
     /// Inserts text at the caret, replacing the selection if there is one.
     pub fn insert(&mut self, text: &str) {
+        // One character at a time is typing and groups; a paste is not.
+        self.remember(if text.chars().nth(1).is_none() { Edit::Typing } else { Edit::Structural });
         self.take_selection();
         self.text.insert_str(self.caret, text);
         self.caret += text.len();
@@ -150,6 +212,7 @@ impl Field {
 
     /// Removes the selection, or the character before the caret.
     pub fn backspace(&mut self) {
+        self.remember(Edit::Structural);
         if self.take_selection() {
             return;
         }
@@ -160,6 +223,7 @@ impl Field {
 
     /// Removes the selection, or the character after the caret.
     pub fn delete(&mut self) {
+        self.remember(Edit::Structural);
         if self.take_selection() {
             return;
         }
@@ -197,9 +261,111 @@ impl Field {
 
     /// Removes everything before the caret.
     pub fn clear_before_caret(&mut self) {
+        self.remember(Edit::Structural);
         self.take_selection();
         self.text.drain(..self.caret);
         self.caret = 0;
+    }
+
+    /// Moves the caret one word, or collapses a selection and then moves.
+    pub fn step_word(&mut self, forward: bool) {
+        self.anchor = None;
+        self.caret = self.word_boundary(forward);
+    }
+
+    /// Moves the caret one word, keeping or starting a selection.
+    pub fn extend_word(&mut self, forward: bool) {
+        let anchor = self.anchor.unwrap_or(self.caret);
+        self.caret = self.word_boundary(forward);
+        self.anchor = Some(anchor);
+    }
+
+    /// Removes the selection, or the word on one side of the caret.
+    pub fn delete_word(&mut self, forward: bool) {
+        self.remember(Edit::Structural);
+        if self.take_selection() {
+            return;
+        }
+        let to = self.word_boundary(forward);
+        let (start, end) = (to.min(self.caret), to.max(self.caret));
+        self.text.drain(start..end);
+        self.caret = start;
+    }
+
+    /// Where the caret lands after one word in `forward`'s direction.
+    ///
+    /// **Skip the separators, then the word.** Going right from inside
+    /// `holiday-2024.jpeg` stops at each `-` and `.` boundary rather than at the
+    /// end, which is what makes a word operation useful on a filename — the parts
+    /// of a name are what a person edits.
+    fn word_boundary(&self, forward: bool) -> usize {
+        let bytes: Vec<(usize, char)> = self.text.char_indices().collect();
+        if forward {
+            let mut at =
+                bytes.iter().position(|(index, _)| *index >= self.caret).unwrap_or(bytes.len());
+            while at < bytes.len() && is_separator(bytes[at].1) {
+                at += 1;
+            }
+            while at < bytes.len() && !is_separator(bytes[at].1) {
+                at += 1;
+            }
+            bytes.get(at).map_or(self.text.len(), |(index, _)| *index)
+        } else {
+            let mut at =
+                bytes.iter().position(|(index, _)| *index >= self.caret).unwrap_or(bytes.len());
+            while at > 0 && is_separator(bytes[at - 1].1) {
+                at -= 1;
+            }
+            while at > 0 && !is_separator(bytes[at - 1].1) {
+                at -= 1;
+            }
+            bytes.get(at).map_or(0, |(index, _)| *index)
+        }
+    }
+
+    /// Takes back the last edit, if there is one to take back.
+    ///
+    /// A field's own history, unrelated to the one over files: `Ctrl+Z` while
+    /// typing a name means "undo what I just typed", and the alternative — the
+    /// chord reaching the file undo stack — is how a rename walked back somebody's
+    /// last Move to Trash.
+    pub fn undo(&mut self) -> bool {
+        let Some(previous) = self.history.pop() else { return false };
+        self.redo.push(Snapshot { text: self.text.clone(), caret: self.caret });
+        self.text = previous.text;
+        self.caret = previous.caret.min(self.text.len());
+        self.anchor = None;
+        self.last = Edit::Structural;
+        true
+    }
+
+    /// Does the last undone edit again.
+    pub fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else { return false };
+        self.history.push(Snapshot { text: self.text.clone(), caret: self.caret });
+        self.text = next.text;
+        self.caret = next.caret.min(self.text.len());
+        self.anchor = None;
+        self.last = Edit::Structural;
+        true
+    }
+
+    /// Records the state before an edit, grouping a run of typing into one entry.
+    ///
+    /// A person who typed ten characters and pressed `Ctrl+Z` expects the ten to
+    /// go, not the last one — so consecutive inserts share a snapshot and anything
+    /// else starts a new one.
+    fn remember(&mut self, kind: Edit) {
+        let grouped = kind == Edit::Typing && self.last == Edit::Typing;
+        self.last = kind;
+        if grouped {
+            return;
+        }
+        self.redo.clear();
+        if self.history.len() == HISTORY {
+            self.history.remove(0);
+        }
+        self.history.push(Snapshot { text: self.text.clone(), caret: self.caret });
     }
 
     /// The text before the caret, for measuring where to draw it.
@@ -231,6 +397,15 @@ impl Field {
             Key::Named(Named::Right) if event.mods.only_shift() => self.extend(true),
             Key::Named(Named::Home) if event.mods.only_shift() => self.extend_to_end(false),
             Key::Named(Named::End) if event.mods.only_shift() => self.extend_to_end(true),
+            // A word at a time, with and without Shift, and a word deleted from
+            // either side. `Ctrl+Backspace` is the one a person reaches for most
+            // and the one whose absence sent the keystroke to the listing.
+            Key::Named(Named::Left) if event.mods.only_ctrl() => self.step_word(false),
+            Key::Named(Named::Right) if event.mods.only_ctrl() => self.step_word(true),
+            Key::Named(Named::Left) if event.mods.ctrl_shift() => self.extend_word(false),
+            Key::Named(Named::Right) if event.mods.ctrl_shift() => self.extend_word(true),
+            Key::Named(Named::Backspace) if event.mods.only_ctrl() => self.delete_word(false),
+            Key::Named(Named::Delete) if event.mods.only_ctrl() => self.delete_word(true),
             // Readline's, and every terminal's, and the only way to clear this
             // field in one key: there is no selection in it, so renaming
             // `holiday-2024-portugal.jpeg` was twenty-six presses of Backspace.
@@ -404,6 +579,122 @@ mod tests {
         assert_eq!(field.selected(), "abcdef");
         field.insert("x");
         assert_eq!(field.text, "x");
+    }
+
+    /// A filename's parts are its words, so a word operation stops at each of
+    /// them rather than jumping the whole name — which is what `Home` does.
+    #[test]
+    fn a_word_is_a_part_of_a_name() {
+        let mut field = Field::new("holiday-2024.jpeg".to_owned());
+        field.jump(false);
+        let mut stops = vec![field.caret];
+        for _ in 0..5 {
+            field.step_word(true);
+            stops.push(field.caret);
+        }
+        // `holiday` `-2024` `.jpeg`, and then the end, twice over.
+        assert_eq!(stops, vec![0, 7, 12, 17, 17, 17]);
+
+        let mut back = vec![field.caret];
+        for _ in 0..4 {
+            field.step_word(false);
+            back.push(field.caret);
+        }
+        assert_eq!(back, vec![17, 13, 8, 0, 0]);
+    }
+
+    #[test]
+    fn ctrl_backspace_takes_the_word_before_the_caret() {
+        let mut field = Field::new("holiday-2024.jpeg".to_owned());
+        field.delete_word(false);
+        assert_eq!(field.text, "holiday-2024.");
+        field.delete_word(false);
+        assert_eq!(field.text, "holiday-");
+        field.delete_word(false);
+        assert_eq!(field.text, "");
+    }
+
+    #[test]
+    fn ctrl_delete_takes_the_word_after_the_caret() {
+        let mut field = Field::new("holiday-2024.jpeg".to_owned());
+        field.jump(false);
+        field.delete_word(true);
+        assert_eq!(field.text, "-2024.jpeg");
+        assert_eq!(field.caret, 0);
+    }
+
+    #[test]
+    fn ctrl_shift_and_an_arrow_selects_a_word() {
+        let mut field = Field::new("holiday-2024.jpeg".to_owned());
+        field.jump(false);
+        field.extend_word(true);
+        assert_eq!(field.selected(), "holiday");
+        field.extend_word(true);
+        assert_eq!(field.selected(), "holiday-2024");
+    }
+
+    /// A run of typing is one entry, because somebody who typed ten characters
+    /// and pressed `Ctrl+Z` means the ten.
+    #[test]
+    fn a_run_of_typing_undoes_as_one_edit() {
+        let mut field = Field::new(String::new());
+        for character in ["n", "o", "t", "e", "s"] {
+            field.insert(character);
+        }
+        assert_eq!(field.text, "notes");
+        assert!(field.undo());
+        assert_eq!(field.text, "");
+        assert!(!field.undo(), "there was nothing else to take back");
+    }
+
+    #[test]
+    fn a_deletion_is_its_own_entry_and_redo_puts_it_back() {
+        let mut field = Field::naming("notes.txt".to_owned());
+        field.insert("plan");
+        assert_eq!(field.text, "plan.txt");
+        field.delete_word(false);
+        assert_eq!(field.text, ".txt");
+
+        assert!(field.undo());
+        assert_eq!(field.text, "plan.txt");
+        assert!(field.undo());
+        assert_eq!(field.text, "notes.txt", "the selected stem came back");
+
+        assert!(field.redo());
+        assert_eq!(field.text, "plan.txt");
+        assert!(field.redo());
+        assert_eq!(field.text, ".txt");
+        assert!(!field.redo());
+    }
+
+    /// Typing after an undo drops the redo branch, which is what every editor
+    /// does — a redo onto text that has moved on is a redo onto nothing.
+    #[test]
+    fn typing_after_an_undo_drops_the_redo_branch() {
+        let mut field = Field::new("abc".to_owned());
+        field.insert("d");
+        assert!(field.undo());
+        assert_eq!(field.text, "abc");
+        field.insert("z");
+        assert!(!field.redo());
+        assert_eq!(field.text, "abcz");
+    }
+
+    /// The history is bounded, because a field that remembers everything is a
+    /// field that grows without one.
+    #[test]
+    fn the_history_is_bounded() {
+        let mut field = Field::new(String::new());
+        for index in 0..(super::HISTORY * 3) {
+            // Structural each time, so every one is its own entry.
+            field.insert(&format!("{index} "));
+        }
+        let mut taken = 0;
+        while field.undo() {
+            taken += 1;
+            assert!(taken <= super::HISTORY, "the history is not bounded");
+        }
+        assert_eq!(taken, super::HISTORY);
     }
 
     /// The defect this shape exists to prevent: `café` is five bytes and four

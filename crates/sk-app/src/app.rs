@@ -1032,6 +1032,30 @@ impl App {
         if self.edits.naming.is_some() && self.name_key(event) {
             return;
         }
+        // **A field swallows everything that acts on files or on the listing.**
+        // Anything it did not handle used to fall through to the registry and then
+        // to the type-ahead — so `Ctrl+Backspace` in a rename field, which was not
+        // a text operation yet, jumped the cursor to another row and changed the
+        // selection under the name being typed. `Ctrl+Shift+N` made a folder,
+        // `Delete` was only safe because the field claimed it first, and `Ctrl+Z`
+        // walked back the last operation on disk.
+        //
+        // Two things still get through, and the line is what they act on: a
+        // command in [`Group::Window`], because a window that ignores its own
+        // close chord reads as frozen, and the diagnostic report, for the reason
+        // the menu lets it through — a report that cannot be taken while a field
+        // is open cannot describe one.
+        if self.field_scope() == Scope::Field {
+            if let Some(command) = commands.resolve(event, Scope::Global)
+                && commands
+                    .describe(command)
+                    .is_some_and(|it| it.group == sk_cmd::Group::Window || it.id == "help.dump")
+            {
+                commands.run(command, self);
+            }
+            self.dirty = true;
+            return;
+        }
         // The filter takes the keyboard while it is open, before the registry
         // sees it: a filter you cannot type the letter `h` into because `Ctrl+H`
         // is bound is not a filter. Bare characters only, so every chord still
@@ -1103,6 +1127,20 @@ impl App {
             return;
         }
         self.window.set_selection(Selection::Clipboard, Content::text(&selected));
+    }
+
+    /// Takes back the last edit in the field with the keyboard.
+    pub(crate) fn undo_text(&mut self) {
+        if self.focused_field().is_some_and(crate::field::Field::undo) {
+            self.dirty = true;
+        }
+    }
+
+    /// Does the last undone edit in the field again.
+    pub(crate) fn redo_text(&mut self) {
+        if self.focused_field().is_some_and(crate::field::Field::redo) {
+            self.dirty = true;
+        }
     }
 
     /// Inserts the clipboard's text into the field with the keyboard.

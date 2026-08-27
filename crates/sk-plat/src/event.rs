@@ -59,6 +59,18 @@ impl Modifiers {
         !self.ctrl && !self.shift && !self.alt && !self.logo
     }
 
+    /// Whether Control is held and nothing else is.
+    #[must_use]
+    pub const fn only_ctrl(self) -> bool {
+        self.ctrl && !self.shift && !self.alt && !self.logo
+    }
+
+    /// Whether Control and Shift are held and nothing else is.
+    #[must_use]
+    pub const fn ctrl_shift(self) -> bool {
+        self.ctrl && self.shift && !self.alt && !self.logo
+    }
+
     /// Whether Shift is held and nothing else is.
     ///
     /// Its own question because Shift is the one modifier that also changes what

@@ -37,8 +37,15 @@ alternative is a hand-written check in the event path, which is a binding no pal
 find and no keymap can rebind — the same drift this rule exists to prevent, arriving through
 the back door.
 
+A text field goes further and **rejects what does not apply to it**: while one has the
+keyboard, only its own editing keys, the field-scoped commands, Enter, Escape, the window's
+own commands and the diagnostic report do anything. Everything else is swallowed. Falling
+through instead is how `Ctrl+Backspace` in a rename field moved the selection under the name
+being typed, and how `Ctrl+Shift+N` made a folder in the middle of one.
+
 > **Fails if:** a menu item or a setting exists that the palette cannot find, or a chord
-> behaves differently somewhere the registry does not know about.
+> behaves differently somewhere the registry does not know about, or a key that means
+> nothing in a text field does something outside it.
 
 ### 3. Everything is reversible
 
