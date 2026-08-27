@@ -43,9 +43,19 @@ own commands and the diagnostic report do anything. Everything else is swallowed
 through instead is how `Ctrl+Backspace` in a rename field moved the selection under the name
 being typed, and how `Ctrl+Shift+N` made a folder in the middle of one.
 
+Having the keyboard and being in effect are **two different things**, and a mode that
+conflates them undoes work when it closes. The find field is the case: its box stops taking
+keys the moment another field opens, and the rows it hid stay hidden. While those were one
+flag, `F2` on a row somebody had just searched for un-narrowed the list as it took the
+keyboard — so the field opened over that file's position among all four thousand entries,
+screens below the single match they were looking at. The answer is not a stack of nested
+modes, which is a second thing to reason about at every keystroke; it is one flag per
+question.
+
 > **Fails if:** a menu item or a setting exists that the palette cannot find, or a chord
 > behaves differently somewhere the registry does not know about, or a key that means
-> nothing in a text field does something outside it.
+> nothing in a text field does something outside it, or a field closing puts back state
+> that was never its to hold.
 
 ### 3. Everything is reversible
 

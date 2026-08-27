@@ -596,15 +596,6 @@ impl Pane {
         self.filter = filter;
         self.reorder(jobs);
         self.forget_hidden_cursor();
-        // A cursor the filter hid leaves nothing focused, and `Enter` on a list
-        // showing exactly one match then did nothing at all — the command's
-        // `enabled` reads `focused()`, which falls back to a selection that is
-        // usually empty. The first row is the only defensible answer.
-        if self.selection.cursor().is_none()
-            && let Some(first) = self.listing.at(0)
-        {
-            self.selection.set_cursor(Some(first));
-        }
         true
     }
 
@@ -622,6 +613,17 @@ impl Pane {
         let cursor = self.selection.cursor();
         if cursor.is_some_and(|id| self.listing.row_of(id).is_none()) {
             self.selection.set_cursor(None);
+        }
+        // A cursor the filter hid leaves nothing focused, and `Enter` on a list
+        // showing exactly one match then did nothing at all — the command's
+        // `enabled` reads `focused()`, which falls back to a selection that is
+        // usually empty. The first row is the only defensible answer, and it
+        // belongs here rather than beside one caller: a listing large enough to
+        // sort on a job lands its order later, and that path had no answer at all.
+        if self.selection.cursor().is_none()
+            && let Some(first) = self.listing.at(0)
+        {
+            self.selection.set_cursor(Some(first));
         }
     }
 

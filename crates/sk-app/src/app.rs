@@ -1477,9 +1477,12 @@ impl App {
     /// rather than a field, `menu_key` has the keyboard while it is up, and
     /// closing a filter because somebody right-clicked would lose their filter.
     fn claim_keyboard(&mut self, keep: Claim) {
-        if keep != Claim::Filter && self.filtering {
-            self.filtering = false;
-            self.pane.set_filter(String::new(), &self.jobs);
+        // **The filter box loses the keyboard; the filter stays applied.** Two
+        // things behind one flag: closing the box used to un-narrow the list, so
+        // `F2` on a row that was found by searching renamed it in a list where it
+        // had jumped to wherever it sits among all the others — usually screens
+        // away from where it was aimed at.
+        if keep != Claim::Filter && std::mem::take(&mut self.filtering) {
             self.dirty = true;
         }
         if keep != Claim::Naming && self.edits.naming.is_some() {

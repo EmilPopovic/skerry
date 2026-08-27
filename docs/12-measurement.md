@@ -619,3 +619,16 @@ every device tested; `Sort 1M entries < 120 ms` is 191 ms at best on reference
 hardware; and "an external `rm -rf` reflected within 100 ms" measures the
 deletion rather than the notification, so it passes at 2,000 files and fails at
 30,000. Each is recorded as unmet. None was quietly widened.
+
+## A selector that matches nothing has to fail, not select nothing
+
+`tools/gui-test` took scenario names as substrings and silently ran none when a
+name matched nothing. Asking it for a scenario that had been renamed printed
+`0 passed, 0 failed` and exited 0. It cost ten minutes here — long enough to
+believe a filter test had passed and move on — and in CI it would cost however
+long it took somebody to notice a job that had asserted nothing since the rename.
+
+The general shape is the one this document keeps returning to: **an invocation
+that cannot fail has measured nothing.** A filter over a set of tests is an
+invocation, the same as the tests themselves. It now exits 2 and names what it
+could not find.

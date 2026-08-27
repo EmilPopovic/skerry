@@ -480,7 +480,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 60
+FEWEST_SCENARIOS = 61
 
 
 def scenario(name, fresh: bool = False):
@@ -1409,6 +1409,72 @@ def filter_narrows_the_list(run: Run, fixture: Path) -> None:
         raise Failure(f"{state['rows']} rows after clearing, wanted {everything}")
 
 
+@scenario("a-filter-outlives-the-field-that-typed-it", fresh=True)
+def a_filter_outlives_the_field_that_typed_it(run: Run, fixture: Path) -> None:
+    """Renaming a row you searched for renames it where you found it.
+
+    **Its own fixture, long enough that the unfiltered row is off screen.** The
+    defect this exists for needs the two to be screens apart: `F2` used to clear
+    the filter as it took the keyboard, so the row being renamed went back to
+    wherever it sits among all the others, and the field opened there — a couple
+    of screens below the one match a person had just narrowed the list down to.
+
+    Having the keyboard and being applied were one flag. They are two now: the
+    box stops taking keys, the rows it hid stay hidden.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    for index in range(200):
+        (fixture / f"filler-{index:03}.txt").write_text("x")
+    (fixture / "zebra-target.txt").write_text("x")
+    for _ in range(40):
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+        filled = run.state()
+        if int(filled["rows"]) > 200:
+            break
+    else:
+        raise Failure(f"the filler files never arrived: {filled['rows']} rows")
+    everything = int(filled["rows"])
+    on_screen = float(filled["body_height"]) / float(filled["row_h"])
+    if everything - on_screen < on_screen:
+        raise Failure(f"{everything} rows over {on_screen:.0f} on screen is not two screens")
+
+    # One match, and the cursor goes to it: a filter that leaves the focus on a
+    # row it just hid is a filter you cannot press F2 in.
+    run.drive("key ctrl+f\ntext zebra\nsleep 500\nkey f12\nsleep 200\n")
+    found = run.state()
+    expect(found, filtering="true", filter="zebra", rows="1", cursor_row="0")
+    if found["cursor"] != "zebra-target.txt":
+        raise Failure(f"the filter left the cursor on {found['cursor']!r}")
+
+    # The whole point. The field opens on row 0, where the match is — not on row
+    # 200, where the file is when nothing is filtered.
+    run.drive("key f2\nsleep 400\nkey f12\nsleep 200\n")
+    naming = run.state()
+    expect(
+        naming,
+        filtering="false",
+        filter="zebra",
+        rows="1",
+        naming_row="0",
+        naming="zebra-target.txt",
+        naming_selected="zebra-target",
+    )
+    if float(naming["scroll"]) != float(found["scroll"]):
+        raise Failure(f"the list scrolled from {found['scroll']} to {naming['scroll']}")
+
+    # And it renames the file it was aimed at.
+    run.drive("text zebra-renamed\nkey enter\nsleep 600\nkey f12\nsleep 200\n")
+    done = run.state()
+    expect(done, naming="", filter="zebra", rows="1")
+    if not (fixture / "zebra-renamed.txt").exists():
+        raise Failure("the rename did not land")
+
+    # Escape is what drops a filter, and the field committed on Enter has already
+    # gone — so this one reaches the list, where Escape means never mind.
+    run.drive("key escape\nsleep 400\nkey f12\nsleep 200\n")
+    expect(run.state(), filter="", rows=str(everything))
+
+
 def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, float]:
     """Where the sidebar row called `label` is, found by hovering down it.
 
@@ -1545,13 +1611,18 @@ def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
     expect(run.state(), menu="0", path_entry=str(fixture))
 
     # The filter is not a field, so a chord still reaches its command from inside
-    # it — and opening a field from the filter closes the filter.
+    # it — and opening a field takes the keyboard off the filter box without
+    # putting back the rows it hid. See a-filter-outlives-the-field-that-typed-it.
     run.drive("key escape\nsleep 200\nkey ctrl+f\ntext al\nsleep 300\nkey f12\nsleep 150\n")
     expect(run.state(), filtering="true", path_entry="", filter="al")
     run.drive("key ctrl+l\nsleep 300\nkey f12\nsleep 150\n")
-    expect(run.state(), filtering="false", filter="", path_entry=str(fixture))
+    expect(run.state(), filtering="false", filter="al", path_entry=str(fixture))
 
-    run.drive("key escape\nsleep 200\nkey ctrl+f\nsleep 250\nkey f2\nsleep 300\nkey f12\n")
+    # Escape leaves the path bar, and a second drops the filter it never touched.
+    run.drive("key escape\nsleep 250\nkey escape\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), filter="", path_entry="")
+
+    run.drive("key ctrl+f\nsleep 250\nkey f2\nsleep 300\nkey f12\n")
     run.drive("sleep 150\n")
     named = run.state()
     if not named["naming"]:
@@ -2531,6 +2602,13 @@ def main(argv: list[str]) -> int:
         if not binary.is_file():
             print(f"missing {binary}; run `cargo build --release` first")
             return 2
+
+    # A needle that names nothing used to select nothing and exit 0, so a renamed
+    # scenario left every invocation that asked for it by name green while running
+    # none of it. It cost me ten minutes believing a filter test had passed.
+    if unmatched := [n for n in wanted if not any(n in name for name in SCENARIOS)]:
+        print(f"no scenario matches {', '.join(repr(n) for n in unmatched)}")
+        return 2
 
     if len(SCENARIOS) < FEWEST_SCENARIOS:
         print(

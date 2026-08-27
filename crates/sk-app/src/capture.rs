@@ -147,9 +147,19 @@ struct Overlays {
 /// the **last** dot, so what is offered is `archive.tar` and `.gz` is kept. A name
 /// with one extension would look the same whichever dot the rule used.
 fn sample_naming(pane: &mut Pane) -> Option<crate::edit::Naming> {
-    let row = (0..pane.listing.rows()).find(|row| {
-        pane.listing.at(*row).is_some_and(|id| pane.listing.name(id).contains(".tar."))
-    })?;
+    // Two dots where there are two to be had, because a stem selection that stops
+    // at the *last* dot is what this frame is for. Any extension otherwise: a
+    // filtered view does not hold `archive.tar.gz`, and asking for it anyway
+    // rendered a focus ring where the field was supposed to be.
+    fn has_extension(name: &str) -> bool {
+        name.rfind('.').is_some_and(|dot| dot > 0)
+    }
+    let name_at = |row: &usize| pane.listing.at(*row).map(|id| pane.listing.name(id));
+    let mut rows = 0..pane.listing.rows();
+    let row = rows
+        .clone()
+        .find(|row| name_at(row).is_some_and(|name| name.contains(".tar.")))
+        .or_else(|| rows.find(|row| name_at(row).is_some_and(has_extension)))?;
     let id = pane.listing.at(row)?;
     let name = pane.listing.name(id).to_owned();
     // The cursor goes here too, because a rename always happens on the focused
@@ -318,7 +328,11 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 // having a golden frame of, since it is the one with two of the
                 // four dimmed.
                 tools: [false, false, true, true],
-                filtering: request.filter,
+                // **The filter is applied; the box only sometimes has the
+                // keyboard.** `--filter --rename` is the state a rename started
+                // from a search is in, and the frame that would catch its panel
+                // going back to accent while the caret is somewhere else.
+                filtering: request.filter && !request.rename,
                 types: Some(&types),
                 window: sk_plat::WindowState {
                     activated: true,

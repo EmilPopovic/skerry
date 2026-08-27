@@ -156,8 +156,8 @@ pub fn draw(
     header(painter, pane, layout);
     body(painter, pane, layout, now, chrome);
     status(painter, pane, layout, chrome, diagnostics);
-    if chrome.filtering {
-        find_popup(painter, pane, layout);
+    if chrome.filtering || !pane.filter.is_empty() {
+        find_popup(painter, pane, layout, chrome.filtering);
     }
     if chrome.stats {
         stats_overlay(painter, pane, layout, diagnostics);
@@ -548,7 +548,7 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
 ///
 /// The count comes with it, because "no matches" and "one match" are the two
 /// answers a filter is asked for and neither is visible in the list itself.
-fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
+fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, focused: bool) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let count = i18n::format(
@@ -569,14 +569,13 @@ fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
     panel(painter, area);
     // An accent outline rather than a tinted strip somewhere else: the border is
     // on the thing that has the keyboard, which is what makes it a mode marker
-    // rather than a decoration.
+    // rather than a decoration. Dim once the keyboard has gone elsewhere and the
+    // filter is only still narrowing the list — the panel stays, because a list
+    // showing 12 of 4,000 rows with nothing on screen saying so is a list that
+    // looks broken.
+    let border = if focused { theme.palette.accent } else { theme.palette.divider };
     let outline = painter.rect(area.x, area.y, area.width, area.height);
-    painter.list.stroke(
-        outline,
-        theme.palette.accent,
-        painter.px(metrics.radius),
-        painter.snap(1.0).max(1.0),
-    );
+    painter.list.stroke(outline, border, painter.px(metrics.radius), painter.snap(1.0).max(1.0));
 
     let baseline = painter.baseline(area.y, area.height, metrics.path_size);
     let counted = TextStyle::new(metrics.header_size, theme.palette.dim).right();
@@ -590,8 +589,13 @@ fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
         let room = field.width - FIND_INSET * 2.0;
         line(painter, i18n::lookup("find.prompt"), prompt, field.x + FIND_INSET, room, baseline);
     }
-    let style = TextStyle::new(metrics.path_size, theme.palette.text);
-    let view = FieldView::plain(&pane.filter, pane.filter.len());
+    let text = if focused { theme.palette.text } else { theme.palette.dim };
+    let style = TextStyle::new(metrics.path_size, text);
+    let view = if focused {
+        FieldView::plain(&pane.filter, pane.filter.len())
+    } else {
+        FieldView::unfocused(&pane.filter)
+    };
     field_text(painter, field, view, style, FIND_INSET, baseline);
 }
 
@@ -645,20 +649,26 @@ fn name_field_at(
 #[derive(Clone, Copy)]
 struct FieldView<'a> {
     text: &'a str,
-    caret: usize,
+    /// `None` when the field does not have the keyboard, and draws no caret.
+    caret: Option<usize>,
     selection: Option<(usize, usize)>,
 }
 
 impl<'a> From<&'a Field> for FieldView<'a> {
     fn from(field: &'a Field) -> Self {
-        Self { text: &field.text, caret: field.caret, selection: field.selection() }
+        Self { text: &field.text, caret: Some(field.caret), selection: field.selection() }
     }
 }
 
 impl<'a> FieldView<'a> {
     /// A field with no selection, for the filter.
     const fn plain(text: &'a str, caret: usize) -> Self {
-        Self { text, caret, selection: None }
+        Self { text, caret: Some(caret), selection: None }
+    }
+
+    /// A field the keyboard has left, still showing what was typed into it.
+    const fn unfocused(text: &'a str) -> Self {
+        Self { text, caret: None, selection: None }
     }
 }
 
@@ -674,7 +684,10 @@ fn field_text(
     inset: f32,
     baseline: f32,
 ) {
-    let (text, caret) = (field.text, field.caret);
+    let text = field.text;
+    // With no caret there is nothing to scroll to, so the end of the text is what
+    // a too-narrow box shows.
+    let caret = field.caret.unwrap_or(text.len());
     let theme = *painter.theme;
     let room = area.width - inset * 2.0;
     // Shaping what is before the caret is the only measurement that survives a
@@ -700,8 +713,10 @@ fn field_text(
     }
     let inner = painter.rect(area.x + inset - scroll, 0.0, full.max(room) + scroll, 0.0);
     painter.label(text, style, inner, baseline);
-    let caret = painter.caret(area.x + inset - scroll + before, baseline, style.size);
-    painter.list.rect(caret, theme.palette.accent, 0.0);
+    if field.caret.is_some() {
+        let caret = painter.caret(area.x + inset - scroll + before, baseline, style.size);
+        painter.list.rect(caret, theme.palette.accent, 0.0);
+    }
     painter.list.pop_clip();
 }
 
