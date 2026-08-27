@@ -56,6 +56,40 @@ icon long before they notice a frame time.
 - Single-instance behaviour over the same bus name: opening a folder reuses the running
   window as a new tab, with `--new-window` to opt out.
 
+## Where the sidebar's contents come from
+
+Three files, all plain text, all written by other programs, none of them behind
+an API:
+
+- **`user-dirs.dirs`**, from the XDG user-directories specification. It is the
+  reason Downloads is called `Descargas` on a Spanish desktop, and the reason
+  finding it by the English name is not our business. Only the directories that
+  exist are shown: a fresh account has every key in the file and half the
+  directories missing.
+- **GTK's `bookmarks`** — `$XDG_CONFIG_HOME/gtk-3.0/bookmarks`. Not a
+  specification and not GTK the library: a list of URIs, one per line, which
+  Nautilus, Thunar, Nemo, Caja and PCManFM all read and write. Interoperating
+  through the file is exactly what rule 9 means — the format is the contract, and
+  nothing links against anything of GTK's. Bookmarks that duplicate a user
+  directory are dropped, which on this machine is all five of them.
+- **`/proc/self/mountinfo`**, filtered by an **allow-list of filesystem types**.
+  This machine has sixty-four mounts and one qualifies. A deny-list is a promise
+  to have heard of every pseudo-filesystem the kernel will ever add, and its
+  failure mode is `bpf` in the sidebar; the allow-list's failure mode is a real
+  disk nobody sees, which is one line to fix and visible the moment somebody
+  plugs one in. Mount *points* are then filtered by a deny-list of the FHS
+  system directories, because `/boot` is `ext4` and `/boot/efi` is `vfat` and
+  neither is a place — those two were two of the four rows the first version
+  showed.
+
+Owed: **nothing watches the mount table.** `/proc/self/mountinfo` is pollable —
+`poll` reports `POLLPRI` on a change — and the frame loop already sleeps on
+descriptors, so the shape of the fix is known. Until then a volume appearing is
+picked up by `F5`.
+
+Also owed, and M2's: the tree, drag-to-reorder, a resizable divider, and writing
+a bookmark back to the file it came from.
+
 ## The window frame
 
 `zxdg_decoration_manager_v1` decides who draws the title bar, and **GNOME does not

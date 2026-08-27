@@ -33,6 +33,13 @@ It found three defects on its first run, one of which no unit test could have:
 `select_all` filled the whole bitset rather than the display order and the tenth
 was a dotfile.
 
+Three drive the chrome above and beside the list: the four navigation buttons,
+the sidebar's `F9` toggle, and a click on a sidebar row. The sidebar's contents
+come from this machine, so those assertions are about the shape rather than the
+contents — Home is always there, and clicking it lands in `$HOME`. Its row
+positions are found by hovering down it rather than calculated, because a row's y
+depends on how many section headings came before it.
+
 One clicks a **breadcrumb** in the path bar, which is the first thing here whose
 hit regions come from the frame that drew them: the width of a path component is
 the shaped width of a directory name and is known nowhere else.

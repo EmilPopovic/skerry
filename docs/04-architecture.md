@@ -62,11 +62,11 @@ manifests either.
 | `sk-model` | `EntryId`, the columnar `Listing`, `Selection`, `Sort`, natural-order collation, the string catalogue, and `Problem` — the error type that carries a message a human can act on | Any I/O, any UI concept |
 | `sk-util` | The one job pool, its cancellation tokens, and the eventfd a finished job wakes the frame loop with | Domain types |
 | `sk-plat` | Wayland and X11 protocol handling, keyboard mapping, pointer and gesture input, clipboard, drag-and-drop as both source and target, IME, monitors and fractional scaling, window lifecycle | Drawing anything |
-| `sk-fs` | `getdents64` enumeration, batched `statx`, the watcher, the operation engine (copy/move/rename/create/trash), xattr and ACL preservation, mount state | Deciding *what* to enumerate, or why |
+| `sk-fs` | `getdents64` enumeration, batched `statx`, the watcher, the mount table, the operation engine (copy/move/rename/create/trash), xattr and ACL preservation | Deciding *what* to enumerate, or why |
 | `sk-text` | Font discovery, shaping, line layout, the layout cache, glyph rasterization | The glyph atlas (that is GPU memory, so `sk-gpu`) |
 | `sk-gpu` | Device and surface setup, glyph and image atlases, instanced quad batching, damage tracking, present pacing | Layout, hit-testing, widget state |
 | `sk-index` | Recursive walk, flattened views, fuzzy matching, ignore rules, recursive size aggregation, and the persistent index — required, not optional, per [ADR 0008](adr/0008-persistent-index-is-required.md). Size aggregation exists; the rest is M4 | Rendering results, or the query UI |
-| `sk-desktop` | shared-mime-info, XDG icon themes, `.desktop` parsing and launch, D-Bus (FileManager1, udisks2, portals), runtime capability probing | Any policy about *when* to launch something |
+| `sk-desktop` | shared-mime-info, XDG user directories and bookmarks, XDG icon themes, `.desktop` parsing and launch, D-Bus (FileManager1, udisks2, portals), runtime capability probing | Any policy about *when* to launch something |
 | `sk-preview` | The preview host: kind detection, child-process lifecycle, the wire protocol, the thumbnail cache | Decoding anything in-process (see [ADR 0006](adr/0006-out-of-process-decoders.md)) |
 | `sk-cmd` | The command registry, keymap resolution including sequences, the palette index, the undo stack. Generic over the context a command runs against, which is what lets a level-2 crate hold level-4 behaviour with no upward edge | Any command's implementation |
 | `sk-ui` | Immediate-mode pass, layout primitives, virtualized lists, focus and hit-testing, animation clocks, the accessibility tree | Which widgets a file manager needs |

@@ -95,6 +95,15 @@ before, and it is a real cost the old harness was constructed not to see:
 
 `skerry --bench` reports it as its own row so it cannot be averaged away.
 
+**What the sidebar and the toolbar cost: below what this machine could resolve
+at the time.** Seven runs with a load average of **4.4** — a browser, an editor
+and this repository's own tooling — gave a best p50 of 0.210 ms against 0.191–0.205
+ms before either. Eight rows of text, four drawn marks and a registry lookup per
+frame is not nothing, but it is under the run-to-run spread on a machine in use,
+and [12-measurement.md](12-measurement.md) says a number taken on a loaded
+machine is worth 6× less than the same number taken on an idle one. Recorded with
+the load rather than quoted as a change.
+
 **What the row mark costs: 0.012 ms a frame.** Colouring a row by the kind of
 file it names asks `MimeDatabase::by_name` once per visible row per frame — a
 hash lookup and, for the four globs on this machine that are not `*.ext`, a short

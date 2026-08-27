@@ -111,9 +111,13 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
     // The windowed loop asks the database once per visible row per frame, so a
     // trace without one measures a frame the product does not draw.
     let types = sk_desktop::MimeDatabase::load();
+    // The fixed set, for the same reason `--capture` uses it and one more: a
+    // trace without a sidebar measures a frame the window does not draw, and the
+    // sidebar narrows the list, which changes how many rows are visible.
+    let places = crate::sidebar::sample(&request.path);
     let theme = Theme::dark();
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
-    let layout = Layout::compute(logical, &theme.metrics);
+    let layout = Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, true);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -182,6 +186,8 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 hovered_button: None,
                 hovered_crumb: None,
                 hovered_tool: None,
+                places: &places,
+                hovered_place: None,
                 tools: [true, true, true, true],
                 filtering: false,
                 types: Some(&types),

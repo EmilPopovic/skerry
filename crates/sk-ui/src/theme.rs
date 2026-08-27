@@ -40,6 +40,10 @@ pub struct Palette {
     pub pending: Color,
     /// The scrollbar thumb.
     pub thumb: Color,
+    /// The sidebar's background, a step further from the list than the chrome.
+    pub sidebar: Color,
+    /// A section heading in the sidebar.
+    pub heading: Color,
     /// A window button under the pointer.
     pub button_hover: Color,
     /// The close button under the pointer, which is the one destructive thing
@@ -98,6 +102,16 @@ pub struct Metrics {
     pub modified_column: f32,
     /// Width of the icon column, including its trailing space.
     pub icon_column: f32,
+    /// Width of the sidebar, in logical pixels.
+    ///
+    /// 220 is what Windows 11 and Nautilus both settle near, and it is wide
+    /// enough for `VirtualBox VMs` at the body text size without truncation.
+    pub sidebar_width: f32,
+    /// One row of the sidebar. Taller than a list row, because a sidebar is
+    /// clicked rather than scanned and forty of them never have to fit.
+    pub sidebar_row: f32,
+    /// A section heading in the sidebar.
+    pub sidebar_heading: f32,
     /// Width of one navigation button in the path bar.
     ///
     /// Narrower than a window button: four of them sit at the left of the strip
@@ -129,6 +143,9 @@ impl Default for Metrics {
             size_column: 96.0,
             modified_column: 128.0,
             icon_column: 26.0,
+            sidebar_width: 220.0,
+            sidebar_row: 30.0,
+            sidebar_heading: 11.0,
             tool_width: 30.0,
             // 46 x 44: wider than it is tall, because three of them sit in a row
             // and a square target next to a square target reads as a grid. The
@@ -170,6 +187,8 @@ impl Theme {
                 hover: Color::hex(0xffffff).with_alpha(14),
                 pending: Color::hex(0x646d7d),
                 thumb: Color::hex(0xffffff).with_alpha(52),
+                sidebar: Color::hex(0x111318),
+                heading: Color::hex(0x7c8698),
                 button_hover: Color::hex(0xffffff).with_alpha(28),
                 close_hover: Color::hex(0xe5484d),
                 kinds: Kinds {
@@ -204,6 +223,8 @@ impl Theme {
                 hover: Color::hex(0x000000).with_alpha(12),
                 pending: Color::hex(0x9aa1ae),
                 thumb: Color::hex(0x000000).with_alpha(64),
+                sidebar: Color::hex(0xeef0f4),
+                heading: Color::hex(0x767d8b),
                 button_hover: Color::hex(0x000000).with_alpha(22),
                 close_hover: Color::hex(0xd93a3f),
                 kinds: Kinds {

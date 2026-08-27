@@ -15,9 +15,11 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod device;
+pub mod mounts;
 pub mod scan;
 pub mod watch;
 
 pub use device::{Device, lane_for};
+pub use mounts::{Mount, mounts};
 pub use scan::{META_CHUNK, MetaRow, Names, metadata, names};
 pub use watch::{Change, Watcher, can_watch};

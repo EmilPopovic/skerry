@@ -199,6 +199,21 @@ impl Background {
     }
 }
 
+/// Prints every interface the compositor advertises, when asked.
+///
+/// [ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md) says
+/// capabilities are probed rather than compiled in; this is the raw material the
+/// probe works from, and printing it is how a "why did that not work" question
+/// gets an answer in one run.
+fn report_globals(window: &Window) {
+    if std::env::var_os("SKERRY_GLOBALS").is_none() {
+        return;
+    }
+    for (interface, version) in &window.capabilities().advertised {
+        eprintln!("skerry: global {interface} v{version}");
+    }
+}
+
 /// Whether each navigation button can run, in `Tool::ALL`'s order.
 ///
 /// From the registry, because the button and the chord are the same action and a
@@ -320,6 +335,8 @@ pub struct App {
     capabilities: String,
     /// Folder totals, kept by path so they survive every listing.
     measurer: Measurer,
+    /// The list of places down the left.
+    sidebar: crate::sidebar::Sidebar,
 
     /// The freedesktop databases, once the job that reads them has finished.
     ///
@@ -393,6 +410,11 @@ impl App {
         })?;
         let window_us = window_started.elapsed().as_micros();
 
+        let background = Background::start(options.path)?;
+        // Open by default, which is what every file manager a person has met
+        // does. Reading what goes in it is a job, started with the others.
+        let sidebar =
+            crate::sidebar::Sidebar::new(&background.jobs, background.waker.handle(), true);
         let Background {
             waker,
             jobs,
@@ -405,7 +427,7 @@ impl App {
             launched_rx,
             watcher,
             changes,
-        } = Background::start(options.path)?;
+        } = background;
         let watch_target = pane.path.clone();
 
         let gpu_started = Instant::now();
@@ -434,21 +456,13 @@ impl App {
         let logical = window.logical();
         let scale_120 = window.scale_120();
         let capabilities = describe(&window);
-        if std::env::var_os("SKERRY_GLOBALS").is_some() {
-            // Every interface the compositor advertises, with its version.
-            // ADR 0007 says capabilities are probed rather than compiled in; this
-            // is the raw material the probe works from, and printing it is how a
-            // "why did that not work" question gets an answer in one run.
-            for (interface, version) in &window.capabilities().advertised {
-                eprintln!("skerry: global {interface} v{version}");
-            }
-        }
+        report_globals(&window);
         let measurer = Measurer::new(waker.handle());
         let now = Instant::now();
         Ok(Self {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
-            layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window)),
+            layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window), true),
             renderer,
             window,
             fonts,
@@ -470,6 +484,7 @@ impl App {
             watching: true,
             capabilities,
             measurer,
+            sidebar,
             desktop: None,
             desktop_rx,
             launcher: Launcher::default(),
@@ -543,6 +558,9 @@ impl App {
             self.drain_desktop();
             self.drain_paste();
             self.drain_launches();
+            if self.sidebar.drain() {
+                self.dirty = true;
+            }
             self.drain_sizes();
             self.advance();
             if self.dirty {
@@ -725,6 +743,7 @@ impl App {
                     self.hovered_button.take().is_some(),
                     self.hovered_crumb.take().is_some(),
                     self.hovered_tool.take().is_some(),
+                    self.sidebar.hover.take().is_some(),
                 ];
                 if gone.contains(&true) {
                     self.dirty = true;
@@ -838,6 +857,14 @@ impl App {
     /// own close event both do.
     pub(crate) fn close_window(&mut self) {
         self.window.request_close();
+    }
+
+    /// Shows or hides the list of places.
+    pub(crate) fn toggle_sidebar(&mut self) {
+        self.sidebar.open = !self.sidebar.open;
+        self.sidebar.hover = None;
+        self.relayout();
+        self.dirty = true;
     }
 
     /// Opens the filter, or closes and clears it if it is already open.
@@ -1049,6 +1076,9 @@ impl App {
     /// asking.
     pub(crate) fn reload(&mut self) {
         self.measurer.forget_all();
+        // The places too: a volume can appear or vanish while a window is open,
+        // and nothing here watches `/proc/self/mountinfo` yet.
+        self.sidebar.reload(&self.jobs);
         // `refresh` rather than `reload`: the directory is the same one, so the
         // cursor and the selection are carried across by name. Pressing `F5`
         // should not cost the user what they had picked out.
@@ -1108,8 +1138,12 @@ impl App {
 
     /// Recomputes every region, including whose frame this window is drawing.
     fn relayout(&mut self) {
-        self.layout =
-            Layout::compute_with(self.logical, &self.theme.metrics, frame_of(&self.window));
+        self.layout = Layout::compute_with(
+            self.logical,
+            &self.theme.metrics,
+            frame_of(&self.window),
+            self.sidebar.open,
+        );
     }
 
     /// Sorts by `column`, reversing if it is already the sort column.
@@ -1182,6 +1216,16 @@ impl App {
             Some(crate::layout::Tool::Reload) => "reload",
             None => "none",
         };
+        let sidebar_w = self.layout.sidebar.width;
+        let sidebar_top = self.layout.sidebar.y;
+        let places = self.sidebar.len();
+        let place_hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let place_name = self
+            .sidebar
+            .hover
+            .and_then(|index| self.sidebar.at(index))
+            .map(|entry| entry.label.clone())
+            .unwrap_or_default();
         let crumbs = self.hits.crumbs.len();
         let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         // The middle of the crumb one level up, which is the one a test clicks.
@@ -1200,6 +1244,8 @@ body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:
 frame={frame} frame_hover={frame_hover} maximized={maximized} close_x={close_x:.1} \
 crumbs={crumbs} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 tool_w={tool_w:.1} tool_hover={tool_hover} \
+sidebar_w={sidebar_w:.1} sidebar_top={sidebar_top:.1} places={places} \
+place_hover={place_hover} place_name={place_name:?} \
 filtering={filtering} filter={filter:?} \
 logical={:.0}x{:.0} scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} sizes={known}/{running} \
@@ -1266,6 +1312,16 @@ jobs={jobs}/{panics} keys={} stats={}",
         }
         // Through the registry, not through a method: a dimmed button must do
         // nothing when clicked, and `enabled` is the only place that knows.
+        if let Some(index) = self.place_at(position) {
+            if let Some(entry) = self.sidebar.at(index) {
+                let path = entry.path.clone();
+                if path != self.pane.path {
+                    self.pane.open(path, &self.jobs);
+                }
+            }
+            self.dirty = true;
+            return;
+        }
         if let Some(tool) = self.layout.tool_at(position.x, position.y) {
             if let Some(id) = commands.find(tool.command()) {
                 commands.run(id, self);
@@ -1379,6 +1435,7 @@ jobs={jobs}/{panics} keys={} stats={}",
         if self.crumb_at(position).is_some()
             || self.layout.button_at(position.x, position.y).is_some()
             || self.layout.tool_at(position.x, position.y).is_some()
+            || self.place_at(position).is_some()
         {
             return sk_plat::Cursor::Hand;
         }
@@ -1388,6 +1445,15 @@ jobs={jobs}/{panics} keys={} stats={}",
             return sk_plat::Cursor::Hand;
         }
         sk_plat::Cursor::Arrow
+    }
+
+    /// Which sidebar row is under a point, if any.
+    ///
+    /// The regions come from the last frame, for the same reason the
+    /// breadcrumbs' do: a row's height is a metric but its position depends on
+    /// how many sections came before it, and that is known where it is drawn.
+    fn place_at(&self, position: Point) -> Option<usize> {
+        self.hits.places.iter().position(|area| area.contains(position.x, position.y))
     }
 
     /// Which path component is under a point, if any.
@@ -1447,6 +1513,11 @@ jobs={jobs}/{panics} keys={} stats={}",
         let tool = self.layout.tool_at(position.x, position.y);
         if self.hovered_tool != tool {
             self.hovered_tool = tool;
+            self.dirty = true;
+        }
+        let place = self.place_at(position);
+        if self.sidebar.hover != place {
+            self.sidebar.hover = place;
             self.dirty = true;
         }
         self.window.set_cursor(self.cursor_at(position));
@@ -1594,6 +1665,7 @@ jobs={jobs}/{panics} keys={} stats={}",
             hovered_button,
             hovered_crumb,
             hovered_tool,
+            sidebar,
             filtering,
             desktop,
             window_state,
@@ -1613,6 +1685,8 @@ jobs={jobs}/{panics} keys={} stats={}",
             hovered_button: *hovered_button,
             hovered_crumb: *hovered_crumb,
             hovered_tool: *hovered_tool,
+            places: &sidebar.sections,
+            hovered_place: sidebar.hover,
             tools,
             filtering: *filtering,
             types: desktop.as_deref().map(|it| &it.mime),

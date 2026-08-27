@@ -272,6 +272,25 @@ impl Painter<'_> {
         self.list.rect(body, color, unit * 1.6);
     }
 
+    /// The mark for a mounted filesystem: a stack of two platters.
+    ///
+    /// Two rounded bars rather than a drive-shaped outline, because at fifteen
+    /// pixels a drive shape is a rectangle and this is the shape every disk icon
+    /// has been since the platters were real.
+    pub fn disk(&mut self, box_rect: Rect, color: Color) {
+        let unit = box_rect.height / 16.0;
+        let height = unit * 4.5;
+        for row in 0..2 {
+            let bar = Rect::new(
+                box_rect.x,
+                box_rect.y + unit * 3.0 + row as f32 * (height + unit * 1.5),
+                box_rect.width,
+                height,
+            );
+            self.list.rect(bar, color, unit * 2.0);
+        }
+    }
+
     /// The mark for a file: an outlined page with two lines of text in it.
     pub fn file(&mut self, box_rect: Rect, color: Color) {
         let unit = box_rect.height / 16.0;

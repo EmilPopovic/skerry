@@ -29,11 +29,13 @@ pub mod apps;
 pub mod entry;
 pub mod launch;
 pub mod mime;
+pub mod places;
 
 pub use apps::Applications;
 pub use entry::DesktopEntry;
 pub use launch::Launcher;
 pub use mime::{Category, MimeDatabase, category};
+pub use places::{Kind, Place, bookmarks, user_dirs};
 
 use std::path::{Path, PathBuf};
 

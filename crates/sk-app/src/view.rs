@@ -14,6 +14,7 @@ use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format, visible_rows};
 use crate::frames::{BUDGET_US, Frames};
 use crate::layout::{Area, Button, Layout, Tool};
 use crate::pane::Pane;
+use crate::sidebar::{Entry, Mark, Section};
 
 /// Which column a row cache key is for.
 const COLUMN_NAME: u8 = 0;
@@ -47,6 +48,14 @@ pub struct Chrome<'a> {
     pub hovered_crumb: Option<usize>,
     /// The navigation button under the pointer.
     pub hovered_tool: Option<Tool>,
+    /// The sidebar's contents, once the job that reads them has finished.
+    ///
+    /// A slice rather than the model, because the view needs the arrangement and
+    /// not the channel the arrangement arrived on — which is what lets a capture
+    /// build one synchronously and have a golden frame of it.
+    pub places: &'a [Section],
+    /// The sidebar row under the pointer.
+    pub hovered_place: Option<usize>,
     /// Whether each of the four navigation buttons can run right now, from the
     /// command registry rather than from a second copy of the same question.
     pub tools: [bool; 4],
@@ -71,6 +80,9 @@ pub struct Hits {
     /// One rectangle per path component, root first. The index is the number of
     /// components to keep when it is clicked.
     pub crumbs: Vec<Area>,
+    /// One rectangle per sidebar row, in the flattened order the model uses, so
+    /// the index a click reports is an index into it.
+    pub places: Vec<Area>,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -111,6 +123,7 @@ pub fn draw(
     diagnostics: &mut Diagnostics<'_>,
     hits: &mut Hits,
 ) {
+    sidebar(painter, pane, layout, chrome, hits);
     path_bar(painter, pane, layout, chrome, hits);
     tool_buttons(painter, layout, chrome);
     window_buttons(painter, layout, chrome);
@@ -325,6 +338,96 @@ fn kind_color(theme: &sk_ui::Theme, types: Option<&MimeDatabase>, name: &str) ->
 /// The width the window buttons take, or zero when the compositor draws them.
 fn strip_width(layout: &Layout) -> f32 {
     layout.buttons.iter().map(|button| button.width).sum()
+}
+
+/// The list of places down the left.
+///
+/// Sections with a heading, rows with a mark and a label, one accent for where
+/// you are. The order is the one Windows 11 and every Linux file manager use:
+/// the directories you keep things in, the ones you bookmarked, then what is
+/// mounted — because that is the order of how often they are clicked.
+fn sidebar(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &Layout,
+    chrome: &Chrome<'_>,
+    hits: &mut Hits,
+) {
+    hits.places.clear();
+    let area = layout.sidebar;
+    if area.width <= 0.0 {
+        return;
+    }
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    fill(painter, area, theme.palette.sidebar);
+    // The divider is on the sidebar's edge rather than the list's, so the list
+    // owns its own left gutter and a row's hover shape does not touch it.
+    let edge = painter.rect(area.right() - 1.0, area.y, 1.0, area.height);
+    painter.list.rect(edge, theme.palette.divider, 0.0);
+
+    let clip = painter.rect(area.x, area.y, area.width - 1.0, area.height);
+    painter.list.push_clip(clip);
+    let current = crate::sidebar::current(chrome.places, &pane.path);
+    let mut y = area.y + 6.0;
+    let mut index = 0;
+    for section in chrome.places {
+        let baseline = painter.baseline(y, metrics.sidebar_heading + 12.0, metrics.sidebar_heading);
+        let style = TextStyle::new(metrics.sidebar_heading, theme.palette.heading).bold();
+        line(
+            painter,
+            i18n::lookup(section.title),
+            style,
+            area.x + 14.0,
+            area.width - 20.0,
+            baseline,
+        );
+        y += metrics.sidebar_heading + 12.0;
+
+        for entry in &section.entries {
+            let row = Area { x: area.x, y, width: area.width - 1.0, height: metrics.sidebar_row };
+            hits.places.push(row);
+            place_row(
+                painter,
+                entry,
+                row,
+                current == Some(index),
+                chrome.hovered_place == Some(index),
+            );
+            y += metrics.sidebar_row;
+            index += 1;
+        }
+        y += 8.0;
+    }
+    painter.list.pop_clip();
+}
+
+/// One row of the sidebar.
+fn place_row(painter: &mut Painter<'_>, entry: &Entry, row: Area, current: bool, hovered: bool) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let pill = painter.rect(row.x + 6.0, row.y + 1.0, row.width - 12.0, row.height - 2.0);
+    if current {
+        painter.list.rect(
+            pill,
+            theme.palette.accent.with_alpha(if theme.dark { 56 } else { 40 }),
+            painter.px(metrics.radius),
+        );
+    } else if hovered {
+        painter.list.rect(pill, theme.palette.hover, painter.px(metrics.radius));
+    }
+
+    let icon = painter.rect(row.x + 14.0, row.y + (row.height - 15.0) / 2.0, 15.0, 15.0);
+    let kinds = theme.palette.kinds;
+    match entry.mark {
+        Mark::Volume => painter.disk(icon, if entry.remote { kinds.audio } else { kinds.unknown }),
+        Mark::Place(_) => painter.folder(icon, kinds.folder),
+    }
+
+    let ink = if current { theme.palette.selected_text } else { theme.palette.text };
+    let baseline = painter.baseline(row.y, row.height, metrics.text_size);
+    let box_rect = painter.rect(row.x + 37.0, 0.0, row.width - 47.0, 0.0);
+    painter.label(&entry.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
 }
 
 /// Back, forward, parent and reload, drawn from triangles and rectangles.
@@ -1009,7 +1112,8 @@ mod tests {
         cache: &mut LayoutCache,
     ) -> Vec<(sk_text::GlyphKey, u32, u32)> {
         let logical = Size::new(1000.0, 620.0);
-        let layout = Layout::compute(logical, &theme.metrics);
+        let layout =
+            Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, false);
         let mut list = DrawList::default();
         list.begin((1250, 775));
         let mut frames = Frames::new();
@@ -1037,6 +1141,8 @@ mod tests {
                 hovered_button: None,
                 hovered_crumb: None,
                 hovered_tool: None,
+                places: &[],
+                hovered_place: None,
                 tools: [true, true, true, true],
                 filtering: false,
                 types: None,

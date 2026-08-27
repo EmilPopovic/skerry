@@ -751,6 +751,72 @@ def filter_narrows_the_list(run: Run, fixture: Path) -> None:
         raise Failure(f"{state['rows']} rows after clearing, wanted {everything}")
 
 
+def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, float]:
+    """Where the sidebar row called `label` is, found by hovering down it.
+
+    A row's y depends on how many section headings came before it, which is known
+    where it is drawn and nowhere else — so the harness looks rather than
+    calculates, the same way `point_at` does for a list row.
+    """
+    width = float(state["sidebar_w"])
+    if width <= 0.0:
+        raise Failure("the sidebar is closed or was shed at this window size")
+    step = 6.0
+    logical_y = float(state["sidebar_top"]) + step
+    height = float(state["logical"].split("x")[1])
+    while logical_y < height:
+        x, y = aim(run, state, width / 2.0, logical_y)
+        run.drive(f"move {x:.2f} {y:.2f}\nsleep 70\nkey f12\nsleep 70\n")
+        if run.state()["place_name"] == label:
+            return x, y
+        logical_y += step
+    raise Failure(f"no sidebar row called {label!r}")
+
+
+@scenario("sidebar-places")
+def sidebar_places(run: Run, fixture: Path) -> None:
+    """The list of places is there, one row is where you are, and a click goes.
+
+    What is in it comes from this machine — `user-dirs.dirs`, GTK's `bookmarks`
+    and `/proc/self/mountinfo` — so the assertions are about the shape rather
+    than the contents: Home is always there, and clicking it lands in `$HOME`.
+    """
+    run.drive("sleep 800\nkey f12\nsleep 200\n")
+    state = run.state()
+    if int(state["places"]) < 2:
+        raise Failure(f"only {state['places']} places; the job that reads them found nothing")
+    if float(state["sidebar_w"]) <= 0.0:
+        raise Failure("the sidebar is not open")
+
+    scan_sidebar(run, state, "Home")
+    run.drive("click\nsleep 900\nkey f12\nsleep 200\n")
+    expect(run.state(), path=os.environ["HOME"])
+
+
+@scenario("sidebar-toggle")
+def sidebar_toggle(run: Run, fixture: Path) -> None:
+    """`F9` closes it and gives the width to the list, and again brings it back.
+
+    The list's own left edge has to move with it, or the rows draw under the
+    sidebar — which is why this asserts on `name_x` and not only on the width.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 200\n")
+    open_state = run.state()
+    if float(open_state["sidebar_w"]) <= 0.0:
+        raise Failure("the sidebar did not start open")
+
+    run.drive("key f9\nsleep 400\nkey f12\nsleep 200\n")
+    closed = run.state()
+    if float(closed["sidebar_w"]) != 0.0:
+        raise Failure(f"the sidebar is {closed['sidebar_w']} wide after F9")
+    if float(closed["name_x"]) >= float(open_state["name_x"]):
+        raise Failure("the name column did not move into the freed width")
+
+    run.drive("key f9\nsleep 400\nkey f12\nsleep 200\n")
+    again = run.state()
+    expect(again, sidebar_w=open_state["sidebar_w"], name_x=open_state["name_x"])
+
+
 @scenario("navigation-buttons")
 def navigation_buttons(run: Run, fixture: Path) -> None:
     """Back, forward, parent and reload, clicked rather than pressed.

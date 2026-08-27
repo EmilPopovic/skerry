@@ -57,6 +57,8 @@ pub struct Capture {
     pub keys: bool,
     /// Whether to draw the statistics overlay.
     pub stats: bool,
+    /// Whether to draw the sidebar.
+    pub sidebar: bool,
     /// Whether to draw the window frame the program draws for itself.
     ///
     /// A capture has no compositor to ask, so it is told. Without this the
@@ -128,6 +130,10 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // Read here rather than left as `None`: the mark at the head of a row is
     // coloured from it, so a golden frame without it is a golden frame of grey.
     let types = sk_desktop::MimeDatabase::load();
+    // A fixed set rather than this machine's: the sidebar is part of the frame,
+    // and a reference image that embeds somebody's `user-dirs.dirs` and mount
+    // table is one nobody else can reproduce.
+    let places = if request.sidebar { crate::sidebar::sample(&request.path) } else { Vec::new() };
     let theme = if request.dark { Theme::dark() } else { Theme::light() };
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     let frame = if request.own_frame {
@@ -135,7 +141,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     } else {
         Frame::None
     };
-    let layout = Layout::compute_with(logical, &theme.metrics, frame);
+    let layout = Layout::compute_with(logical, &theme.metrics, frame, request.sidebar);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -185,6 +191,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 hovered_button: None,
                 hovered_crumb: None,
                 hovered_tool: None,
+                places: &places,
+                hovered_place: None,
                 // What a freshly opened directory looks like: nowhere to go
                 // back to, nowhere forward, a parent and a reload. Hardcoded
                 // because a capture has no history — and it is the state worth

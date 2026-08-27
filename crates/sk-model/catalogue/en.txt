@@ -51,6 +51,17 @@ error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.ino
 # arrows are entries too, so a language that prefers a word can have one.
 # The close button's mark. A multiplication sign, because it is the one shape
 # in the window frame that a rectangle cannot draw and every font has this.
+# The sidebar's section headings, and the name for the root filesystem — which
+# is `/` and is not what a person calls it.
+sidebar.places = Places
+sidebar.bookmarks = Bookmarks
+sidebar.volumes = Volumes
+sidebar.root = Filesystem
+# The home directory, which is named after the user and is not what anyone calls
+# it.
+sidebar.home = Home
+action.sidebar = Show the sidebar
+
 chrome.close = ×
 # The path bar's furniture. Separate entries because a right-to-left locale puts
 # the separator on the other side of the name and may spell an elision

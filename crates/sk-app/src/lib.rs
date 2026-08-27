@@ -31,6 +31,7 @@ mod headless;
 mod keys;
 mod layout;
 mod pane;
+mod sidebar;
 mod sizes;
 mod view;
 

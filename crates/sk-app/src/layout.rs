@@ -35,6 +35,12 @@ impl Area {
 pub struct Layout {
     /// The path bar.
     pub path: Area,
+    /// The list of places down the left, or empty when it is closed or shed.
+    ///
+    /// Below the path strip and not beside it, which is where Windows 11 puts
+    /// it: the address bar spans the window and the navigation pane starts under
+    /// it. So the column headers begin where this ends.
+    pub sidebar: Area,
     /// The column header strip.
     pub header: Area,
     /// The scrolling list.
@@ -72,6 +78,35 @@ pub struct Layout {
     /// decorations, and zero when the window is maximized or tiled — its edges
     /// are not free to move then.
     pub resize_border: f32,
+}
+
+/// The icon, name, size and modified columns for a list of `body`'s width.
+///
+/// The two metadata columns keep their width and the name takes what is left,
+/// because a filename is the only cell whose useful length is unbounded. Below
+/// the width where the name would fall under a hundred logical pixels the
+/// metadata columns give way instead, widest first.
+fn columns(body: Area, metrics: &Metrics) -> (Area, Area, Area, Area) {
+    let gutter = metrics.gutter;
+    let available = body.width - gutter * 2.0;
+    let mut size_width = metrics.size_column;
+    let mut modified_width = metrics.modified_column;
+    if available - metrics.icon_column - size_width - modified_width < 100.0 {
+        modified_width = 0.0;
+    }
+    if available - metrics.icon_column - size_width < 100.0 {
+        size_width = 0.0;
+    }
+
+    let icon = Area { x: body.x + gutter, y: 0.0, width: metrics.icon_column, height: 0.0 };
+    let name_x = icon.right();
+    let name_width = (body.right() - gutter - size_width - modified_width - name_x).max(0.0);
+    (
+        icon,
+        Area { x: name_x, y: 0.0, width: name_width, height: 0.0 },
+        Area { x: name_x + name_width, y: 0.0, width: size_width, height: 0.0 },
+        Area { x: name_x + name_width + size_width, y: 0.0, width: modified_width, height: 0.0 },
+    )
 }
 
 /// Whether the window draws its own frame, and what belongs in it.
@@ -167,13 +202,7 @@ impl Layout {
     /// hundred logical pixels the metadata columns give way instead, so a
     /// narrow window shows names rather than three unreadable columns.
     #[must_use]
-    pub fn compute(size: Size, metrics: &Metrics) -> Self {
-        Self::compute_with(size, metrics, Frame::None)
-    }
-
-    /// The same, told whether the window has to draw its own frame.
-    #[must_use]
-    pub fn compute_with(size: Size, metrics: &Metrics, frame: Frame) -> Self {
+    pub fn compute_with(size: Size, metrics: &Metrics, frame: Frame, sidebar: bool) -> Self {
         let full = size.width.max(1.0);
         // Only the buttons the compositor actually offers, packed against the
         // right edge: a slot left empty for an absent action reads as a bug, and
@@ -225,49 +254,50 @@ impl Layout {
             Frame::Own { edges: true, .. } => metrics.resize_border,
             _ => 0.0,
         };
-        let header = Area { x: 0.0, y: path.bottom(), width: full, height: metrics.header_height };
         let status = Area {
             x: 0.0,
-            y: (size.height - metrics.status_height).max(header.bottom()),
+            y: (size.height - metrics.status_height).max(path.bottom() + metrics.header_height),
             width: full,
             height: metrics.status_height,
         };
+        // Shed below the width where the list would be narrower than the
+        // sidebar: a window too small for both is a window that came for the
+        // list. The same rule the metadata columns follow.
+        let aside = if sidebar && full - metrics.sidebar_width >= 320.0 {
+            Area {
+                x: 0.0,
+                y: path.bottom(),
+                width: metrics.sidebar_width,
+                height: (status.y - path.bottom()).max(0.0),
+            }
+        } else {
+            Area::default()
+        };
+        let content = full - aside.width;
+        let header = Area {
+            x: aside.width,
+            y: path.bottom(),
+            width: content,
+            height: metrics.header_height,
+        };
         let body = Area {
-            x: 0.0,
+            x: aside.width,
             y: header.bottom(),
-            width: full,
+            width: content,
             height: (status.y - header.bottom()).max(0.0),
         };
 
-        let gutter = metrics.gutter;
-        let content = full - gutter * 2.0;
-        let mut size_width = metrics.size_column;
-        let mut modified_width = metrics.modified_column;
-        // Shed the metadata columns rather than the name, widest first.
-        if content - metrics.icon_column - size_width - modified_width < 100.0 {
-            modified_width = 0.0;
-        }
-        if content - metrics.icon_column - size_width < 100.0 {
-            size_width = 0.0;
-        }
-
-        let icon = Area { x: gutter, y: 0.0, width: metrics.icon_column, height: 0.0 };
-        let name_x = icon.right();
-        let name_width = (full - gutter - size_width - modified_width - name_x).max(0.0);
+        let (icon, name, size_column, modified) = columns(body, metrics);
         Self {
             path,
+            sidebar: aside,
             header,
             body,
             status,
             icon,
-            name: Area { x: name_x, y: 0.0, width: name_width, height: 0.0 },
-            size: Area { x: name_x + name_width, y: 0.0, width: size_width, height: 0.0 },
-            modified: Area {
-                x: name_x + name_width + size_width,
-                y: 0.0,
-                width: modified_width,
-                height: 0.0,
-            },
+            name,
+            size: size_column,
+            modified,
             tools,
             buttons,
             drag,
@@ -276,6 +306,9 @@ impl Layout {
     }
 
     /// The navigation button at a point, if any.
+    ///
+    /// Split out of `compute_with` only because that function has a length limit
+    /// worth keeping; the reasoning is in the doc on [`Layout::compute`].
     #[must_use]
     pub fn tool_at(&self, x: f32, y: f32) -> Option<Tool> {
         Tool::ALL
@@ -350,6 +383,7 @@ mod tests {
             size,
             &metrics,
             Frame::Own { edges: true, minimize: true, maximize: true },
+            false,
         );
         assert!(all.buttons.iter().all(|button| button.width > 0.0));
         assert!((all.buttons[2].right() - 1100.0).abs() < f32::EPSILON, "close is not at the edge");
@@ -359,19 +393,49 @@ mod tests {
             size,
             &metrics,
             Frame::Own { edges: true, minimize: false, maximize: true },
+            false,
         );
         assert!(two.buttons[0].width <= 0.0, "an absent action was given a slot");
         assert!((two.buttons[2].right() - 1100.0).abs() < f32::EPSILON);
         assert!((two.buttons[1].right() - two.buttons[2].x).abs() < f32::EPSILON, "a hole");
         assert!(two.path.width > all.path.width, "the path bar did not take the freed width");
 
-        let served = Layout::compute_with(size, &metrics, Frame::None);
+        let served = Layout::compute_with(size, &metrics, Frame::None, false);
         assert!(served.buttons.iter().all(|button| button.width <= 0.0));
         assert!(served.drag.width <= 0.0, "a compositor-drawn title bar is not ours to drag");
         // The whole strip minus the four navigation buttons, which are there
         // whoever draws the frame.
         assert!((served.path.right() - 1100.0).abs() < f32::EPSILON);
         assert!((served.path.x - served.tools[3].right()).abs() < f32::EPSILON);
+    }
+
+    /// The sidebar takes the left of everything below the path strip, the
+    /// header and the list start where it ends, and both shed at the width
+    /// where the list would be narrower than the sidebar is wide.
+    #[test]
+    fn the_sidebar_takes_the_left_and_the_list_starts_where_it_ends() {
+        let metrics = Metrics::default();
+        let open = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, true);
+        assert!((open.sidebar.width - metrics.sidebar_width).abs() < f32::EPSILON);
+        assert!(open.sidebar.x <= f32::EPSILON);
+        // Below the path strip, down to the status strip, with no gap at either.
+        assert!((open.sidebar.y - open.path.bottom()).abs() < f32::EPSILON);
+        assert!((open.sidebar.bottom() - open.status.y).abs() < f32::EPSILON);
+        // And the list starts after it, header included.
+        assert!((open.header.x - open.sidebar.right()).abs() < f32::EPSILON);
+        assert!((open.body.x - open.sidebar.right()).abs() < f32::EPSILON);
+        assert!(open.icon.x > open.sidebar.right(), "a row's mark draws under the sidebar");
+        assert!((open.body.right() - 1100.0).abs() < f32::EPSILON);
+
+        let closed = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        assert!(closed.sidebar.width <= 0.0);
+        assert!(closed.body.x <= f32::EPSILON);
+        assert!(closed.name.x < open.name.x, "the name column did not take the freed width");
+
+        // Narrow enough that the list would be smaller than the sidebar.
+        let narrow = Layout::compute_with(Size::new(500.0, 720.0), &metrics, Frame::None, true);
+        assert!(narrow.sidebar.width <= 0.0, "the sidebar did not shed");
+        assert!((narrow.body.width - 500.0).abs() < f32::EPSILON);
     }
 
     /// Corners win over sides, or a diagonal drag is impossible: the band is six
@@ -383,6 +447,7 @@ mod tests {
             size,
             &Metrics::default(),
             Frame::Own { edges: true, minimize: true, maximize: true },
+            false,
         );
         assert_eq!(layout.edge_at(1.0, 1.0, size), Some(Edge::TopLeft));
         assert_eq!(layout.edge_at(799.0, 1.0, size), Some(Edge::TopRight));
@@ -405,6 +470,7 @@ mod tests {
             size,
             &Metrics::default(),
             Frame::Own { edges: false, minimize: true, maximize: true },
+            false,
         );
         assert!(fixed.resize_border <= 0.0);
         assert_eq!(fixed.edge_at(1.0, 1.0, size), None);
@@ -417,7 +483,7 @@ mod tests {
     #[test]
     fn the_navigation_buttons_take_the_left_of_the_strip_and_shed_together() {
         let metrics = Metrics::default();
-        let wide = Layout::compute(Size::new(1100.0, 720.0), &metrics);
+        let wide = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
         assert!(wide.tools.iter().all(|tool| tool.width > 0.0));
         assert!(wide.tools[0].x <= f32::EPSILON, "they start at the left edge");
         for pair in wide.tools.windows(2) {
@@ -430,7 +496,7 @@ mod tests {
         assert!((wide.path.right() - 1100.0).abs() < f32::EPSILON);
 
         // Narrow enough that the path would have nothing left.
-        let narrow = Layout::compute(Size::new(200.0, 720.0), &metrics);
+        let narrow = Layout::compute_with(Size::new(200.0, 720.0), &metrics, Frame::None, false);
         assert!(narrow.tools.iter().all(|tool| tool.width <= 0.0));
         assert!(narrow.path.x <= f32::EPSILON);
         assert!((narrow.path.width - 200.0).abs() < f32::EPSILON);
@@ -440,7 +506,8 @@ mod tests {
     /// the command it runs — rule 2, so the dimming and the click agree.
     #[test]
     fn a_press_on_a_navigation_button_finds_that_button() {
-        let layout = Layout::compute(Size::new(1100.0, 720.0), &Metrics::default());
+        let layout =
+            Layout::compute_with(Size::new(1100.0, 720.0), &Metrics::default(), Frame::None, false);
         for (tool, area) in Tool::ALL.into_iter().zip(layout.tools) {
             let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
             assert_eq!(layout.tool_at(x, y), Some(tool));
@@ -457,6 +524,7 @@ mod tests {
             Size::new(1100.0, 720.0),
             &Metrics::default(),
             Frame::Own { edges: true, minimize: true, maximize: true },
+            false,
         );
         for (button, area) in Button::ALL.into_iter().zip(layout.buttons) {
             let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
@@ -468,7 +536,7 @@ mod tests {
     #[test]
     fn the_regions_tile_the_window_with_no_gap_and_no_overlap() {
         let metrics = Metrics::default();
-        let layout = Layout::compute(Size::new(1100.0, 720.0), &metrics);
+        let layout = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
         assert!((layout.path.bottom() - layout.header.y).abs() < f32::EPSILON);
         assert!((layout.header.bottom() - layout.body.y).abs() < f32::EPSILON);
         assert!((layout.body.bottom() - layout.status.y).abs() < f32::EPSILON);
@@ -478,7 +546,7 @@ mod tests {
     #[test]
     fn the_columns_tile_the_row_and_the_name_takes_what_is_left() {
         let metrics = Metrics::default();
-        let layout = Layout::compute(Size::new(1100.0, 720.0), &metrics);
+        let layout = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
         assert!((layout.icon.right() - layout.name.x).abs() < f32::EPSILON);
         assert!((layout.name.right() - layout.size.x).abs() < f32::EPSILON);
         assert!((layout.size.right() - layout.modified.x).abs() < f32::EPSILON);
@@ -489,28 +557,30 @@ mod tests {
     #[test]
     fn a_narrow_window_sheds_metadata_columns_rather_than_the_name() {
         let metrics = Metrics::default();
-        let wide = Layout::compute(Size::new(1100.0, 720.0), &metrics);
+        let wide = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
         assert!(wide.modified.width > 0.0 && wide.size.width > 0.0);
 
-        let medium = Layout::compute(Size::new(320.0, 720.0), &metrics);
+        let medium = Layout::compute_with(Size::new(320.0, 720.0), &metrics, Frame::None, false);
         assert!(medium.modified.width.abs() < f32::EPSILON, "the widest column goes first");
         assert!(medium.name.width >= 100.0);
 
-        let narrow = Layout::compute(Size::new(200.0, 720.0), &metrics);
+        let narrow = Layout::compute_with(Size::new(200.0, 720.0), &metrics, Frame::None, false);
         assert!(narrow.size.width.abs() < f32::EPSILON);
         assert!(narrow.name.width > 0.0, "the name never disappears");
     }
 
     #[test]
     fn a_window_shorter_than_its_chrome_still_produces_a_valid_layout() {
-        let layout = Layout::compute(Size::new(400.0, 20.0), &Metrics::default());
+        let layout =
+            Layout::compute_with(Size::new(400.0, 20.0), &Metrics::default(), Frame::None, false);
         assert!(layout.body.height >= 0.0);
         assert!(layout.status.y >= layout.header.bottom());
     }
 
     #[test]
     fn a_click_maps_to_the_row_under_it_at_any_scroll_offset() {
-        let layout = Layout::compute(Size::new(1100.0, 720.0), &Metrics::default());
+        let layout =
+            Layout::compute_with(Size::new(1100.0, 720.0), &Metrics::default(), Frame::None, false);
         let top = layout.body.y;
         assert_eq!(layout.row_at(top + 1.0, 0.0, 26.0), Some(0));
         assert_eq!(layout.row_at(top + 27.0, 0.0, 26.0), Some(1));

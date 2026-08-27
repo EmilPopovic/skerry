@@ -21,6 +21,7 @@ fn main() -> std::process::ExitCode {
     let mut stats = false;
     let mut keys = false;
     let mut own_frame = false;
+    let mut no_sidebar = false;
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
@@ -33,6 +34,7 @@ fn main() -> std::process::ExitCode {
             "--stats" => stats = true,
             "--keys" => keys = true,
             "--own-frame" => own_frame = true,
+            "--no-sidebar" => no_sidebar = true,
             "--capture" => match arguments.next() {
                 Some(file) => capture = Some(PathBuf::from(file)),
                 None => return usage_error("--capture needs a file"),
@@ -76,6 +78,7 @@ fn main() -> std::process::ExitCode {
             keys,
             stats,
             own_frame,
+            sidebar: !no_sidebar,
         })
         .map(|()| true),
         (None, Some(frames)) => {
@@ -137,6 +140,7 @@ skerry [OPTIONS] [PATH]
   --light          use the light palette
   --stats          show the frame statistics overlay
   --keys           show the keyboard overlay
+  --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,
                    which is GNOME.

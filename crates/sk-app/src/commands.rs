@@ -235,6 +235,15 @@ fn view(registry: &mut Registry<App>) {
             run: App::toggle_filter,
         },
         CommandSpec {
+            id: "view.sidebar",
+            name: "action.sidebar",
+            group: Group::View,
+            // What Files, Nautilus and Nemo all use for the same pane.
+            keys: &["f9"],
+            enabled: |_| true,
+            run: App::toggle_sidebar,
+        },
+        CommandSpec {
             id: "view.hidden",
             name: "action.toggle_hidden",
             group: Group::View,
