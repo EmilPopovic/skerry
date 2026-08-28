@@ -195,6 +195,15 @@ class Server:
     def window_box(self) -> tuple[int, int, int, int]:
         """Where the window is, in **logical** pixels — the space the program
         reports its own size in."""
+        return self.box_of("dev.skerry.Skerry")
+
+    def box_of(self, app_id: str) -> tuple[int, int, int, int]:
+        """The same for any window, by the identity it gives the display server.
+
+        Needed by the interop scenarios, which have a second application on the
+        display and have to aim at it: an `app_id` on Wayland and the instance
+        half of `WM_CLASS` on X11, which are the same string for a GTK program.
+        """
         raise NotImplementedError
 
     def output_size(self) -> tuple[int, int]:
@@ -229,6 +238,14 @@ class Server:
 
     def make_floating(self) -> None:
         """Takes the window out of any tiling layout. Not every server has one."""
+
+    def focus(self, app_id: str) -> None:
+        """Gives that window the keyboard.
+
+        Needed once a scenario has a second application on the display: a
+        compositor focuses what it has just mapped, so every key after that goes
+        to the peer.
+        """
 
 
 class WaylandServer(Server):
@@ -278,6 +295,14 @@ class WaylandServer(Server):
             capture_output=True,
         )
 
+    def focus(self, app_id: str) -> None:
+        subprocess.run(
+            ["hyprctl", "dispatch", "focuswindow", f"class:{app_id}"],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+        )
+        time.sleep(0.3)
+
     def make_floating(self) -> None:
         """Hyprland tiles by default and reports a tiled window as `maximized`,
         which is honest — a tiled window has no free edges and nothing to
@@ -299,12 +324,10 @@ class WaylandServer(Server):
         )
         return json.loads(done.stdout)
 
-    def window_box(self) -> tuple[int, int, int, int]:
-        window = next(
-            (c for c in self._hypr("clients") if c.get("class") == "dev.skerry.Skerry"), None
-        )
+    def box_of(self, app_id: str) -> tuple[int, int, int, int]:
+        window = next((c for c in self._hypr("clients") if c.get("class") == app_id), None)
         if window is None:
-            raise Failure("the compositor does not know about the window")
+            raise Failure(f"the compositor does not know about a {app_id} window")
         # Already logical: Hyprland's window geometry is in the same units the
         # program reports, measured — a 870x1078 window reads as 870x1078 at a
         # scale of 1.25.
@@ -433,6 +456,11 @@ class X11Server(Server):
     def ask_to_close(self) -> None:
         subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True)
 
+    def focus(self, app_id: str) -> None:
+        """Nothing to do: with no window manager the window focuses itself when
+        it maps, and X11's default is that keys follow the pointer anyway."""
+        del app_id
+
     def resize(self, width: int, height: int) -> None:
         subprocess.run(
             [str(DRIVE), "--x11", "--resize", f"{width}x{height}"],
@@ -440,16 +468,20 @@ class X11Server(Server):
             capture_output=True,
         )
 
-    def window_box(self) -> tuple[int, int, int, int]:
+    def box_of(self, app_id: str) -> tuple[int, int, int, int]:
         tree = subprocess.run(
             ["xwininfo", "-display", self.display, "-root", "-tree"],
             capture_output=True,
             text=True,
         ).stdout
-        # `0x200000 "Skerry": ("skerry" "Skerry")  1100x720+0+0  +0+0`
-        found = re.search(r'\("skerry" "Skerry"\)\s+(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', tree)
+        # `0x200000 "Skerry": ("skerry" "Skerry")  1100x720+0+0  +0+0` — the
+        # instance half of `WM_CLASS`, which is the app id lowercased.
+        instance = app_id.rsplit(".", 1)[-1].lower()
+        found = re.search(
+            rf'\("{re.escape(instance)}" "[^"]*"\)\s+(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', tree
+        )
         if not found:
-            raise Failure("the X server does not know about the window")
+            raise Failure(f"the X server does not know about a {app_id} window")
         width, height, left, top = (int(value) for value in found.groups())
         # X11 speaks device pixels throughout, so this is the one place it is
         # divided — the same conversion `sk-plat`'s X11 backend does, for the same
@@ -532,6 +564,7 @@ class Run:
         wrap: list[str] | None = None,
     ):
         self.instance = instance
+        self.work = work
         self.log = work / "app.log"
         self.err = work / "app.err"
         environment = with_server(environment or {})
@@ -775,7 +808,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 64
+FEWEST_SCENARIOS = 66
 
 
 def scenario(name, fresh: bool = False):
@@ -1914,7 +1947,9 @@ def dragging_files_onto_a_folder(run: Run, fixture: Path) -> None:
             raise Failure(f"{name} did not land in alpha: {landed}")
         if (fixture / name).exists():
             raise Failure(f"{name} is still where it was, so the drag copied rather than moved")
-    expect(run.state(), undo="true", dragging="false", drop_row="-1")
+    # Nothing is left in flight on either side: the app has let go of what it
+    # was carrying, and so has the display server.
+    expect(run.state(), undo="true", dragging="false", drop_row="-1", drag_in="false", drag_out="false")
 
     # **One gesture, one undo.** This used to take back the last file and leave
     # the other, because a queue of N recorded N entries.
@@ -1923,6 +1958,196 @@ def dragging_files_onto_a_folder(run: Run, fixture: Path) -> None:
     for name in ("file-1.txt", "file-2.txt"):
         if not (fixture / name).is_file():
             raise Failure(f"undo did not bring {name} back")
+
+
+PEER = ROOT / "tools" / "gtk-drag-peer"
+
+
+class Peer:
+    """A GTK application on the same display, for the interop scenarios.
+
+    **Somebody else's toolkit, in another process.** GTK is a banned dependency
+    (rule 9) and stays banned — but what is under test here *is* interop with
+    GTK, and a peer that can be driven from a script is worth more than one that
+    has to be clicked. Spike D made the same trade for the clipboard.
+
+    Not Nautilus, for a reason Spike D recorded: driving a file manager's own
+    view means guessing where it drew an icon, and its X11 half failed exactly
+    there. This peer is one big target at a known place, so a failure is about
+    the protocol and not about somebody else's layout.
+    """
+
+    def __init__(self, work: Path, *arguments: str):
+        if not PEER.is_file():
+            raise Skipped("tools/gtk-drag-peer is missing")
+        self.log = work / f"peer-{arguments[0]}.log"
+        backend = "x11" if isinstance(SERVER, X11Server) else "wayland"
+        # Placed away from the window under test where nothing else will place
+        # it. A bare X server has no window manager, so two windows would both
+        # map at the origin and the drag would begin and end in the same one.
+        at = ["--at", "1150,120"] if backend == "x11" else []
+        self.process = subprocess.Popen(
+            [str(PEER), arguments[0], *at, *arguments[1:]],
+            env=dict(with_server(), GDK_BACKEND=backend),
+            stdout=self.log.open("w"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        deadline = time.time() + PATIENCE
+        while time.time() < deadline:
+            if self.said("ready"):
+                return
+            if self.process.poll() is not None:
+                raise Skipped(f"the GTK peer would not start: {self.output()[:200]}")
+            time.sleep(0.1)
+        raise Failure("the GTK peer never became ready")
+
+    def yield_focus(self, run: Run) -> None:
+        """Gives the keyboard back to the window under test, and checks it took.
+
+        A compositor focuses what it has just mapped, so without this every key a
+        scenario sends after starting a peer goes to the peer. Asked and then
+        **verified**, because a focus request is asynchronous and a scenario that
+        assumed it had landed failed later, on a state dump that never arrived,
+        with a message about the window rather than about the focus.
+        """
+        for _ in range(10):
+            SERVER.focus("dev.skerry.Skerry")
+            run.drive("sleep 200\nkey f12\nsleep 200\n")
+            with contextlib.suppress(Failure):
+                run.state()
+                return
+        raise Failure("the window under test would not take the keyboard back")
+
+    def output(self) -> str:
+        return self.log.read_text() if self.log.exists() else ""
+
+    def said(self, word: str) -> bool:
+        return any(line.startswith(word) for line in self.output().splitlines())
+
+    def wait_for(self, word: str, seconds: float = 6.0) -> str:
+        """Waits for a line, and returns everything the peer has said."""
+        deadline = time.time() + seconds
+        while time.time() < deadline:
+            if self.said(word):
+                return self.output()
+            time.sleep(0.15)
+        raise Failure(f"the peer never said {word!r}; it said {self.output()!r}")
+
+    def box(self) -> tuple[int, int, int, int]:
+        return SERVER.box_of("gtk-drag-peer")
+
+    def close(self) -> None:
+        if self.process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+
+
+def drag_between(
+    run: Run,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    steps: int = 8,
+    pace: int = 150,
+) -> None:
+    """A drag from one window to another, **paced**.
+
+    `skerry-drive`'s own `drag` sends press, eight motions and release with
+    nothing between them, which is right for a rubber band inside one window and
+    wrong across two: the peer answers every position, and a gesture that outruns
+    its replies is released before it has been accepted. Measured — the first
+    attempt at this produced two `motion` lines from GTK and no drop at all.
+    """
+    script = [f"move {start[0]:.1f} {start[1]:.1f}", "sleep 300", "press", "sleep 200"]
+    for step in range(1, steps + 1):
+        across = start[0] + (end[0] - start[0]) * step / steps
+        down = start[1] + (end[1] - start[1]) * step / steps
+        script += [f"move {across:.1f} {down:.1f}", f"sleep {pace}"]
+    script += ["sleep 500", "release", "sleep 1500"]
+    run.drive("\n".join(script) + "\n")
+
+
+def middle_of(run: Run, box: tuple[int, int, int, int]) -> tuple[float, float]:
+    """The centre of a window, as the percentages the driver takes."""
+    left, top, width, height = box
+    across, down = SERVER.output_size()
+    return ((left + width / 2) / across * 100.0, (top + height / 2) / down * 100.0)
+
+
+@scenario("a-drag-out-lands-in-another-application", fresh=True)
+def a_drag_out_lands(run: Run, fixture: Path) -> None:
+    """A file dragged out of this window arrives in a GTK application.
+
+    The whole outgoing path, against somebody else's implementation: the source
+    is claimed, the types are offered, the peer asks for `text/uri-list` and the
+    bytes travel through the selection machinery — `INCR` and all — before the
+    peer reports what it received. "The peer read the data" is Spike D's
+    criterion and it is the right one: whether the peer then does something
+    useful with a `.txt` is the peer's business.
+    """
+    peer = Peer(run.work, "target")
+    try:
+        peer.yield_focus(run)
+        run.drive("sleep 600\ntext file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+        chosen = run.state()
+        if chosen["cursor"] != "file-1.txt":
+            raise Failure(f"the cursor is on {chosen['cursor']!r}")
+        row = int(chosen["cursor_row"])
+        held = point_at(run, row)
+        from_point = aim(run, held, name_x(held), row_y(held, row))
+        drag_between(run, from_point, middle_of(run, peer.box()))
+
+        said = peer.wait_for("dropped")
+        if "file-1.txt" not in said:
+            raise Failure(f"the peer received {said!r}")
+    finally:
+        peer.close()
+
+
+@scenario("a-drag-in-from-another-application-lands", fresh=True)
+def a_drag_in_lands(run: Run, fixture: Path) -> None:
+    """A file dragged in from a GTK application arrives in this folder.
+
+    **A copy, always.** A peer that asked for a move removes its own original;
+    doing it here would delete somebody else's file on a confirmation this
+    program cannot get — Spike D measured the negotiated action reported zero
+    times across every pairing.
+    """
+    outside = run.work / "outside"
+    outside.mkdir(exist_ok=True)
+    carried = outside / "from-the-peer.txt"
+    carried.write_text("dragged in")
+
+    peer = Peer(run.work, "source", f"file://{carried}")
+    try:
+        peer.yield_focus(run)
+        run.drive("sleep 600\nkey f12\nsleep 200\n")
+        before = run.state()
+        # **The empty space below the last row**, which is the case the folder
+        # under the pointer does not cover: files from elsewhere belong in the
+        # directory being shown, and requiring a folder would refuse most of the
+        # window. Dropping *on* a folder puts them in it, which the assertion
+        # below would not be able to tell from this one.
+        empty = float(before["body_top"]) + float(before["row_h"]) * (int(before["rows"]) + 1)
+        if empty >= float(before["body_top"]) + float(before["body_height"]):
+            raise Failure("no empty space below the last row to drop into")
+        into = aim(run, before, name_x(before), empty)
+        drag_between(run, middle_of(run, peer.box()), into, steps=14, pace=220)
+
+        peer.wait_for("drag ended")
+        if "asked for text/uri-list" not in peer.output():
+            raise Failure(f"the peer was never asked for the files: {peer.output()!r}")
+        for _ in range(40):
+            if (fixture / carried.name).is_file():
+                break
+            run.drive("sleep 200\n")
+        else:
+            raise Failure(f"nothing landed: {sorted(p.name for p in fixture.iterdir())}")
+        # The peer's original stays: a drag in is a copy.
+        if not carried.is_file():
+            raise Failure("the drag deleted the peer's original")
+    finally:
+        peer.close()
 
 
 def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, float]:

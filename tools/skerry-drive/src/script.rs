@@ -22,6 +22,13 @@ impl Button {
 /// One step of a script.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Action {
+    /// One button, pressed or released on its own.
+    Press {
+        /// Which button.
+        button: Button,
+        /// Down or up.
+        down: bool,
+    },
     /// `modifiers` are evdev keycodes to hold; `mask` is the same set as the
     /// keymap's modifier bits.
     ///
@@ -94,6 +101,19 @@ fn step(verb: &str, rest: &[&str]) -> Result<Vec<Action>, String> {
             Ok(vec![Action::Click { button, times: 1 }])
         }
         "double" => Ok(vec![Action::Click { button: Button::Left, times: 2 }]),
+        // Press and release apart, so a drag can be paced. `drag` sends its
+        // whole gesture at once, which is right for a rubber band inside one
+        // window and wrong for a drag between two applications: the peer answers
+        // each position and a gesture that outruns its replies is dropped before
+        // it was ever accepted.
+        "press" => {
+            let button = rest.first().map_or(Ok(Button::Left), |name| button(name))?;
+            Ok(vec![Action::Press { button, down: true }])
+        }
+        "release" => {
+            let button = rest.first().map_or(Ok(Button::Left), |name| button(name))?;
+            Ok(vec![Action::Press { button, down: false }])
+        }
         "drag" => {
             if rest.len() != 4 {
                 return Err("drag needs four numbers".into());

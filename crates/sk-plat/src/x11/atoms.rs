@@ -41,6 +41,21 @@ x11rb::atom_manager! {
         RESOURCE_MANAGER,
         _XKB_RULES_NAMES,
 
+        // XDND, which is a convention made of client messages and properties.
+        XdndAware,
+        XdndSelection,
+        XdndEnter,
+        XdndPosition,
+        XdndStatus,
+        XdndLeave,
+        XdndDrop,
+        XdndFinished,
+        XdndTypeList,
+        XdndActionCopy,
+        XdndActionMove,
+        XdndActionLink,
+        XdndActionPrivate,
+
         // Selections.
         CLIPBOARD,
         TARGETS,

@@ -64,7 +64,10 @@ struct FilesDrag {
     /// What would be dragged, captured at the press.
     paths: Vec<PathBuf>,
     /// The entry pressed, for the selection this collapses to on a plain click.
-    id: sk_model::EntryId,
+    ///
+    /// `None` for a drag another application started: there is no row of ours
+    /// under it and nothing to collapse to.
+    id: Option<sk_model::EntryId>,
     /// Set once the pointer has moved past the threshold.
     active: bool,
     /// The directory under the pointer that would take the drop.
@@ -402,6 +405,12 @@ enum Pasted {
     /// writes into a pipe at its own pace, and a read on the frame loop is a
     /// frame loop waiting on another process.
     Files(Vec<PathBuf>, bool),
+    /// Paths dropped by another application, and the directory to put them in.
+    ///
+    /// Always a copy: a peer that asked for a move removes its own originals,
+    /// and doing it here would delete somebody else's files on a confirmation
+    /// this program cannot get — see `sk_plat::drag`.
+    Dropped(Vec<PathBuf>, PathBuf),
     /// The clipboard held nothing that names a file.
     NotFiles,
     /// Text to insert into whichever field still has the keyboard.
@@ -584,6 +593,13 @@ pub struct App {
     band: Option<(Point, Point)>,
     /// A press on an already-selected row that may become a drag of files.
     files_drag: Option<FilesDrag>,
+    /// Whether the display server has already reported this gesture's drop.
+    ///
+    /// **A drag ends twice.** The pointer's button comes up and the data device
+    /// says `drop`, in an order neither protocol fixes, and both mean the same
+    /// gesture. Whichever arrives first does the work; this is how the other one
+    /// knows not to do it again.
+    dropped: bool,
     /// The offset within the scrollbar thumb where a drag began.
     thumb_grab: Option<f32>,
     /// The field a press landed in, while the button is still down.
@@ -702,6 +718,7 @@ impl App {
             pointer: Point::default(),
             band: None,
             files_drag: None,
+            dropped: false,
             thumb_grab: None,
             text_drag: None,
             title_press: None,
@@ -897,6 +914,15 @@ impl App {
                 let into = self.pane.path.clone();
                 self.edits.paste_all(paths, into, moving, &self.jobs);
             }
+            Pasted::Dropped(paths, into) => {
+                // The bytes are in hand, so the drag is over: `wl_data_offer`
+                // wants `finish` *after* the read, and a source told earlier
+                // stops serving before it has served.
+                self.window.finish_drop();
+                if !paths.is_empty() {
+                    self.edits.paste_all(paths, into, false, &self.jobs);
+                }
+            }
             Pasted::Text(text) => {
                 if let Some(field) = self.focused_field() {
                     field.insert(&text);
@@ -994,6 +1020,18 @@ impl App {
             Event::Focused(_) => self.dirty = true,
             Event::KeyDown(key) => self.key(key, commands),
             Event::PointerMoved { position, .. } => self.moved(*position, commands),
+            // A drag from somewhere else — or from here, because a drag that
+            // starts in this window and stays in it comes back through the same
+            // events as anybody else's.
+            Event::DragEntered { position } | Event::DragMoved { position } => {
+                self.drag_over(*position);
+            }
+            Event::DragLeft => {
+                if self.files_drag.take().is_some() {
+                    self.dirty = true;
+                }
+            }
+            Event::Dropped { position } => self.take_drop(*position),
             Event::PointerLeft => {
                 // Every hover, and each of them taken: `||` short-circuits, so a
                 // pointer leaving a row left a breadcrumb lit and a window button
@@ -1014,7 +1052,20 @@ impl App {
                     self.press(*position, *clicks, mods.ctrl, mods.shift, commands);
                 }
                 Button::Primary => {
-                    self.drop_files(mods.ctrl);
+                    let position = *position;
+                    // **A drag that ends inside this window is ours to finish.**
+                    // The display server is told to let go: it cannot arrange a
+                    // drop onto a surface the pointer is already on, and a source
+                    // left alive outlives the gesture — measured, one compositor
+                    // sends a single `enter` after the button is already up and
+                    // then nothing at all.
+                    let inside = self.layout.body.contains(position.x, position.y);
+                    if inside && self.window.dragging_out() {
+                        self.window.cancel_drag();
+                    }
+                    if !std::mem::take(&mut self.dropped) {
+                        self.drop_files(mods.ctrl);
+                    }
                     self.release();
                 }
                 Button::Secondary if *pressed => self.open_menu(*position),
@@ -2431,6 +2482,11 @@ impl App {
         let progress = self.edits.progress_line().unwrap_or_default();
         let drop_row = self.drop_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
+        // The display server's own view, which is not the same question: one is
+        // "this window is carrying something", the other is "the server has a
+        // drag over this surface".
+        let drag_in = self.window.dragging().is_some();
+        let drag_out = self.window.dragging_out();
         format!(
             "path={:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
@@ -2440,6 +2496,7 @@ naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 filtering={} filter={:?} drop_row={drop_row} dragging={dragging} \
+drag_in={drag_in} drag_out={drag_out} \
 sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
@@ -2775,7 +2832,20 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             Some((row, path))
         });
         let Some(drag) = &mut self.files_drag else { return };
+        let starting = !drag.active;
         drag.active = true;
+        if starting && !drag.paths.is_empty() {
+            // **Handed to the display server**, which is what makes it possible
+            // to drop these anywhere but here. It comes back through
+            // `Event::DragEntered` while the pointer is still over this window,
+            // so the internal case is the same code as everybody else's — and
+            // where the server will not take it, the pointer keeps driving and
+            // an internal drop still works.
+            let content = Content::paths(&drag.paths, Intent::Copy);
+            let actions = [sk_plat::DragAction::Copy, sk_plat::DragAction::Move];
+            let _ = self.window.start_drag(content, &actions);
+        }
+        let Some(drag) = &mut self.files_drag else { return };
         let (row, onto) = match target {
             Some((row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
                 (Some(row), Some(path))
@@ -2787,6 +2857,115 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             drag.onto = onto;
             self.dirty = true;
         }
+    }
+
+    /// Follows a drag over this window, whoever started it.
+    ///
+    /// Ours and a peer's are the same gesture from here: the compositor drives
+    /// both once the drag has begun, and the only difference is whether
+    /// [`Self::files_drag`] holds what is being carried.
+    fn drag_over(&mut self, position: Point) {
+        self.pointer = position;
+        if self.files_drag.is_none() {
+            // **Only where the window still has one.** A compositor brackets a
+            // drop with `leave, drop, leave` — measured — so a motion arriving
+            // after the drop would otherwise start a second, empty drag that
+            // never ends and leaves the highlight lit.
+            if self.window.dragging().is_none() {
+                return;
+            }
+            // A peer's. Nothing is held here, so the highlight is all there is.
+            self.files_drag = Some(FilesDrag {
+                from: position,
+                paths: Vec::new(),
+                id: None,
+                active: true,
+                onto: None,
+                row: None,
+            });
+        }
+        self.drag_files_to(position);
+        // Whether this window would take it, and what it would do. Said every
+        // time: a target that accepts once and then goes quiet gets a refusal
+        // cursor over rows it would in fact accept.
+        let wanted = self.drop_target().is_some().then_some("text/uri-list");
+        self.window.accept_drag(wanted, sk_plat::DragAction::Copy);
+    }
+
+    /// The directory a drop would land in: the folder under the pointer, or the
+    /// one being shown.
+    fn drop_target(&self) -> Option<PathBuf> {
+        let drag = self.files_drag.as_ref()?;
+        if let Some(onto) = &drag.onto {
+            return Some(onto.clone());
+        }
+        // **A peer's drag can land anywhere in the list; ours cannot.** Files
+        // from another application belong in the directory being shown, and
+        // requiring a folder under the pointer would refuse every drop onto a
+        // row or onto empty space — which is most of the window. Our own
+        // selection dropped on its own directory is a move to where it already
+        // is, so that needs a folder.
+        drag.paths.is_empty().then(|| self.pane.path.clone())
+    }
+
+    /// Takes a drop from another application.
+    ///
+    /// Ours never reaches here with anything to read: [`Self::drop_files`] has
+    /// already moved what this window was carrying, and a drag that came from
+    /// this window has its paths in hand rather than in a pipe.
+    fn take_drop(&mut self, position: Point) {
+        self.dropped = true;
+        self.drag_over(position);
+        let ours = self.files_drag.as_ref().is_some_and(|drag| !drag.paths.is_empty());
+        if ours {
+            // Ours landed here. The paths are in hand, so the offer is closed
+            // rather than read — but it is still closed, or the display server
+            // holds the pointer waiting for a confirmation.
+            self.window.finish_drop();
+            self.drop_files(false);
+            return;
+        }
+        if self.window.dragging_out() {
+            // Ours, and the button release has already moved them. The offer is
+            // still closed, or the display server holds the pointer.
+            self.window.finish_drop();
+            self.files_drag = None;
+            self.dirty = true;
+            return;
+        }
+        let into = self.files_drag.as_ref().and_then(|drag| drag.onto.clone());
+        let into = into.unwrap_or_else(|| self.pane.path.clone());
+        self.files_drag = None;
+        self.dirty = true;
+        let Some(fd) = self.window.take_drop("text/uri-list") else { return };
+        let sender = self.replies.paste_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let mut bytes = Vec::new();
+            let mut file = std::fs::File::from(fd);
+            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            let text = String::from_utf8_lossy(&bytes);
+            let paths: Vec<PathBuf> = text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .filter_map(sk_plat::decode_uri)
+                .filter(|path| path.symlink_metadata().is_ok())
+                .collect();
+            // **A copy, always.** A peer that asked for a move deletes its own
+            // originals; taking that on ourselves would delete somebody else's
+            // files on a confirmation this crate cannot get — see `sk_plat::drag`.
+            // Sent even when it names nothing, so the drag is always closed:
+            // an offer left open holds a source that is waiting on us.
+            let reply = if paths.is_empty() {
+                Pasted::Dropped(Vec::new(), into)
+            } else {
+                Pasted::Dropped(paths, into)
+            };
+            if sender.send(reply).is_ok() {
+                wake.wake();
+            }
+        });
     }
 
     /// Where a drag of files would land, for the highlight.
@@ -2806,8 +2985,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let Some(into) = drag.onto.filter(|_| drag.active) else {
             // Never moved, or moved and landed on nothing: the press was a plain
             // click after all, and the selection it deferred happens now.
-            if !drag.active {
-                self.pane.selection.replace_with(drag.id);
+            if !drag.active
+                && let Some(id) = drag.id
+            {
+                self.pane.selection.replace_with(id);
             }
             self.dirty = true;
             return;
@@ -2831,6 +3012,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         ctrl: bool,
         shift: bool,
     ) {
+        self.dropped = false;
         if shift {
             self.pane.selection.extend_to(id, self.pane.listing.order());
             return;
@@ -2846,7 +3028,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.files_drag = Some(FilesDrag {
                 from: position,
                 paths: self.selected_paths(),
-                id,
+                id: Some(id),
                 active: false,
                 onto: None,
                 row: None,

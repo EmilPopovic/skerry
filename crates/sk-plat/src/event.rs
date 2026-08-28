@@ -209,6 +209,26 @@ pub enum Event {
         /// What is held.
         mods: Modifiers,
     },
+    /// A drag from another application arrived over the window.
+    DragEntered {
+        /// Where the pointer is, in logical pixels.
+        position: Point,
+    },
+    /// It moved. The window says what it would do with it through
+    /// [`Window::accept_drag`](crate::Window::accept_drag).
+    DragMoved {
+        /// Where the pointer is now.
+        position: Point,
+    },
+    /// It left without dropping, or the source cancelled it.
+    DragLeft,
+    /// It was dropped. The payload is read with
+    /// [`Window::take_drop`](crate::Window::take_drop), which hands back a
+    /// descriptor rather than bytes for the same reason the clipboard does.
+    Dropped {
+        /// Where it landed.
+        position: Point,
+    },
     /// A background job finished and wants the frame loop to look.
     Woken,
 }

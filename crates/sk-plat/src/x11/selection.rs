@@ -111,6 +111,9 @@ pub(super) struct Selections {
     /// scan of four is cheaper than a hash.
     incoming: VecDeque<(xproto::Atom, Incoming)>,
     outgoing: Vec<Outgoing>,
+    /// A selection that is neither the clipboard nor primary. `XdndSelection` is
+    /// the only one today, and it is owned for the length of one drag.
+    extra: Option<(xproto::Atom, Published)>,
 }
 
 impl Selections {
@@ -145,7 +148,23 @@ impl Selections {
         }
     }
 
+    /// Content published outside the two selections — a drag's, which lives in
+    /// `Xdnd` because it goes away when the drag does.
+    pub(super) fn set_extra(
+        &mut self,
+        atom: xproto::Atom,
+        content: Option<Content>,
+        time: xproto::Timestamp,
+    ) {
+        self.extra = content.map(|content| (atom, Published { content, since: time }));
+    }
+
     fn published_for(&self, atoms: &Atoms, atom: xproto::Atom) -> Option<&Published> {
+        if let Some((extra, published)) = &self.extra
+            && *extra == atom
+        {
+            return Some(published);
+        }
         if atom == atoms.CLIPBOARD {
             self.clipboard.as_ref()
         } else if atom == xproto::Atom::from(xproto::AtomEnum::PRIMARY) {
@@ -316,6 +335,16 @@ impl Selections {
         selection: Selection,
         mime: &str,
     ) -> Option<OwnedFd> {
+        self.request_from(ask, atom_of(ask.atoms, selection), mime)
+    }
+
+    /// The same, against any selection atom — `XdndSelection` is one too.
+    pub(super) fn request_from(
+        &mut self,
+        ask: &Ask<'_, impl Connection>,
+        selection: xproto::Atom,
+        mime: &str,
+    ) -> Option<OwnedFd> {
         let Ask { connection, atoms, types, window, time } = *ask;
         let target = types.atom(mime)?;
         let (read, write) = rustix::pipe::pipe().ok()?;
@@ -323,13 +352,7 @@ impl Selections {
         // distinguishable from whatever was left in it by the last one.
         let _ = connection.delete_property(window, atoms.SKERRY_SELECTION);
         connection
-            .convert_selection(
-                window,
-                atom_of(atoms, selection),
-                target,
-                atoms.SKERRY_SELECTION,
-                time,
-            )
+            .convert_selection(window, selection, target, atoms.SKERRY_SELECTION, time)
             .ok()?;
         let _ = connection.flush();
         self.incoming.push_back((
@@ -338,7 +361,7 @@ impl Selections {
                 pipe: Some(write),
                 incremental: false,
                 collected: Vec::new(),
-                primary: matches!(selection, Selection::Primary),
+                primary: false,
             },
         ));
         Some(read)
@@ -548,7 +571,7 @@ impl Types {
     ///
     /// X11 predates MIME, so `text/plain;charset=utf-8` is `UTF8_STRING` here —
     /// which is the name every X11 peer written before 2005 asks for.
-    fn atom(self, mime: &str) -> Option<xproto::Atom> {
+    pub(super) fn atom(self, mime: &str) -> Option<xproto::Atom> {
         Some(match mime {
             "text/uri-list" => self.uri_list,
             "text/plain;charset=utf-8" | "text/plain;charset=UTF-8" => self.utf8,
@@ -560,7 +583,7 @@ impl Types {
     }
 
     /// The MIME type an atom means, for the offer list a caller reads.
-    fn mime(self, atom: xproto::Atom) -> Option<&'static str> {
+    pub(super) fn mime(self, atom: xproto::Atom) -> Option<&'static str> {
         if atom == self.uri_list {
             Some("text/uri-list")
         } else if atom == self.utf8 || atom == self.plain_utf8 {

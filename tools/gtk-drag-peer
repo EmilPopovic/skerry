@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""A GTK drag-and-drop peer, for testing interop against somebody else's toolkit.
+
+**A separate process on purpose.** GTK is a banned dependency (rule 9) and stays
+banned — but the thing being measured *is* interop with GTK, and a peer that can
+be driven from a script is worth more than one that has to be clicked. Spike D
+made the same trade for the clipboard; this is the drag half of it.
+
+Not Nautilus, and for a reason Spike D recorded: driving a file manager's own
+view means guessing where it drew an icon, and its X11 half failed there — "no
+candidate grab position started a drag", which the harness could not tell from a
+view that ignored the press. This peer is one big drop target and one big drag
+source at known coordinates, so a failure is about the protocol rather than about
+somebody else's layout. What is under test is GTK's drag implementation either
+way.
+
+    gtk-drag-peer target --at X,Y            accepts a drop and prints what it got
+    gtk-drag-peer source --at X,Y URI...     drags those URIs when it is pressed
+
+`--at` places the window, because the harness runs against a bare `Xvfb` with no
+window manager and every window would otherwise be mapped at the origin, on top
+of the one being dragged from.
+
+Both print one line per protocol event to stdout, unbuffered, so a harness can
+watch for them. `GDK_BACKEND` in the environment decides which display server,
+which is what makes this both halves of the matrix.
+"""
+
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+# The one type that matters: it is what a file manager offers and what every
+# other application reads files as.
+URI_LIST = Gtk.TargetEntry.new("text/uri-list", 0, 0)
+
+
+def say(*words: object) -> None:
+    print(*words, flush=True)
+
+
+def target_window() -> Gtk.Window:
+    """A window that accepts a `text/uri-list` drop anywhere in it."""
+    window = Gtk.Window(title="skerry-drag-peer-target")
+    window.set_default_size(400, 300)
+    label = Gtk.Label(label="drop here")
+    window.add(label)
+    window.drag_dest_set(Gtk.DestDefaults.ALL, [URI_LIST], Gdk.DragAction.COPY)
+
+    def dropped(_widget, _context, _x, _y, data, _info, _time):
+        uris = data.get_uris() or []
+        text = bytes(data.get_data() or b"").decode("utf-8", "replace")
+        say("dropped uris", len(uris))
+        for uri in uris:
+            say("uri", uri)
+        if not uris and text:
+            say("raw", text.replace("\n", " ").strip())
+
+    window.connect("drag-data-received", dropped)
+    window.connect("drag-motion", lambda *_: say("motion") or False)
+    return window
+
+
+def source_window(uris: list[str]) -> Gtk.Window:
+    """A window that starts a drag carrying `uris` when it is pressed."""
+    window = Gtk.Window(title="skerry-drag-peer-source")
+    window.set_default_size(400, 300)
+    button = Gtk.Button(label="drag from here")
+    window.add(button)
+    button.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [URI_LIST], Gdk.DragAction.COPY)
+
+    def provide(_widget, _context, data, _info, _time):
+        say("asked for", data.get_target().name())
+        data.set_uris(uris)
+
+    button.connect("drag-data-get", provide)
+    button.connect("drag-begin", lambda *_: say("drag begun"))
+    button.connect("drag-end", lambda *_: say("drag ended"))
+    button.connect("drag-failed", lambda *_: say("drag failed") or False)
+    return window
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[1] not in ("target", "source"):
+        print(__doc__)
+        return 2
+    rest = argv[2:]
+    at = None
+    if len(rest) >= 2 and rest[0] == "--at":
+        across, _, down = rest[1].partition(",")
+        at = (int(across), int(down))
+        rest = rest[2:]
+    window = target_window() if argv[1] == "target" else source_window(rest)
+    window.connect("destroy", Gtk.main_quit)
+    window.show_all()
+    if at is not None:
+        # After `show_all`, because a position set on an unrealized window is a
+        # hint a window manager may take and a bare X server has nothing to take
+        # it — moving the mapped window is a request the server itself answers.
+        window.move(*at)
+    # Announced once the window exists, so a harness waits for this rather than
+    # for a sleep that is either too short on a loaded machine or wasted on an
+    # idle one.
+    GLib.idle_add(lambda: say("ready", Gdk.Display.get_default().__class__.__name__) or False)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

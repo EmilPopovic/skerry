@@ -58,6 +58,68 @@ use crate::window::{
 
 use self::seat::Seat;
 
+/// Both directions of drag-and-drop, for one window.
+///
+/// Grouped the way the clipboard's transport is, and for the same reason: eight
+/// fields that are all empty until a drag starts and all empty again after one,
+/// scattered through a struct whose other fields last the life of the window.
+#[derive(Default)]
+struct Drags {
+    /// The types of the offer currently arriving, kept apart from the
+    /// clipboard's because a drag's `enter` comes *after* them.
+    offer_types_in_flight: Vec<String>,
+    /// The offer a drag over this window is carrying.
+    ///
+    /// **Not destroyed on `leave`** — see the comment where that is handled.
+    offer: Option<wayland_client::protocol::wl_data_offer::WlDataOffer>,
+    /// What that offer holds, in neutral terms.
+    over: Option<crate::drag::Drag>,
+    /// The serial the `enter` came with, which every `accept` needs.
+    serial: u32,
+    /// Set between `drop` and the caller finishing with the offer.
+    dropped: bool,
+    /// The source of a drag *out* of this window, while one is in flight.
+    source: Option<wayland_client::protocol::wl_data_source::WlDataSource>,
+    /// What that drag is carrying, served on demand after the drop.
+    carrying: Option<crate::Content>,
+    /// Whether a drag out is still in flight.
+    out: bool,
+}
+
+/// The neutral actions a `dnd_action` bitfield names.
+fn actions_from(actions: wl_data_device_manager::DndAction) -> Vec<crate::drag::DragAction> {
+    use crate::drag::DragAction;
+    let mut named = Vec::new();
+    for (bit, action) in [
+        (wl_data_device_manager::DndAction::Copy, DragAction::Copy),
+        (wl_data_device_manager::DndAction::Move, DragAction::Move),
+        (wl_data_device_manager::DndAction::Ask, DragAction::Ask),
+    ] {
+        if actions.contains(bit) {
+            named.push(action);
+        }
+    }
+    named
+}
+
+/// The `dnd_action` bitfield for a set of neutral actions.
+///
+/// Silently drops the two Wayland cannot express, which is what
+/// [`crate::DragAction::on_wayland`] exists to let a caller avoid asking for.
+fn actions_of(actions: &[crate::drag::DragAction]) -> wl_data_device_manager::DndAction {
+    use crate::drag::DragAction;
+    let mut bits = wl_data_device_manager::DndAction::None;
+    for action in actions {
+        bits |= match action {
+            DragAction::Copy => wl_data_device_manager::DndAction::Copy,
+            DragAction::Move => wl_data_device_manager::DndAction::Move,
+            DragAction::Ask => wl_data_device_manager::DndAction::Ask,
+            DragAction::Link | DragAction::Private => wl_data_device_manager::DndAction::None,
+        };
+    }
+    bits
+}
+
 /// The protocol shape for a cursor, which is the only Wayland-specific thing
 /// about [`Cursor`].
 const fn shape_of(cursor: Cursor) -> wp_cursor_shape_device_v1::Shape {
@@ -138,6 +200,8 @@ struct State {
         wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1,
     >,
     pending_primary_types: Vec<String>,
+    /// Both directions of drag-and-drop.
+    drags: Drags,
 
     /// The compositor's scale as a numerator over 120.
     ///
@@ -168,6 +232,18 @@ struct State {
     /// program burned a core until it was killed.
     fatal: Option<String>,
     events: VecDeque<Event>,
+}
+
+impl State {
+    /// A surface-local fixed-point position, in logical pixels.
+    ///
+    /// `wl_data_device` sends `wl_fixed`, which is already in surface
+    /// coordinates — the same space everything above this crate works in, so
+    /// this is a conversion of units and not of spaces.
+    #[expect(clippy::unused_self, reason = "a method so both call sites read the same")]
+    fn logical_point(&self, x: f64, y: f64) -> Point {
+        Point::new(x as f32, y as f32)
+    }
 }
 
 impl Window {
@@ -256,6 +332,7 @@ impl Window {
             pending_types: Vec::new(),
             pending_primary_offer: None,
             pending_primary_types: Vec::new(),
+            drags: Drags::default(),
             scale_120: 120,
             fallback_scale: 1,
             logical: config.logical,

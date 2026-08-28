@@ -317,6 +317,16 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     seat.button_serial = Some(serial);
                 }
                 let position = seat.position;
+                // **A drag ends when the button does.** Spike D measured
+                // `dnd_drop_performed` and `dnd_finished` delivered by some peers
+                // and neither by others, so a source that waited for one to know
+                // it was free would never start a second drag. The *source object*
+                // stays alive to serve bytes — a target asks for them after the
+                // release — and only the "in flight" flag goes.
+                if !down {
+                    state.drags.out = false;
+                }
+                let seat = &mut state.seat;
                 let clicks = if down { seat.clicks.count(time, position) } else { 0 };
                 state.events.push_back(Event::Button {
                     button: button_of(button),

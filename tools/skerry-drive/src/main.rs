@@ -194,6 +194,7 @@ display — and can be said outright.
   --resize WxH          resize the X11 window, as a window manager would
   --xft-dpi N           set Xft.dpi in the root resource database
   --query-dpi           print the Xft.dpi the root resource database holds
+  press / release       one button, apart, so a drag can be paced
   key ctrl+shift+c      press and release a chord
   text hello            type a string
   move 50 30            move the pointer, in percent of the output
@@ -241,6 +242,7 @@ fn play(input: &mut dyn Input, actions: &[Action]) {
                 }
             }
             Action::Move { x, y } => input.move_to(*x, *y),
+            Action::Press { button, down } => input.button(*button, *down),
             Action::Click { button, times } => {
                 for _ in 0..*times {
                     input.button(*button, true);

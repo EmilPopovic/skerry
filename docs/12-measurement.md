@@ -753,3 +753,32 @@ measured there was the fallback and not the product. The X11 scenarios now run o
 software Vulkan, which is what a runner has, what the golden frames already
 render with, and — measured — 20% faster here than the fallback path they were
 using.
+
+## A one-in-three failure looks like flakiness and was a protocol violation
+
+The first drag from a GTK application into this one worked. The second did not,
+the third did, and the fourth did not. Every trace on *our* side was byte for
+byte identical: the same `enter`, the same accept for every motion, the same
+`drop`, the same `receive` on a live offer. The peer simply never served the
+bytes, about a third of the time.
+
+The temptation with a ratio like that is to call it a race in somebody else's
+code and pace the test around it. Slowing the gesture from eight steps to
+fourteen and from 150 ms to 220 ms changed nothing, which is what said it was not
+timing. What said what it *was* is the protocol text: `wl_data_offer.finish` is
+to be sent **after reading the data**, and this sent it immediately after asking
+for it — so the source was told the drag was over while the transfer it was still
+being asked for was in flight. Whether the bytes arrived first was a race, and it
+went our way twice in three.
+
+XDND has the same requirement and this had the same bug: `XdndFinished` was sent
+with the conversion still outstanding. It had not been observed to fail, which is
+worth stating rather than glossing — the X11 half was *also* wrong and passed
+anyway, so "it works" was evidence about a timing window and not about the code.
+
+Two things follow. **An identical trace on your own side is not evidence that
+your side is right**, only that it is consistent; the thing to compare against is
+the specification, not the previous run. And **a failure rate between zero and
+one is not automatically flakiness** — the word smuggles in the assumption that
+the code is correct and the environment is not, which is the assumption most
+worth checking first.

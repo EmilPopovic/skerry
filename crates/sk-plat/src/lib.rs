@@ -33,6 +33,7 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod clipboard;
+pub mod drag;
 pub mod event;
 mod input;
 pub mod keys;
@@ -47,6 +48,7 @@ use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 
 pub use clipboard::{Clipboard, Content, Intent, Selection, decode_copied_files, decode_uri};
+pub use drag::{Drag, DragAction};
 pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size};
 pub use window::{Capabilities, Cursor, Edge, RawHandles, WindowConfig, WindowState};
 
@@ -263,6 +265,67 @@ impl Window {
         mime: &str,
     ) -> Option<std::os::fd::OwnedFd> {
         forward!(self, request_selection, selection, mime)
+    }
+
+    /// Starts a drag carrying `content`. Whether the display server took it.
+    ///
+    /// Needs the serial of a button press on both servers, which is what makes a
+    /// drag legal — and there is no event for the refusal, so a `false` here is
+    /// the only notice a caller gets.
+    pub fn start_drag(&mut self, content: Content, actions: &[DragAction]) -> bool {
+        forward!(self, start_drag, content, actions)
+    }
+
+    /// Whether a drag out of this window is still in flight.
+    #[must_use]
+    pub fn dragging_out(&self) -> bool {
+        forward!(self, dragging_out)
+    }
+
+    /// The drag hovering over this window, if one is.
+    #[must_use]
+    pub fn dragging(&self) -> Option<&Drag> {
+        forward!(self, dragging)
+    }
+
+    /// Which drag actions this display server can express at all.
+    ///
+    /// Wayland has three of the five; X11 has all of them. A menu offering one
+    /// this session cannot do is a menu entry that silently does something else.
+    #[must_use]
+    pub fn drag_actions(&self) -> &'static [DragAction] {
+        forward!(self, drag_actions)
+    }
+
+    /// Tells the source what would happen if the drag were dropped now.
+    ///
+    /// `None` declines. Said on **every** motion: a target that accepts once and
+    /// then goes quiet shows a refusal cursor over rows it would in fact take.
+    pub fn accept_drag(&mut self, mime: Option<&str>, action: DragAction) {
+        forward!(self, accept_drag, mime, action);
+    }
+
+    /// Abandons a drag out of this window, for a gesture that ended inside it.
+    ///
+    /// The drop is then the caller's to perform, and the display server has
+    /// nothing left to arrange. Necessary rather than tidy: a compositor that
+    /// never sends `drop` or `dnd_finished` — Spike D measured one — otherwise
+    /// leaves a source alive for the rest of the session.
+    pub fn cancel_drag(&mut self) {
+        forward!(self, cancel_drag);
+    }
+
+    /// Ends a drop without reading it, for a drag this window started itself.
+    ///
+    /// The source has to be told either way, or it keeps the pointer grabbed
+    /// waiting for a confirmation that never arrives.
+    pub fn finish_drop(&mut self) {
+        forward!(self, finish_drop);
+    }
+
+    /// Reads what was dropped, as a descriptor to read at leisure.
+    pub fn take_drop(&mut self, mime: &str) -> Option<std::os::fd::OwnedFd> {
+        forward!(self, take_drop, mime)
     }
 
     /// Blocks until something happens, then queues everything that did.

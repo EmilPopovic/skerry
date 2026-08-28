@@ -25,6 +25,7 @@ mod atoms;
 mod cursor;
 mod keyboard;
 mod selection;
+mod xdnd;
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -36,6 +37,7 @@ use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 use x11rb::connection::Connection as _;
 use x11rb::protocol::Event as X11Event;
+use x11rb::protocol::xfixes;
 use x11rb::protocol::xkb as xkbext;
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::wrapper::ConnectionExt as _;
@@ -111,6 +113,7 @@ pub struct Window {
     shape: Cursor,
 
     selections: selection::Selections,
+    xdnd: xdnd::Xdnd,
     clipboard: Clipboard,
     transfers: Vec<Transfer>,
 
@@ -186,6 +189,7 @@ impl Window {
             cursors: cursor::Cursors::default(),
             shape: Cursor::Arrow,
             selections: selection::Selections::default(),
+            xdnd: xdnd::Xdnd::default(),
             clipboard: Clipboard::default(),
             transfers: Vec::new(),
             scale_120,
@@ -212,6 +216,7 @@ impl Window {
         capabilities.cursor_shape = window.cursors.themed();
         window.capabilities = capabilities;
 
+        xdnd::Xdnd::advertise(&window.connection, &window.atoms, window.id);
         window.detectable_auto_repeat();
         window.watch_resources();
         let watching = selection::Selections::watch(&window.connection, &window.atoms, window.id);
@@ -604,6 +609,73 @@ impl Window {
         &self.clipboard
     }
 
+    /// The drag hovering over this window, if one is.
+    #[must_use]
+    pub const fn dragging(&self) -> Option<&crate::Drag> {
+        self.xdnd.incoming()
+    }
+
+    /// Whether a drag out of this window is still in flight.
+    #[must_use]
+    pub const fn dragging_out(&self) -> bool {
+        self.xdnd.outgoing()
+    }
+
+    /// Which actions this display server can express.
+    ///
+    /// All five: XDND is the vocabulary the union was taken from.
+    #[must_use]
+    pub const fn drag_actions(&self) -> &'static [crate::DragAction] {
+        use crate::DragAction;
+        &[
+            DragAction::Copy,
+            DragAction::Move,
+            DragAction::Link,
+            DragAction::Ask,
+            DragAction::Private,
+        ]
+    }
+
+    /// Tells the source what would happen if the drag were dropped now.
+    pub fn accept_drag(&mut self, mime: Option<&str>, action: crate::DragAction) {
+        self.xdnd.accept(&self.connection, &self.atoms, self.id, mime, action);
+    }
+
+    /// Starts a drag carrying `content`. Whether it began.
+    pub fn start_drag(&mut self, content: Content, actions: &[crate::DragAction]) -> bool {
+        let started = self.xdnd.start(
+            &self.connection,
+            &self.atoms,
+            self.id,
+            self.time,
+            content.clone(),
+            actions,
+        );
+        // The bytes are served by the selection machinery, which is what carries
+        // an `INCR` — and a directory's worth of URIs is one.
+        if started {
+            self.selections.set_extra(self.atoms.XdndSelection, Some(content), self.time);
+        }
+        started
+    }
+
+    /// Abandons a drag out of this window. See the Wayland half for why.
+    pub fn cancel_drag(&mut self) {
+        self.xdnd.cancel(&self.connection, &self.atoms, self.id, self.time);
+        self.selections.set_extra(self.atoms.XdndSelection, None, self.time);
+    }
+
+    /// Ends a drop without reading it. See the Wayland half for why.
+    pub fn finish_drop(&mut self) {
+        self.xdnd.finish(&self.connection, &self.atoms, self.id);
+    }
+
+    /// Reads what was dropped, as a descriptor.
+    pub fn take_drop(&mut self, mime: &str) -> Option<std::os::fd::OwnedFd> {
+        let ask = ask!(self);
+        self.xdnd.take(&ask, &mut self.selections, &mut self.transfers, mime)
+    }
+
     /// Publishes `content` on `selection`.
     pub fn set_selection(&mut self, selection: Selection, content: Content) {
         let offered = self.selections.publish(&ask!(self), selection, content);
@@ -744,6 +816,15 @@ impl Window {
                 }
             }
             X11Event::ClientMessage(event) if event.window == self.id => {
+                if self.xdnd.message(
+                    &self.connection,
+                    &self.atoms,
+                    self.id,
+                    &event,
+                    &mut self.events,
+                ) {
+                    return;
+                }
                 let data = event.data.as_data32();
                 if event.type_ == self.atoms.WM_PROTOCOLS
                     && data.first() == Some(&self.atoms.WM_DELETE_WINDOW)
@@ -765,20 +846,31 @@ impl Window {
             }
             X11Event::KeyPress(event) => self.key(event.detail, event.state, event.time, true),
             X11Event::KeyRelease(event) => self.key(event.detail, event.state, event.time, false),
-            X11Event::ButtonPress(event) => {
-                self.time = event.time;
-                self.pointer_state(event.state);
-                self.position = self.logical_point(event.event_x, event.event_y);
-                self.button(event.detail, event.time, true);
-            }
+            X11Event::ButtonPress(event) => self.pointer_button(&event, true),
             X11Event::ButtonRelease(event) => {
-                self.time = event.time;
-                self.pointer_state(event.state);
-                self.position = self.logical_point(event.event_x, event.event_y);
-                self.button(event.detail, event.time, false);
+                if self.xdnd.outgoing() {
+                    self.time = event.time;
+                    if !self.xdnd.released(&self.connection, &self.atoms, self.id, event.time) {
+                        self.selections.set_extra(self.atoms.XdndSelection, None, self.time);
+                    }
+                }
+                // The button still comes up for the caller either way: a drag
+                // that ended on a peer is still a release here, and the code
+                // above this crate has state of its own to let go of.
+                self.pointer_button(&event, false);
             }
             X11Event::MotionNotify(event) => {
                 self.time = event.time;
+                // **Both, while a drag is going out.** The XDND conversation
+                // needs every motion, and so does the caller: our own
+                // `XdndPosition` comes back to us for a drag that stays over this
+                // window, but a caller that waited only for that would have
+                // nothing to draw if the round trip were slow — and a highlight
+                // that lags the pointer is a drop that lands somewhere else.
+                if self.xdnd.outgoing() {
+                    let at = xdnd::Where { window: self.id, root: self.root, time: event.time };
+                    self.xdnd.moved(&self.connection, &self.atoms, at, event.root_x, event.root_y);
+                }
                 self.pointer_state(event.state);
                 self.position = self.logical_point(event.event_x, event.event_y);
                 let mods = self.keyboard.as_ref().map(|k| k.mods).unwrap_or_default();
@@ -796,9 +888,7 @@ impl Window {
                 self.time = event.time;
                 self.position = self.logical_point(event.event_x, event.event_y);
             }
-            X11Event::SelectionRequest(event) => {
-                self.selections.answer(&ask!(self), &event);
-            }
+            X11Event::SelectionRequest(event) => self.selections.answer(&ask!(self), &event),
             X11Event::SelectionNotify(event) => {
                 let ask = ask!(self);
                 if let Some(offered) = self.selections.arrived(&ask, &mut self.transfers, &event) {
@@ -814,22 +904,7 @@ impl Window {
             X11Event::SelectionClear(event) => {
                 self.selections.lost(&self.atoms, event.selection);
             }
-            X11Event::XfixesSelectionNotify(event) => {
-                // Somebody took the selection. What they are offering is a
-                // second question, and `TARGETS` is how X11 asks it.
-                let which = if event.selection == self.atoms.CLIPBOARD {
-                    Selection::Clipboard
-                } else {
-                    Selection::Primary
-                };
-                if event.owner == self.id {
-                    // Our own copy. We already know what is in it, and asking
-                    // ourselves would be a round trip to answer a question we
-                    // are the answer to.
-                    return;
-                }
-                self.ask_targets(which);
-            }
+            X11Event::XfixesSelectionNotify(event) => self.selection_changed(&event),
             X11Event::Error(error) => {
                 // An X11 error is asynchronous and names the request that caused
                 // it, which is the only way to find out that a property nobody
@@ -838,6 +913,24 @@ impl Window {
             }
             _ => {}
         }
+    }
+
+    /// Somebody took a selection. What they offer is a second question.
+    ///
+    /// `TARGETS` is how X11 asks it, and the answer arrives later as a
+    /// `SelectionNotify`. Our own copy is skipped: we already know what is in it,
+    /// and asking would be a round trip to answer a question we are the answer
+    /// to.
+    fn selection_changed(&mut self, event: &xfixes::SelectionNotifyEvent) {
+        if event.owner == self.id {
+            return;
+        }
+        let which = if event.selection == self.atoms.CLIPBOARD {
+            Selection::Clipboard
+        } else {
+            Selection::Primary
+        };
+        self.ask_targets(which);
     }
 
     /// Asks whoever owns a selection what types they are offering.
@@ -922,6 +1015,14 @@ impl Window {
         self.shell.maximized = has(self.atoms._NET_WM_STATE_MAXIMIZED_HORZ)
             && has(self.atoms._NET_WM_STATE_MAXIMIZED_VERT);
         self.shell.fullscreen = has(self.atoms._NET_WM_STATE_FULLSCREEN);
+    }
+
+    /// One button, pressed or released.
+    fn pointer_button(&mut self, event: &xproto::ButtonPressEvent, pressed: bool) {
+        self.time = event.time;
+        self.pointer_state(event.state);
+        self.position = self.logical_point(event.event_x, event.event_y);
+        self.button(event.detail, event.time, pressed);
     }
 
     fn pointer_state(&mut self, state: xproto::KeyButMask) {
