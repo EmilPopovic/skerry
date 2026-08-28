@@ -24,6 +24,37 @@ pub enum Selection {
     Primary,
 }
 
+/// Whether a set of paths was copied or cut.
+///
+/// On the clipboard this is not a property of the paths, it is a *type*:
+/// `text/uri-list` says which files and nothing about what to do with them, and
+/// every desktop that supports cut-and-paste for files does it by publishing a
+/// second type that says. Without it a cut arrives in Nautilus as a copy — the
+/// files land, the originals stay, and nobody is told why.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Intent {
+    /// The originals stay.
+    Copy,
+    /// The originals are the receiver's to remove, once it has them.
+    Cut,
+}
+
+impl Intent {
+    /// The word `x-special/gnome-copied-files` opens with.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Cut => "cut",
+        }
+    }
+
+    /// Reads that word back. Anything else is a copy, which is the safe answer:
+    /// a verb we did not understand must not delete somebody's files.
+    fn of(word: &str) -> Self {
+        if word.trim() == "cut" { Self::Cut } else { Self::Copy }
+    }
+}
+
 /// Content to publish, as one or more types of the same thing.
 ///
 /// More than one because a peer asks for what it understands: a file manager
@@ -44,11 +75,21 @@ pub struct Content {
 impl Content {
     /// A list of paths, as both a URI list and as text.
     #[must_use]
-    pub fn paths(paths: &[std::path::PathBuf]) -> Self {
+    pub fn paths(paths: &[std::path::PathBuf], intent: Intent) -> Self {
         let mut uris = String::new();
         for path in paths {
             use std::fmt::Write as _;
             let _ = writeln!(uris, "file://{}\r", encode_uri(&path.to_string_lossy()));
+        }
+        // `x-special/gnome-copied-files`: the verb, then one URI per line, and
+        // **no trailing newline** — GTK joins rather than terminates, and a
+        // trailing one reads as an empty final URI. Undocumented by any
+        // standard and read by GTK, Qt and every file manager that interoperates
+        // with them.
+        let mut cut_or_copy = String::from(intent.word());
+        for path in paths {
+            use std::fmt::Write as _;
+            let _ = write!(cut_or_copy, "\nfile://{}", encode_uri(&path.to_string_lossy()));
         }
         let text = paths
             .iter()
@@ -57,6 +98,9 @@ impl Content {
             .join("\n");
         Self {
             types: vec![
+                // First, because a peer takes the first type it understands and
+                // this is the only one that carries the verb.
+                ("x-special/gnome-copied-files".to_owned(), cut_or_copy.into_bytes().into()),
                 ("text/uri-list".to_owned(), uris.into_bytes().into()),
                 ("text/plain;charset=utf-8".to_owned(), text.clone().into_bytes().into()),
                 ("text/plain".to_owned(), text.into_bytes().into()),
@@ -129,6 +173,23 @@ fn encode_uri(path: &str) -> String {
         }
     }
     out
+}
+
+/// Reads `x-special/gnome-copied-files` back: the verb and the paths it names.
+///
+/// Returns nothing for anything that is not that format, so a caller can try it
+/// and fall back to `text/uri-list` without having to know which it asked for.
+#[must_use]
+pub fn decode_copied_files(bytes: &[u8]) -> Option<(Intent, Vec<std::path::PathBuf>)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut lines = text.lines();
+    let verb = lines.next()?;
+    if !matches!(verb.trim(), "copy" | "cut") {
+        return None;
+    }
+    let paths: Vec<std::path::PathBuf> =
+        lines.filter(|line| !line.trim().is_empty()).filter_map(decode_uri).collect();
+    (!paths.is_empty()).then(|| (Intent::of(verb), paths))
 }
 
 /// Decodes a `file://` URI back into a path.
@@ -367,7 +428,8 @@ mod tests {
 
     #[test]
     fn a_path_selection_is_offered_as_both_a_uri_list_and_as_text() {
-        let content = Content::paths(&[PathBuf::from("/a/one"), PathBuf::from("/a/two")]);
+        let content =
+            Content::paths(&[PathBuf::from("/a/one"), PathBuf::from("/a/two")], Intent::Copy);
         let uris = content.bytes_for("text/uri-list").expect("uri-list");
         assert_eq!(String::from_utf8_lossy(uris), "file:///a/one\r\nfile:///a/two\r\n");
         let text = content.bytes_for("text/plain;charset=utf-8").expect("text");
@@ -377,7 +439,9 @@ mod tests {
     /// The alias every GTK and Qt application still asks for.
     #[test]
     fn the_x11_utf8_alias_carries_the_same_bytes_as_the_text_type() {
-        for content in [Content::paths(&[PathBuf::from("/a/one")]), Content::text("hello")] {
+        for content in
+            [Content::paths(&[PathBuf::from("/a/one")], Intent::Copy), Content::text("hello")]
+        {
             let text = content.bytes_for("text/plain;charset=utf-8").expect("text");
             let alias = content.bytes_for("UTF8_STRING").expect("alias");
             assert_eq!(text, alias);
@@ -410,7 +474,7 @@ mod tests {
     #[test]
     fn a_uri_survives_the_round_trip_with_a_space_and_a_percent_in_it() {
         let path = std::path::PathBuf::from("/tmp/a name with 100% in it.txt");
-        let content = Content::paths(std::slice::from_ref(&path));
+        let content = Content::paths(std::slice::from_ref(&path), Intent::Copy);
         let uris = content.bytes_for("text/uri-list").expect("a uri list");
         let line = std::str::from_utf8(uris).expect("utf-8").trim_end();
         assert_eq!(decode_uri(line).as_deref(), Some(path.as_path()));
@@ -423,8 +487,60 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_and_a_cut_differ_only_in_the_verb() {
+        let paths = [std::path::PathBuf::from("/tmp/one"), std::path::PathBuf::from("/tmp/two")];
+        let copied = Content::paths(&paths, Intent::Copy);
+        let cut = Content::paths(&paths, Intent::Cut);
+        let of = |content: &Content| {
+            String::from_utf8(content.bytes_for("x-special/gnome-copied-files").unwrap().to_vec())
+                .unwrap()
+        };
+        assert_eq!(of(&copied), "copy\nfile:///tmp/one\nfile:///tmp/two");
+        assert_eq!(of(&cut), "cut\nfile:///tmp/one\nfile:///tmp/two");
+        // The uri-list is the same either way: it names files and says nothing
+        // about what to do with them, which is the whole reason the other type
+        // exists.
+        assert_eq!(copied.bytes_for("text/uri-list"), cut.bytes_for("text/uri-list"));
+    }
+
+    /// GTK joins with newlines rather than terminating, so a trailing one reads
+    /// as an empty final URI.
+    #[test]
+    fn the_copied_files_list_has_no_trailing_newline() {
+        let content = Content::paths(&[std::path::PathBuf::from("/tmp/one")], Intent::Copy);
+        let bytes = content.bytes_for("x-special/gnome-copied-files").unwrap();
+        assert!(!bytes.ends_with(b"\n"), "{:?}", String::from_utf8_lossy(bytes));
+    }
+
+    #[test]
+    fn a_cut_survives_the_round_trip_with_a_space_in_the_name() {
+        let paths = [std::path::PathBuf::from("/tmp/a name.txt")];
+        let content = Content::paths(&paths, Intent::Cut);
+        let bytes = content.bytes_for("x-special/gnome-copied-files").unwrap();
+        let (intent, back) = decode_copied_files(bytes).expect("our own format reads back");
+        assert_eq!(intent, Intent::Cut);
+        assert_eq!(back, paths);
+    }
+
+    /// A verb nobody recognises must not delete anybody's files.
+    #[test]
+    fn an_unknown_verb_is_not_a_cut() {
+        assert_eq!(decode_copied_files(b"obliterate\nfile:///tmp/one"), None);
+        let (intent, _) = decode_copied_files(b"copy\nfile:///tmp/one").expect("a copy");
+        assert_eq!(intent, Intent::Copy);
+    }
+
+    #[test]
+    fn something_that_is_not_this_format_is_not_read_as_it() {
+        assert_eq!(decode_copied_files(b"file:///tmp/one\r\n"), None);
+        assert_eq!(decode_copied_files(b""), None);
+        assert_eq!(decode_copied_files(b"cut"), None);
+        assert_eq!(decode_copied_files(&[0xff, 0xfe]), None);
+    }
+
+    #[test]
     fn paths_are_offered_as_text_as_well_as_uris() {
-        let content = Content::paths(&[std::path::PathBuf::from("/tmp/one")]);
+        let content = Content::paths(&[std::path::PathBuf::from("/tmp/one")], Intent::Copy);
         let offered: Vec<&str> = content.types.iter().map(|(mime, _)| mime.as_str()).collect();
         assert!(offered.contains(&"text/uri-list"), "{offered:?}");
         assert!(offered.iter().any(|mime| mime.starts_with("text/plain")), "{offered:?}");

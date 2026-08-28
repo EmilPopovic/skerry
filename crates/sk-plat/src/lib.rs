@@ -46,7 +46,7 @@ use std::time::Duration;
 use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 
-pub use clipboard::{Clipboard, Content, Selection, decode_uri};
+pub use clipboard::{Clipboard, Content, Intent, Selection, decode_copied_files, decode_uri};
 pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size};
 pub use window::{Capabilities, Cursor, Edge, RawHandles, WindowConfig, WindowState};
 

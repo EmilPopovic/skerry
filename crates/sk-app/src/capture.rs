@@ -321,6 +321,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,
+                drop_row: None,
                 naming: overlays.naming.as_ref(),
                 // What a freshly opened directory looks like: nowhere to go
                 // back to, nowhere forward, a parent and a reload. Hardcoded

@@ -8,7 +8,7 @@ use sk_cmd::{Registry, Scope};
 use sk_desktop::{Applications, Launcher, MimeDatabase};
 use sk_gpu::{DrawList, FrameStats, Renderer};
 use sk_model::{Problem, ProblemKind, SortColumn};
-use sk_plat::{Button, Content, Event, Point, Selection, Size, Window, WindowConfig};
+use sk_plat::{Button, Content, Event, Intent, Point, Selection, Size, Window, WindowConfig};
 use sk_text::{Fonts, LayoutCache};
 use sk_ui::{Painter, Theme};
 use sk_util::{Pool, Waker};
@@ -50,6 +50,28 @@ const NOTICE_WINDOW: Duration = Duration::from_secs(4);
 /// second of work per notification. A quarter-second floor is well under what
 /// anyone notices and two orders of magnitude cheaper.
 const REFRESH_FLOOR: Duration = Duration::from_millis(250);
+
+/// A press on a selected row, before it is known whether it is a drag.
+///
+/// **The selection is not replaced until the release.** A plain press on a row
+/// that is already selected has two meanings — "select only this one" and "pick
+/// all of these up" — and which it was is not known until the pointer either
+/// moves or does not. Deciding on the press is what makes dragging three files
+/// drag one of them.
+struct FilesDrag {
+    /// Where the press was, in logical pixels.
+    from: Point,
+    /// What would be dragged, captured at the press.
+    paths: Vec<PathBuf>,
+    /// The entry pressed, for the selection this collapses to on a plain click.
+    id: sk_model::EntryId,
+    /// Set once the pointer has moved past the threshold.
+    active: bool,
+    /// The directory under the pointer that would take the drop.
+    onto: Option<PathBuf>,
+    /// The display row of that directory, for the highlight.
+    row: Option<usize>,
+}
 
 /// How far the pointer must travel before a press becomes a rubber band.
 ///
@@ -560,6 +582,8 @@ pub struct App {
     pointer: Point,
     /// Where a rubber band started, and where it is now.
     band: Option<(Point, Point)>,
+    /// A press on an already-selected row that may become a drag of files.
+    files_drag: Option<FilesDrag>,
     /// The offset within the scrollbar thumb where a drag began.
     thumb_grab: Option<f32>,
     /// The field a press landed in, while the button is still down.
@@ -677,6 +701,7 @@ impl App {
             typed_at: now,
             pointer: Point::default(),
             band: None,
+            files_drag: None,
             thumb_grab: None,
             text_drag: None,
             title_press: None,
@@ -988,7 +1013,10 @@ impl App {
                 Button::Primary if *pressed => {
                     self.press(*position, *clicks, mods.ctrl, mods.shift, commands);
                 }
-                Button::Primary => self.release(),
+                Button::Primary => {
+                    self.drop_files(mods.ctrl);
+                    self.release();
+                }
                 Button::Secondary if *pressed => self.open_menu(*position),
                 _ => {}
             },
@@ -1784,9 +1812,18 @@ impl App {
         self.launch(path);
     }
 
-    /// Puts the selected paths on the clipboard.
+    /// Puts the selected paths on the clipboard, to be copied.
     pub(crate) fn copy_selection(&mut self) {
-        self.cutting = false;
+        self.publish_selection(Intent::Copy);
+    }
+
+    /// Puts them there to be moved.
+    pub(crate) fn cut_selection(&mut self) {
+        self.publish_selection(Intent::Cut);
+    }
+
+    /// Publishes the selection with the verb a peer will read.
+    fn publish_selection(&mut self, intent: Intent) {
         let paths = self.selected_paths();
         let Some(first) = paths.first().cloned() else { return };
         if !self.window.capabilities().clipboard {
@@ -1795,34 +1832,28 @@ impl App {
             return;
         }
         let count = paths.len();
-        self.window.set_selection(Selection::Clipboard, Content::paths(&paths));
+        self.window.set_selection(Selection::Clipboard, Content::paths(&paths, intent));
         // The primary selection too, so a middle click in a terminal pastes what
         // was just copied. Hyprland discards this silently unless
         // `misc:middle_click_paste` is on, which is a documented limitation with
         // no fallback and no way to detect.
-        self.window.set_selection(Selection::Primary, Content::paths(&paths));
+        self.window.set_selection(Selection::Primary, Content::paths(&paths, intent));
+        let (one, many) = match intent {
+            Intent::Copy => ("notice.copied_one", "notice.copied"),
+            Intent::Cut => ("notice.cut_one", "notice.cut"),
+        };
         let message = if count == 1 {
             let name = first.file_name().map(|name| name.to_string_lossy().into_owned());
-            sk_model::i18n::format("notice.copied_one", &[&name.unwrap_or_default()])
+            sk_model::i18n::format(one, &[&name.unwrap_or_default()])
         } else {
-            sk_model::i18n::format("notice.copied", &[&count])
+            sk_model::i18n::format(many, &[&count])
         };
         self.notice = Some((message, Instant::now()));
+        self.cutting = matches!(intent, Intent::Cut) && count > 0;
     }
 
     /// Puts the selected paths on the clipboard and marks them to be moved.
     ///
-    /// **The mark is ours and does not leave the process.** GNOME and KDE both
-    /// carry a cut through `x-special/gnome-copied-files`, whose first line is
-    /// the word `cut`; offering that is what makes a cut here paste as a move in
-    /// Nautilus, and it is owed. Until then another application pasting this gets
-    /// a copy, which is the documented behaviour of a cut whose marker the peer
-    /// does not understand — not a silent move that loses the original.
-    pub(crate) fn cut_selection(&mut self) {
-        self.copy_selection();
-        self.cutting = !self.selected_paths().is_empty();
-    }
-
     /// Stops the operation in flight and drops the rest of the queue.
     pub(crate) fn cancel_operation(&mut self) {
         if !self.edits.cancellable() {
@@ -1848,17 +1879,27 @@ impl App {
     #[must_use]
     pub fn can_paste(&self) -> bool {
         let offered = self.window.clipboard().offered();
-        ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
-            .iter()
-            .any(|want| offered.iter().any(|have| have == want))
+        Self::PASTE_TYPES.iter().any(|want| offered.iter().any(|have| have == want))
     }
+
+    /// The clipboard types a paste will take, best first.
+    ///
+    /// `x-special/gnome-copied-files` leads because it is the only one that says
+    /// whether the files were copied or **cut** — the rest name files and nothing
+    /// else, and taking one of them turns somebody's cut into a copy.
+    const PASTE_TYPES: [&str; 5] = [
+        "x-special/gnome-copied-files",
+        "text/uri-list",
+        "text/plain;charset=utf-8",
+        "UTF8_STRING",
+        "text/plain",
+    ];
 
     /// Copies or moves what is on the clipboard into the directory being shown.
     pub(crate) fn paste_files(&mut self) {
         let offered = self.window.clipboard().offered().to_vec();
-        let Some(mime) = ["text/uri-list", "text/plain;charset=utf-8", "UTF8_STRING", "text/plain"]
-            .into_iter()
-            .find(|want| offered.iter().any(|have| have == want))
+        let Some(mime) =
+            Self::PASTE_TYPES.into_iter().find(|want| offered.iter().any(|have| have == want))
         else {
             self.notice = Some((
                 sk_model::i18n::lookup("error.clipboard_no_files").to_owned(),
@@ -1867,13 +1908,33 @@ impl App {
             return;
         };
         let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        // Our own mark, for a clipboard we published ourselves. A peer's verb
+        // arrives inside the bytes and overrides it below.
         let moving = self.cutting;
+        let carries_verb = mime == "x-special/gnome-copied-files";
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
             let mut bytes = Vec::new();
             let mut file = std::fs::File::from(fd);
             let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+
+            // **The peer's verb wins where there is one.** A cut in Nautilus
+            // arrives as `x-special/gnome-copied-files` opening with `cut`, and
+            // pasting it as a copy leaves the original behind — which is a paste
+            // that silently did half of what was asked.
+            if carries_verb && let Some((intent, paths)) = sk_plat::decode_copied_files(&bytes) {
+                let paths: Vec<PathBuf> =
+                    paths.into_iter().filter(|path| path.symlink_metadata().is_ok()).collect();
+                let moving = matches!(intent, sk_plat::Intent::Cut);
+                let reply =
+                    if paths.is_empty() { Pasted::NotFiles } else { Pasted::Files(paths, moving) };
+                if sender.send(reply).is_ok() {
+                    wake.wake();
+                }
+                return;
+            }
+
             let text = String::from_utf8_lossy(&bytes);
             // Every line, not just the first: a copy of nine files is nine lines,
             // and a paste that takes one of them is a paste that silently drops
@@ -2262,6 +2323,10 @@ impl App {
     /// different things depending on state is worse than Escape doing all of
     /// them.
     pub(crate) fn clear(&mut self) {
+        // A drag in flight is the most specific thing Escape can mean, and
+        // leaving it running would drop files on the next release with no
+        // highlight to say where.
+        self.files_drag = None;
         self.pane.selection.clear();
         self.typed.clear();
         self.filtering = false;
@@ -2364,6 +2429,8 @@ impl App {
         let (queue_left, queue_total) = self.edits.queue_state();
         let cursor_row = self.pane.cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let progress = self.edits.progress_line().unwrap_or_default();
+        let drop_row = self.drop_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
         format!(
             "path={:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
@@ -2372,7 +2439,8 @@ hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
-filtering={} filter={:?} sizes={known}/{running} jobs={jobs}/{panics}",
+filtering={} filter={:?} drop_row={drop_row} dragging={dragging} \
+sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
             self.pane.show_hidden,
@@ -2676,13 +2744,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         };
         let Some(id) = self.pane.listing.at(row) else { return };
-        if shift {
-            self.pane.selection.extend_to(id, self.pane.listing.order());
-        } else if ctrl {
-            self.pane.selection.toggle(id);
-        } else {
-            self.pane.selection.replace_with(id);
-        }
+        self.press_on_a_row(id, position, clicks, ctrl, shift);
         if clicks >= 2 {
             // `App::open_focused`, not `Pane::open_focused`: the pane's one
             // enters directories and returns false for anything else, so a
@@ -2691,6 +2753,105 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.open_focused();
         }
         self.dirty = true;
+    }
+
+    /// Follows a drag of files, and finds what would take the drop.
+    ///
+    /// A drop target is a **directory that is not part of what is being
+    /// dragged**: dropping a folder into itself is a request nobody means, and
+    /// the engine underneath would follow the loop until it ran out of depth.
+    fn drag_files_to(&mut self, position: Point) {
+        let Some(drag) = &self.files_drag else { return };
+        let moved = (position.x - drag.from.x).abs().max((position.y - drag.from.y).abs());
+        if !drag.active && moved <= DRAG_THRESHOLD {
+            return;
+        }
+        let target = self.row_under(position).and_then(|row| {
+            let id = self.pane.listing.at(row)?;
+            if !self.pane.listing.flags(id).has(sk_model::Flags::DIR) {
+                return None;
+            }
+            let path = self.pane.path.join(self.pane.listing.name(id));
+            Some((row, path))
+        });
+        let Some(drag) = &mut self.files_drag else { return };
+        drag.active = true;
+        let (row, onto) = match target {
+            Some((row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
+                (Some(row), Some(path))
+            }
+            _ => (None, None),
+        };
+        if drag.row != row || drag.onto != onto {
+            drag.row = row;
+            drag.onto = onto;
+            self.dirty = true;
+        }
+    }
+
+    /// Where a drag of files would land, for the highlight.
+    #[must_use]
+    pub(crate) fn drop_row(&self) -> Option<usize> {
+        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.row)
+    }
+
+    /// Finishes a drag of files, or collapses it back into a plain click.
+    ///
+    /// **Move, and `Ctrl` copies.** Every target reachable by dragging inside one
+    /// pane is on the filesystem the pane is showing, so "same device means move"
+    /// — which is what GNOME and KDE decide per drop — is always move here, and a
+    /// rule that is always the same is better stated than computed.
+    fn drop_files(&mut self, copying: bool) {
+        let Some(drag) = self.files_drag.take() else { return };
+        let Some(into) = drag.onto.filter(|_| drag.active) else {
+            // Never moved, or moved and landed on nothing: the press was a plain
+            // click after all, and the selection it deferred happens now.
+            if !drag.active {
+                self.pane.selection.replace_with(drag.id);
+            }
+            self.dirty = true;
+            return;
+        };
+        self.edits.paste_all(drag.paths, into, !copying, &self.jobs);
+        self.dirty = true;
+    }
+
+    /// Chooses what a press on a row selects, and whether it may become a drag.
+    ///
+    /// **A plain press on an already-selected row changes nothing yet.** It
+    /// means either "just this one" or "pick all of these up", and which it was
+    /// is not known until the pointer moves or does not — so the selection is
+    /// deferred to the release. Deciding here is what made dragging three files
+    /// drag one of them.
+    fn press_on_a_row(
+        &mut self,
+        id: sk_model::EntryId,
+        position: Point,
+        clicks: u8,
+        ctrl: bool,
+        shift: bool,
+    ) {
+        if shift {
+            self.pane.selection.extend_to(id, self.pane.listing.order());
+            return;
+        }
+        if ctrl {
+            self.pane.selection.toggle(id);
+            return;
+        }
+        if !self.pane.selection.contains(id) || clicks >= 2 {
+            self.pane.selection.replace_with(id);
+        }
+        if clicks < 2 {
+            self.files_drag = Some(FilesDrag {
+                from: position,
+                paths: self.selected_paths(),
+                id,
+                active: false,
+                onto: None,
+                row: None,
+            });
+        }
     }
 
     fn release(&mut self) {
@@ -3135,6 +3296,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.drag_text(which, position.x);
             return;
         }
+        if self.files_drag.is_some() {
+            self.drag_files_to(position);
+            return;
+        }
         // The palette is over everything the menu is over, and over the menu, so
         // it answers first and nothing beneath it hovers.
         if self.palette.is_some() {
@@ -3329,6 +3494,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             show_stats,
             typed,
             band,
+            files_drag,
             adapter,
             backend,
             scale_120,
@@ -3369,6 +3535,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_tool: *hovered_tool,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,
+            drop_row: files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.row),
             naming: edits.naming.as_ref(),
             tools,
             filtering: *filtering,

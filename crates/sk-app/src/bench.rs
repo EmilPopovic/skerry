@@ -204,6 +204,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,
+                drop_row: None,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,

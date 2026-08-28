@@ -99,6 +99,10 @@ pub struct Edits {
     stop: Option<Cancel>,
     /// Whether the queue in flight was stopped, so the notice says so once.
     cancelled_queue: bool,
+    /// What a queued operation has changed so far, recorded as one entry when it
+    /// drains. A cancelled queue still records what it did: those files moved,
+    /// and an undo has to be able to bring them back.
+    batch: Vec<Change>,
     /// How far the operation in flight has got, and when it started.
     running: Option<Running>,
     progress: Receiver<Progress>,
@@ -159,6 +163,7 @@ impl Edits {
             pending: None,
             stop: None,
             cancelled_queue: false,
+            batch: Vec::new(),
             running: None,
             progress,
             progress_tx,
@@ -333,7 +338,16 @@ impl Edits {
                     Change::Trashed { .. } => None,
                     kept => Some(kept.subject().to_path_buf()),
                 };
-                self.history.record(change);
+                // **One gesture is one undo.** A queue of two hundred pastes
+                // used to record two hundred entries, so `Ctrl+Z` after it took
+                // back the last file and left the other hundred and ninety-nine
+                // — an undo that did a two-hundredth of what was asked. The
+                // batch is recorded when the queue drains, below.
+                if self.queued > 1 {
+                    self.batch.push(change);
+                } else {
+                    self.history.record(change);
+                }
                 let message = if self.queued > 1 {
                     let done = self.queued - self.queue.len();
                     // **Named by what the queue is doing.** This said "Moved 10
@@ -362,6 +376,10 @@ impl Edits {
                 };
                 if self.queue.is_empty() {
                     self.queued = 0;
+                    if !self.batch.is_empty() {
+                        let changes = std::mem::take(&mut self.batch);
+                        self.history.record(Change::Batch(changes));
+                    }
                 }
                 Some(Landed::Notice(message, subject))
             }

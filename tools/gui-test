@@ -775,7 +775,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 62
+FEWEST_SCENARIOS = 64
 
 
 def scenario(name, fresh: bool = False):
@@ -1831,6 +1831,98 @@ def a_resize_relays_out(run: Run, fixture: Path) -> None:
             f"the body runs {float(after['body_top']) + float(after['body_height'])} "
             f"past a window {logical[1]} tall"
         )
+
+
+@scenario("a-cut-says-cut-to-another-application", fresh=True)
+def a_cut_says_cut(run: Run, fixture: Path) -> None:
+    """A cut here pastes as a move in Nautilus, and a copy does not.
+
+    **Read by a separate client**, which is the whole point: the mark that says
+    "these were cut" is not a property of the paths, it is a second MIME type,
+    and until it was published a cut in this window arrived everywhere else as a
+    copy — the files landed, the originals stayed, and nobody was told why.
+
+    `x-special/gnome-copied-files` is undocumented by any standard and read by
+    GTK, Qt and every file manager that interoperates with them. Its first line
+    is the verb.
+    """
+    run.drive("sleep 600\ntext file-1.txt\nsleep 400\nkey ctrl+c\nsleep 500\n")
+    copied = clipboard(run, "x-special/gnome-copied-files")
+    lines = copied.split("\n")
+    if lines[0] != "copy":
+        raise Failure(f"a copy published {copied!r}")
+    if not lines[1].endswith("/file-1.txt"):
+        raise Failure(f"the copy names {lines[1]!r}")
+
+    run.drive("key ctrl+x\nsleep 600\n")
+    cut = clipboard(run, "x-special/gnome-copied-files")
+    if cut.split("\n")[0] != "cut":
+        raise Failure(f"a cut published {cut!r}")
+    # The same files either way: the verb is the only difference, and a uri-list
+    # that changed with it would mean the two types disagreed about what was cut.
+    if cut.split("\n")[1:] != lines[1:]:
+        raise Failure(f"the cut names {cut.split(chr(10))[1:]}, the copy named {lines[1:]}")
+
+    # And it still round-trips here: pasting our own cut moves rather than copies.
+    (fixture / "target").mkdir()
+    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 900\nkey ctrl+v\n")
+    run.drive("sleep 900\nkey f12\nsleep 200\n")
+    if not (fixture / "target" / "file-1.txt").is_file():
+        raise Failure("the cut did not land in the folder")
+    if (fixture / "file-1.txt").exists():
+        raise Failure("the original is still there, so the cut pasted as a copy")
+
+
+@scenario("dragging-files-onto-a-folder-moves-them", fresh=True)
+def dragging_files_onto_a_folder(run: Run, fixture: Path) -> None:
+    """Pick two files up, drop them on a folder, and `Ctrl+Z` takes it back.
+
+    **A press on an already-selected row does not collapse the selection.** That
+    is the whole reason the selection change is deferred to the release: a plain
+    press on one of several chosen files means either "just this one" or "pick
+    all of them up", and which it was is not known until the pointer moves or
+    does not. Deciding on the press is what makes dragging three files drag one.
+
+    Move, and `Ctrl` copies — every folder reachable by dragging inside one pane
+    is on the filesystem that pane is showing, so the "same device means move"
+    rule other desktops decide per drop is always move here.
+    """
+    run.drive("sleep 600\nkey f12\nsleep 150\n")
+    # Two files, chosen with the keyboard so the pointer has touched nothing.
+    run.drive("text file-1.txt\nsleep 400\nkey shift+down\nsleep 250\nkey f12\nsleep 150\n")
+    chosen = run.state()
+    if chosen["selected"] != "2":
+        raise Failure(f"{chosen['selected']} rows selected, wanted 2")
+
+    held = point_at(run, int(chosen["cursor_row"]) - 1)
+    if held["hover_name"] != "file-1.txt":
+        raise Failure(f"the pointer is over {held['hover_name']!r}, wanted file-1.txt")
+    onto = point_at(run, 0)
+    if onto["hover_name"] != "alpha":
+        raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
+
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"]) - 1))
+    to_point = aim(run, held, name_x(held), row_y(held, 0))
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\n"
+        f"drag {from_point[0]:.1f} {from_point[1]:.1f} {to_point[0]:.1f} {to_point[1]:.1f}\n"
+        "sleep 1000\nkey f12\nsleep 300\n"
+    )
+    landed = sorted(path.name for path in (fixture / "alpha").iterdir())
+    for name in ("file-1.txt", "file-2.txt"):
+        if name not in landed:
+            raise Failure(f"{name} did not land in alpha: {landed}")
+        if (fixture / name).exists():
+            raise Failure(f"{name} is still where it was, so the drag copied rather than moved")
+    expect(run.state(), undo="true", dragging="false", drop_row="-1")
+
+    # **One gesture, one undo.** This used to take back the last file and leave
+    # the other, because a queue of N recorded N entries.
+    run.drive("key ctrl+z\nsleep 1500\nkey f12\nsleep 400\n")
+    expect(run.state(), undo="false")
+    for name in ("file-1.txt", "file-2.txt"):
+        if not (fixture / name).is_file():
+            raise Failure(f"undo did not bring {name} back")
 
 
 def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, float]:

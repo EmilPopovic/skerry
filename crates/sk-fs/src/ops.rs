@@ -26,6 +26,15 @@ use sk_model::{Problem, ProblemKind};
 /// What a mutation did, and enough to undo it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
+    /// Several changes made by one gesture, oldest first.
+    ///
+    /// **One gesture is one undo.** A paste of two hundred files makes two
+    /// hundred changes, and a person who presses `Ctrl+Z` after it meant to
+    /// undo the paste — not the last file of it, two hundred times. Undone
+    /// **backwards**, because the last change is the one made on top of the
+    /// others: a move that replaced a name has to be put back before the thing
+    /// it displaced can be.
+    Batch(Vec<Change>),
     /// A directory that did not exist before.
     Created {
         /// Where it is.
@@ -68,6 +77,9 @@ impl Change {
     #[must_use]
     pub fn subject(&self) -> &Path {
         match self {
+            // The last one, which is what the gesture finished by doing and
+            // therefore where a person is looking.
+            Self::Batch(changes) => changes.last().map_or(Path::new(""), Change::subject),
             Self::Created { path } => path,
             Self::Renamed { to, .. } => to,
             Self::Copied { destination, .. } => destination,
@@ -85,6 +97,9 @@ impl Change {
     #[must_use]
     pub fn origin(&self) -> Option<&Path> {
         match self {
+            // The *first* one, because a batch is undone backwards and the first
+            // change is the last to be put back.
+            Self::Batch(changes) => changes.first().and_then(Change::origin),
             Self::Created { .. } => None,
             Self::Renamed { from, .. } => Some(from),
             // A copy's source never moved, so an undo leaves the cursor on it.
@@ -244,6 +259,10 @@ pub fn move_into(
 /// **Runs on a job.**
 pub fn revert(change: &Change) -> Result<(), Problem> {
     match change {
+        // Backwards, and the first failure stops it: a batch half undone is a
+        // state somebody can look at and act on, where carrying on past an
+        // error would keep changing a filesystem that has already surprised us.
+        Change::Batch(changes) => changes.iter().rev().try_for_each(revert),
         // `rmdir`, not a recursive remove: if something has been put in it since,
         // this fails with `ENOTEMPTY` and the undo refuses. An undo that deletes
         // files somebody added is not an undo.
@@ -275,6 +294,9 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
 /// **Runs on a job.**
 pub fn apply(change: &Change) -> Result<Change, Problem> {
     match change {
+        Change::Batch(changes) => {
+            changes.iter().map(apply).collect::<Result<_, _>>().map(Change::Batch)
+        }
         Change::Created { path } => {
             let (Some(parent), Some(name)) =
                 (path.parent(), path.file_name().and_then(|name| name.to_str()))
@@ -434,6 +456,7 @@ fn io_problem(error: &std::io::Error, path: &Path) -> Problem {
 
 #[cfg(test)]
 mod tests {
+
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{
@@ -744,5 +767,45 @@ mod tests {
         assert_eq!(encode_path("/home/emil/a#b?c"), "/home/emil/a%23b%3Fc");
         assert_eq!(encode_path("/home/emil/café"), "/home/emil/caf%C3%A9");
         assert_eq!(encode_path("/a-b_c.d~e"), "/a-b_c.d~e");
+    }
+
+    /// A batch is undone **backwards**, and only a dependent pair can tell.
+    ///
+    /// A folder made and then filled: undone backwards the file comes out and
+    /// the empty folder goes, and undone forwards the `rmdir` meets `ENOTEMPTY`
+    /// and the whole undo stops having done nothing. Two independent changes
+    /// would pass either way, which is why this one is not two renames.
+    #[test]
+    fn a_batch_is_reverted_in_the_reverse_order() {
+        let home = scratch("batch-order");
+        let folder = home.join("into");
+        std::fs::create_dir(&folder).expect("the folder");
+        std::fs::write(home.join("f"), b"one").expect("the file");
+        std::fs::rename(home.join("f"), folder.join("f")).expect("move it in");
+
+        let batch = Change::Batch(vec![
+            Change::Created { path: folder.clone() },
+            Change::Renamed { from: home.join("f"), to: folder.join("f") },
+        ]);
+        revert(&batch).expect("the batch undoes");
+        assert_eq!(std::fs::read(home.join("f")).expect("f is back"), b"one");
+        assert!(!folder.exists(), "the folder the batch made is still there");
+    }
+
+    #[test]
+    fn an_empty_batch_undoes_to_nothing_rather_than_failing() {
+        assert!(revert(&Change::Batch(Vec::new())).is_ok());
+    }
+
+    /// The cursor lands on what the gesture finished with, and after an undo on
+    /// what the first change moved.
+    #[test]
+    fn a_batch_points_at_its_last_change_and_comes_back_to_its_first() {
+        let batch = Change::Batch(vec![
+            Change::Renamed { from: "/x/one".into(), to: "/x/two".into() },
+            Change::Renamed { from: "/x/three".into(), to: "/x/four".into() },
+        ]);
+        assert_eq!(batch.subject(), Path::new("/x/four"));
+        assert_eq!(batch.origin(), Some(Path::new("/x/one")));
     }
 }

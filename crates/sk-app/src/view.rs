@@ -60,6 +60,8 @@ pub struct Chrome<'a> {
     pub places: &'a [Section],
     /// The sidebar row under the pointer.
     pub hovered_place: Option<usize>,
+    /// The row a drag of files would drop into, while one is in flight.
+    pub drop_row: Option<usize>,
     /// The name being typed, if one is.
     pub naming: Option<&'a Naming>,
     /// Whether each of the four navigation buttons can run right now, from the
@@ -1081,7 +1083,9 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
     let rows = pane.listing.rows();
     let range = visible_rows(pane.scroll.offset(), layout.body.height, metrics.row_height, rows);
     for row in range {
-        row_at(painter, pane, layout, now, row, chrome.types, chrome.naming);
+        let context =
+            RowContext { types: chrome.types, naming: chrome.naming, drop_row: chrome.drop_row };
+        row_at(painter, pane, layout, now, row, context);
     }
 
     if rows == 0 && !pane.loading {
@@ -1112,6 +1116,20 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
     painter.list.pop_clip();
 }
 
+/// What a row needs to know about the window around it.
+///
+/// One value rather than three more arguments: each is a thing *some* row is
+/// drawn differently for, and they arrive together from the same `Chrome`.
+#[derive(Clone, Copy)]
+struct RowContext<'a> {
+    /// The filename half of shared-mime-info, for the kind colour.
+    types: Option<&'a MimeDatabase>,
+    /// The name being typed, if one is — which suppresses every focus ring.
+    naming: Option<&'a Naming>,
+    /// Where a drag of files would land.
+    drop_row: Option<usize>,
+}
+
 /// One row: its shape, its mark, and its three cells.
 fn row_at(
     painter: &mut Painter<'_>,
@@ -1119,9 +1137,9 @@ fn row_at(
     layout: &Layout,
     now: i64,
     row: usize,
-    types: Option<&MimeDatabase>,
-    naming: Option<&Naming>,
+    context: RowContext<'_>,
 ) {
+    let RowContext { types, naming, drop_row } = context;
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let cursor = pane.selection.cursor();
@@ -1163,6 +1181,16 @@ fn row_at(
         // so which ones are chosen is never in doubt.
         if cursor == Some(id) && naming.is_none() {
             painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
+        }
+        // Where a drag would land. A filled accent rather than another ring: the
+        // ring means "the keyboard is here" everywhere else in this window, and a
+        // second meaning for it during a drag is a second thing to learn.
+        if drop_row == Some(row) {
+            painter.list.rect(
+                pill,
+                theme.palette.accent.with_alpha(90),
+                painter.px(metrics.radius),
+            );
         }
 
         let icon_box = painter.rect(
@@ -1634,6 +1662,7 @@ mod tests {
                 hovered_tool: None,
                 places: &[],
                 hovered_place: None,
+                drop_row: None,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,

@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 435 tests, 62 GUI scenarios on two display servers and fifteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 443 tests, 64 GUI scenarios on two display servers and fifteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -147,7 +147,7 @@ defects they exposed.
 | Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change, **frame 1 included** — a one-pixel buffer maps the surface first, because the scale arrives at map and not before it | — |
 | Keyboard through `xkbcommon`, with key repeat implemented client-side **and shared by both backends**, so a held key behaves identically on either | **Drag-and-drop and IME** — two of the four capabilities `winit` could not reach, and the reason ADR 0002 exists |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection | Gestures, and the pointer-shape protocol |
-| **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural, and a paste that pastes **files** | `x-special/gnome-copied-files`, which is what makes a cut arrive in Nautilus as a move rather than a copy — and interop in either direction, which is unverified |
+| **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural, and a paste that pastes **files** | Interop with a real peer in either direction, which is unverified — `x-special/gnome-copied-files` is published and read now, so a cut here is a move there and a cut there is a move here, but nothing has yet been dragged between two applications |
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle**, on both servers | — |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, and Spike E's matrix nightly on four filesystems it builds itself | A second runner architecture — the matrix and the frames are both `x86_64` today, and [06-portability.md](06-portability.md) names `aarch64` |
@@ -160,7 +160,7 @@ was deliberately put after X11 — XDND has five actions where Wayland has three
 and an API designed against one dialect would be wrong in a way that is expensive
 to correct — and X11 is now there to design against.
 
-**The 62 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The 64 GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are
