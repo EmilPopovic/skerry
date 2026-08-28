@@ -60,6 +60,16 @@ struct Outgoing {
 
 /// A conversion this window asked for and is waiting on.
 struct Incoming {
+    /// The type that was asked for.
+    ///
+    /// **A refusal names no property.** `SelectionNotify` carries `property =
+    /// None` when the owner declines, so a pending conversion cannot be found by
+    /// the property it was going to land in — it is found by what it asked for.
+    /// Matching on the property alone left the entry, and its pipe's write end,
+    /// alive for the life of the process: the job reading that pipe waited for an
+    /// end-of-file that could never come, and a paste did nothing at all with no
+    /// error to show for it.
+    target: xproto::Atom,
     /// Where the bytes go once they arrive. The caller already has the other end.
     pipe: Option<OwnedFd>,
     /// Set once the reply said `INCR`: the payload arrives one property at a
@@ -358,6 +368,7 @@ impl Selections {
         self.incoming.push_back((
             atoms.SKERRY_SELECTION,
             Incoming {
+                target,
                 pipe: Some(write),
                 incremental: false,
                 collected: Vec::new(),
@@ -384,6 +395,7 @@ impl Selections {
         self.incoming.push_back((
             property,
             Incoming {
+                target: atoms.TARGETS,
                 pipe: None,
                 incremental: false,
                 collected: Vec::new(),
@@ -400,10 +412,15 @@ impl Selections {
         event: &xproto::SelectionNotifyEvent,
     ) -> Option<Offered> {
         let Ask { connection, atoms, types, window, .. } = *ask;
-        let index = self.incoming.iter().position(|(atom, _)| *atom == event.property)?;
+        let index = if event.property == 0 {
+            self.incoming.iter().position(|(_, it)| it.target == event.target)?
+        } else {
+            self.incoming.iter().position(|(atom, _)| *atom == event.property)?
+        };
         if event.property == 0 {
-            // The peer refused. Dropping the write end turns that into an
-            // end-of-file the reader can act on rather than a wait it cannot.
+            // The owner refused. Dropping the entry drops the pipe's write end,
+            // which turns the refusal into an end-of-file the reader can act on
+            // rather than a wait it cannot.
             self.incoming.remove(index);
             return None;
         }

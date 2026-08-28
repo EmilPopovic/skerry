@@ -782,3 +782,46 @@ the specification, not the previous run. And **a failure rate between zero and
 one is not automatically flakiness** — the word smuggles in the assumption that
 the code is correct and the environment is not, which is the assumption most
 worth checking first.
+
+## Instrumenting a race can hide it, so instrument the *next* one instead
+
+`cut-and-paste-moves-it` failed about one run in four on X11. Two real bugs came
+out of chasing it — a refused selection conversion whose lookup could never match
+its own pending entry, so the pipe leaked and the job reading it waited forever
+on an end-of-file that could not come; and a paste that returned silently when a
+conversion was refused. The rate fell to roughly one in twenty.
+
+Then it stopped being findable. Every attempt to watch it changed it: an
+`eprintln!` per key — one write syscall — made fourteen consecutive runs pass. A
+hypothesis about the driver decomposing `Ctrl+V` into a bare `v` was tested by
+construction, with a round trip proving the modifier had been processed before
+the key was sent, and **the rate did not move**. The hypothesis was wrong, and
+the measurement said so, which is the only reason it did not become a story.
+
+Two things this cost, and one that paid.
+
+It cost a reading that proved nothing and was nearly taken as evidence: the
+state dump showed `typed=""` after the failure, which looked like "the chord did
+not decompose" and in fact meant nothing at all — the type-ahead buffer expires
+after a second and the dump was taken 1.1 s later. **A field that is empty
+because it was cleared and a field that is empty because it was never written
+look identical**, and a dump taken after the window has closed can only produce
+the first.
+
+It cost three hypotheses, each of which pointed at a different file, and none of
+which survived. That is the ordinary price of the rule this document keeps
+returning to; it is not always refunded.
+
+What paid was giving up on catching *this* occurrence and making the next one
+explain itself. A chord that resolves to a command whose `enabled` says no
+consumes the key and produces **nothing** — no notice, no job, no frame worth
+looking at — which from outside the process is indistinguishable from a key that
+never arrived. That ambiguity was the whole difficulty, and it is now one
+`&'static str` in the diagnostic dump, written on a path that already ran.
+`offered` is there for the same reason: "why is Paste dimmed" had no answer from
+outside.
+
+**The residual failure is unexplained and recorded as such.** One in roughly
+forty runs at the last measurement, against one in four before the fixes — which
+is not enough to tell "rarer" from "gone", and saying so is the point. The next
+occurrence will name the command it refused.

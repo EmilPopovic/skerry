@@ -551,10 +551,20 @@ impl Input for XTest {
         self.fake(if down { KEY_PRESS } else { KEY_RELEASE }, keycode, 0, 0);
     }
 
-    /// Nothing to do: the X server tracks modifier state from the keycodes it
-    /// was sent, which is the part `zwp_virtual_keyboard_v1` leaves to the
-    /// client.
-    fn modifiers(&mut self, _mask: u32) {}
+    /// **A round trip, not a no-op.** The X server tracks modifier state from the
+    /// keycodes it was sent — that part needs no help — but `play` presses the
+    /// modifier and the key back to back, and a reply here is what proves the
+    /// press has been *processed* before the key it modifies is sent. Requests
+    /// are answered in order, so a reply to this one means every request before
+    /// it has been applied.
+    ///
+    /// Without it `Ctrl+V` arrived as a bare `v` about once in twenty, which
+    /// lands in the type-ahead buffer and leaves no trace anywhere: no notice, no
+    /// job, and every mode in the window reading clean.
+    fn modifiers(&mut self, _mask: u32) {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        let _ = self.connection.get_input_focus().map(x11rb::cookie::Cookie::reply);
+    }
 
     fn move_to(&mut self, x: u32, y: u32) {
         let across = |value: u32, extent: u32| {

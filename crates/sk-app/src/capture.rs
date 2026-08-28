@@ -63,6 +63,8 @@ pub struct Capture {
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
     pub palette: bool,
+    /// Whether to draw the sibling menu one of the path bar's chevrons opens.
+    pub crumbs: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
     pub filter: bool,
     /// Whether to draw a name being typed over a row, with its stem selected.
@@ -135,6 +137,8 @@ fn sample_path_entry(path: &std::path::Path) -> crate::field::Field {
 /// and the four of them are the same thing: a thing the window would be showing,
 /// stated rather than reached.
 struct Overlays {
+    /// The sibling menu a path-bar chevron opens.
+    crumbs: Option<crate::crumbs::CrumbMenu>,
     menu: Option<crate::menu::Menu>,
     path_entry: Option<crate::field::Field>,
     palette: Option<crate::palette::Palette>,
@@ -173,6 +177,23 @@ fn sample_naming(pane: &mut Pane) -> Option<crate::edit::Naming> {
     })
 }
 
+/// The sibling menu, as the chevron *before* the last component opens it.
+///
+/// So the rows are the leaf's own siblings and one of them is the leaf — which
+/// is the state a person meets, and the only one where the "you are here" mark
+/// is worth a frame at all. A menu anchored at one depth listing another's
+/// children would be a frame that agreed with nothing.
+fn sample_crumb_menu(layout: &Layout) -> crate::crumbs::CrumbMenu {
+    let rows = ["fixture", "rendered", "مستندات"].map(str::to_owned).to_vec();
+    crate::crumbs::CrumbMenu::new(
+        2,
+        std::path::PathBuf::from("/tmp/skerry-golden"),
+        layout.path.x + 180.0,
+        rows,
+        Some("fixture"),
+    )
+}
+
 fn sample_overlays(
     request: &Capture,
     layout: &Layout,
@@ -186,6 +207,7 @@ fn sample_overlays(
     }
     Overlays {
         menu: request.menu.then(|| sample_menu(layout)).flatten(),
+        crumbs: request.crumbs.then(|| sample_crumb_menu(layout)),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
         palette: request.palette.then(sample_palette),
         naming: request.rename.then(|| sample_naming(pane)).flatten(),
@@ -318,6 +340,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 // actually move a pointer.
                 hovered_button: None,
                 hovered_crumb: None,
+                hovered_separator: None,
+                crumb_menu: overlays.crumbs.as_ref(),
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,

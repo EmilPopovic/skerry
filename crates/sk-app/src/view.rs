@@ -62,6 +62,10 @@ pub struct Chrome<'a> {
     pub hovered_place: Option<usize>,
     /// The row a drag of files would drop into, while one is in flight.
     pub drop_row: Option<usize>,
+    /// The breadcrumb separator under the pointer.
+    pub hovered_separator: Option<usize>,
+    /// The sibling menu a separator has opened, while one is open.
+    pub crumb_menu: Option<&'a crate::crumbs::CrumbMenu>,
     /// The name being typed, if one is.
     pub naming: Option<&'a Naming>,
     /// Whether each of the four navigation buttons can run right now, from the
@@ -96,6 +100,16 @@ pub struct Hits {
     /// One rectangle per path component, root first. The index is the number of
     /// components to keep when it is clicked.
     pub crumbs: Vec<Area>,
+    /// One rectangle per *drawn* row of a separator's menu, in draw order — so
+    /// the index a click reports is an offset from the menu's scroll.
+    pub crumb_menu: Vec<Area>,
+    /// One rectangle per **separator**, indexed by the component on its left.
+    ///
+    /// A separator is a target of its own — clicking one lists the directories
+    /// inside the component to its left, which are the siblings of the component
+    /// to its right. There is one after the last component too: its list is the
+    /// children of where you already are.
+    pub separators: Vec<Area>,
     /// One rectangle per sidebar row, in the flattened order the model uses, so
     /// the index a click reports is an index into it.
     pub places: Vec<Area>,
@@ -167,6 +181,9 @@ pub fn draw(
     if let Some(rows) = chrome.keys {
         keys_overlay(painter, layout, rows);
     }
+    if let Some(menu) = chrome.crumb_menu {
+        crumb_menu(painter, layout, menu, hits);
+    }
     if let Some(palette) = chrome.palette {
         command_palette(painter, layout, palette, hits);
     }
@@ -225,6 +242,7 @@ fn path_bar(
     ) / painter.scale;
 
     hits.crumbs.clear();
+    hits.separators.clear();
     if let Some(field) = chrome.path_entry {
         // No breadcrumbs and no hit regions for them: the strip is a text field
         // now, and a click in it belongs to the caret.
@@ -233,45 +251,9 @@ fn path_bar(
     }
     let available = layout.path.width - metrics.gutter * 2.0 - hint_width - 12.0;
     let names = crumb_names(pane);
-    let widths: Vec<f32> = names
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            let bold = index + 1 == names.len();
-            crumb_width(painter, name, metrics.path_size, bold)
-                + CRUMB_PAD * 2.0
-                + if index + 1 == names.len() || index == 0 { 0.0 } else { SEPARATOR }
-        })
-        .collect();
+    let widths = crumb_widths(painter, &names, metrics.path_size);
 
-    // From the right, because the leaf answers "where am I" and everything to
-    // its left is context: a path too long for the bar loses its middle and
-    // keeps its end, which is the half a person is reading. The root stays,
-    // because "/" is one glyph and dropping it makes an absolute path look
-    // relative.
-    let root = widths.first().copied().unwrap_or_default();
-    let mut first = 1;
-    // The `… /` mark has a width of its own and the fitting never counted it, so
-    // an elided bar overflowed by exactly that much. Reserved up front: it costs
-    // one component's worth of room in the case where there is already not
-    // enough, which is the case it exists for.
-    let mut total = root
-        + crumb_width(painter, i18n::lookup("chrome.crumb_elided"), metrics.path_size, false)
-        + CRUMB_PAD;
-    for index in (1..names.len()).rev() {
-        if total + widths[index] > available && index > 1 {
-            first = index + 1;
-            break;
-        }
-        total += widths[index];
-    }
-    // **Never past the leaf.** A leaf wider than the whole bar used to set
-    // `first` to `names.len()`, and the draw loop then skipped every index from
-    // one — including the leaf. The bar read `/ … /` with the current directory
-    // absent and nothing clickable, at window widths the toplevel's own 320 px
-    // minimum can reach. It is drawn and clipped instead, which is what the
-    // clip region below is for.
-    first = first.min(names.len().saturating_sub(1)).max(1);
+    let first = first_crumb(painter, &names, &widths, available, metrics.path_size);
     let elided = first > 1;
     let mut cursor = layout.path.x + metrics.gutter;
 
@@ -291,30 +273,61 @@ fn path_bar(
         }
         hits.crumbs.push(area);
 
-        if chrome.hovered_crumb == Some(index) && !last {
-            let shape =
-                painter.rect(area.x, area.y + 6.0, area.width - SEPARATOR, area.height - 12.0);
+        let text_cell = width - SEPARATOR;
+        if chrome.hovered_crumb == Some(index) && text_cell > 0.0 {
+            let shape = painter.rect(area.x, area.y + 6.0, text_cell, area.height - 12.0);
             painter.list.rect(shape, theme.palette.hover, painter.px(metrics.radius));
         }
-        let style = if last {
-            TextStyle::new(metrics.path_size, theme.palette.text).bold()
-        } else {
-            TextStyle::new(metrics.path_size, theme.palette.dim)
-        };
-        line(painter, name, style, cursor + CRUMB_PAD, width - CRUMB_PAD, baseline);
-        cursor += width;
-        // The root is its own separator, so it does not get another one — the
-        // first draft read `/ / home / emil`.
-        if !last && index > 0 {
-            let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(120));
-            let mark = i18n::lookup("chrome.crumb_separator");
-            line(painter, mark, style, cursor - SEPARATOR, SEPARATOR, baseline);
+        if text_cell > 0.0 {
+            let style = if last {
+                TextStyle::new(metrics.path_size, theme.palette.text).bold()
+            } else {
+                TextStyle::new(metrics.path_size, theme.palette.dim)
+            };
+            line(painter, name, style, cursor + CRUMB_PAD, text_cell - CRUMB_PAD, baseline);
         }
+        cursor += text_cell;
+
+        // The separator, which is a target of its own.
+        let cell =
+            Area { x: cursor, y: layout.path.y, width: SEPARATOR, height: layout.path.height };
+        while hits.separators.len() < index {
+            hits.separators.push(Area::default());
+        }
+        hits.separators.push(cell);
+        if chrome.hovered_separator == Some(index)
+            || chrome.crumb_menu.map(|it| it.depth) == Some(index)
+        {
+            let shape = painter.rect(cell.x, cell.y + 6.0, cell.width, cell.height - 12.0);
+            painter.list.rect(shape, theme.palette.hover, painter.px(metrics.radius));
+        }
+        let mark = if index == 0 {
+            i18n::lookup("chrome.crumb_root")
+        } else {
+            i18n::lookup("chrome.crumb_separator")
+        };
+        let shade = if chrome.hovered_separator == Some(index) {
+            theme.palette.text
+        } else {
+            theme.palette.dim.with_alpha(150)
+        };
+        let style = TextStyle::new(metrics.path_size, shade).centred();
+        line(painter, mark, style, cell.x, cell.width, baseline);
+        cursor += SEPARATOR;
+
         if index == 0 && elided {
+            // The ellipsis stands for the components that did not fit, so it
+            // takes a separator of its own: `/ … › fixture` reads as root, some
+            // things, fixture, where `/ … fixture` reads as one odd name.
             let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(150));
             let mark = i18n::lookup("chrome.crumb_elided");
             cursor +=
                 line(painter, mark, style, cursor, available, baseline) / painter.scale + CRUMB_PAD;
+            let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(150));
+            let mark = i18n::lookup("chrome.crumb_separator");
+            let cell = Area { x: cursor, y: layout.path.y, width: SEPARATOR, ..layout.path };
+            line(painter, mark, style.centred(), cell.x, cell.width, baseline);
+            cursor += SEPARATOR;
         }
     }
     painter.list.pop_clip();
@@ -352,12 +365,19 @@ pub fn path_field(layout: &Layout, metrics: &sk_ui::Metrics) -> Area {
 /// hit test that turns a click into a caret position.
 pub const PATH_INSET: f32 = 8.0;
 
-/// Room for the `/` between two components, in logical pixels.
-const SEPARATOR: f32 = 10.0;
+/// Room for the chevron between two components, in logical pixels.
+const SEPARATOR: f32 = SEPARATOR_TARGET;
 
 /// Space each side of a breadcrumb's text, so the hover shape is not tight
 /// against the glyphs and the target is bigger than the word.
 const CRUMB_PAD: f32 = 6.0;
+
+/// How much of the separator's width is a click target.
+///
+/// The glyph is narrow and the thing it opens is a menu, so the target is the
+/// whole cell rather than the ink: a chevron a person has to hit within two
+/// pixels is a chevron nobody discovers.
+const SEPARATOR_TARGET: f32 = 18.0;
 
 /// The path's components, root first, with `/` as its own first component.
 ///
@@ -375,6 +395,63 @@ fn crumb_names(pane: &Pane) -> Vec<String> {
             .filter(|name| !name.is_empty()),
     );
     names
+}
+
+/// The first component to draw, once the bar has been fitted to its width.
+///
+/// **From the right**, because the leaf answers "where am I" and everything to
+/// its left is context: a path too long for the bar loses its middle and keeps
+/// its end, which is the half a person is reading. The root stays, because `/`
+/// is one glyph and dropping it makes an absolute path look relative.
+fn first_crumb(
+    painter: &mut Painter<'_>,
+    names: &[String],
+    widths: &[f32],
+    available: f32,
+    size: f32,
+) -> usize {
+    let root = widths.first().copied().unwrap_or_default();
+    let mut first = 1;
+    // The elision mark has a width of its own and the fitting never counted it,
+    // so an elided bar overflowed by exactly that much. Reserved up front: it
+    // costs one component's worth of room in the case where there is already not
+    // enough, which is the case it exists for.
+    let mut total =
+        root + crumb_width(painter, i18n::lookup("chrome.crumb_elided"), size, false) + CRUMB_PAD;
+    for index in (1..names.len()).rev() {
+        if total + widths[index] > available && index > 1 {
+            first = index + 1;
+            break;
+        }
+        total += widths[index];
+    }
+    // **Never past the leaf.** A leaf wider than the whole bar used to set this
+    // to `names.len()`, and the draw loop then skipped every index from one —
+    // including the leaf. The bar read `/ … ›` with the current directory absent
+    // and nothing clickable, at window widths the toplevel's own 320 px minimum
+    // can reach. It is drawn and clipped instead.
+    first.min(names.len().saturating_sub(1)).max(1)
+}
+
+/// How wide each component's cell is, separator included.
+///
+/// Every component carries the separator that *follows* it, the last one
+/// included: its chevron lists the children of where you already are, which is
+/// how Windows 11 reads and is the one that saves the most steps. The root draws
+/// no name of its own — it is all separator, because `/` is the separator.
+fn crumb_widths(painter: &mut Painter<'_>, names: &[String], size: f32) -> Vec<f32> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let text = if index == 0 {
+                0.0
+            } else {
+                crumb_width(painter, name, size, index + 1 == names.len()) + CRUMB_PAD * 2.0
+            };
+            text + SEPARATOR
+        })
+        .collect()
 }
 
 /// How wide a breadcrumb's text is, in logical pixels.
@@ -470,6 +547,99 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
 /// Centred horizontally and near the top, which is where every palette a person
 /// has used puts it, and a fixed height so the list does not jump as a query
 /// narrows.
+/// The sibling menu hanging from a breadcrumb separator.
+///
+/// Anchored under the chevron it belongs to, and pushed back inside the window
+/// where the chevron is near the right edge: a menu that runs off the screen is
+/// a menu whose bottom rows nobody can reach.
+fn crumb_menu(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    menu: &crate::crumbs::CrumbMenu,
+    hits: &mut Hits,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let (first, drawn) = menu.window();
+
+    let widest = drawn
+        .iter()
+        .map(|name| text_width(painter, name, metrics.path_size, false))
+        .fold(0.0_f32, f32::max);
+    let width = (widest + CRUMB_MENU_INSET * 2.0 + CRUMB_MENU_MARK)
+        .clamp(CRUMB_MENU_WIDTH.0, CRUMB_MENU_WIDTH.1.min(layout.window.width - 16.0));
+    let height = drawn.len() as f32 * CRUMB_MENU_STEP + CRUMB_MENU_PAD * 2.0;
+    let area = Area {
+        x: (menu.at - CRUMB_MENU_INSET).clamp(8.0, (layout.window.width - width - 8.0).max(8.0)),
+        y: layout.path.bottom(),
+        width,
+        height,
+    };
+    panel(painter, area);
+
+    hits.crumb_menu.clear();
+    for (offset, name) in drawn.iter().enumerate() {
+        let top = area.y + CRUMB_MENU_PAD + offset as f32 * CRUMB_MENU_STEP;
+        let row = Area { x: area.x, y: top, width: area.width, height: CRUMB_MENU_STEP };
+        hits.crumb_menu.push(row);
+        let highlighted = menu.active == Some(first + offset);
+        if highlighted {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, CRUMB_MENU_STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let baseline = painter.baseline(top, CRUMB_MENU_STEP, metrics.path_size);
+        // The way you came, marked. Without it a menu of forty siblings gives no
+        // clue which of them the path already goes through.
+        if menu.current == Some(first + offset) {
+            let mark = TextStyle::new(
+                metrics.path_size,
+                if highlighted { theme.palette.selected_text } else { theme.palette.accent },
+            );
+            line(
+                painter,
+                i18n::lookup("chrome.crumb_here"),
+                mark,
+                area.x + CRUMB_MENU_INSET,
+                CRUMB_MENU_MARK,
+                baseline,
+            );
+        }
+        let colour = if highlighted { theme.palette.selected_text } else { theme.palette.text };
+        let style = TextStyle::new(metrics.path_size, colour);
+        line(
+            painter,
+            name,
+            style,
+            area.x + CRUMB_MENU_INSET + CRUMB_MENU_MARK,
+            area.width - CRUMB_MENU_INSET * 2.0 - CRUMB_MENU_MARK,
+            baseline,
+        );
+    }
+    if drawn.is_empty() {
+        let baseline = painter.baseline(area.y, area.height, metrics.path_size);
+        let style = TextStyle::new(metrics.path_size, theme.palette.dim);
+        line(
+            painter,
+            i18n::lookup("chrome.crumb_empty"),
+            style,
+            area.x + CRUMB_MENU_INSET,
+            area.width - CRUMB_MENU_INSET * 2.0,
+            baseline,
+        );
+    }
+}
+
+/// One row of a separator's menu.
+const CRUMB_MENU_STEP: f32 = 26.0;
+/// Space above and below the rows.
+const CRUMB_MENU_PAD: f32 = 4.0;
+/// Text inset inside the menu.
+const CRUMB_MENU_INSET: f32 = 10.0;
+/// The column the "you are here" mark sits in.
+const CRUMB_MENU_MARK: f32 = 16.0;
+/// How wide the menu may be, whatever its widest name is.
+const CRUMB_MENU_WIDTH: (f32, f32) = (160.0, 420.0);
+
 fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette, hits: &mut Hits) {
     use crate::palette::{FIELD, INSET, SPACING, STEP, TOP, VISIBLE, WIDTH};
 
@@ -1659,6 +1829,8 @@ mod tests {
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,
+                hovered_separator: None,
+                crumb_menu: None,
                 hovered_tool: None,
                 places: &[],
                 hovered_place: None,

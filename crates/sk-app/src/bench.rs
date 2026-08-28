@@ -201,6 +201,8 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,
+                hovered_separator: None,
+                crumb_menu: None,
                 hovered_tool: None,
                 places: &places,
                 hovered_place: None,

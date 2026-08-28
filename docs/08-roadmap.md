@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 445 tests, 66 GUI scenarios on two display servers and fifteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 452 tests, 68 GUI scenarios on two display servers and sixteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -151,7 +151,7 @@ defects they exposed.
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle**, on both servers | — |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, and Spike E's matrix nightly on four filesystems it builds itself | A second runner architecture — the matrix and the frames are both `x86_64` today, and [06-portability.md](06-portability.md) names `aarch64` |
-| Fifteen golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on | A perceptual diff. Two channel levels of 255 is a threshold, not a metric, and it cannot tell a moved glyph from a re-blended one |
+| Sixteen golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on | A perceptual diff. Two channel levels of 255 is a threshold, not a metric, and it cannot tell a moved glyph from a re-blended one |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8). **Deliberately not in CI**: a shared runner's worst frame says more about its neighbours than about this code, and [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded) prices that at 6× |
 
 The two capabilities left are the expensive ones, and Spike D already knows what
@@ -166,7 +166,7 @@ measured the negotiated action reported zero times and `dnd_finished` delivered 
 some peers and not others, and deleting an original on a confirmation that may
 never arrive is how a drag loses somebody's files.
 
-**The 66 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The 68 GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are

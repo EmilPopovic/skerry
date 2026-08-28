@@ -430,6 +430,21 @@ struct Replies {
     content_rx: Receiver<Copied>,
     launched_tx: std::sync::mpsc::Sender<Launched>,
     launched_rx: Receiver<Launched>,
+    siblings_tx: std::sync::mpsc::Sender<Siblings>,
+    siblings_rx: Receiver<Siblings>,
+}
+
+/// What a breadcrumb separator's directory turned out to hold.
+struct Siblings {
+    /// Which separator asked, so a stale answer to a menu nobody is waiting for
+    /// any more is dropped rather than opened.
+    depth: usize,
+    /// The directory that was read.
+    parent: PathBuf,
+    /// Where the separator was when it was pressed.
+    at: f32,
+    /// The subdirectories, unsorted.
+    rows: Vec<String>,
 }
 
 impl Replies {
@@ -437,7 +452,17 @@ impl Replies {
         let (paste_tx, paste_rx) = mpsc::channel();
         let (content_tx, content_rx) = mpsc::channel();
         let (launched_tx, launched_rx) = mpsc::channel();
-        Self { paste_tx, paste_rx, content_tx, content_rx, launched_tx, launched_rx }
+        let (siblings_tx, siblings_rx) = mpsc::channel();
+        Self {
+            paste_tx,
+            paste_rx,
+            content_tx,
+            content_rx,
+            launched_tx,
+            launched_rx,
+            siblings_tx,
+            siblings_rx,
+        }
     }
 }
 
@@ -523,6 +548,15 @@ pub struct App {
     hovered_button: Option<crate::layout::Button>,
     /// The path component under the pointer.
     hovered_crumb: Option<usize>,
+    /// The last command a chord resolved to and could not run.
+    refused: Option<&'static str>,
+    /// The breadcrumb separator under the pointer.
+    hovered_separator: Option<usize>,
+    /// The sibling menu a separator opened, once its directory has been read.
+    crumb_menu: Option<crate::crumbs::CrumbMenu>,
+    /// A separator whose directory is still being read, so a second press on it
+    /// does not queue a second read.
+    crumb_pending: Option<usize>,
     /// The navigation button under the pointer.
     hovered_tool: Option<crate::layout::Tool>,
     /// The hit regions the last frame produced.
@@ -691,6 +725,10 @@ impl App {
             window_state: sk_plat::WindowState::default(),
             hovered_button: None,
             hovered_crumb: None,
+            refused: None,
+            hovered_separator: None,
+            crumb_menu: None,
+            crumb_pending: None,
             hovered_tool: None,
             hits: crate::view::Hits::default(),
             cursor: sk_plat::Cursor::Arrow,
@@ -896,6 +934,7 @@ impl App {
 
     /// Applies whatever came back from a clipboard read.
     fn drain_paste(&mut self) {
+        self.drain_siblings();
         let Ok(pasted) = self.replies.paste_rx.try_recv() else { return };
         match pasted {
             Pasted::Folder(path) => self.pane.open(path, &self.jobs),
@@ -1111,6 +1150,14 @@ impl App {
         if self.menu.is_some() && self.menu_key(event, commands) {
             return;
         }
+        // Before the palette and before the list: a sibling menu is the most
+        // specific thing on screen while it is open, and an arrow that moved the
+        // list behind it would move a selection nobody can see.
+        if (self.crumb_menu.is_some() || self.crumb_pending.is_some())
+            && self.crumb_menu_key(event, commands)
+        {
+            return;
+        }
         // The palette takes the keyboard next, and takes nearly all of it: it is
         // a modal field over the whole window, and a chord that ran a command
         // behind it would run one the palette was about to offer.
@@ -1179,7 +1226,15 @@ impl App {
             // A disabled command consumes its key and does nothing, which is the
             // same thing a dimmed menu item does. Falling through to type-ahead
             // instead would make `Alt ←` with no history type an arrow.
-            commands.run(command, self);
+            //
+            // **Which one it was is remembered.** A chord that resolves to a
+            // command whose `enabled` says no produces nothing at all — no
+            // notice, no job, no frame worth looking at — and from outside the
+            // process that is indistinguishable from a key that never arrived.
+            // One `&'static str`, written on the path that already happened.
+            if !commands.run(command, self) {
+                self.refused = commands.describe(command).map(|it| it.id);
+            }
             self.dirty = true;
             return;
         }
@@ -1958,7 +2013,16 @@ impl App {
             ));
             return;
         };
-        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        // **Not a silent return.** The display server can refuse a conversion —
+        // the owner went away between the offer and the ask, or the type it
+        // advertised is one it will not actually serve — and a paste that does
+        // nothing with nothing to show for it is indistinguishable from a key
+        // that never arrived.
+        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else {
+            self.notice =
+                Some((sk_model::i18n::format("error.clipboard_refused", &[&mime]), Instant::now()));
+            return;
+        };
         // Our own mark, for a clipboard we published ourselves. A peer's verb
         // arrives inside the bytes and overrides it below.
         let moving = self.cutting;
@@ -2485,6 +2549,15 @@ impl App {
         // The display server's own view, which is not the same question: one is
         // "this window is carrying something", the other is "the server has a
         // drag over this surface".
+        // What the clipboard says it holds, which is the whole of what dims or
+        // undims Paste — a command that silently does nothing is a command whose
+        // `enabled` said no, and this is the only way to see that from outside.
+        let offered = self.window.clipboard().offered().join(" ");
+        // The type-ahead buffer. A chord whose modifier did not register arrives
+        // as a bare letter and lands here, which is otherwise indistinguishable
+        // from a key that was never delivered at all.
+        let typed = self.typed.clone();
+        let refused = self.refused.unwrap_or_default();
         let drag_in = self.window.dragging().is_some();
         let drag_out = self.window.dragging_out();
         format!(
@@ -2496,7 +2569,8 @@ naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 filtering={} filter={:?} drop_row={drop_row} dragging={dragging} \
-drag_in={drag_in} drag_out={drag_out} \
+drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
+refused={refused:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",
             self.pane.path,
             self.pane.listing.rows(),
@@ -2590,6 +2664,43 @@ sizes={known}/{running} jobs={jobs}/{panics}",
 
     /// Where everything is, so a scenario can aim at it without a copy of the
     /// metrics it is testing.
+    /// How many separators are drawn, which is hovered, and where each one is.
+    ///
+    /// The aim points are the middle of every drawn one, so a scenario names a
+    /// depth instead of copying the path bar's own constants — which would then
+    /// be a second copy to keep right.
+    fn separator_state(&self) -> (usize, i64, String) {
+        let drawn = self.hits.separators.iter().filter(|area| area.width > 0.0).count();
+        let hovered = self.hovered_separator.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let aim = self
+            .hits
+            .separators
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| area.width > 0.0)
+            .map(|(depth, area)| {
+                format!(
+                    "{depth}@{:.1}:{:.1}",
+                    area.x + area.width / 2.0,
+                    area.y + area.height / 2.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        (drawn, hovered, aim)
+    }
+
+    /// The open sibling menu: how many rows, which separator, what is chosen.
+    fn crumb_menu_state(&self) -> (i64, i64, String) {
+        let Some(menu) = &self.crumb_menu else { return (-1, -1, String::new()) };
+        let active = menu.active.and_then(|row| menu.rows.get(row)).cloned().unwrap_or_default();
+        (
+            i64::try_from(menu.rows.len()).unwrap_or(-1),
+            i64::try_from(menu.depth).unwrap_or(-1),
+            active,
+        )
+    }
+
     fn chrome_state(&mut self) -> String {
         let frame = if self.window.needs_own_frame() { "own" } else { "server" };
         let frame_hover = match self.hovered_button {
@@ -2633,6 +2744,8 @@ sizes={known}/{running} jobs={jobs}/{panics}",
         let menu_report = self.menu_report();
         let palette_report = self.palette_report();
         // The middle of the crumb one level up, which is the one a test clicks.
+        let (separators, separator_hover, separator_aim) = self.separator_state();
+        let (crumb_menu, crumb_menu_depth, crumb_menu_active) = self.crumb_menu_state();
         let parent_crumb_x = self
             .hits
             .crumbs
@@ -2644,6 +2757,8 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
 crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
+separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
+crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={crumb_menu_active:?} \
 {menu_report} {palette_report} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
@@ -2697,6 +2812,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.pointer = position;
         if self.palette.is_some() {
             self.palette_press(position, commands);
+            return;
+        }
+        if self.press_in_the_crumb_menu(position) {
             return;
         }
         if self.menu.is_some() {
@@ -2770,6 +2888,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // the drag region: the path bar is the title bar, and a component that
         // moved the window instead of navigating would be a component nobody
         // could click.
+        if let Some(depth) = self.separator_at(position) {
+            self.open_crumb_menu(depth);
+            return;
+        }
         if let Some(depth) = self.crumb_at(position) {
             self.go_to_crumb(depth);
             return;
@@ -3137,6 +3259,194 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.hits.crumbs[..last]
             .iter()
             .position(|area| area.width > 0.0 && area.contains(position.x, position.y))
+    }
+
+    /// Lights the separator and the menu row under the pointer.
+    ///
+    /// Both, because a menu hanging from a separator is one thing on screen and
+    /// a pointer moving from the chevron into the list should not lose the
+    /// highlight on the way.
+    fn hover_the_path_bar(&mut self, position: Point) {
+        let separator = self.separator_at(position);
+        if self.hovered_separator != separator {
+            self.hovered_separator = separator;
+            self.dirty = true;
+        }
+        if let Some(offset) = self.crumb_menu_at(position)
+            && let Some(menu) = &mut self.crumb_menu
+            && menu.hover(offset)
+        {
+            self.dirty = true;
+        }
+    }
+
+    /// A press while a separator's menu is open. Whether it was taken.
+    ///
+    /// A press on a row follows it; a press anywhere else closes the menu and
+    /// **falls through**, so the same click also does whatever it was aimed at.
+    /// The separator itself is left alone, because the branch that owns it
+    /// toggles — closing here would make a second press reopen the menu it had
+    /// just shut.
+    fn press_in_the_crumb_menu(&mut self, position: Point) -> bool {
+        if self.crumb_menu.is_none() && self.crumb_pending.is_none() {
+            return false;
+        }
+        let Some(row) = self.crumb_menu_at(position) else {
+            if self.separator_at(position).is_none() {
+                self.close_crumb_menu();
+            }
+            return false;
+        };
+        if let Some(menu) = &mut self.crumb_menu {
+            menu.hover(row);
+        }
+        self.follow_crumb_menu();
+        true
+    }
+
+    /// Which drawn row of the sibling menu is under a point, as an offset from
+    /// the first drawn.
+    fn crumb_menu_at(&self, position: Point) -> Option<usize> {
+        self.hits.crumb_menu.iter().position(|area| area.contains(position.x, position.y))
+    }
+
+    /// Which breadcrumb separator is under a point, if any.
+    fn separator_at(&self, position: Point) -> Option<usize> {
+        self.hits
+            .separators
+            .iter()
+            .position(|area| area.width > 0.0 && area.contains(position.x, position.y))
+    }
+
+    /// The path a breadcrumb at `depth` names: the current path, that deep.
+    fn path_to_crumb(&self, depth: usize) -> PathBuf {
+        let mut path = PathBuf::from("/");
+        let names = self.pane.path.components().filter_map(|part| match part {
+            std::path::Component::Normal(name) => Some(name.to_owned()),
+            _ => None,
+        });
+        for name in names.take(depth) {
+            path.push(name);
+        }
+        path
+    }
+
+    /// Opens the menu of directories inside the component left of a separator.
+    ///
+    /// **Read on a job**, because rule 1 gives the UI thread no filesystem
+    /// syscalls at all and a separator over a hung mount is exactly the case
+    /// that rule is for. The menu appears when the answer lands; until then the
+    /// chevron stays lit and a second press on it does nothing.
+    fn open_crumb_menu(&mut self, depth: usize) {
+        if self.crumb_menu.as_ref().is_some_and(|menu| menu.depth == depth) {
+            self.close_crumb_menu();
+            return;
+        }
+        // The menu takes the keyboard while it is up, the way the context menu
+        // does — so anything else holding it lets go first.
+        self.menu = None;
+        self.palette = None;
+        self.crumb_menu = None;
+        self.crumb_pending = Some(depth);
+        self.dirty = true;
+        let parent = self.path_to_crumb(depth);
+        let at = self.hits.separators.get(depth).map_or(0.0, |area| area.x);
+        let show_hidden = self.pane.show_hidden;
+        let sender = self.replies.siblings_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |cancel| {
+            let rows = crate::crumbs::children(&parent, show_hidden, cancel).unwrap_or_default();
+            if sender.send(Siblings { depth, parent, at, rows }).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of a separator's directory listing.
+    fn drain_siblings(&mut self) {
+        let Ok(found) = self.replies.siblings_rx.try_recv() else { return };
+        // A menu nobody is waiting for any more: the separator was pressed
+        // again, or something else took the keyboard while the read was running.
+        if self.crumb_pending != Some(found.depth) {
+            return;
+        }
+        self.crumb_pending = None;
+        // The component of the current path that follows this one, which is the
+        // row to mark and to open on.
+        let along = self
+            .pane
+            .path
+            .strip_prefix(&found.parent)
+            .ok()
+            .and_then(|rest| rest.components().next())
+            .map(|part| part.as_os_str().to_string_lossy().into_owned());
+        self.crumb_menu = Some(crate::crumbs::CrumbMenu::new(
+            found.depth,
+            found.parent,
+            found.at,
+            found.rows,
+            along.as_deref(),
+        ));
+        self.dirty = true;
+    }
+
+    /// One key, while a separator's menu is up. Whether it was taken.
+    ///
+    /// **Everything is taken.** A menu of directory names is modal in the same
+    /// way the context menu is: a chord that reached the list behind it would act
+    /// on a selection the menu is covering.
+    fn crumb_menu_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.close_crumb_menu(),
+            Key::Named(Named::Enter) => self.follow_crumb_menu(),
+            Key::Named(Named::Down) if bare => self.step_crumb_menu(1),
+            Key::Named(Named::Up) if bare => self.step_crumb_menu(-1),
+            _ => {
+                // **The diagnostic report passes through every mode**, the same
+                // as it does through the context menu: a report that cannot be
+                // taken while this is open cannot describe it, and it is the only
+                // way the GUI harness can see one. Asked of the registry rather
+                // than matched on a key, so rebinding it does not quietly make
+                // the menu opaque again.
+                let diagnostic = commands
+                    .resolve(event, Scope::Global)
+                    .and_then(|id| commands.describe(id))
+                    .is_some_and(|command| command.id == "help.dump");
+                if diagnostic {
+                    return false;
+                }
+                // Anything else dismisses, and dismisses only: a key that closes
+                // a menu must not also act behind it.
+                self.close_crumb_menu();
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn step_crumb_menu(&mut self, delta: isize) {
+        if let Some(menu) = &mut self.crumb_menu {
+            menu.step(delta);
+            self.dirty = true;
+        }
+    }
+
+    /// Closes the sibling menu, and forgets a read still in flight.
+    fn close_crumb_menu(&mut self) {
+        if self.crumb_menu.take().is_some() || self.crumb_pending.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Goes where the highlighted row of the sibling menu points.
+    fn follow_crumb_menu(&mut self) {
+        let Some(menu) = &self.crumb_menu else { return };
+        let Some(path) = menu.active.and_then(|row| menu.path_of(row)) else { return };
+        self.close_crumb_menu();
+        self.pane.open(path, &self.jobs);
+        self.dirty = true;
     }
 
     /// Navigates to the prefix of the current path a breadcrumb names.
@@ -3526,6 +3836,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.dirty = true;
         }
         let crumb = self.crumb_at(position);
+        self.hover_the_path_bar(position);
         if self.hovered_crumb != crumb {
             self.hovered_crumb = crumb;
             self.dirty = true;
@@ -3644,7 +3955,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         None
     }
 
-    fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
+    /// Everything that has to settle before the frame can be described.
+    ///
+    /// Separate from [`Self::render`] because all of it wants `&mut self` whole,
+    /// and the description below splits `self` into its fields — so anything
+    /// left here would have to be answered twice or borrowed around.
+    fn before_frame(&mut self, commands: &Registry<Self>) -> ((u32, u32), f32, [bool; 4]) {
         let physical = self.window.physical();
         if physical != self.renderer.size() {
             self.renderer.resize(physical);
@@ -3652,13 +3968,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         let scale = self.window.scale();
         self.settle_rows();
-
-        // Asked before the borrow below splits `self` apart: the answer is
-        // whether each navigation command can run, and only the registry knows
-        // that — rule 2 again, so the dimming and the click cannot disagree.
+        // Asked here for the same reason: the answer is whether each navigation
+        // command can run, and only the registry knows that — rule 2 again, so
+        // the dimming and the click cannot disagree.
         let tools = tool_state(commands, self);
         self.settle_menu_state(commands);
+        (physical, scale, tools)
+    }
 
+    fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
+        let (physical, scale, tools) = self.before_frame(commands);
         self.list.begin(physical);
 
         let Self {
@@ -3685,6 +4004,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             capabilities,
             hovered_button,
             hovered_crumb,
+            hovered_separator,
+            crumb_menu,
             hovered_tool,
             sidebar,
             edits,
@@ -3714,6 +4035,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             notice: progress.as_deref().or(notice.as_ref().map(|(message, _)| message.as_str())),
             hovered_button: *hovered_button,
             hovered_crumb: *hovered_crumb,
+            hovered_separator: *hovered_separator,
+            crumb_menu: crumb_menu.as_ref(),
             hovered_tool: *hovered_tool,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,

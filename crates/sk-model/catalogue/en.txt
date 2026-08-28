@@ -66,6 +66,7 @@ error.not_empty = {0} is not empty any more, so undoing that would delete what i
 error.too_large = {0} is too large to copy as text. Open it instead.
 error.full = There is no room for {0}. Free some space, or copy it somewhere else.
 error.not_copyable = {0} is a device or a pipe. There is nothing in it to copy.
+error.clipboard_refused = The clipboard would not hand over {0}
 error.clipboard_no_files = The clipboard holds no files to paste.
 verb.copying = Copying
 verb.moving = Moving
@@ -107,8 +108,10 @@ chrome.close = ×
 # the separator on the other side of the name and may spell an elision
 # differently, and because the root is `/` here and need not be everywhere.
 chrome.crumb_root = /
-chrome.crumb_separator = /
-chrome.crumb_elided = … /
+chrome.crumb_separator = ›
+chrome.crumb_elided = …
+chrome.crumb_here = ›
+chrome.crumb_empty = No folders in here
 
 key.super = Super
 key.ctrl = Ctrl

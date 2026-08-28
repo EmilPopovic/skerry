@@ -149,7 +149,7 @@ embedded catalogue at build time with a runtime override directory.
 | --- | --- | --- |
 | `sk-model`, `sk-util` | Ordinary unit tests, plus property tests for arena and interning invariants | Every commit |
 | `sk-fs` | A filesystem torture matrix over loopback images: ext4, btrfs, xfs, tmpfs, exFAT, plus an NFS loopback. Sparse files, hardlinks, symlinks, xattrs, ACLs, ENOSPC mid-copy, adversarial filenames | Every commit for tmpfs/ext4; nightly for the full matrix |
-| `sk-plat` | The 66 GUI scenarios against a real window, on **both** display servers: a nested Hyprland through the virtual-input protocols, and a private `Xvfb` through `XTEST`. Only the second needs no seat, so only the second is in CI | Every commit |
+| `sk-plat` | The 68 GUI scenarios against a real window, on **both** display servers: a nested Hyprland through the virtual-input protocols, and a private `Xvfb` through `XTEST`. Only the second needs no seat, so only the second is in CI | Every commit |
 | `sk-gpu`, `sk-ui`, `sk-text` | Golden-frame tests: render offscreen, compare against reference PNGs with a perceptual tolerance, at 100/125/150/200% scaling. Run on llvmpipe so CI needs no GPU | Every commit |
 | `sk-index`, `sk-cmd` | Unit tests against synthetic trees; fuzz the filter grammar and the keymap parser | Every commit; fuzzers nightly |
 | `sk-desktop` | Parser fuzzing (`.desktop`, MIME globs and magic, `index.theme`); D-Bus tested against a mock bus | Every commit |

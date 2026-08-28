@@ -26,6 +26,7 @@ mod app;
 mod bench;
 mod capture;
 mod commands;
+mod crumbs;
 mod edit;
 mod field;
 mod frames;
@@ -42,4 +43,7 @@ mod view;
 pub use app::{App, Options};
 pub use bench::{Bench, run as bench};
 pub use capture::{Capture, run as capture};
+// Re-exported because every entry point above returns one, and a binary that
+// calls them has to be able to name what they fail with.
 pub use pane::Pane;
+pub use sk_model::Problem;

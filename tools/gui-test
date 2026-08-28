@@ -808,7 +808,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 66
+FEWEST_SCENARIOS = 68
 
 
 def scenario(name, fresh: bool = False):
@@ -2148,6 +2148,111 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
             raise Failure("the drag deleted the peer's original")
     finally:
         peer.close()
+
+
+def separator_aim(run: Run, state: dict[str, str], depth: int) -> tuple[float, float]:
+    """Where to click the breadcrumb separator after component `depth`.
+
+    The window reports the middle of every drawn one, so a scenario aims by depth
+    and never by arithmetic over the path bar's own constants — which it would
+    have to copy, and which would then be a second copy to keep right.
+    """
+    for entry in state.get("separator_aim", "").split(","):
+        name, _, point = entry.partition("@")
+        if name == str(depth):
+            x, _, y = point.partition(":")
+            return aim(run, state, float(x), float(y))
+    raise Failure(f"no separator at depth {depth}: {state.get('separator_aim')!r}")
+
+
+@scenario("a-separator-lists-the-siblings-beside-it", fresh=True)
+def a_separator_lists_siblings(run: Run, fixture: Path) -> None:
+    """The chevron between two components opens what is between them.
+
+    **The whole point of a Windows 11 path bar.** A separator sits between two
+    components, so the directories inside the one on its left are the *siblings*
+    of the one on its right — which is the list a person wants when they are
+    three levels deep and meant to be in the folder next door. It turns "up, up,
+    down, down" into one press and one click, at any depth.
+
+    The listing happens on a job: rule 1 gives the UI thread no filesystem
+    syscalls, and a separator over a hung mount is the case that rule is for. So
+    the menu is asked for and opens when the answer lands, which is why this
+    waits for it rather than asserting on the next frame.
+    """
+    (fixture / "alpha" / "sideways").mkdir()
+    run.drive("sleep 500\ntext alpha\nsleep 400\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    inside = run.state()
+    if not inside["path"].endswith("/alpha"):
+        raise Failure(f"did not get into alpha: {inside['path']}")
+    deep = int(inside["crumbs"])
+
+    # The separator *before* the leaf: its left neighbour is the fixture, so its
+    # list is the leaf's own siblings.
+    where = separator_aim(run, inside, deep - 2)
+    run.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n")
+    opened = run.state()
+    if int(opened["crumb_menu"]) < 3:
+        raise Failure(f"the menu holds {opened['crumb_menu']} rows, wanted the fixture's folders")
+    expect(opened, crumb_menu_depth=str(deep - 2))
+    # It opens on the component the path already goes through, so the keyboard
+    # starts from where the person is rather than from the top of an alphabet.
+    expect(opened, crumb_menu_active="alpha")
+
+    # And down to a sibling, then Enter, and that is where we are. One key per
+    # drive: two sent together race the frame that processes the first.
+    run.drive("key down\nsleep 300\nkey f12\nsleep 300\n")
+    moved = run.state()
+    if moved["crumb_menu_active"] == "alpha":
+        raise Failure("Down did not move off the current component")
+    chosen = moved["crumb_menu_active"]
+    run.drive("key enter\nsleep 900\nkey f12\nsleep 300\n")
+    landed = run.state()
+    if landed["path"] != str(fixture / chosen):
+        raise Failure(f"chose {chosen!r} and landed in {landed['path']}")
+    expect(landed, crumb_menu="-1")
+
+
+@scenario("the-last-separator-lists-what-is-inside-here", fresh=True)
+def the_last_separator_lists_children(run: Run, fixture: Path) -> None:
+    """The chevron after the last component lists the children of here.
+
+    It has no right-hand neighbour, so its list is what is inside the current
+    directory — a way into a subdirectory without leaving, and the one that saves
+    the most steps.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 200\n")
+    start = run.state()
+    deep = int(start["crumbs"])
+
+    where = separator_aim(run, start, deep - 1)
+    run.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n")
+    opened = run.state()
+    expect(opened, crumb_menu_depth=str(deep - 1))
+    if int(opened["crumb_menu"]) != 3:
+        raise Failure(f"the menu holds {opened['crumb_menu']} rows, wanted the three folders")
+    # Nothing below the last component is on the path, so nothing is marked and
+    # nothing is selected until a key or the pointer says so.
+    expect(opened, crumb_menu_active="")
+
+    # One key per drive, and asserted between: a `Down` and an `Enter` sent
+    # together race the frame that processes the first, and an `Enter` that
+    # arrives with nothing highlighted does nothing at all.
+    run.drive("key down\nsleep 300\nkey f12\nsleep 300\n")
+    chosen = run.state()["crumb_menu_active"]
+    if not chosen:
+        raise Failure("Down highlighted nothing")
+    run.drive("key enter\nsleep 900\nkey f12\nsleep 300\n")
+    landed = run.state()
+    if landed["path"] != str(fixture / chosen):
+        raise Failure(f"chose {chosen!r} and landed in {landed['path']}")
+    if Path(landed["path"]).parent != fixture:
+        raise Failure(f"landed in {landed['path']}, wanted a child of the fixture")
+
+    # Escape closes it without going anywhere.
+    where = separator_aim(run, landed, int(landed["crumbs"]) - 1)
+    run.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey escape\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), crumb_menu="-1", path=landed["path"])
 
 
 def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, float]:

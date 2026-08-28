@@ -104,6 +104,10 @@ FRAMES = [
         "rename-while-filtered",
         ["--size", "900x400", "--scale", "125", "--filter", "--rename"],
     ),
+    # A path-bar chevron's sibling menu: the list, the row the path goes through
+    # marked, and the anchor under the separator it hangs from. The only frame
+    # that would catch the menu drifting away from its chevron.
+    ("crumb-menu", ["--size", "900x400", "--scale", "125", "--crumbs"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

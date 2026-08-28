@@ -11,6 +11,21 @@ use std::time::Instant;
 
 use sk_app::{App, Bench, Capture, Options};
 
+/// Opens the window and runs it until it closes.
+///
+/// Separate from `main` because the other two modes are one expression each and
+/// this one is not: a display server going away is not the user closing the
+/// window, and the difference is worth a line on the way out.
+fn window(options: Options) -> Result<bool, sk_app::Problem> {
+    App::new(options).map(|mut app| {
+        if let Some(failure) = app.run() {
+            eprintln!("skerry: the display server went away — {failure}");
+            return false;
+        }
+        true
+    })
+}
+
 fn main() -> std::process::ExitCode {
     // Taken first, so the cold-start figure includes argument parsing, the
     // allocator waking up, and every dynamic library the loader pulls in.
@@ -24,6 +39,7 @@ fn main() -> std::process::ExitCode {
     let mut path_entry = false;
     let mut palette = false;
     let mut filter = false;
+    let mut crumbs = false;
     let mut rename = false;
     let mut own_frame = false;
     let mut no_sidebar = false;
@@ -45,6 +61,7 @@ fn main() -> std::process::ExitCode {
             "--path-entry" => path_entry = true,
             "--palette" => palette = true,
             "--filter" => filter = true,
+            "--crumbs" => crumbs = true,
             "--rename" => rename = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
@@ -94,6 +111,7 @@ fn main() -> std::process::ExitCode {
             path_entry,
             palette,
             filter,
+            crumbs,
             rename,
             stats,
             own_frame,
@@ -104,16 +122,7 @@ fn main() -> std::process::ExitCode {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
         }
         (None, None) => {
-            App::new(Options { path, dark, stats, own_frame, scale_120: forced_scale, started })
-                .map(|mut app| {
-                    // A compositor that goes away is not the user closing the window, and
-                    // the difference is worth a line on the way out.
-                    if let Some(failure) = app.run() {
-                        eprintln!("skerry: the display server went away — {failure}");
-                        return false;
-                    }
-                    true
-                })
+            window(Options { path, dark, stats, own_frame, scale_120: forced_scale, started })
         }
     };
 
@@ -164,6 +173,7 @@ skerry [OPTIONS] [PATH]
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it
+  --crumbs         show a path-bar chevron's sibling menu, for a golden frame
   --rename         show a name being typed, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
