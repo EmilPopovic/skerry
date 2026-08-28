@@ -170,6 +170,354 @@ def stop_compositor(process: subprocess.Popen | None, config: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+
+class Server:
+    """A display server to run the window on, and the questions a scenario asks it.
+
+    Two implementations, because the product has two backends and a scenario that
+    only ever ran on one of them has measured one of them. Everything a scenario
+    needs that is *about the server* rather than about the window is behind this:
+    where the window is, how big the output is, what scale it claims, and how to
+    photograph it.
+    """
+
+    display = ""
+
+    def start(self, work: Path, scale: str) -> None:
+        raise NotImplementedError
+
+    def stop(self) -> None:
+        raise NotImplementedError
+
+    def environment(self) -> dict:
+        raise NotImplementedError
+
+    def window_box(self) -> tuple[int, int, int, int]:
+        """Where the window is, in **logical** pixels — the space the program
+        reports its own size in."""
+        raise NotImplementedError
+
+    def output_size(self) -> tuple[int, int]:
+        """How big the output is, in **logical** pixels.
+
+        The same space as [`window_box`], and that is the whole point: `aim`
+        divides one by the other, so a mismatch is invisible at 100% and wrong by
+        exactly the scale at any other. It was wrong — `hyprctl clients` reports
+        logical and `hyprctl monitors` reports device — and twelve scenarios
+        failed at 125% for as long as anyone had been running them there.
+        """
+        raise NotImplementedError
+
+    def output_scale(self) -> float:
+        raise NotImplementedError
+
+    def grab(self, box: tuple[int, int, int, int], into: Path) -> None:
+        raise NotImplementedError
+
+    def driver_flag(self) -> str:
+        raise NotImplementedError
+
+    def paste_command(self, mime: str) -> list[str] | None:
+        raise NotImplementedError
+
+    def ask_to_close(self) -> None:
+        raise NotImplementedError
+
+    def resize(self, width: int, height: int) -> None:
+        """Resizes the window from outside, the way a person dragging an edge does."""
+        raise NotImplementedError
+
+    def make_floating(self) -> None:
+        """Takes the window out of any tiling layout. Not every server has one."""
+
+
+class WaylandServer(Server):
+    """A nested Hyprland, for the virtual-input protocols."""
+
+    def __init__(self):
+        self.process = None
+        self.instance = ""
+        self.work = Path(".")
+
+    def start(self, work: Path, scale: str) -> None:
+        self.work = work
+        self.process, self.display, self.instance = start_compositor(work, scale)
+
+    def stop(self) -> None:
+        stop_compositor(self.process, self.work / "hypr.conf")
+
+    def environment(self) -> dict:
+        return {"WAYLAND_DISPLAY": self.display, "DISPLAY": ""}
+
+    def driver_flag(self) -> str:
+        return "--wayland"
+
+    def paste_command(self, mime: str) -> list[str] | None:
+        if not shutil.which("wl-paste"):
+            return None
+        return ["wl-paste", "--no-newline", "--type", mime]
+
+    def ask_to_close(self) -> None:
+        if not self.instance:
+            raise Failure("no compositor instance to ask")
+        subprocess.run(
+            ["hyprctl", "dispatch", "closewindow", "class:dev.skerry.Skerry"],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+        )
+
+    def resize(self, width: int, height: int) -> None:
+        subprocess.run(
+            [
+                "hyprctl",
+                "dispatch",
+                "resizewindowpixel",
+                f"exact {width} {height},class:dev.skerry.Skerry",
+            ],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+        )
+
+    def make_floating(self) -> None:
+        """Hyprland tiles by default and reports a tiled window as `maximized`,
+        which is honest — a tiled window has no free edges and nothing to
+        maximise. A window that can be resized needs to have them.
+        """
+        subprocess.run(
+            ["hyprctl", "dispatch", "setfloating", "class:dev.skerry.Skerry"],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+        )
+        time.sleep(0.4)
+
+    def _hypr(self, what: str):
+        done = subprocess.run(
+            ["hyprctl", "-j", what],
+            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(done.stdout)
+
+    def window_box(self) -> tuple[int, int, int, int]:
+        window = next(
+            (c for c in self._hypr("clients") if c.get("class") == "dev.skerry.Skerry"), None
+        )
+        if window is None:
+            raise Failure("the compositor does not know about the window")
+        # Already logical: Hyprland's window geometry is in the same units the
+        # program reports, measured — a 870x1078 window reads as 870x1078 at a
+        # scale of 1.25.
+        (left, top), (width, height) = window["at"], window["size"]
+        return left, top, width, height
+
+    def output_size(self) -> tuple[int, int]:
+        # Device, and divided: `hyprctl monitors` reports the mode's pixels where
+        # `hyprctl clients` reports logical ones.
+        first = self._hypr("monitors")[0]
+        scale = float(first["scale"])
+        return round(first["width"] / scale), round(first["height"] / scale)
+
+    def output_scale(self) -> float:
+        return float(self._hypr("monitors")[0]["scale"])
+
+    def grab(self, box: tuple[int, int, int, int], into: Path) -> None:
+        left, top, width, height = box
+        subprocess.run(
+            ["grim", "-g", f"{left},{top} {width}x{height}", str(into)],
+            env=dict(os.environ, WAYLAND_DISPLAY=self.display),
+            capture_output=True,
+            check=True,
+        )
+
+
+class X11Server(Server):
+    """A private Xvfb, driven through XTEST.
+
+    **No seat and no compositor**, which is the point: the Wayland fixture needs
+    virtual-input protocols that a compositor only offers to a real session, and
+    that is why the scenarios are not in CI. XTEST needs neither.
+    """
+
+    def __init__(self):
+        self.process = None
+        self.number = 0
+
+    def start(self, work: Path, scale: str) -> None:
+        # A display number nothing else is using. `/tmp/.X11-unix` is the only
+        # authority on that, and racing another `Xvfb` for one produces an error
+        # that reads like a broken test.
+        taken = {int(name[1:]) for name in os.listdir("/tmp/.X11-unix") if name[1:].isdigit()}
+        self.number = next(n for n in range(80, 200) if n not in taken)
+        self.display = f":{self.number}"
+        self.process = subprocess.Popen(
+            ["Xvfb", self.display, "-screen", "0", "1600x1000x24"],
+            stdout=(work / "xvfb.log").open("w"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        deadline = time.time() + PATIENCE
+        while time.time() < deadline:
+            probe = subprocess.run(
+                ["xdpyinfo", "-display", self.display], capture_output=True
+            )
+            if probe.returncode == 0:
+                break
+            if self.process.poll() is not None:
+                raise Failure(f"Xvfb exited: {(work / 'xvfb.log').read_text()[:400]}")
+            time.sleep(0.1)
+        else:
+            raise Failure("Xvfb never came up")
+
+        # **The scale goes into the resource database, not onto the command
+        # line.** `Xft.dpi` is where every X11 desktop states a scale and where
+        # the backend reads it; forcing it with `--scale` instead would test the
+        # override and leave the mechanism a person actually meets untested.
+        #
+        # Written by the driver rather than by `xrdb`: on this machine
+        # `xrdb -merge` and `xrdb -load` both exit 0 against an `Xvfb` and create
+        # no `RESOURCE_MANAGER` at all, so this set nothing and every scale
+        # assertion compared a default with a default.
+        dpi = round(96.0 * float(scale))
+        subprocess.run(
+            [str(DRIVE), "--x11", "--xft-dpi", str(dpi)],
+            env=dict(os.environ, DISPLAY=self.display),
+            capture_output=True,
+            check=True,
+        )
+
+    def stop(self) -> None:
+        if self.process is None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+
+    # Mesa's software Vulkan, under either name the packaging has used.
+    LAVAPIPE = [
+        "/usr/share/vulkan/icd.d/lvp_icd.json",
+        "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json",
+    ]
+
+    def environment(self) -> dict:
+        # `WAYLAND_DISPLAY` is cleared as well as `SKERRY_BACKEND` set: the outer
+        # session has one, and a test that only worked because of an environment
+        # variable's precedence is a test of that precedence.
+        environment = {"DISPLAY": self.display, "SKERRY_BACKEND": "x11", "WAYLAND_DISPLAY": ""}
+
+        # **Software Vulkan, deliberately.** `Xvfb` has no DRI3, so a proprietary
+        # driver cannot present through it and falls back to copying frames on a
+        # thread of its own — measured at 1 to 2 ticks of CPU per three seconds
+        # with the window doing nothing, which fails `no-cpu-when-idle` for a
+        # reason that is the fixture's and not the program's. The frame loop makes
+        # **zero** syscalls across that window either way.
+        #
+        # It is also faster here — 13.0 s against 16.3 s over three scenarios —
+        # and it is what a runner has and what the golden frames already render
+        # with, for the same reason: the answer should not depend on whose GPU
+        # produced it. The Wayland half still exercises a real one.
+        for icd in self.LAVAPIPE:
+            if os.path.exists(icd):
+                environment["VK_ICD_FILENAMES"] = icd
+                break
+        return environment
+
+    def driver_flag(self) -> str:
+        return "--x11"
+
+    def paste_command(self, mime: str) -> list[str] | None:
+        return [str(DRIVE), "--x11", "--paste", mime]
+
+    def ask_to_close(self) -> None:
+        subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True)
+
+    def resize(self, width: int, height: int) -> None:
+        subprocess.run(
+            [str(DRIVE), "--x11", "--resize", f"{width}x{height}"],
+            env=with_server(),
+            capture_output=True,
+        )
+
+    def window_box(self) -> tuple[int, int, int, int]:
+        tree = subprocess.run(
+            ["xwininfo", "-display", self.display, "-root", "-tree"],
+            capture_output=True,
+            text=True,
+        ).stdout
+        # `0x200000 "Skerry": ("skerry" "Skerry")  1100x720+0+0  +0+0`
+        found = re.search(r'\("skerry" "Skerry"\)\s+(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', tree)
+        if not found:
+            raise Failure("the X server does not know about the window")
+        width, height, left, top = (int(value) for value in found.groups())
+        # X11 speaks device pixels throughout, so this is the one place it is
+        # divided — the same conversion `sk-plat`'s X11 backend does, for the same
+        # reason and in the same direction.
+        scale = self.output_scale()
+        return (
+            round(left / scale),
+            round(top / scale),
+            round(width / scale),
+            round(height / scale),
+        )
+
+    def output_size(self) -> tuple[int, int]:
+        info = subprocess.run(
+            ["xdpyinfo", "-display", self.display], capture_output=True, text=True
+        ).stdout
+        found = re.search(r"dimensions:\s+(\d+)x(\d+) pixels", info)
+        if not found:
+            raise Failure("the X server reported no screen dimensions")
+        scale = self.output_scale()
+        return round(int(found.group(1)) / scale), round(int(found.group(2)) / scale)
+
+    def output_scale(self) -> float:
+        """What the server says, read back rather than remembered.
+
+        Asked the same way the product asks it, so the assertion is about the two
+        agreeing and not about a number written into a test.
+        """
+        # Asked through the driver, not `xprop`: `xprop -root RESOURCE_MANAGER`
+        # reports `not found` against an `Xvfb` whose root demonstrably holds the
+        # property, so a scale read that way was always 1.0 and every assertion
+        # about scale on X11 compared a default with a default.
+        shown = subprocess.run(
+            [str(DRIVE), "--x11", "--query-dpi"],
+            env=dict(os.environ, DISPLAY=self.display),
+            capture_output=True,
+            text=True,
+        ).stdout
+        return float(shown.strip() or 96.0) / 96.0
+
+    def grab(self, box: tuple[int, int, int, int], into: Path) -> None:
+        from PIL import Image
+
+        whole = into.parent / f"{into.stem}-root.png"
+        subprocess.run(
+            ["import", "-display", self.display, "-window", "root", str(whole)],
+            capture_output=True,
+            check=True,
+        )
+        left, top, width, height = box
+        Image.open(whole).crop((left, top, left + width, top + height)).save(into)
+
+
+SERVER: Server = WaylandServer()
+
+
+def with_server(extra: dict | None = None) -> dict:
+    """The environment for a child, with the current server's variables in it.
+
+    An empty value means *unset*, not "set to nothing": the outer session has a
+    `WAYLAND_DISPLAY` and leaving it visible to a child that should be speaking
+    X11 is how a test passes because of a variable's precedence rather than
+    because the code works.
+    """
+    environment = dict(os.environ, **SERVER.environment(), **(extra or {}))
+    return {name: value for name, value in environment.items() if value != ""}
+
+
 class Run:
     """A window, and the state it reported."""
 
@@ -186,7 +534,7 @@ class Run:
         self.instance = instance
         self.log = work / "app.log"
         self.err = work / "app.err"
-        environment = dict(os.environ, **(environment or {}), WAYLAND_DISPLAY=display)
+        environment = with_server(environment or {})
         self.process = subprocess.Popen(
             [*(wrap or []), str(SKERRY), *arguments, str(path)],
             stdout=self.log.open("w"),
@@ -206,9 +554,12 @@ class Run:
         raise Failure("the window never drew a first frame")
 
     def drive(self, script: str) -> None:
-        environment = dict(os.environ, WAYLAND_DISPLAY=self.display)
         done = subprocess.run(
-            [str(DRIVE)], input=script, text=True, env=environment, capture_output=True
+            [str(DRIVE), SERVER.driver_flag()],
+            input=script,
+            text=True,
+            env=with_server(),
+            capture_output=True,
         )
         if done.returncode != 0:
             raise Failure(f"the driver refused the script: {done.stderr.strip()}")
@@ -237,33 +588,17 @@ class Run:
         return found[index]
 
     def make_floating(self) -> None:
-        """Take the window out of the tiling layout.
-
-        Hyprland tiles by default and reports a tiled window as `maximized`,
-        which is honest — a tiled window has no free edges and nothing to
-        maximise. The frame scenarios need a window that does.
-        """
-        subprocess.run(
-            ["hyprctl", "dispatch", "setfloating", "class:dev.skerry.Skerry"],
-            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
-            capture_output=True,
-        )
-        time.sleep(0.4)
+        """Take the window out of whatever layout the server has it in."""
+        SERVER.make_floating()
 
     def ask_to_close(self) -> int:
-        """Has the compositor ask the window to close, the way a person would.
+        """Has the display server ask the window to close, the way a person would.
 
         Not a signal. A signal skips every destructor, and the one time this ran
         for real it turned up a segmentation fault on the way out that a week of
         signal-killed tests had hidden.
         """
-        if not self.instance:
-            raise Failure("no compositor instance to ask")
-        subprocess.run(
-            ["hyprctl", "dispatch", "closewindow", "class:dev.skerry.Skerry"],
-            env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
-            capture_output=True,
-        )
+        SERVER.ask_to_close()
         try:
             return self.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -279,61 +614,37 @@ class Run:
 
 
 def row_y(state: dict[str, str], row: int) -> float:
-    """The vertical centre of a display row, as a percentage of the window."""
+    """The vertical centre of a display row, in window logical pixels."""
     top = float(state["body_top"]) + float(state["row_h"]) * row + float(state["row_h"]) / 2
-    top -= float(state["scroll"])
-    height = float(state["logical"].split("x")[1])
-    return top / height * 100.0
+    return top - float(state["scroll"])
 
 
 def name_x(state: dict[str, str]) -> float:
-    """A horizontal position inside the name column."""
-    width = float(state["logical"].split("x")[0])
-    return (float(state["name_x"]) + 30.0) / width * 100.0
+    """A horizontal position inside the name column, in window logical pixels."""
+    return float(state["name_x"]) + 30.0
 
 
 def window_box(run: Run) -> tuple[int, int, int, int]:
-    """Where the window is on the output, from the compositor itself."""
-    clients = subprocess.run(
-        ["hyprctl", "-j", "clients"],
-        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
-        capture_output=True,
-        text=True,
-    )
-    window = next(
-        (c for c in json.loads(clients.stdout) if c.get("class") == "dev.skerry.Skerry"),
-        None,
-    )
-    if window is None:
-        raise Failure("the compositor does not know about the window")
-    (left, top), (width, height) = window["at"], window["size"]
-    return left, top, width, height
+    """Where the window is on the output, from the display server itself."""
+    del run
+    return SERVER.window_box()
 
 
 def output_size(run: Run) -> tuple[int, int]:
-    monitors = subprocess.run(
-        ["hyprctl", "-j", "monitors"],
-        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
-        capture_output=True,
-        text=True,
-    )
-    first = json.loads(monitors.stdout)[0]
-    return first["width"], first["height"]
+    del run
+    return SERVER.output_size()
 
 
 def output_scale(run: Run) -> float:
-    """What the compositor says its scale is.
+    """What the display server says its scale is.
 
     Asked rather than assumed, so the assertion is about the program agreeing
-    with the compositor and not about a number written into a test.
+    with the server and not about a number written into a test. On Wayland that
+    is the compositor's `scale`; on X11 it is `Xft.dpi` over 96, which is where
+    every X11 desktop states one.
     """
-    monitors = subprocess.run(
-        ["hyprctl", "-j", "monitors"],
-        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
-        capture_output=True,
-        text=True,
-    )
-    return float(json.loads(monitors.stdout)[0]["scale"])
+    del run
+    return SERVER.output_scale()
 
 
 def aim(run: Run, state: dict[str, str], x: float, y: float) -> tuple[float, float]:
@@ -365,28 +676,11 @@ def photograph(run: Run, state: dict[str, str], into: Path, cell: str = "") -> "
     """
     from PIL import Image
 
-    clients = subprocess.run(
-        ["hyprctl", "-j", "clients"],
-        env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=run.instance),
-        capture_output=True,
-        text=True,
-    )
-    window = next(
-        (c for c in json.loads(clients.stdout) if c.get("class") == "dev.skerry.Skerry"),
-        None,
-    )
-    if window is None:
-        raise Failure("the compositor does not know about the window")
-    (left, top), (width, height) = window["at"], window["size"]
+    box = SERVER.window_box()
     shot = into.parent / f"{into.stem}-full.png"
-    subprocess.run(
-        ["grim", "-g", f"{left},{top} {width}x{height}", str(shot)],
-        env=dict(os.environ, WAYLAND_DISPLAY=run.display),
-        capture_output=True,
-        check=True,
-    )
+    SERVER.grab(box, shot)
     image = Image.open(shot).convert("RGB")
-    # `grim` writes device pixels and the state line is in logical ones.
+    # A grab is in device pixels and the state line is in logical ones.
     scale = image.width / float(state["logical"].split("x")[0])
     body_top = float(state["body_top"]) * scale
     if cell == "size":
@@ -437,24 +731,25 @@ def expect(state: dict[str, str], **wanted) -> None:
 
 
 def clipboard(run: Run, mime: str = "text/plain;charset=utf-8") -> str:
-    """What the compositor's clipboard holds, read by a real Wayland client.
+    """What the clipboard holds, read by a **separate client**.
 
-    `wl-paste` rather than the window's own report: the point of a clipboard is
-    that another application can read it, and a scenario that asked the window
-    what it thinks it offered would pass with the data source never bound.
+    Never the window's own report: the point of a clipboard is that another
+    application can read it, and a scenario that asked the window what it thinks
+    it offered would pass with the selection never taken.
+
+    `wl-paste` is that other application on Wayland. On X11 it is
+    `skerry-drive --paste`, because neither `xclip` nor `xsel` is a given on a
+    machine and the driver already speaks X11 — one binary the repository
+    controls beats a package the reader has to be told to install.
     """
-    if not shutil.which("wl-paste"):
-        raise Skipped("wl-clipboard is not installed")
-    done = subprocess.run(
-        ["wl-paste", "--no-newline", "--type", mime],
-        env=dict(os.environ, WAYLAND_DISPLAY=run.display),
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    del run
+    command = SERVER.paste_command(mime)
+    if command is None:
+        raise Skipped("no clipboard reader for this display server")
+    done = subprocess.run(command, env=with_server(), capture_output=True, timeout=15)
     if done.returncode != 0:
-        raise Failure(f"wl-paste refused: {done.stderr.strip()}")
-    return done.stdout
+        raise Failure(f"the clipboard reader refused: {done.stderr.decode().strip()}")
+    return done.stdout.decode("utf-8", "replace")
 
 
 def make_fixture(root: Path, name: str = "fixture") -> Path:
@@ -480,7 +775,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 61
+FEWEST_SCENARIOS = 62
 
 
 def scenario(name, fresh: bool = False):
@@ -576,15 +871,21 @@ def point_at(run: Run, row: int) -> dict[str, str]:
     compositor those differ by whatever the frame around it costs. Reading back
     what the program thinks it is pointing at removes the guess — and is the only
     honest way for a test to know it clicked what it meant to.
+
+    **Through `aim`, which asks the server where the window is.** This used to
+    treat a percentage of the window as a percentage of the output. Those are the
+    same number only because Hyprland makes the window fill the screen, and under
+    a bare `Xvfb` — where a 1100×720 window sits in a 1600×1000 root — every row
+    was six rows out. The nudge could never recover it: the error is proportional,
+    not an offset.
     """
     start = run.state()
-    x = name_x(start)
     for attempt in range(6):
-        # Correct for the offset between the output and the window by nudging
-        # half a row per attempt until `hover` agrees.
+        # Half a row per attempt, alternating up and down, for the sub-pixel
+        # disagreement that remains once the geometry is right.
         nudge = 0.0 if attempt == 0 else float(start["row_h"]) / 2 * attempt
-        height = float(start["logical"].split("x")[1])
-        y = row_y(start, row) + (nudge / height * 100.0) * (1 if attempt % 2 else -1)
+        offset = nudge * (1 if attempt % 2 else -1)
+        x, y = aim(run, start, name_x(start), row_y(start, row) + offset)
         run.drive(f"move {x:.1f} {y:.1f}\nsleep 120\nkey f12\nsleep 120\n")
         state = run.state()
         if state["hover"] == str(row):
@@ -1475,6 +1776,63 @@ def a_filter_outlives_the_field_that_typed_it(run: Run, fixture: Path) -> None:
     expect(run.state(), filter="", rows=str(everything))
 
 
+@scenario("a-resize-relays-out-at-the-new-size", fresh=True)
+def a_resize_relays_out(run: Run, fixture: Path) -> None:
+    """The window is resized from outside, and everything follows.
+
+    Nothing covered this on either display server before there were two of them.
+    Under Hyprland the window is sized once at map time and never again; under a
+    bare `Xvfb` there is no window manager to size it at all — so the whole
+    relayout path was reached only by starting a window at a given size, which is
+    not the same code.
+
+    The assertion is the conversion rather than the pixels: **logical times scale
+    is what the server says the window is**. That is the one arithmetic
+    docs/03-principles.md says must live in exactly one place, and the two
+    backends derive it in opposite directions — Wayland is told the logical size
+    and computes the device one, X11 is told the device size and computes the
+    logical one.
+    """
+    # A tiled window has no free edges and cannot be resized; a bare X server has
+    # no tiling and this does nothing there.
+    run.make_floating()
+    run.drive("sleep 600\nkey f12\nsleep 150\n")
+    before = run.state()
+
+    # A fixed size rather than a fraction of the current one. Floating a tiled
+    # window drops it to its 320x240 minimum, and 70% of that is below the
+    # minimum — which the compositor refuses, so nothing moves and the scenario
+    # reports a resize that never happened rather than one that was declined.
+    target = (900, 600)
+    if before["logical"] == f"{target[0]}x{target[1]}":
+        raise Failure("the window is already the size this resizes it to")
+    SERVER.resize(*target)
+    for _ in range(30):
+        run.drive("sleep 150\nkey f12\nsleep 100\n")
+        after = run.state()
+        if after["logical"] != before["logical"]:
+            break
+    else:
+        raise Failure(f"the window never resized: still {before['logical']}")
+
+    logical = [float(value) for value in after["logical"].split("x")]
+
+    # What the program laid out is what the server says the window is. Both in
+    # logical pixels, with one of slack for the rounding — a `div_ceil` on both.
+    left, top, width, height = SERVER.window_box()
+    del left, top
+    for got, want, axis in [(logical[0], width, "width"), (logical[1], height, "height")]:
+        if abs(got - want) > 1.0:
+            raise Failure(f"the server says the {axis} is {want} and the window laid out {got}")
+
+    # And the list still fits inside it, which is what a relayout is for.
+    if float(after["body_top"]) + float(after["body_height"]) > logical[1]:
+        raise Failure(
+            f"the body runs {float(after['body_top']) + float(after['body_height'])} "
+            f"past a window {logical[1]} tall"
+        )
+
+
 def scan_sidebar(run: Run, state: dict[str, str], label: str) -> tuple[float, float]:
     """Where the sidebar row called `label` is, found by hovering down it.
 
@@ -1551,7 +1909,13 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
 
     # A click a third of the way along the text puts the caret there rather than
     # committing, and a click outside puts the breadcrumbs back.
-    inside = aim(run, field, 60.0, 22.0)
+    # Aimed at the box the window reports rather than at a number: 60 logical
+    # pixels is left of the field's own left edge at 125, and it only ever worked
+    # because a click there happened to land on nothing. Under a bare X server the
+    # window draws its own frame, that same point is on the title bar, and the
+    # press went to the frame instead.
+    box = [float(value) for value in field["path_field"].split(",")]
+    inside = aim(run, field, box[0] + box[2] / 3.0, box[1] + box[3] / 2.0)
     run.drive(f"move {inside[0]:.1f} {inside[1]:.1f}\nsleep 150\nclick\nsleep 250\nkey f12\nsleep 150\n")
     expect(run.state(), path_entry=str(fixture), path=str(fixture))
     run.drive("key ctrl+u\nsleep 150\nkey f12\nsleep 150\n")
@@ -2483,14 +2847,20 @@ def backspace_in_the_filter(run: Run, fixture: Path) -> None:
 
 @scenario("the-frame-is-at-the-compositors-scale")
 def first_frame_scale(run: Run, fixture: Path) -> None:
-    """What the program scales by is what the compositor asked for.
+    """What the program scales by is what the display server asked for.
 
     **Run this with `--scale=1.25`.** At scale 1 it cannot fail, which is most of
-    what it is here to say: `120` is also what a program that never read
-    `wp_fractional_scale_v1` would report, so the assertion only has teeth on a
-    fractional output. It is the assertion the 1×1 pre-map probe in
-    docs/08-roadmap.md would exist to satisfy — a compositor that sends the scale
-    only after the first buffer is attached would fail it.
+    what it is here to say: `120` is also what a program that never read the
+    scale at all would report, so the assertion only has teeth on a fractional
+    output. It is the assertion the 1×1 pre-map probe in docs/08-roadmap.md
+    exists to satisfy — a compositor that sends the scale only after the first
+    buffer is attached would fail it.
+
+    Two mechanisms, one assertion. On Wayland the scale is
+    `wp_fractional_scale_v1`; on X11 there is no such protocol and it is
+    `Xft.dpi` in the root window's resource database, which is where every X11
+    desktop states one. `--scale` writes it there rather than forcing the
+    program's hand, so what is under test is the reading and not the override.
     """
     run.drive("sleep 700\nkey f12\nsleep 150\n")
     state = run.state()
@@ -2593,6 +2963,7 @@ def no_cpu_when_idle(run: Run, fixture: Path) -> None:
 def main(argv: list[str]) -> int:
     wanted = [a for a in argv[1:] if not a.startswith("--")]
     keep = "--keep" in argv
+    x11 = "--x11" in argv
     scale = "1"
     for argument in argv[1:]:
         if argument.startswith("--scale="):
@@ -2618,11 +2989,15 @@ def main(argv: list[str]) -> int:
         return 2
 
     work = Path(tempfile.mkdtemp(prefix="skerry-gui-"))
-    compositor = None
     passed, failed = 0, []
+    global SERVER
+    SERVER = X11Server() if x11 else WaylandServer()
     try:
-        compositor, display, instance = start_compositor(work, scale)
-        print(f"nested compositor on {display} at scale {scale}")
+        SERVER.start(work, scale)
+        display = SERVER.display
+        instance = getattr(SERVER, "instance", "")
+        kind = "Xvfb" if x11 else "nested compositor"
+        print(f"{kind} on {display} at scale {scale}")
         fixture = make_fixture(work)
 
         for name, function in SCENARIOS.items():
@@ -2650,7 +3025,7 @@ def main(argv: list[str]) -> int:
         print(f"fixture: {problem}")
         return 1
     finally:
-        stop_compositor(compositor, work / "hypr.conf")
+        SERVER.stop()
         if keep:
             print(f"left behind: {work}")
         else:

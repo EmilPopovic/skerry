@@ -210,6 +210,8 @@ nested GNOME with no environment overrides at all: 234, 244, 331 ms to first
 frame on the NVIDIA card, where before it was a protocol error and an exit.
 
 Owed: the same probe on X11, where the answer is `DRI3`'s open of the provider
-rather than a Wayland global.
+rather than a Wayland global. Nothing has needed it there yet — the X11 backend
+reports `render_device: None`, which means "no opinion" and lets the adapter be
+chosen the way it was before the probe existed.
 
 Owed: none of this is a real GNOME *session*, only a headless one.

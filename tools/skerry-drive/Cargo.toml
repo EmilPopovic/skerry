@@ -21,6 +21,9 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 xkbcommon = { workspace = true }
 rustix = { workspace = true }
+# `xtest` for the input, and the pure-Rust connection: this binary needs no
+# `xcb_connection_t *`, so it needs no `libxcb` either.
+x11rb = { version = "0.14", default-features = false, features = ["xtest"] }
 
 [lints]
 workspace = true

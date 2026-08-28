@@ -57,7 +57,7 @@ the same renderer and the same glyph atlas the window uses.
 | Open a 10k-entry directory | < 30 ms | **23.9 ms** to a sorted, painted listing | met |
 | Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% at 200,000. At **973,759**: 1 run in 5 breaches, worst frame **16.4 ms** | met at 200,000; **missed at 1M**, see below |
 | Sort a large listing | < 120 ms at 1M | **166.0 ms** median of 5 at 973,759, on a job — down from 1,460 ms | **missed** by 1.4×, see below |
-| Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window | met |
+| Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window, on **both** display servers. On X11 the frame loop was traced across a three-second idle window and made **zero syscalls** | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
 | RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |
 | Stripped binary | < 20 MB | **6.25 MB** | met |

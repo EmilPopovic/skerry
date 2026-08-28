@@ -126,7 +126,7 @@ and fails the build on any upward or sideways edge — see
 
 ## Working on it
 
-All six Phase 0 spikes are resolved and M0 is in progress: eleven crates, 401 tests, a
+All six Phase 0 spikes are resolved and M0 is in progress: eleven crates, 435 tests, a
 window on screen over a real directory. What is done and what is owed is the table in
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). [CLAUDE.md](CLAUDE.md) is
 the working brief — the craft bar, the invariants that are expensive to undo, and which

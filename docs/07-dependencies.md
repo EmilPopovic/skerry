@@ -115,7 +115,8 @@ which is what the row is about.
 | `swash` | 8 | `swash`, `skrifa`, `read-fonts`, `font-types`, `bytemuck`, `zeno`, `yazi`, `once_cell` |
 | `xkbcommon` | 4 | `xkbcommon`, `xkeysym`, `memmap2`, `libc` |
 | `wayland-client` + `wayland-protocols` | 17 | the two, plus `wayland-backend`, `wayland-sys`, `downcast-rs`, `scoped-tls`, `smallvec`, `log`, and `dlib` + `libloading` + `cfg-if` for `dlopen` |
-| **Union, deduplicated** | **27** | the non-GPU budget below |
+| `x11rb` | 5 | `x11rb`, `x11rb-protocol`, `as-raw-xcb-connection`, `gethostname`, `xcursor` — `libloading`, `cfg-if`, `once_cell`, `libc`, `rustix` and `bitflags` are already here and are not counted twice |
+| **Union, deduplicated** | **32** | the non-GPU budget below |
 
 Two numbers here are worth stating plainly rather than leaving implied.
 
@@ -127,7 +128,24 @@ value**: raising it needs a row here and a re-measure in the same commit. A
 budget nobody has measured is decoration; a ratchet fails on the next addition
 that arrives without an argument.
 
-**`dlopen` costs three of the 27 and is not negotiable for a number.** Linking
+**The second display server costs five, and four of them were unavoidable.**
+[ADR 0009](adr/0009-x11-backend-behind-a-runtime-selected-enum.md) prices it:
+`x11rb` and `x11rb-protocol` are the crate, `gethostname` is a hard dependency of
+it, and `as-raw-xcb-connection` comes with `dl-libxcb` — which is taken for the
+reason `wayland-client` takes `dlopen` and which is also the only way to get the
+`xcb_connection_t *` that `VK_KHR_xcb_surface` needs. The fifth, `xcursor`, is a
+choice: X11 has no `wp_cursor_shape_v1`, and without a theme parser the pointer
+is the core cursor font, which is a set of bitmaps from 1987. One crate for the
+pointer looking like the rest of the desktop.
+
+Two things were **not** taken and each saved a crate or a link-time dependency.
+`gethostname` is a direct dependency of `x11rb` and is used through `rustix`'s
+`uname` here rather than directly, and `xkbcommon`'s `x11` feature — the textbook
+way to fetch a keymap from an X server — would link `libxkbcommon-x11` at build
+time, so a machine without it would fail to start `skerry` even on Wayland. The
+keymap comes from `_XKB_RULES_NAMES` instead.
+
+**`dlopen` costs three of the 32 and is not negotiable for a number.** Linking
 `libwayland-client` at load time would put the count at 24 and inside the
 original budget — and would make the binary refuse to start on an X11-only
 machine that has no Wayland libraries, which is verbatim the failure condition

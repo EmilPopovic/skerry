@@ -29,7 +29,10 @@ POLICY = ROOT / "docs" / "07-dependencies.md"
 # is in docs/09-performance-budgets.md. Raising it requires a row in
 # docs/07-dependencies.md and a re-measure in the same commit, which is the only
 # thing that makes the number a gate rather than a preference.
-BUDGET_NON_GPU = 27
+#
+# 27 to 32 is the second display server, priced in ADR 0009: `x11rb`,
+# `x11rb-protocol`, `as-raw-xcb-connection`, `gethostname` and `xcursor`.
+BUDGET_NON_GPU = 32
 BUDGET_TOTAL = 120
 
 # The crate whose graph is the shipping binary's graph.

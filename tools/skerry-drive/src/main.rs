@@ -10,10 +10,17 @@
 //! desktop it would type into whatever window happened to be focused. `tools/gui`
 //! starts a nested Hyprland with its own socket for exactly this reason.
 //!
-//! Two protocols, both wlroots': `zwp_virtual_keyboard_manager_v1` and
-//! `zwlr_virtual_pointer_manager_v1`. Measured on this machine, `KWin` advertises
-//! neither — so this fixture is Hyprland-only, and the portability answer for
-//! `KWin` has to come from running the product there by hand.
+//! **Two backends, because the product has two.** On Wayland it is
+//! `zwp_virtual_keyboard_manager_v1` and `zwlr_virtual_pointer_manager_v1`, both
+//! wlroots'; measured on this machine, `KWin` advertises neither, so that half of
+//! the fixture is Hyprland-only. On X11 it is `XTEST`, which every X server has
+//! and which **needs no seat** — that is what lets the same scenarios run under a
+//! bare `Xvfb`, and it is the reason the GUI suite can reach CI at all.
+//!
+//! The script is played by one function over a [`Input`] trait rather than twice.
+//! A scenario that pressed a different sequence on each backend would be two
+//! tests wearing one name, and the differences between the two servers are
+//! exactly what this is here to find.
 
 use std::io::Write as _;
 use std::os::fd::AsFd;
@@ -41,11 +48,24 @@ const EXTENT: u32 = 10_000;
 
 fn main() -> std::process::ExitCode {
     let mut display = None;
+    let mut backend = None;
+    let mut paste = None;
+    let mut close = false;
+    let mut resize = None;
+    let mut dpi = None;
+    let mut query_dpi = false;
     let mut path = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--display" => display = arguments.next(),
+            "--x11" => backend = Some(Backend::X11),
+            "--paste" => paste = arguments.next(),
+            "--close" => close = true,
+            "--resize" => resize = arguments.next(),
+            "--xft-dpi" => dpi = arguments.next(),
+            "--query-dpi" => query_dpi = true,
+            "--wayland" => backend = Some(Backend::Wayland),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return std::process::ExitCode::SUCCESS;
@@ -53,9 +73,28 @@ fn main() -> std::process::ExitCode {
             other => path = Some(other.to_owned()),
         }
     }
+    // Which server, decided the way the product decides it — so a scenario that
+    // names a display gets the driver that matches it.
+    let backend = backend.unwrap_or_else(|| {
+        if display.as_deref().is_some_and(|name| name.starts_with(':'))
+            || std::env::var_os("WAYLAND_DISPLAY").is_none_or(|name| name.is_empty())
+        {
+            Backend::X11
+        } else {
+            Backend::Wayland
+        }
+    });
     if let Some(display) = display {
+        let name = match backend {
+            Backend::Wayland => "WAYLAND_DISPLAY",
+            Backend::X11 => "DISPLAY",
+        };
         // SAFETY: single-threaded, before any thread is started.
-        unsafe { std::env::set_var("WAYLAND_DISPLAY", display) };
+        unsafe { std::env::set_var(name, display) };
+    }
+
+    if let Some(code) = one_shot(&OneShot { dpi, query_dpi, resize, close, paste }) {
+        return code;
     }
 
     let source = match path {
@@ -70,9 +109,13 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match Driver::connect() {
-        Ok(mut driver) => {
-            driver.play(&actions);
+    let connected: Result<Box<dyn Input>, String> = match backend {
+        Backend::Wayland => Driver::connect().map(|it| Box::new(it) as Box<dyn Input>),
+        Backend::X11 => XTest::connect().map(|it| Box::new(it) as Box<dyn Input>),
+    };
+    match connected {
+        Ok(mut input) => {
+            play(input.as_mut(), &actions);
             std::process::ExitCode::SUCCESS
         }
         Err(problem) => {
@@ -82,13 +125,75 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// The one-shot commands: each does its thing and the process exits.
+///
+/// Together rather than inline in `main`, which is otherwise argument parsing
+/// and a playback loop with five early returns wedged between them.
+struct OneShot {
+    dpi: Option<String>,
+    query_dpi: bool,
+    resize: Option<String>,
+    close: bool,
+    paste: Option<String>,
+}
+
+/// Runs whichever one-shot was asked for, or `None` to carry on and play a script.
+fn one_shot(asked: &OneShot) -> Option<std::process::ExitCode> {
+    /// A `Result` becomes an exit code, with the reason on stderr.
+    fn done(outcome: Result<(), String>) -> std::process::ExitCode {
+        match outcome {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(problem) => {
+                eprintln!("skerry-drive: {problem}");
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+
+    if asked.query_dpi {
+        return Some(done(query_xft_dpi().map(|dpi| println!("{dpi}"))));
+    }
+    if let Some(dpi) = &asked.dpi {
+        return Some(done(set_xft_dpi(dpi)));
+    }
+    if let Some(size) = &asked.resize {
+        return Some(done(resize_window(size)));
+    }
+    if asked.close {
+        return Some(done(ask_to_close()));
+    }
+    if let Some(mime) = &asked.paste {
+        return Some(done(read_selection(mime).map(|bytes| {
+            use std::io::Write as _;
+            let _ = std::io::stdout().write_all(&bytes);
+        })));
+    }
+    None
+}
+
+/// Which display server to drive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backend {
+    Wayland,
+    X11,
+}
+
 const USAGE: &str = "\
-skerry-drive [--display SOCKET] [SCRIPT]
+skerry-drive [--display SOCKET] [--x11|--wayland] [SCRIPT]
 
-Replays input into a compositor. The script is read from SCRIPT or from standard
-input. Point it at a nested compositor: synthetic input goes wherever the focus
-is.
+Replays input into a display server. The script is read from SCRIPT or from
+standard input. Point it at a nested compositor or a private X server: synthetic
+input goes wherever the focus is, and against a live session that is whatever
+window a person was using.
 
+The backend is guessed from --display — a name starting with a colon is an X
+display — and can be said outright.
+
+  --paste MIME          print the X11 clipboard as MIME and exit
+  --close               ask the X11 window to close, the way a title bar would
+  --resize WxH          resize the X11 window, as a window manager would
+  --xft-dpi N           set Xft.dpi in the root resource database
+  --query-dpi           print the Xft.dpi the root resource database holds
   key ctrl+shift+c      press and release a chord
   text hello            type a string
   move 50 30            move the pointer, in percent of the output
@@ -98,6 +203,81 @@ is.
   drag 10 20 80 90      press at the first point, move to the second, release
   scroll -3             wheel notches, negative is up
   sleep 250             milliseconds";
+
+/// What a backend has to be able to do. Deliberately primitive: every decision
+/// about *ordering* — how a chord is pressed, how many steps a drag takes — is in
+/// [`play`] and is therefore the same on both.
+trait Input {
+    /// Presses or releases one evdev keycode.
+    fn key(&mut self, code: u32, down: bool);
+    /// States the modifier mask, where the protocol needs it said separately.
+    fn modifiers(&mut self, _mask: u32) {}
+    /// Moves the pointer, in [`EXTENT`]ths of the output.
+    fn move_to(&mut self, x: u32, y: u32);
+    /// Presses or releases one button.
+    fn button(&mut self, button: Button, down: bool);
+    /// One wheel notch, negative being up.
+    fn notch(&mut self, up: bool);
+    /// Sends everything queued.
+    fn flush(&mut self);
+    /// A last round trip before the process exits.
+    fn finish(&mut self) {}
+}
+
+/// Replays a script through any backend.
+fn play(input: &mut dyn Input, actions: &[Action]) {
+    for action in actions {
+        match action {
+            Action::Key { modifiers, mask, code } => {
+                for held in modifiers {
+                    input.key(*held, true);
+                }
+                input.modifiers(*mask);
+                input.key(*code, true);
+                input.key(*code, false);
+                input.modifiers(0);
+                for held in modifiers.iter().rev() {
+                    input.key(*held, false);
+                }
+            }
+            Action::Move { x, y } => input.move_to(*x, *y),
+            Action::Click { button, times } => {
+                for _ in 0..*times {
+                    input.button(*button, true);
+                    input.button(*button, false);
+                }
+            }
+            Action::Drag { from, to } => {
+                input.move_to(from.0, from.1);
+                input.button(Button::Left, true);
+                // Several steps, because a rubber band is a gesture and one jump
+                // is a click that happened to end somewhere else.
+                for step in 1..=8i64 {
+                    // Signed, because a drag upward has a negative delta and the
+                    // unsigned version wrapped to four billion — a driver bug
+                    // that reads exactly like a rubber band selecting nothing.
+                    let along = |start: u32, end: u32| {
+                        (i64::from(start) + (i64::from(end) - i64::from(start)) * step / 8).max(0)
+                            as u32
+                    };
+                    input.move_to(along(from.0, to.0), along(from.1, to.1));
+                }
+                input.button(Button::Left, false);
+            }
+            Action::Scroll { notches } => {
+                for _ in 0..notches.abs() {
+                    input.notch(*notches < 0);
+                }
+            }
+            Action::Sleep { milliseconds } => {
+                input.flush();
+                std::thread::sleep(Duration::from_millis(u64::from(*milliseconds)));
+            }
+        }
+        input.flush();
+    }
+    input.finish();
+}
 
 struct Driver {
     queue: EventQueue<State>,
@@ -137,26 +317,6 @@ impl Driver {
         Ok(Self { queue, state, keyboard, pointer, time: 1 })
     }
 
-    fn play(&mut self, actions: &[Action]) {
-        for action in actions {
-            match action {
-                Action::Key { modifiers, mask, code } => self.chord(modifiers, *mask, *code),
-                Action::Move { x, y } => self.move_to(*x, *y),
-                Action::Click { button, times } => self.click(*button, *times),
-                Action::Drag { from, to } => self.drag(*from, *to),
-                Action::Scroll { notches } => self.scroll(*notches),
-                Action::Sleep { milliseconds } => {
-                    self.flush();
-                    std::thread::sleep(Duration::from_millis(u64::from(*milliseconds)));
-                }
-            }
-            self.flush();
-        }
-        // A last round trip, so the compositor has seen everything before the
-        // process exits and its virtual devices are destroyed.
-        let _ = self.queue.roundtrip(&mut self.state);
-    }
-
     /// Advances the clock.
     ///
     /// Milliseconds, monotonically. The click counter under test decides a double
@@ -167,69 +327,7 @@ impl Driver {
         self.time
     }
 
-    fn chord(&mut self, modifiers: &[u32], mask: u32, code: u32) {
-        for held in modifiers {
-            let time = self.tick();
-            self.keyboard.key(time, *held, 1);
-        }
-        // And say so explicitly. `zwp_virtual_keyboard_v1` does not derive the
-        // modifier state from the keycodes it was sent, so a client that only
-        // presses `Ctrl` sees a plain `h` arrive at the far end.
-        if mask != 0 {
-            self.keyboard.modifiers(mask, 0, 0, 0);
-        }
-        let time = self.tick();
-        self.keyboard.key(time, code, 1);
-        let time = self.tick();
-        self.keyboard.key(time, code, 0);
-        if mask != 0 {
-            self.keyboard.modifiers(0, 0, 0, 0);
-        }
-        for held in modifiers.iter().rev() {
-            let time = self.tick();
-            self.keyboard.key(time, *held, 0);
-        }
-    }
-
-    fn move_to(&mut self, x: u32, y: u32) {
-        let time = self.tick();
-        self.pointer.motion_absolute(time, x, y, EXTENT, EXTENT);
-        self.pointer.frame();
-    }
-
-    fn click(&mut self, button: Button, times: u32) {
-        for _ in 0..times {
-            let time = self.tick();
-            self.pointer.button(time, button.code(), wl_pointer::ButtonState::Pressed);
-            self.pointer.frame();
-            let time = self.tick();
-            self.pointer.button(time, button.code(), wl_pointer::ButtonState::Released);
-            self.pointer.frame();
-        }
-    }
-
-    fn drag(&mut self, from: (u32, u32), to: (u32, u32)) {
-        self.move_to(from.0, from.1);
-        let time = self.tick();
-        self.pointer.button(time, Button::Left.code(), wl_pointer::ButtonState::Pressed);
-        self.pointer.frame();
-        // Several steps, because a rubber band is a gesture and one jump is a
-        // click that happened to end somewhere else.
-        for step in 1..=8i64 {
-            // Signed, because a drag upward has a negative delta and the
-            // unsigned version wrapped to four billion — which is a driver bug
-            // that reads exactly like a rubber band that selects nothing.
-            let along = |start: u32, end: u32| {
-                (i64::from(start) + (i64::from(end) - i64::from(start)) * step / 8).max(0) as u32
-            };
-            self.move_to(along(from.0, to.0), along(from.1, to.1));
-        }
-        let time = self.tick();
-        self.pointer.button(time, Button::Left.code(), wl_pointer::ButtonState::Released);
-        self.pointer.frame();
-    }
-
-    /// One wheel notch per step, as a discrete axis with a source.
+    /// One wheel notch, as a discrete axis with a source.
     ///
     /// **`axis` alone produced nothing.** Hyprland forwarded a bare
     /// `virtual_pointer.axis` to the client as `wl_pointer.axis` with a value of
@@ -238,20 +336,56 @@ impl Driver {
     /// early on a fixture smaller than the window, so nothing ever failed.
     /// `axis_discrete` with `axis_source` is what a real wheel sends and what the
     /// compositor translates.
-    fn scroll(&mut self, notches: i32) {
-        for _ in 0..notches.abs() {
-            let time = self.tick();
-            let steps = if notches < 0 { -1 } else { 1 };
-            let distance = f64::from(steps) * 15.0;
-            self.pointer.axis_source(wl_pointer::AxisSource::Wheel);
-            self.pointer.axis_discrete(time, wl_pointer::Axis::VerticalScroll, distance, steps);
-            self.pointer.frame();
-        }
+    fn wheel(&mut self, up: bool) {
+        let time = self.tick();
+        let steps = if up { -1 } else { 1 };
+        let distance = f64::from(steps) * 15.0;
+        self.pointer.axis_source(wl_pointer::AxisSource::Wheel);
+        self.pointer.axis_discrete(time, wl_pointer::Axis::VerticalScroll, distance, steps);
+        self.pointer.frame();
+    }
+}
+
+impl Input for Driver {
+    fn key(&mut self, code: u32, down: bool) {
+        let time = self.tick();
+        self.keyboard.key(time, code, u32::from(down));
+    }
+
+    /// Said explicitly, because `zwp_virtual_keyboard_v1` does not derive the
+    /// modifier state from the keycodes it was sent — a client that only presses
+    /// `Ctrl` sees a plain `h` arrive at the far end.
+    fn modifiers(&mut self, mask: u32) {
+        self.keyboard.modifiers(mask, 0, 0, 0);
+    }
+
+    fn move_to(&mut self, x: u32, y: u32) {
+        let time = self.tick();
+        self.pointer.motion_absolute(time, x, y, EXTENT, EXTENT);
+        self.pointer.frame();
+    }
+
+    fn button(&mut self, button: Button, down: bool) {
+        let time = self.tick();
+        let state =
+            if down { wl_pointer::ButtonState::Pressed } else { wl_pointer::ButtonState::Released };
+        self.pointer.button(time, button.code(), state);
+        self.pointer.frame();
+    }
+
+    fn notch(&mut self, up: bool) {
+        self.wheel(up);
     }
 
     fn flush(&mut self) {
         let _ = self.queue.flush();
         let _ = self.queue.dispatch_pending(&mut self.state);
+    }
+
+    fn finish(&mut self) {
+        // So the compositor has seen everything before the process exits and its
+        // virtual devices are destroyed.
+        let _ = self.queue.roundtrip(&mut self.state);
     }
 }
 
@@ -335,3 +469,409 @@ ignore_events!(
     zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
     zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
 );
+
+// ---------------------------------------------------------------------------
+// X11
+// ---------------------------------------------------------------------------
+
+/// Synthetic input through `XTEST`.
+///
+/// **No seat and no compositor.** That is the whole reason this exists beside
+/// the Wayland driver: `XTEST` is a core X extension, every server has it, and a
+/// bare `Xvfb` on a machine with no login session answers it — which is what
+/// lets the GUI scenarios run somewhere a Wayland compositor cannot start.
+///
+/// Keycodes arrive here as evdev, because that is what the script and the
+/// Wayland protocol use. X11 keycodes are the same physical keys offset by
+/// eight, which is the one conversion in this file.
+struct XTest {
+    connection: x11rb::rust_connection::RustConnection,
+    root: x11rb::protocol::xproto::Window,
+    /// The screen in pixels, so a script's percentage becomes a coordinate.
+    size: (u32, u32),
+}
+
+impl XTest {
+    fn connect() -> Result<Self, String> {
+        use x11rb::connection::Connection as _;
+        let (connection, screen) =
+            x11rb::connect(None).map_err(|error| format!("X11 connect: {error}"))?;
+        let present =
+            x11rb::protocol::xproto::ConnectionExt::query_extension(&connection, b"XTEST")
+                .map_err(|error| format!("query XTEST: {error}"))?
+                .reply()
+                .map_err(|error| format!("query XTEST: {error}"))?
+                .present;
+        if !present {
+            return Err("this X server has no XTEST extension".to_owned());
+        }
+        let screen = connection.setup().roots.get(screen).ok_or("no such X screen")?;
+        Ok(Self {
+            root: screen.root,
+            size: (u32::from(screen.width_in_pixels), u32::from(screen.height_in_pixels)),
+            connection,
+        })
+    }
+
+    fn fake(&mut self, kind: u8, detail: u8, x: i16, y: i16) {
+        let _ = x11rb::protocol::xtest::fake_input(
+            &self.connection,
+            kind,
+            detail,
+            // No delay: the script's own `sleep` is the timing, and a delay here
+            // would be a second one nobody asked for.
+            0,
+            self.root,
+            x,
+            y,
+            0,
+        );
+    }
+}
+
+/// X11 event codes, from the core protocol.
+const KEY_PRESS: u8 = 2;
+const KEY_RELEASE: u8 = 3;
+const BUTTON_PRESS: u8 = 4;
+const BUTTON_RELEASE: u8 = 5;
+const MOTION_NOTIFY: u8 = 6;
+
+/// X11 button numbers for the wheel. It predates wheels, so they are buttons.
+const WHEEL_UP: u8 = 4;
+const WHEEL_DOWN: u8 = 5;
+
+impl Input for XTest {
+    fn key(&mut self, code: u32, down: bool) {
+        // evdev to X11: the same physical keys, offset by eight. Getting this
+        // wrong shifts the whole keyboard by one row, which is what it looked
+        // like the first time.
+        let keycode = u8::try_from(code + 8).unwrap_or(0);
+        self.fake(if down { KEY_PRESS } else { KEY_RELEASE }, keycode, 0, 0);
+    }
+
+    /// Nothing to do: the X server tracks modifier state from the keycodes it
+    /// was sent, which is the part `zwp_virtual_keyboard_v1` leaves to the
+    /// client.
+    fn modifiers(&mut self, _mask: u32) {}
+
+    fn move_to(&mut self, x: u32, y: u32) {
+        let across = |value: u32, extent: u32| {
+            i16::try_from(u64::from(value) * u64::from(extent) / u64::from(EXTENT))
+                .unwrap_or(i16::MAX)
+        };
+        self.fake(MOTION_NOTIFY, 0, across(x, self.size.0), across(y, self.size.1));
+    }
+
+    fn button(&mut self, button: Button, down: bool) {
+        let detail = match button {
+            Button::Left => 1,
+            Button::Middle => 2,
+            Button::Right => 3,
+        };
+        self.fake(if down { BUTTON_PRESS } else { BUTTON_RELEASE }, detail, 0, 0);
+    }
+
+    fn notch(&mut self, up: bool) {
+        let detail = if up { WHEEL_UP } else { WHEEL_DOWN };
+        // Press and release, because that is what a real wheel sends and what
+        // the client counts one notch from.
+        self.fake(BUTTON_PRESS, detail, 0, 0);
+        self.fake(BUTTON_RELEASE, detail, 0, 0);
+    }
+
+    fn flush(&mut self) {
+        use x11rb::connection::Connection as _;
+        let _ = self.connection.flush();
+    }
+
+    fn finish(&mut self) {
+        use x11rb::connection::Connection as _;
+        // A round trip, so everything has reached the server before the process
+        // exits.
+        let _ = x11rb::protocol::xproto::ConnectionExt::get_input_focus(&self.connection)
+            .map(x11rb::cookie::Cookie::reply);
+        let _ = self.connection.flush();
+    }
+}
+
+/// Reads the `CLIPBOARD` selection as `mime`, as a separate X client.
+///
+/// The point of a clipboard is that **another application** can read it, so a
+/// scenario that asked the window what it thinks it offered would pass with the
+/// selection never taken. `wl-paste` is that other application on Wayland;
+/// neither `xclip` nor `xsel` is a given on a machine, and this binary already
+/// speaks X11, so it is that other application here.
+///
+/// `INCR` is handled: the reason it exists is a selection larger than one
+/// request, and `Ctrl+A` over a large directory is exactly that.
+fn read_selection(mime: &str) -> Result<Vec<u8>, String> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+
+    let (connection, screen) =
+        x11rb::connect(None).map_err(|error| format!("X11 connect: {error}"))?;
+    let root = connection.setup().roots.get(screen).ok_or("no such X screen")?.root;
+    let intern = |name: &str| -> Result<u32, String> {
+        connection
+            .intern_atom(false, name.as_bytes())
+            .map_err(|error| format!("intern {name}: {error}"))?
+            .reply()
+            .map(|reply| reply.atom)
+            .map_err(|error| format!("intern {name}: {error}"))
+    };
+    // The X11 spelling of the MIME type, matching what the window publishes.
+    let target = match mime {
+        "text/plain;charset=utf-8" | "text/plain;charset=UTF-8" => intern("UTF8_STRING")?,
+        other => intern(other)?,
+    };
+    let clipboard = intern("CLIPBOARD")?;
+    let incr = intern("INCR")?;
+    let property = intern("SKERRY_DRIVE_PASTE")?;
+
+    let window = connection.generate_id().map_err(|error| format!("id: {error}"))?;
+    let aux = xproto::CreateWindowAux::new().event_mask(xproto::EventMask::PROPERTY_CHANGE);
+    connection
+        .create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            window,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            xproto::WindowClass::INPUT_OUTPUT,
+            x11rb::COPY_FROM_PARENT,
+            &aux,
+        )
+        .map_err(|error| format!("create_window: {error}"))?;
+    connection
+        .convert_selection(window, clipboard, target, property, x11rb::CURRENT_TIME)
+        .map_err(|error| format!("convert_selection: {error}"))?;
+    connection.flush().map_err(|error| format!("flush: {error}"))?;
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    let mut collected = Vec::new();
+    let mut incremental = false;
+    while std::time::Instant::now() < deadline {
+        let Ok(Some(event)) = connection.poll_for_event() else {
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        };
+        let arrived = match event {
+            Event::SelectionNotify(event) if event.property == 0 => {
+                return Err(format!("nothing is offered as {mime}"));
+            }
+            Event::SelectionNotify(_) => true,
+            Event::PropertyNotify(event)
+                if incremental && event.state == xproto::Property::NEW_VALUE =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !arrived {
+            continue;
+        }
+        let reply = connection
+            .get_property(true, window, property, xproto::AtomEnum::ANY, 0, u32::MAX / 4)
+            .map_err(|error| format!("get_property: {error}"))?
+            .reply()
+            .map_err(|error| format!("get_property: {error}"))?;
+        connection.flush().map_err(|error| format!("flush: {error}"))?;
+        if reply.type_ == incr {
+            incremental = true;
+            continue;
+        }
+        if incremental {
+            // A zero-length property ends an `INCR` transfer.
+            if reply.value.is_empty() {
+                return Ok(collected);
+            }
+            collected.extend_from_slice(&reply.value);
+            continue;
+        }
+        return Ok(reply.value);
+    }
+    Err(format!("the owner never answered for {mime}"))
+}
+
+/// Asks the `skerry` window to close, the way a window manager's button does.
+///
+/// A `WM_DELETE_WINDOW` client message and nothing else — **not a signal**. A
+/// signal skips every destructor, and the one time this ran for real it turned up
+/// a segmentation fault on the way out that a week of signal-killed tests had
+/// hidden.
+fn ask_to_close() -> Result<(), String> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+
+    let (connection, screen) =
+        x11rb::connect(None).map_err(|error| format!("X11 connect: {error}"))?;
+    let root = connection.setup().roots.get(screen).ok_or("no such X screen")?.root;
+    let intern = |name: &str| -> Result<u32, String> {
+        connection
+            .intern_atom(false, name.as_bytes())
+            .map_err(|error| format!("intern {name}: {error}"))?
+            .reply()
+            .map(|reply| reply.atom)
+            .map_err(|error| format!("intern {name}: {error}"))
+    };
+    let protocols = intern("WM_PROTOCOLS")?;
+    let delete = intern("WM_DELETE_WINDOW")?;
+
+    let target = find_window(&connection, root).ok_or("no skerry window on this display")?;
+
+    let event = xproto::ClientMessageEvent::new(32, target, protocols, [delete, 0, 0, 0, 0]);
+    connection
+        .send_event(false, target, xproto::EventMask::NO_EVENT, event)
+        .map_err(|error| format!("send_event: {error}"))?;
+    // A round trip, not a flush. X11 errors are asynchronous: without something
+    // that waits for a reply, a refused `SendEvent` is a message this process
+    // exits before ever hearing about.
+    connection
+        .get_input_focus()
+        .map_err(|error| format!("send_event: {error}"))?
+        .reply()
+        .map_err(|error| format!("the server refused the close message: {error}"))?;
+    Ok(())
+}
+
+/// Finds the `skerry` window, by the `WM_CLASS` it sets.
+///
+/// The children of the root are the toplevels: there is no window manager under
+/// `Xvfb`, so nothing is reparented and no frame window sits in between.
+fn find_window(
+    connection: &impl x11rb::connection::Connection,
+    root: x11rb::protocol::xproto::Window,
+) -> Option<x11rb::protocol::xproto::Window> {
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+    let children = connection.query_tree(root).ok()?.reply().ok()?.children;
+    children.into_iter().find(|window| {
+        connection
+            .get_property(
+                false,
+                *window,
+                xproto::AtomEnum::WM_CLASS,
+                xproto::AtomEnum::STRING,
+                0,
+                64,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some_and(|reply| reply.value.starts_with(b"skerry\0"))
+    })
+}
+
+/// Resizes the window, the way a window manager would.
+///
+/// There is no window manager under `Xvfb`, so without this nothing ever changes
+/// the window's size and the whole relayout path — `ConfigureNotify`, the logical
+/// size derived from the device one, the columns that shed — is never exercised.
+fn resize_window(size: &str) -> Result<(), String> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+
+    let (width, height) = size
+        .split_once(['x', 'X'])
+        .and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)))
+        .ok_or("--resize needs WIDTHxHEIGHT")?;
+
+    let (connection, screen) =
+        x11rb::connect(None).map_err(|error| format!("X11 connect: {error}"))?;
+    let root = connection.setup().roots.get(screen).ok_or("no such X screen")?.root;
+    let window = find_window(&connection, root).ok_or("no skerry window on this display")?;
+    connection
+        .configure_window(window, &xproto::ConfigureWindowAux::new().width(width).height(height))
+        .map_err(|error| format!("configure_window: {error}"))?;
+    // A round trip and not a flush: this process is about to exit, and a request
+    // that has only been queued is a request the server may never see.
+    connection
+        .get_input_focus()
+        .map_err(|error| format!("resize: {error}"))?
+        .reply()
+        .map_err(|error| format!("the server refused the resize: {error}"))?;
+    Ok(())
+}
+
+/// Writes `Xft.dpi` into the root window's resource database.
+///
+/// **Not `xrdb`.** On this machine `xrdb -merge` and `xrdb -load` both exit 0
+/// against an `Xvfb` and create no `RESOURCE_MANAGER` property at all, so a
+/// harness that used it set nothing and every assertion about scale compared a
+/// default against a default. Writing the property is what `xrdb` is for, it is
+/// four lines, and it puts exactly the bytes there that the thing under test
+/// reads.
+fn set_xft_dpi(dpi: &str) -> Result<(), String> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+    use x11rb::wrapper::ConnectionExt as _;
+
+    let dpi: u32 = dpi.trim().parse().map_err(|_| format!("{dpi} is not a DPI"))?;
+    let (connection, screen) =
+        x11rb::connect(None).map_err(|error| format!("X11 connect: {error}"))?;
+    let root = connection.setup().roots.get(screen).ok_or("no such X screen")?.root;
+    // **`RetainPermanent` first, or this vanishes the moment the process exits.**
+    // An X server frees a client's resources when its connection closes, and a
+    // property set on the root is one of them — so writing it, reading it back on
+    // the same connection to prove it is there, and then exiting leaves a display
+    // with no resource database and a test that compares two defaults. It is what
+    // `xrdb` does and the reason it exists rather than being a one-line `xprop`.
+    connection
+        .set_close_down_mode(xproto::CloseDown::RETAIN_PERMANENT)
+        .map_err(|error| format!("set_close_down_mode: {error}"))?
+        .check()
+        .map_err(|error| format!("the server refused to retain the database: {error}"))?;
+
+    // The X resource database is a text property, one `name:\tvalue` per line.
+    let database = format!("Xft.dpi:\t{dpi}\n");
+    // `check` and not `flush`: `ChangeProperty` has no reply, so a refusal comes
+    // back as an error event that nothing would otherwise look at.
+    connection
+        .change_property8(
+            xproto::PropMode::REPLACE,
+            root,
+            xproto::AtomEnum::RESOURCE_MANAGER,
+            xproto::AtomEnum::STRING,
+            database.as_bytes(),
+        )
+        .map_err(|error| format!("change_property: {error}"))?
+        .check()
+        .map_err(|error| format!("the server refused the resource database: {error}"))?;
+    Ok(())
+}
+
+/// Prints the `Xft.dpi` the root resource database holds, or 96 where it has none.
+///
+/// **Not `xprop`.** `xprop -root RESOURCE_MANAGER` reports `not found` against an
+/// `Xvfb` whose root demonstrably holds the property — measured, by writing it
+/// and reading it back on the same connection. A harness that asked `xprop` got
+/// 96 whatever the truth was, so its scale assertions compared a default with a
+/// default and could not fail.
+fn query_xft_dpi() -> Result<f64, String> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{self, ConnectionExt as _};
+
+    let (connection, screen) =
+        x11rb::connect(None).map_err(|error| format!("X11 connect: {error}"))?;
+    let root = connection.setup().roots.get(screen).ok_or("no such X screen")?.root;
+    let reply = connection
+        .get_property(
+            false,
+            root,
+            xproto::AtomEnum::RESOURCE_MANAGER,
+            xproto::AtomEnum::STRING,
+            0,
+            64 * 1024,
+        )
+        .map_err(|error| format!("get_property: {error}"))?
+        .reply()
+        .map_err(|error| format!("get_property: {error}"))?;
+    let database = String::from_utf8_lossy(&reply.value);
+    Ok(database
+        .lines()
+        .find_map(|line| line.strip_prefix("Xft.dpi:"))
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .unwrap_or(96.0))
+}

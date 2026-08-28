@@ -6,8 +6,9 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 401
-tests, 61 GUI scenarios, fifteen golden frames, every gate green: a Details view
+**M0, in progress, and something you can use for a day.** Eleven crates, 435
+tests, 62 GUI scenarios **on both Wayland and X11**, fifteen golden frames, every
+gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, a command registry
 behind every key, a context menu and a fuzzy palette over the same registry,
@@ -21,7 +22,7 @@ is done and what is owed:
 three budget rows currently missed:
 [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
-Two things about working on this code that are not obvious from reading it:
+Three things about working on this code that are not obvious from reading it:
 
 - **`--bench` and `--capture` need no display server**, and they run the same
   immediate-mode pass, renderer and glyph atlas the window does. Use them. Four
@@ -32,6 +33,12 @@ Two things about working on this code that are not obvious from reading it:
   place. Mixing them produces arithmetic that is correct at 100% and wrong
   everywhere else — which is how one baseline ended up four thousand pixels below
   the window.
+- **There are two display backends and nothing above `sk-plat` may know which it
+  has.** `tools/check-invariants.py` fails a build that names one
+  ([ADR 0009](docs/adr/0009-x11-backend-behind-a-runtime-selected-enum.md)). Run
+  the scenarios both ways — `tools/gui-test` and `tools/gui-test --x11` — because
+  the X11 half needs no seat and finds things the Wayland half cannot: it caught
+  a harness bug that had been latent since the harness was written.
 
 Phase 0's six spikes are all resolved and none of them said no:
 

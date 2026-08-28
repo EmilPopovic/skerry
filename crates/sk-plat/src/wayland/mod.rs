@@ -51,219 +51,46 @@ use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel};
 
 use crate::event::{Event, Point, Size};
+use crate::wait::{shorter, to_timespec};
+use crate::window::{
+    Capabilities, Cursor, Edge, RawHandles, WindowConfig, WindowState, physical_of,
+};
 
 use self::seat::Seat;
 
-/// How the window should first appear.
-#[derive(Clone, Debug)]
-pub struct WindowConfig {
-    /// The title a compositor shows in a task switcher.
-    pub title: String,
-    /// The `app_id`, which is how a desktop matches a window to its
-    /// `.desktop` file. Reverse-DNS by freedesktop convention.
-    pub app_id: String,
-    /// The size in logical pixels, used until the compositor names one.
-    pub logical: (u32, u32),
-    /// Draw the frame here rather than asking the compositor to.
-    ///
-    /// Two things, because the protocol only offers one of them: the decoration
-    /// mode asked for becomes `client_side`, **and** the frame is drawn whatever
-    /// the compositor answers. A compositor may refuse the request — Hyprland
-    /// does, measured — and a preference that a compositor can silently veto is
-    /// not a preference. Where it refuses, a person who asked for this gets two
-    /// frames, which is what asking for it means.
-    ///
-    /// GNOME advertises no decoration manager at all, so there the frame is
-    /// drawn regardless and this flag changes nothing.
-    pub own_frame: bool,
-}
-
-impl Default for WindowConfig {
-    fn default() -> Self {
-        Self {
-            title: sk_model::t!("app.name").to_owned(),
-            app_id: "dev.skerry.Skerry".to_owned(),
-            logical: (1100, 720),
-            own_frame: false,
-        }
+/// The protocol shape for a cursor, which is the only Wayland-specific thing
+/// about [`Cursor`].
+const fn shape_of(cursor: Cursor) -> wp_cursor_shape_device_v1::Shape {
+    use wp_cursor_shape_device_v1::Shape;
+    match cursor {
+        Cursor::Arrow => Shape::Default,
+        Cursor::Hand => Shape::Pointer,
+        Cursor::Text => Shape::Text,
+        Cursor::Grabbing => Shape::Grabbing,
+        Cursor::Resize(edge) => match edge {
+            Edge::Top => Shape::NResize,
+            Edge::Bottom => Shape::SResize,
+            Edge::Left => Shape::WResize,
+            Edge::Right => Shape::EResize,
+            Edge::TopLeft => Shape::NwResize,
+            Edge::TopRight => Shape::NeResize,
+            Edge::BottomLeft => Shape::SwResize,
+            Edge::BottomRight => Shape::SeResize,
+        },
     }
 }
 
-/// What this compositor turned out to support.
-///
-/// Probed, never compiled in — [ADR 0007](../../../../docs/adr/0007-runtime-capability-detection.md).
-/// Recorded as a value rather than checked at each use so that a missing
-/// capability is a fact the log carries, not a branch nobody can see.
-#[derive(Clone, Debug, Default)]
-pub struct Capabilities {
-    /// `wp_fractional_scale_v1`. Without it, scale is an integer and text at
-    /// 125% is either too small or resampled.
-    pub fractional_scale: bool,
-    /// `wp_viewporter`. Required to express a fractional scale at all: it maps
-    /// a physical-size buffer onto a logical-size surface.
-    pub viewporter: bool,
-    /// `zxdg_decoration_manager_v1`, and whether the compositor agreed to draw
-    /// the frame itself.
-    pub server_side_decorations: bool,
-    /// A keyboard is present on the seat.
-    pub keyboard: bool,
-    /// A pointer is present on the seat.
-    pub pointer: bool,
-    /// `wp_cursor_shape_v1`, which is how the pointer gets an image at all.
-    pub cursor_shape: bool,
-    /// `wl_data_device_manager`: the clipboard, and later drag-and-drop.
-    pub clipboard: bool,
-    /// `zwp_primary_selection_device_manager_v1`. Present here does **not** mean
-    /// usable: Hyprland advertises it and silently discards `set_selection`
-    /// unless `misc:middle_click_paste` is on, which Spike D found by
-    /// elimination because nothing reports it.
-    pub primary_selection: bool,
-    /// The DRM device the compositor renders on, as a `dev_t`.
-    ///
-    /// From `zwp_linux_dmabuf_v1`'s default feedback. It exists because a hybrid
-    /// laptop has two, and a buffer allocated on the wrong one cannot be
-    /// imported: measured, mutter picked the discrete NVIDIA card, the drawing
-    /// stack picked the integrated AMD one for its low-power preference, and the
-    /// compositor answered `failed to import supplied dmabufs` and killed the
-    /// connection.
-    pub render_device: Option<u64>,
-    /// Every advertised global with its version, so "why did that not work" has
-    /// an answer that does not need a second run.
-    pub advertised: Vec<(String, u32)>,
-}
-
-impl Capabilities {
-    /// The PCI vendor and device ids of the compositor's render device.
-    ///
-    /// Resolved through `/sys/dev/char`, which is where a `dev_t` becomes a
-    /// device one can ask questions about. `None` when there is no feedback to
-    /// read, when the node has no PCI parent — a virtual or USB display — or when
-    /// the files are not there, all of which are "no opinion" rather than errors:
-    /// the caller then chooses an adapter the way it always did.
-    #[must_use]
-    pub fn render_device_ids(&self) -> Option<(u32, u32)> {
-        let (major, minor) = split_dev(self.render_device?);
-        let base = std::path::PathBuf::from(format!("/sys/dev/char/{major}:{minor}/device"));
-        let read = |name: &str| -> Option<u32> {
-            let text = std::fs::read_to_string(base.join(name)).ok()?;
-            u32::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok()
-        };
-        Some((read("vendor")?, read("device")?))
-    }
-}
-
-/// What the pointer should look like over a particular thing.
-///
-/// A named shape rather than an image: `wp_cursor_shape_v1` hands the name to
-/// the compositor, which owns the theme, the size and the scale — all three of
-/// which are settings a person has already chosen once and should not choose
-/// again here. The alternative is parsing an `XCursor` theme and uploading a
-/// buffer, which is the whole of a cursor library for a set of arrows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Cursor {
-    /// The ordinary arrow.
-    #[default]
-    Arrow,
-    /// Over something that acts on a click: a breadcrumb, a column header.
-    Hand,
-    /// Over text a click would put a caret into.
-    Text,
-    /// Over a resize edge, named by the edge.
-    Resize(Edge),
-    /// Dragging something that follows the pointer.
-    Grabbing,
-}
-
-impl Cursor {
-    const fn as_protocol(self) -> wp_cursor_shape_device_v1::Shape {
-        use wp_cursor_shape_device_v1::Shape;
-        match self {
-            Self::Arrow => Shape::Default,
-            Self::Hand => Shape::Pointer,
-            Self::Text => Shape::Text,
-            Self::Grabbing => Shape::Grabbing,
-            Self::Resize(edge) => match edge {
-                Edge::Top => Shape::NResize,
-                Edge::Bottom => Shape::SResize,
-                Edge::Left => Shape::WResize,
-                Edge::Right => Shape::EResize,
-                Edge::TopLeft => Shape::NwResize,
-                Edge::TopRight => Shape::NeResize,
-                Edge::BottomLeft => Shape::SwResize,
-                Edge::BottomRight => Shape::SeResize,
-            },
-        }
-    }
-}
-
-/// Which edge or corner a resize drag is pulling.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(missing_docs, reason = "each variant is the edge of that name")]
-pub enum Edge {
-    Top,
-    Bottom,
-    Left,
-    Right,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
-impl Edge {
-    const fn as_protocol(self) -> xdg_toplevel::ResizeEdge {
-        match self {
-            Self::Top => xdg_toplevel::ResizeEdge::Top,
-            Self::Bottom => xdg_toplevel::ResizeEdge::Bottom,
-            Self::Left => xdg_toplevel::ResizeEdge::Left,
-            Self::Right => xdg_toplevel::ResizeEdge::Right,
-            Self::TopLeft => xdg_toplevel::ResizeEdge::TopLeft,
-            Self::TopRight => xdg_toplevel::ResizeEdge::TopRight,
-            Self::BottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
-            Self::BottomRight => xdg_toplevel::ResizeEdge::BottomRight,
-        }
-    }
-}
-
-/// What the compositor last said about the window.
-///
-/// Read rather than assumed: a maximized or tiled window must not draw a rounded
-/// corner over the screen edge, and a window that is not activated draws its
-/// title bar dimmed the way every other window on the desktop does.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub struct WindowState {
-    /// Filling its output.
-    pub maximized: bool,
-    /// Filling its output with no chrome at all.
-    pub fullscreen: bool,
-    /// Holding keyboard focus, as far as the shell is concerned.
-    pub activated: bool,
-    /// Snapped against at least one edge, so its corners are not free.
-    pub tiled: bool,
-    /// Whether the compositor offers a maximize action at all.
-    pub can_maximize: bool,
-    /// Whether it offers a minimize action.
-    pub can_minimize: bool,
-    /// Whether it offers a window menu.
-    pub can_show_menu: bool,
-}
-
-impl WindowState {
-    /// What to assume until a compositor says otherwise.
-    ///
-    /// All three actions present: `wm_capabilities` is `xdg_wm_base` v5, and on
-    /// anything older the actions simply exist — which is what every compositor
-    /// before v5 meant by not saying.
-    const fn before_any_configure() -> Self {
-        Self {
-            maximized: false,
-            fullscreen: false,
-            activated: false,
-            tiled: false,
-            can_maximize: true,
-            can_minimize: true,
-            can_show_menu: true,
-        }
+/// The protocol shape for a resize edge.
+const fn resize_edge_of(edge: Edge) -> xdg_toplevel::ResizeEdge {
+    match edge {
+        Edge::Top => xdg_toplevel::ResizeEdge::Top,
+        Edge::Bottom => xdg_toplevel::ResizeEdge::Bottom,
+        Edge::Left => xdg_toplevel::ResizeEdge::Left,
+        Edge::Right => xdg_toplevel::ResizeEdge::Right,
+        Edge::TopLeft => xdg_toplevel::ResizeEdge::TopLeft,
+        Edge::TopRight => xdg_toplevel::ResizeEdge::TopRight,
+        Edge::BottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
+        Edge::BottomRight => xdg_toplevel::ResizeEdge::BottomRight,
     }
 }
 
@@ -286,7 +113,7 @@ struct State {
     data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
     primary_manager:
         Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
-    clipboard: clipboard::Clipboard,
+    clipboard: clipboard::Selections,
     /// The compositor's cursor namer, where it has one.
     ///
     /// `wp_cursor_shape_v1` is staging and recent — mutter 45, kwin 5.27, sway
@@ -302,7 +129,7 @@ struct State {
     ///
     /// A pipe holds 64 KiB and a whole-directory selection is megabytes, so the
     /// tail of a transfer waits here for room rather than blocking the loop.
-    transfers: Vec<clipboard::Transfer>,
+    transfers: Vec<crate::clipboard::Transfer>,
     /// An offer whose types are still arriving, before the `selection` event
     /// that adopts it.
     pending_offer: Option<wayland_client::protocol::wl_data_offer::WlDataOffer>,
@@ -503,7 +330,7 @@ impl Window {
     #[must_use = "a refused grab is a press the caller still has to account for"]
     pub fn start_resize(&self, edge: Edge) -> bool {
         let Some(serial) = self.state.seat.button_serial else { return false };
-        self.state.toplevel.resize(self.state.seat.seat(), serial, edge.as_protocol());
+        self.state.toplevel.resize(self.state.seat.seat(), serial, resize_edge_of(edge));
         true
     }
 
@@ -548,7 +375,7 @@ impl Window {
         }
         let Some(device) = &self.state.cursor else { return };
         let Some(serial) = self.state.seat.enter_serial else { return };
-        device.set_shape(serial, cursor.as_protocol());
+        device.set_shape(serial, shape_of(cursor));
         self.state.shape = cursor;
     }
 
@@ -590,7 +417,7 @@ impl Window {
     /// what it converts them into appear in this file at all.
     #[must_use]
     pub fn raw_handles(&self) -> RawHandles {
-        RawHandles {
+        RawHandles::Wayland {
             display: self.connection.backend().display_ptr().cast::<c_void>(),
             surface: self.state.surface.id().as_ptr().cast::<c_void>(),
         }
@@ -636,7 +463,7 @@ impl Window {
 
         // A transfer whose pipe has room since last time finishes here, before
         // anything decides to sleep.
-        clipboard::resume_all(&mut self.state.transfers);
+        crate::clipboard::resume_all(&mut self.state.transfers);
 
         // Anything already buffered is dispatched without touching the socket.
         match self.queue.dispatch_pending(&mut self.state) {
@@ -672,7 +499,8 @@ impl Window {
         // everything else here waits: in the one `poll`. No thread, no timer, and
         // idle stays idle because a full pipe is simply not ready.
         let waiting = fds.len();
-        let pipes: Vec<_> = self.state.transfers.iter().map(clipboard::Transfer::as_fd).collect();
+        let pipes: Vec<_> =
+            self.state.transfers.iter().map(crate::clipboard::Transfer::as_fd).collect();
         for pipe in &pipes {
             fds.push(PollFd::new(pipe, PollFlags::OUT));
         }
@@ -701,7 +529,7 @@ impl Window {
             self.state.events.push_back(Event::Woken);
         }
         if fds[waiting..].iter().any(|fd| !fd.revents().is_empty()) {
-            clipboard::resume_all(&mut self.state.transfers);
+            crate::clipboard::resume_all(&mut self.state.transfers);
         }
 
         if let Err(error) = self.queue.dispatch_pending(&mut self.state) {
@@ -751,15 +579,6 @@ impl Window {
             scale_120: state.scale_120,
         });
     }
-}
-
-/// Pointers to the compositor objects a GPU backend needs.
-#[derive(Clone, Copy, Debug)]
-pub struct RawHandles {
-    /// `*mut wl_display`.
-    pub display: *mut c_void,
-    /// `*mut wl_surface`.
-    pub surface: *mut c_void,
 }
 
 /// Names the window and asks for a frame, before the first commit.
@@ -836,31 +655,6 @@ fn forget_which_gpu(asked: WhichGpu) {
 /// bits 8–19 and 32–63, and the minor across 0–7 and 20–31. Written out rather
 /// than taken from `libc::major`, which is a macro in C and an inline function
 /// with no stable Rust binding.
-const fn split_dev(device: u64) -> (u64, u64) {
-    (
-        ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff),
-        (device & 0xff) | ((device >> 12) & !0xff),
-    )
-}
-
-fn physical_of(logical: (u32, u32), scale_120: u32) -> (u32, u32) {
-    ((logical.0 * scale_120).div_ceil(120).max(1), (logical.1 * scale_120).div_ceil(120).max(1))
-}
-
-fn shorter(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
-    match (left, right) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (some, None) | (None, some) => some,
-    }
-}
-
-fn to_timespec(duration: Duration) -> rustix::fs::Timespec {
-    rustix::fs::Timespec {
-        tv_sec: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-        tv_nsec: i64::from(duration.subsec_nanos()),
-    }
-}
-
 fn bind<I>(
     globals: &GlobalList,
     handle: &QueueHandle<State>,
@@ -1163,52 +957,5 @@ impl Drop for State {
         self.toplevel.destroy();
         self.xdg_surface.destroy();
         self.surface.destroy();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, clippy::unwrap_used)]
-
-    use super::{physical_of, shorter, split_dev};
-    use std::time::Duration;
-
-    /// The number that turns "which GPU is the compositor on" into a path under
-    /// `/sys/dev/char`. A DRM render node is major 226; `renderD128` is minor
-    /// 128 and `renderD129` is 129, which is the pair this had to tell apart.
-    #[test]
-    fn a_dev_t_splits_the_way_glibc_packed_it() {
-        assert_eq!(split_dev(226 * 256 + 128), (226, 128));
-        assert_eq!(split_dev(226 * 256 + 129), (226, 129));
-        assert_eq!(split_dev(0), (0, 0));
-        // A minor above 255, which is where the second field lives and where a
-        // naive `dev & 0xff` loses it.
-        let wide = (226u64 << 8) | (0x1_00u64 << 12) | 0x34;
-        assert_eq!(split_dev(wide), (226, 0x134));
-    }
-
-    #[test]
-    fn the_physical_size_is_derived_from_the_integer_the_compositor_sent() {
-        // 125% of 1100x720. Exact, because the scale never becomes a float.
-        assert_eq!(physical_of((1100, 720), 150), (1375, 900));
-        // 110%, which is not representable as a ratio of small integers and is
-        // exactly why the numerator is kept rather than a factor.
-        assert_eq!(physical_of((1100, 720), 132), (1210, 792));
-        assert_eq!(physical_of((1100, 720), 120), (1100, 720));
-    }
-
-    #[test]
-    fn a_surface_is_never_zero_sized() {
-        assert_eq!(physical_of((0, 0), 120), (1, 1));
-    }
-
-    #[test]
-    fn the_shorter_deadline_wins_and_none_means_forever() {
-        let short = Some(Duration::from_millis(8));
-        let long = Some(Duration::from_millis(500));
-        assert_eq!(shorter(short, long), short);
-        assert_eq!(shorter(long, short), short);
-        assert_eq!(shorter(None, short), short);
-        assert_eq!(shorter(None, None), None);
     }
 }

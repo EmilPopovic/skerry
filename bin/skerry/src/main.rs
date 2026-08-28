@@ -30,7 +30,10 @@ fn main() -> std::process::ExitCode {
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
-    let mut scale_120 = 120;
+    // `None` until `--scale` says otherwise, so the window can tell "asked for
+    // 100%" from "not asked at all" — different things where the server states
+    // one, and the only way to run at a fractional scale under a bare X server.
+    let mut forced_scale = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -58,7 +61,7 @@ fn main() -> std::process::ExitCode {
                 None => return usage_error("--size needs WIDTHxHEIGHT"),
             },
             "--scale" => match arguments.next().as_deref().and_then(parse_scale) {
-                Some(scale) => scale_120 = scale,
+                Some(scale) => forced_scale = Some(scale),
                 None => return usage_error("--scale needs a percentage, such as 125"),
             },
             "--help" | "-h" => {
@@ -78,6 +81,7 @@ fn main() -> std::process::ExitCode {
     // the answer to "where am I" and should never have needed resolving.
     let path = std::fs::canonicalize(&path).unwrap_or(path);
 
+    let scale_120 = forced_scale.unwrap_or(120);
     let outcome = match (capture, bench) {
         (Some(file), _) => sk_app::capture(&Capture {
             file,
@@ -100,15 +104,16 @@ fn main() -> std::process::ExitCode {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
         }
         (None, None) => {
-            App::new(Options { path, dark, stats, own_frame, started }).map(|mut app| {
-                // A compositor that goes away is not the user closing the window, and
-                // the difference is worth a line on the way out.
-                if let Some(failure) = app.run() {
-                    eprintln!("skerry: the display server went away — {failure}");
-                    return false;
-                }
-                true
-            })
+            App::new(Options { path, dark, stats, own_frame, scale_120: forced_scale, started })
+                .map(|mut app| {
+                    // A compositor that goes away is not the user closing the window, and
+                    // the difference is worth a line on the way out.
+                    if let Some(failure) = app.run() {
+                        eprintln!("skerry: the display server went away — {failure}");
+                        return false;
+                    }
+                    true
+                })
         }
     };
 

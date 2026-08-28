@@ -42,6 +42,17 @@ rustix = { version = "1.1", default-features = false, features = ["std", "fs", "
 wayland-client = { version = "0.31", features = ["system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 xkbcommon = "0.9"
+# `dl-libxcb` for the same reason `wayland-client` takes `dlopen`: an X11-only
+# machine and a Wayland-only machine both have to start. It also yields the real
+# `xcb_connection_t *` that `VK_KHR_xcb_surface` needs — ADR 0009.
+x11rb = { version = "0.14", default-features = false, features = [
+    "dl-libxcb",
+    "xkb",
+    "xfixes",
+    "render",
+    "cursor",
+    "resource_manager",
+] }
 # Only for `localtime_r`. Already in the graph through `rustix` and
 # `xkbcommon`, so it costs no crates — see docs/07-dependencies.md.
 libc = "0.2"

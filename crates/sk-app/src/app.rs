@@ -66,6 +66,13 @@ pub struct Options {
     pub stats: bool,
     /// Ask for a client-drawn window frame even where the compositor offers one.
     pub own_frame: bool,
+    /// Force a scale rather than taking the display server's.
+    ///
+    /// `--scale`. Wayland states a scale and this is ignored there; X11 has no
+    /// protocol to state one, so under a bare `Xvfb` with no resource database
+    /// this is the only way to run at anything but 100% — which makes it the
+    /// only way to test a fractional scale headlessly.
+    pub scale_120: Option<u32>,
     /// When the process started, for the cold-start measurement.
     pub started: Instant,
 }
@@ -584,6 +591,7 @@ impl App {
         let window_started = Instant::now();
         let window = Window::open(&WindowConfig {
             own_frame: options.own_frame,
+            scale_120: options.scale_120,
             ..WindowConfig::default()
         })?;
         let window_us = window_started.elapsed().as_micros();

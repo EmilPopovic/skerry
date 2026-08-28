@@ -81,7 +81,32 @@ def source_check(report: Report) -> None:
                     report.fail(f"{rel(source)}:{number}", message)
             if "wgpu" in line and "sk-gpu" not in source.parts and not suppressed(line, "gpu-seam"):
                 report.fail(f"{rel(source)}:{number}", "wgpu must not leak above sk-gpu — ADR 0003")
+            # Which display server this is must not reach the code above the
+            # platform layer. `sk-gpu` is the one exception: it converts the raw
+            # handles, and a Wayland surface and an X11 window are different
+            # shapes. Everywhere else, a backend named above `sk-plat` is a
+            # behaviour that differs between two servers without a test that
+            # would notice — ADR 0009.
+            if (
+                BACKEND_NAME.search(line)
+                and "sk-plat" not in source.parts
+                and "sk-gpu" not in source.parts
+                and not suppressed(line, "backend-seam")
+            ):
+                report.fail(
+                    f"{rel(source)}:{number}",
+                    "no crate above sk-plat may name a display server — ADR 0009",
+                )
 
+
+# The names of the two backends, as they appear in code rather than in prose: a
+# path, a variant, or the crate itself. Deliberately not the bare words — a
+# comment explaining why something is the way it is on Wayland is documentation,
+# and this is about code that branches on it.
+BACKEND_NAME = re.compile(
+    r"\b(?:sk_plat::(?:wayland|x11)|Backend::(?:Wayland|X11)|RawHandles::(?:Wayland|X11)"
+    r"|wayland_client|x11rb)\b"
+)
 
 # Every string a person can see goes through the catalogue, and a key that is not
 # in it resolves to itself — so a typo ships as `notice.trashed` on screen.
@@ -176,7 +201,7 @@ def run() -> int:
     adr_immutability_check(report)
     if not report.failures:
         report.note(
-            "banned crates, capability flags, crate lints, GPU seam, doc comments, "
+            "banned crates, capability flags, crate lints, GPU and backend seams, doc comments, "
             "catalogue keys, ADR immutability"
         )
     return report.finish()

@@ -1,7 +1,5 @@
 //! The device, the target, and the one draw call per clip region.
 
-use std::ffi::c_void;
-
 use sk_model::{Problem, ProblemKind};
 use sk_plat::RawHandles;
 use sk_text::{Fonts, GlyphKey};
@@ -95,18 +93,14 @@ impl Renderer {
         physical: (u32, u32),
         render_device: Option<(u32, u32)>,
     ) -> Result<Self, Problem> {
-        let (Some(display), Some(window)) =
-            (std::ptr::NonNull::new(handles.display), std::ptr::NonNull::new(handles.surface))
-        else {
-            return Err(Problem::plain(ProblemKind::NoGpu, "null compositor handle"));
-        };
+        let target = raw_pair(handles)?;
 
         let mut refused = None;
         for backends in BACKENDS {
-            // SAFETY: the caller's contract, restated: both pointers name live
+            // SAFETY: the caller's contract, restated: the handles name live
             // objects owned by the `sk_plat::Window` that produced them, and the
             // window outlives this renderer.
-            match unsafe { Self::windowed(backends, display, window, physical, render_device) } {
+            match unsafe { Self::windowed(backends, target, physical, render_device) } {
                 Ok(renderer) => return Ok(renderer),
                 Err(problem) => refused = Some(problem),
             }
@@ -119,16 +113,12 @@ impl Renderer {
     /// As [`Renderer::new`].
     unsafe fn windowed(
         backends: wgpu::Backends,
-        display: std::ptr::NonNull<c_void>,
-        window: std::ptr::NonNull<c_void>,
+        target: (wgpu::rwh::RawDisplayHandle, wgpu::rwh::RawWindowHandle),
         physical: (u32, u32),
         render_device: Option<(u32, u32)>,
     ) -> Result<Self, Problem> {
         let instance = instance(backends);
-        let raw_display =
-            wgpu::rwh::RawDisplayHandle::Wayland(wgpu::rwh::WaylandDisplayHandle::new(display));
-        let raw_window =
-            wgpu::rwh::RawWindowHandle::Wayland(wgpu::rwh::WaylandWindowHandle::new(window));
+        let (raw_display, raw_window) = target;
 
         // SAFETY: the caller's contract.
         let surface = unsafe {
@@ -617,6 +607,52 @@ fn clear_color(color: crate::Color) -> wgpu::Color {
     let (red, green, blue, alpha) = color.components();
     let channel = |value: u8| f64::from(value) / 255.0;
     wgpu::Color { r: channel(red), g: channel(green), b: channel(blue), a: channel(alpha) }
+}
+
+/// The `raw-window-handle` pair for whichever display server produced these.
+///
+/// The one place in the GPU stack that knows there is more than one. `sk-plat`
+/// hands over raw pointers and ids on purpose — it may not name a
+/// `raw-window-handle` type, and `tools/check-invariants.py` enforces that — so
+/// the translation happens here, at the seam it belongs to.
+///
+/// **`Xcb` and not `Xlib`.** `x11rb` holds an `xcb_connection_t *` and
+/// `VK_KHR_xcb_surface` takes one; going through `Xlib` would mean loading a
+/// second library to hand back a pointer we already have.
+fn raw_pair(
+    handles: RawHandles,
+) -> Result<(wgpu::rwh::RawDisplayHandle, wgpu::rwh::RawWindowHandle), Problem> {
+    match handles {
+        RawHandles::Wayland { display, surface } => {
+            let (Some(display), Some(surface)) =
+                (std::ptr::NonNull::new(display), std::ptr::NonNull::new(surface))
+            else {
+                return Err(Problem::plain(ProblemKind::NoGpu, "null compositor handle"));
+            };
+            Ok((
+                wgpu::rwh::RawDisplayHandle::Wayland(wgpu::rwh::WaylandDisplayHandle::new(display)),
+                wgpu::rwh::RawWindowHandle::Wayland(wgpu::rwh::WaylandWindowHandle::new(surface)),
+            ))
+        }
+        RawHandles::X11 { connection, screen, window, visual } => {
+            let Some(window) = std::num::NonZeroU32::new(window) else {
+                return Err(Problem::plain(ProblemKind::NoGpu, "null X11 window"));
+            };
+            let mut handle = wgpu::rwh::XcbWindowHandle::new(window);
+            // The visual the window was created with. Vulkan picks one itself if
+            // this is absent, and on a server offering more than one visual of
+            // the same depth it can pick a different one from the window's —
+            // which is a `BadMatch` at surface creation and no window at all.
+            handle.visual_id = std::num::NonZeroU32::new(visual);
+            Ok((
+                wgpu::rwh::RawDisplayHandle::Xcb(wgpu::rwh::XcbDisplayHandle::new(
+                    std::ptr::NonNull::new(connection),
+                    screen,
+                )),
+                wgpu::rwh::RawWindowHandle::Xcb(handle),
+            ))
+        }
+    }
 }
 
 /// Prefers a non-sRGB 8-bit format.

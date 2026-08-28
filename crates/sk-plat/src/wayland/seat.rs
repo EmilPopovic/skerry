@@ -16,38 +16,17 @@
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use xkbcommon::xkb;
 
 use crate::event::{Button, Event, KeyEvent, Modifiers, Point};
+use crate::input::{Clicks, Repeater, WHEEL_NOTCH, modifiers_of};
 use crate::keys;
 
 use super::State;
-
-/// A wheel notch, in logical pixels.
-///
-/// Three lines of about 22 logical pixels, which is what GTK and Qt both settle
-/// on and therefore what a user's hands already expect. A touchpad sends a real
-/// distance and does not go through this.
-const WHEEL_NOTCH: f32 = 66.0;
-
-/// How close in time and space two presses must be to count as a double click.
-///
-/// 400 ms is the freedesktop default; 5 logical pixels is enough slack for a
-/// hand on a touchpad and tight enough that a press at the next row is a fresh
-/// click.
-const MULTI_CLICK_WINDOW_MS: u32 = 400;
-const MULTI_CLICK_SLOP: f32 = 5.0;
-
-struct Repeat {
-    event: KeyEvent,
-    keysym: u32,
-    next: Instant,
-    interval: Duration,
-}
 
 /// One gesture step's worth of scroll, before it is resolved into a distance.
 ///
@@ -99,13 +78,11 @@ pub struct Seat {
     xkb_state: Option<xkb::State>,
     mods: Modifiers,
 
-    repeat_delay: Duration,
-    repeat_interval: Option<Duration>,
-    repeating: Option<Repeat>,
+    repeat: Repeater,
 
     position: Point,
     scroll: PendingScroll,
-    last_click: Option<(u32, Point, u8)>,
+    clicks: Clicks,
 
     /// The serial of the last keyboard enter or key event. A selection may only
     /// be set with a serial from a real input event, which is the protocol's way
@@ -130,12 +107,10 @@ impl Seat {
             keymap: None,
             xkb_state: None,
             mods: Modifiers::default(),
-            repeat_delay: Duration::from_millis(600),
-            repeat_interval: Some(Duration::from_millis(40)),
-            repeating: None,
+            repeat: Repeater::default(),
             position: Point::default(),
             scroll: PendingScroll::default(),
-            last_click: None,
+            clicks: Clicks::default(),
             keyboard_serial: None,
             button_serial: None,
             enter_serial: None,
@@ -154,26 +129,12 @@ impl Seat {
 
     /// How long until the next key repeat is due, if one is pending.
     pub fn next_repeat_in(&self) -> Option<Duration> {
-        self.repeating.as_ref().map(|repeat| repeat.next.saturating_duration_since(Instant::now()))
+        self.repeat.next_in()
     }
 
     /// Emits any key repeats that have come due.
     pub fn emit_repeats(&mut self, events: &mut VecDeque<Event>) {
-        let now = Instant::now();
-        while let Some(repeat) = &mut self.repeating {
-            if repeat.next > now {
-                break;
-            }
-            repeat.next += repeat.interval;
-            // A window that was suspended long enough to owe a hundred repeats
-            // should not deliver them all at once.
-            if repeat.next < now {
-                repeat.next = now + repeat.interval;
-            }
-            let mut event = repeat.event.clone();
-            event.repeat = true;
-            events.push_back(Event::KeyDown(event));
-        }
+        self.repeat.emit(events);
     }
 
     fn load_keymap(&mut self, fd: OwnedFd, size: u32) {
@@ -196,13 +157,7 @@ impl Seat {
 
     fn refresh_modifiers(&mut self) {
         let Some(state) = &self.xkb_state else { return };
-        let active = |name| state.mod_name_is_active(name, xkb::STATE_MODS_EFFECTIVE);
-        self.mods = Modifiers {
-            ctrl: active(xkb::MOD_NAME_CTRL),
-            shift: active(xkb::MOD_NAME_SHIFT),
-            alt: active(xkb::MOD_NAME_ALT),
-            logo: active(xkb::MOD_NAME_LOGO),
-        };
+        self.mods = modifiers_of(state);
     }
 
     /// Builds the event for one physical key, or `None` without a keymap.
@@ -221,21 +176,6 @@ impl Seat {
             .then_some(text)
             .filter(|text| !text.chars().any(char::is_control));
         Some((KeyEvent { key, text, mods: self.mods, repeat: false }, keysym.raw(), repeats))
-    }
-
-    fn multi_click(&mut self, time: u32, position: Point) -> u8 {
-        let count = match self.last_click {
-            Some((last_time, last_position, count))
-                if time.wrapping_sub(last_time) <= MULTI_CLICK_WINDOW_MS
-                    && (position.x - last_position.x).abs() <= MULTI_CLICK_SLOP
-                    && (position.y - last_position.y).abs() <= MULTI_CLICK_SLOP =>
-            {
-                count.saturating_add(1)
-            }
-            _ => 1,
-        };
-        self.last_click = Some((time, position, count));
-        count
     }
 }
 
@@ -302,7 +242,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             wl_keyboard::Event::Leave { .. } => {
                 // Every held key is released by a focus change, so a repeat that
                 // outlives the focus would type into a window that is not ours.
-                state.seat.repeating = None;
+                state.seat.repeat.clear();
                 state.seat.mods = Modifiers::default();
                 state.events.push_back(Event::Focused(false));
             }
@@ -311,19 +251,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 let Some((event, keysym, repeats)) = state.seat.key_event(key) else { return };
                 let down = matches!(pressed, WEnum::Value(wl_keyboard::KeyState::Pressed));
                 if down {
-                    if let Some(interval) = state.seat.repeat_interval.filter(|_| repeats) {
-                        state.seat.repeating = Some(Repeat {
-                            event: event.clone(),
-                            keysym,
-                            next: Instant::now() + state.seat.repeat_delay,
-                            interval,
-                        });
-                    }
+                    state.seat.repeat.press(&event, keysym, repeats);
                     state.events.push_back(Event::KeyDown(event));
                 } else {
-                    if state.seat.repeating.as_ref().is_some_and(|r| r.keysym == keysym) {
-                        state.seat.repeating = None;
-                    }
+                    state.seat.repeat.release(keysym);
                     state.events.push_back(Event::KeyUp(event));
                 }
             }
@@ -340,14 +271,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 state.seat.refresh_modifiers();
             }
             wl_keyboard::Event::RepeatInfo { rate, delay } => {
-                state.seat.repeat_delay = Duration::from_millis(delay.max(0) as u64);
                 // A rate of zero means the compositor is telling us not to
                 // repeat at all, which is a setting a user can choose.
-                state.seat.repeat_interval =
-                    (rate > 0).then(|| Duration::from_secs_f32(1.0 / rate as f32));
-                if state.seat.repeat_interval.is_none() {
-                    state.seat.repeating = None;
-                }
+                state.seat.repeat.set_rate(delay, rate);
             }
             _ => {}
         }
@@ -382,7 +308,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             }
             wl_pointer::Event::Leave { .. } => {
                 seat.enter_serial = None;
-                seat.last_click = None;
+                seat.clicks = Clicks::default();
                 state.events.push_back(Event::PointerLeft);
             }
             wl_pointer::Event::Button { serial, time, button, state: pressed, .. } => {
@@ -391,7 +317,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     seat.button_serial = Some(serial);
                 }
                 let position = seat.position;
-                let clicks = if down { seat.multi_click(time, position) } else { 0 };
+                let clicks = if down { seat.clicks.count(time, position) } else { 0 };
                 state.events.push_back(Event::Button {
                     button: button_of(button),
                     pressed: down,
@@ -454,8 +380,9 @@ fn accumulate(into: &mut Point, any: &mut bool, axis: WEnum<wl_pointer::Axis>, a
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{PendingScroll, WHEEL_NOTCH, button_of};
+    use super::{PendingScroll, button_of};
     use crate::event::{Button, Point};
+    use crate::input::WHEEL_NOTCH;
 
     /// A wheel notch is a wheel notch whichever of the three the compositor
     /// sends, and the choice cannot depend on which arrives first: the protocol

@@ -632,3 +632,124 @@ The general shape is the one this document keeps returning to: **an invocation
 that cannot fail has measured nothing.** A filter over a set of tests is an
 invocation, the same as the tests themselves. It now exits 2 and names what it
 could not find.
+
+## A helper can be correct only because of the fixture it grew up in
+
+`tools/gui-test`'s `point_at` computed a row's position as a percentage of the
+**window** and handed it to a driver that reads percentages of the **output**.
+Those are the same number under Hyprland, because the nested compositor makes the
+window fill the screen — so for the whole life of the harness the arithmetic was
+wrong and could not be observed.
+
+The second display server observed it immediately. A 1,100×720 window in a
+1,600×1,000 root put every click six rows below where it was aimed, and five
+scenarios failed at once. The nudge loop that exists to absorb small offsets
+could never have recovered it: the error was **proportional**, not an offset, and
+a loop that adds half a row at a time cannot fix a factor.
+
+The general form is worth stating because it is not about coordinates. **A
+fixture with a coincidence in it hides every bug that coincidence covers**, and
+no amount of running the same suite finds them — only a second environment where
+the coincidence does not hold. That is most of the argument for the X11 backend
+being tested by the same 61 scenarios rather than by a new set written against
+it: a scenario that has passed on one server for a year is evidence about that
+server, and the first thing it says on a second one is what it was never
+checking.
+
+## `flush` is not delivery, and a process that exits never hears the error
+
+`skerry-drive --close` sent a `WM_DELETE_WINDOW` client message, called `flush`,
+and exited. The window never closed. The message was well-formed, the window id
+was right, and the receiving code was correct — and nothing arrived, six times in
+a row.
+
+Two X11 properties combined to make this invisible. Requests are asynchronous, so
+`flush` queues a write rather than completing a transaction; and **errors are
+asynchronous too**, so a `SendEvent` the server refused reports back on a
+connection that has already been closed. A process that issues one request and
+exits has no point at which either could be observed.
+
+The fix is one round trip — any request with a reply, `GetInputFocus` by
+convention — after the last thing that matters. It cost twenty minutes of
+suspecting the receiving end, which had been right all along, and it is the same
+shape as **the first suspect is rarely the culprit**: the new code was assumed
+guilty because it was new, and the bug was in the four-line helper that talked to
+it.
+
+## An assertion between two readings of the same absent value cannot fail
+
+`the-frame-is-at-the-compositors-scale` compares what the program scaled by
+against what the display server says its scale is. On Wayland it has teeth. On
+X11 it passed for three hours while proving nothing, because **both sides were
+reading a resource database that was empty**: the harness's `xrdb -merge` exited
+0 and wrote nothing, so the server's scale read as the default 96 DPI and the
+program's read as the same default, and 120 equalled 120.
+
+Two separate mechanisms hid it, and each is worth knowing on its own.
+
+`xrdb -merge` and `xrdb -load` both **exit 0 against an `Xvfb` and create no
+`RESOURCE_MANAGER` property at all**, so the harness's write was a no-op with a
+success code. Writing the property directly with `x11rb` fixed the write and did
+not fix the test — because `xprop -root RESOURCE_MANAGER` then reported `not
+found` for a property that the same connection could read back. The read was a
+no-op too, and the two no-ops agreed.
+
+Underneath both: **an X server frees a client's resources when its connection
+closes**, and a property set on the root is one of them. A process that writes it
+and exits leaves nothing behind. `XSetCloseDownMode(RetainPermanent)` is the
+request that says otherwise, and it is most of what `xrdb` is for.
+
+The general form is the one this document keeps arriving at from new directions.
+**An assertion whose two sides are derived from the same missing input is an
+assertion that cannot fail**, and it looks exactly like one that is passing. The
+way it was caught is the way these are always caught: a *deliberately broken*
+implementation was put underneath it — `logical` set equal to the device size —
+and the test still passed. That is the only question worth asking of a green
+test, and it takes two minutes.
+
+## A driver that writes and exits has written nothing
+
+The same shape twice in one afternoon, in two different tools.
+`skerry-drive --close` sent a `WM_DELETE_WINDOW`, flushed, and exited; the window
+never closed. `--xft-dpi` wrote a property, read it back on the same connection
+to prove it was there, and exited; the property was gone.
+
+X11 requests are asynchronous and so are X11 errors, so a short-lived process has
+no point at which either could be observed — and both failures reported success.
+The two fixes are different (`GetInputFocus` as a round trip; `RetainPermanent`
+before the write) and the rule behind them is one: **a tool that fires a request
+and exits must prove the request landed**, either by waiting for a reply or by
+reading it back from a *different* process. Reading it back from the same one
+proves only that the server has it right now.
+
+## A process is more threads than the program has written
+
+`no-cpu-when-idle` reads `utime + stime` out of `/proc/<pid>/stat` and fails on
+any tick at all. On X11 it failed at 1 and 2 ticks per three seconds, twice, and
+the obvious suspect was the new backend's `pump` — a frame loop that woke on
+something it should have slept through.
+
+It had not. Traced across a three-second idle window the loop made **zero
+syscalls**: it sat in one `ppoll` on the display descriptor and the pool's
+eventfd and never returned. The ticks were charged to a thread inside the same
+process that this repository did not write — the proprietary GPU driver's, doing
+presentation work by hand because **`Xvfb` has no DRI3** and there is no other way
+for it to get a frame onto that server.
+
+The discriminator took one command and settled it in thirty seconds, where the
+reasoning had already taken twenty minutes:
+
+| Renderer under `Xvfb` | Ticks per 3 s, idle |
+| --- | --- |
+| Proprietary driver | 1, 1, 2 |
+| `lavapipe` | 0, 0, 0 |
+
+Two things follow. **A per-process CPU measurement is a measurement of every
+thread in it**, including a driver's, and attributing it to the code under test
+is the same error as attributing a frame time to the code when the machine was
+loaded. And **a fixture that cannot do the thing being measured is not a
+fixture**: `Xvfb` cannot present through a hardware driver, so what was being
+measured there was the fallback and not the product. The X11 scenarios now run on
+software Vulkan, which is what a runner has, what the golden frames already
+render with, and — measured — 20% faster here than the fallback path they were
+using.
