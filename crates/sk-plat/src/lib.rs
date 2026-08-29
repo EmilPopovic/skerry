@@ -49,7 +49,8 @@ use sk_util::Waker;
 
 pub use clipboard::{Clipboard, Content, Intent, Selection, decode_copied_files, decode_uri};
 pub use drag::{Drag, DragAction};
-pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size, Swipe};
+pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size, Swipe, TextChange};
+pub use wayland::TextArea;
 pub use window::{Capabilities, Cursor, Edge, RawHandles, WindowConfig, WindowState};
 
 /// Which display server to talk to.
@@ -198,6 +199,16 @@ impl Window {
     /// Gives the pointer an image, if it does not already have this one.
     pub fn set_cursor(&mut self, cursor: Cursor) {
         forward!(self, set_cursor, cursor);
+    }
+
+    /// Tells an input method whether a field has the keyboard, and where its
+    /// caret is, so a candidate window can sit beside it.
+    ///
+    /// `None` disables it. Sends nothing when the answer has not changed, so a
+    /// caller may say it every frame — and should, because the alternative is
+    /// remembering to say it at every place the focus can move.
+    pub fn set_text_area(&mut self, area: Option<TextArea>) {
+        forward!(self, set_text_area, area);
     }
 
     /// Asks the window to close, as though the button had been pressed.

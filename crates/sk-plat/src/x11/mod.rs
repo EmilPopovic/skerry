@@ -535,6 +535,17 @@ impl Window {
         );
     }
 
+    /// Where the caret is, for an input method.
+    ///
+    /// **Nothing to tell on X11.** There is no input method connected: the
+    /// equivalent of `text-input-v3` here is XIM or ibus, and
+    /// [`Capabilities::input_method`](crate::Capabilities::input_method) reports
+    /// the absence. The method exists so that nothing above `sk-plat` has to
+    /// know which display server it is on — ADR 0009.
+    pub fn set_text_area(&mut self, area: Option<crate::TextArea>) {
+        let _ = area;
+    }
+
     /// Gives the pointer an image, if it does not already have this one.
     pub fn set_cursor(&mut self, cursor: Cursor) {
         if cursor == self.shape {
@@ -1247,6 +1258,10 @@ fn probe(connection: &XCBConnection, root: xproto::Window, atoms: &Atoms) -> Cap
         // pretended: ADR 0007's whole point is that a capability is probed and
         // said out loud.
         gestures: false,
+        // XIM is a protocol over properties and `ClientMessage`s and ibus is
+        // D-Bus; neither is written, so a CJK input method cannot reach this
+        // window on X11. Compose and dead keys work here, and are not this.
+        input_method: false,
         clipboard: true,
         primary_selection: true,
         render_device: None,

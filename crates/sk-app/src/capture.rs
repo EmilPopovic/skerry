@@ -69,6 +69,8 @@ pub struct Capture {
     pub properties: bool,
     /// Whether to draw the Open With list.
     pub open_with: bool,
+    /// Whether to draw the rename field with an input method composing in it.
+    pub composing: bool,
     /// Whether to draw that menu over a folder that holds no folders.
     pub crumbs_empty: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
@@ -284,7 +286,17 @@ fn sample_overlays(
             .then(|| sample_crumb_menu(layout, request.crumbs_empty)),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
         palette: request.palette.then(sample_palette),
-        naming: request.rename.then(|| sample_naming(pane)).flatten(),
+        naming: (request.rename || request.composing).then(|| sample_naming(pane)).flatten().map(
+            |mut naming| {
+                // Three characters of Japanese being composed, underlined and
+                // not yet part of the name — which is the one frame that would
+                // catch the rule drawing over the text instead of under it.
+                if request.composing {
+                    naming.field.preedit = Some(("にほん".to_owned(), Some((9, 9))));
+                }
+                naming
+            },
+        ),
         properties: request.properties.then(sample_properties),
         openers: request.open_with.then(sample_openers),
     }

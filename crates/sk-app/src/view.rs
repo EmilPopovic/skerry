@@ -1035,23 +1035,52 @@ struct FieldView<'a> {
     /// `None` when the field does not have the keyboard, and draws no caret.
     caret: Option<usize>,
     selection: Option<(usize, usize)>,
+    /// What an input method is still composing, and where its caret is inside
+    /// it. Drawn at the field's caret and underlined, because it is not text
+    /// yet — the method may replace all of it with one character.
+    preedit: Option<&'a (String, Option<(usize, usize)>)>,
 }
 
 impl<'a> From<&'a Field> for FieldView<'a> {
     fn from(field: &'a Field) -> Self {
-        Self { text: &field.text, caret: Some(field.caret), selection: field.selection() }
+        Self {
+            text: &field.text,
+            caret: Some(field.caret),
+            selection: field.selection(),
+            preedit: field.preedit.as_ref(),
+        }
     }
 }
 
 impl<'a> FieldView<'a> {
     /// A field with no selection, for the filter.
     const fn plain(text: &'a str, caret: usize) -> Self {
-        Self { text, caret: Some(caret), selection: None }
+        Self { text, caret: Some(caret), selection: None, preedit: None }
     }
 
     /// A field the keyboard has left, still showing what was typed into it.
     const fn unfocused(text: &'a str) -> Self {
-        Self { text, caret: None, selection: None }
+        Self { text, caret: None, selection: None, preedit: None }
+    }
+
+    /// The string to draw, the caret's offset in it, and the preedit's span.
+    ///
+    /// A preedit is drawn *inside* the text at the caret rather than after it,
+    /// because that is where the characters will land — a candidate shown at the
+    /// end of the line is a candidate for a different sentence.
+    fn shown(&self) -> (std::borrow::Cow<'a, str>, usize, Option<(usize, usize)>) {
+        let caret = self.caret.unwrap_or(self.text.len());
+        let Some((preedit, cursor)) = self.preedit else {
+            return (std::borrow::Cow::Borrowed(self.text), caret, None);
+        };
+        let mut shown = String::with_capacity(self.text.len() + preedit.len());
+        shown.push_str(self.text.get(..caret).unwrap_or(self.text));
+        shown.push_str(preedit);
+        shown.push_str(self.text.get(caret..).unwrap_or(""));
+        // Inside the preedit where the method said, and at its end where it
+        // said nothing — which is where a person typing expects to be.
+        let inside = cursor.map_or(preedit.len(), |(begin, _)| begin);
+        (std::borrow::Cow::Owned(shown), caret + inside, Some((caret, caret + preedit.len())))
     }
 }
 
@@ -1067,10 +1096,8 @@ fn field_text(
     inset: f32,
     baseline: f32,
 ) {
-    let text = field.text;
-    // With no caret there is nothing to scroll to, so the end of the text is what
-    // a too-narrow box shows.
-    let caret = field.caret.unwrap_or(text.len());
+    let (shown, caret, composing) = field.shown();
+    let text: &str = &shown;
     let theme = *painter.theme;
     let room = area.width - inset * 2.0;
     // Shaping what is before the caret is the only measurement that survives a
@@ -1096,6 +1123,23 @@ fn field_text(
     }
     let inner = painter.rect(area.x + inset - scroll, 0.0, full.max(room) + scroll, 0.0);
     painter.label(text, style, inner, baseline);
+    // A line under what is being composed: it is the convention every toolkit
+    // uses for text that is not typed yet, and without it a preedit is
+    // indistinguishable from the text it will replace.
+    if let Some((start, end)) = composing {
+        let from = text_width(painter, text.get(..start).unwrap_or(""), style.size, false);
+        let to = text_width(painter, text.get(..end).unwrap_or(text), style.size, false);
+        let x = painter.snap(area.x + inset - scroll + from);
+        let width = painter.snap(to - from).max(1.0);
+        let thickness = painter.px(1.0).round().max(1.0);
+        // **`baseline` is already device pixels.** `snap` converts logical to
+        // device, so snapping it again put the rule a quarter of the way down
+        // the window at 125% and exactly under the text at 100% — which is the
+        // trap CLAUDE.md names, and the reason this frame is rendered at 125%.
+        let y = (baseline + painter.px(2.0)).round();
+        let rule = sk_gpu::Rect::new(x, y, width, thickness);
+        painter.list.rect(rule, theme.palette.accent, 0.0);
+    }
     if field.caret.is_some() {
         let caret = painter.caret(area.x + inset - scroll + before, baseline, style.size);
         painter.list.rect(caret, theme.palette.accent, 0.0);

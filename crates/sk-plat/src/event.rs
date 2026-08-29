@@ -249,8 +249,43 @@ pub enum Event {
         /// Whether the fingers moved apart.
         out: bool,
     },
+    /// An input method changed the text being edited.
+    ///
+    /// One event rather than three, because the protocol's three parts are
+    /// meaningless apart: they are applied in one order, and a client that
+    /// acted on each as it arrived would show the deletion before the
+    /// replacement.
+    Composing(TextChange),
     /// A background job finished and wants the frame loop to look.
     Woken,
+}
+
+/// What an input method wants done to the text, in the order it must happen.
+///
+/// `text-input-v3` delivers `delete_surrounding_text`, `commit_string` and
+/// `preedit_string` and then a `done`, and the specification fixes the order
+/// they are applied in. Encoding that in the type is what stops a caller
+/// applying them in the order they arrived.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct TextChange {
+    /// Bytes to remove before and after the caret, **first**.
+    pub delete: (u32, u32),
+    /// Text to insert at the caret, **second**. Empty when there is none.
+    pub commit: String,
+    /// The uncommitted text to show, **last**. Empty when the method has
+    /// nothing pending, which is how a preedit is cleared.
+    pub preedit: String,
+    /// Where the caret sits inside `preedit`, as byte offsets. `None` means the
+    /// method asked for it to be hidden.
+    pub preedit_cursor: Option<(u32, u32)>,
+}
+
+impl TextChange {
+    /// Whether this would change anything at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.delete == (0, 0) && self.commit.is_empty() && self.preedit.is_empty()
+    }
 }
 
 /// Which way a swipe went.

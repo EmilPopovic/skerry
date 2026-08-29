@@ -42,6 +42,7 @@ struct Overlays {
     crumbs_empty: bool,
     properties: bool,
     open_with: bool,
+    composing: bool,
     rename: bool,
 }
 
@@ -58,6 +59,7 @@ impl Overlays {
             "--crumbs-empty" => &mut self.crumbs_empty,
             "--properties" => &mut self.properties,
             "--open-with" => &mut self.open_with,
+            "--composing" => &mut self.composing,
             "--rename" => &mut self.rename,
             _ => return false,
         };
@@ -145,6 +147,7 @@ fn main() -> std::process::ExitCode {
             crumbs_empty: overlays.crumbs_empty,
             properties: overlays.properties,
             open_with: overlays.open_with,
+            composing: overlays.composing,
             rename: overlays.rename,
             stats,
             own_frame,
@@ -212,6 +215,7 @@ skerry [OPTIONS] [PATH]
   --crumbs-empty   show that menu over a folder with no folders in it
   --properties     show the Properties panel, for a golden frame of it
   --open-with      show the Open With list, for a golden frame of it
+  --composing      show a rename with an input method composing in it
   --rename         show a name being typed, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor

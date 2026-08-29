@@ -142,6 +142,7 @@ fn describe(window: &Window) -> String {
         ("pointer", found.pointer),
         ("cursor-shape", found.cursor_shape),
         ("gestures", found.gestures),
+        ("input-method", found.input_method),
         ("clipboard", found.clipboard),
         ("primary", found.primary_selection),
     ]
@@ -1160,6 +1161,7 @@ impl App {
             self.watching = armed;
             self.dirty = true;
         }
+        self.aim_the_input_method();
         self.launcher.reap();
         if self.notice.as_ref().is_some_and(|(_, at)| at.elapsed() > NOTICE_WINDOW) {
             self.notice = None;
@@ -1268,6 +1270,15 @@ impl App {
                     && commands.enabled(id, self)
                 {
                     commands.run(id, self);
+                }
+            }
+            // An input method's change goes to the field with the keyboard, and
+            // nowhere at all when none has it: a candidate window over a file
+            // list is a candidate window whose text has nothing to go into.
+            Event::Composing(change) => {
+                if let Some(field) = self.focused_field() {
+                    field.compose(change);
+                    self.dirty = true;
                 }
             }
             Event::Pinched { out } => {
@@ -1441,6 +1452,17 @@ impl App {
             return self.typing_path.as_mut();
         }
         self.edits.naming.as_mut().map(|naming| &mut naming.field)
+    }
+
+    /// What an input method is composing in the field with the keyboard.
+    fn field_preedit(&self) -> Option<&(String, Option<(usize, usize)>)> {
+        if let Some(palette) = self.palette.as_ref() {
+            return palette.query.preedit.as_ref();
+        }
+        if let Some(field) = self.typing_path.as_ref() {
+            return field.preedit.as_ref();
+        }
+        self.edits.naming.as_ref().and_then(|naming| naming.field.preedit.as_ref())
     }
 
     /// Whether a field has the keyboard, for a command's `enabled`.
@@ -2217,6 +2239,42 @@ impl App {
         if self.panes.step_leaf(1) {
             self.settle_panes();
         }
+    }
+
+    /// Tells the input method whether a field has the keyboard, and where.
+    ///
+    /// Every pass rather than at each place the focus can move, for the same
+    /// reason the watcher is retargeted here: a new way of opening a field
+    /// cannot forget. `set_text_area` sends nothing when the answer is
+    /// unchanged, so the cost is a comparison.
+    fn aim_the_input_method(&mut self) {
+        let area = self.in_a_field().then(|| {
+            let caret = self.caret_rectangle();
+            sk_plat::TextArea {
+                x: caret.x as i32,
+                y: caret.y as i32,
+                width: caret.width as i32,
+                height: caret.height as i32,
+            }
+        });
+        self.window.set_text_area(area);
+    }
+
+    /// Where the caret of the field with the keyboard is, in logical pixels.
+    ///
+    /// The *field's* box rather than the caret's exact position: a candidate
+    /// window is placed beside the text being edited, and a box is what the
+    /// protocol asks for.
+    fn caret_rectangle(&self) -> Area {
+        // The palette's own field rectangle is recorded by the frame that drew
+        // it, which is the only thing that knows how wide the panel came out.
+        if let Some(field) = self.hits.palette_field.filter(|_| self.palette.is_some()) {
+            return field;
+        }
+        if self.typing_path.is_some() {
+            return crate::view::path_field(&self.layout, &self.theme.metrics);
+        }
+        self.naming_field()
     }
 
     /// Watches exactly the directories that are on screen.
@@ -3621,6 +3679,9 @@ tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} divider_aim={divider_
         let box_of = crate::view::path_field(&self.layout, &self.theme.metrics);
         let path_field =
             format!("{:.1},{:.1},{:.1},{:.1}", box_of.x, box_of.y, box_of.width, box_of.height);
+        // What an input method is composing, if anything. The field it is in is
+        // whichever has the keyboard, so one value answers for all three.
+        let composing = self.field_preedit().map(|(text, _)| text.clone()).unwrap_or_default();
         let (properties, facts, openers, opener) = self.overlay_report();
         let panes_report = self.panes_report();
         let menu_report = self.menu_report();
@@ -3645,6 +3706,7 @@ crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={c
 crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
+composing={composing:?} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \

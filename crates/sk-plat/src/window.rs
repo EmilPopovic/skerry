@@ -108,6 +108,14 @@ pub struct Capabilities {
     /// thing to be able to read off one line of a bug report rather than to
     /// discover.
     pub gestures: bool,
+    /// Whether an input method can reach this window.
+    ///
+    /// `zwp_text_input_manager_v3` on Wayland, which is what a Chinese, Japanese
+    /// or Korean input method needs — those are separate processes and the
+    /// compositor is the go-between. **False on X11**, where the equivalent is
+    /// XIM or ibus over D-Bus and neither is written. Dead keys and Compose
+    /// sequences work either way and are not this: they need no protocol at all.
+    pub input_method: bool,
     /// The clipboard: `wl_data_device_manager`, or an X11 server, which has
     /// always had selections.
     pub clipboard: bool,

@@ -18,6 +18,10 @@
 
 pub mod clipboard;
 mod seat;
+mod text;
+
+pub use text::TextArea;
+use text::TextInput;
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -44,6 +48,7 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
 };
 use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1;
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_manager_v1;
+use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3;
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
@@ -188,6 +193,14 @@ struct State {
     /// a capability rather than worked around: the fallback is an `XCursor` theme
     /// parser and a shm buffer, and that is a library.
     cursor: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    /// The input method's end of the conversation, where the compositor offers
+    /// one.
+    ///
+    /// **Enabled only while a field has the keyboard.** The protocol says an
+    /// enabled text input is a request for an input method to be shown, so a
+    /// client that enabled it at start-up would put a Japanese candidate window
+    /// over a file list nobody is typing into.
+    text_input: Option<TextInput>,
     /// The compositor's touchpad gesture manager, where it has one.
     ///
     /// Held rather than consumed at open, because a seat can gain a pointer
@@ -277,6 +290,7 @@ struct Globals {
     )>,
     cursor_shapes: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    text_inputs: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
 }
 
 impl Globals {
@@ -293,6 +307,7 @@ impl Globals {
             dmabuf: ask_which_gpu(globals, handle),
             cursor_shapes: bind(globals, handle, 1..=2),
             gestures: bind(globals, handle, 1..=3),
+            text_inputs: bind(globals, handle, 1..=1),
         })
     }
 }
@@ -327,6 +342,7 @@ impl Window {
             dmabuf,
             cursor_shapes,
             gestures,
+            text_inputs,
         } = Globals::bind(&globals, &handle)?;
         let clipboard =
             clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
@@ -353,6 +369,7 @@ impl Window {
             pointer: false,
             cursor_shape: cursor_shapes.is_some(),
             gestures: gestures.is_some(),
+            input_method: text_inputs.is_some(),
             clipboard: data_manager.is_some(),
             primary_selection: primary_manager.is_some(),
             render_device: None,
@@ -371,6 +388,7 @@ impl Window {
             primary_manager,
             clipboard,
             cursor: None,
+            text_input: text_inputs.map(|manager| TextInput::new(&manager, &wl_seat, &handle)),
             gestures,
             shape: Cursor::Arrow,
             transfers: Vec::new(),
@@ -500,6 +518,16 @@ impl Window {
         let Some(serial) = self.state.seat.enter_serial else { return };
         device.set_shape(serial, shape_of(cursor));
         self.state.shape = cursor;
+    }
+
+    /// Tells the input method whether a field has the keyboard, and where.
+    ///
+    /// `None` disables it, which is what takes a candidate window off the
+    /// screen. Called every frame with the same answer, it sends nothing.
+    pub fn set_text_area(&mut self, area: Option<TextArea>) {
+        if let Some(input) = self.state.text_input.as_mut() {
+            input.focus(area);
+        }
     }
 
     /// Asks the window to close, as the title bar's button does.
@@ -1061,6 +1089,7 @@ ignore_events!(
     wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
     wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
     zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
+    zwp_text_input_manager_v3::ZwpTextInputManagerV3,
     zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     wl_compositor::WlCompositor,
     wl_output::WlOutput,

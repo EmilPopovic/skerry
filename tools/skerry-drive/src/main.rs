@@ -36,6 +36,7 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_manager_v1, zwlr_virtual_pointer_v1,
 };
 
+mod ime;
 mod script;
 
 use script::{Action, Button};
@@ -54,6 +55,8 @@ fn main() -> std::process::ExitCode {
     let mut resize = None;
     let mut dpi = None;
     let mut query_dpi = false;
+    let mut ime: Option<Vec<String>> = None;
+    let mut globals = false;
     let mut path = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -65,6 +68,10 @@ fn main() -> std::process::ExitCode {
             "--resize" => resize = arguments.next(),
             "--xft-dpi" => dpi = arguments.next(),
             "--query-dpi" => query_dpi = true,
+            // Three words: what to show while composing, what to commit, and how
+            // many milliseconds to hold the preedit for.
+            "--ime" => ime = Some(arguments.by_ref().take(3).collect()),
+            "--globals" => globals = true,
             "--wayland" => backend = Some(Backend::Wayland),
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -91,6 +98,32 @@ fn main() -> std::process::ExitCode {
         };
         // SAFETY: single-threaded, before any thread is started.
         unsafe { std::env::set_var(name, display) };
+    }
+
+    if globals {
+        return match ime::list_globals() {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(problem) => {
+                eprintln!("skerry-drive: {problem}");
+                std::process::ExitCode::from(2)
+            }
+        };
+    }
+
+    if let Some(words) = ime {
+        let [preedit, commit, hold] = <[String; 3]>::try_from(words).unwrap_or_else(|words| {
+            let mut words = words;
+            words.resize(3, String::new());
+            [words[0].clone(), words[1].clone(), words[2].clone()]
+        });
+        let hold = Duration::from_millis(hold.parse().unwrap_or(300));
+        return match ime::type_into_the_window(&ime::Typing { preedit, commit, hold }) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(problem) => {
+                eprintln!("skerry-drive: {problem}");
+                std::process::ExitCode::from(2)
+            }
+        };
     }
 
     if let Some(code) = one_shot(&OneShot { dpi, query_dpi, resize, close, paste }) {
@@ -193,6 +226,9 @@ display — and can be said outright.
   --close               ask the X11 window to close, the way a title bar would
   --resize WxH          resize the X11 window, as a window manager would
   --xft-dpi N           set Xft.dpi in the root resource database
+  --globals             print every Wayland global the compositor advertises
+  --ime PREEDIT COMMIT HOLD_MS
+                   act as an input method: show PREEDIT, hold it, then commit
   --query-dpi           print the Xft.dpi the root resource database holds
   press / release       one button, apart, so a drag can be paced
   key ctrl+shift+c      press and release a chord

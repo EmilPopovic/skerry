@@ -154,6 +154,10 @@ FRAMES = [
     # the first highlighted — the only frame that would catch the subtitle
     # drawing over the first row.
     ("open-with", ["--size", "900x520", "--scale", "125", "--open-with"]),
+    # A rename with an input method composing into it: the preedit sits at the
+    # caret, underlined, and is not part of the name yet. The only frame that
+    # would catch the rule drawing through the glyphs instead of under them.
+    ("composing", ["--size", "900x400", "--scale", "125", "--composing"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

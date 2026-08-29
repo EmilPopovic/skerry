@@ -46,6 +46,15 @@ pub struct Field {
     redo: Vec<Snapshot>,
     /// What the last edit was, so a run of typing groups into one undo entry.
     last: Edit,
+    /// Text an input method is still composing, and where its caret is inside
+    /// it.
+    ///
+    /// **Not part of [`Field::text`].** It is not typed yet: the method may
+    /// replace all of it with something else, and a rename that committed it
+    /// would name a file after a half-finished sequence. It is drawn at the
+    /// caret, underlined, and every edit that is not the method's own clears
+    /// it.
+    pub preedit: Option<(String, Option<(usize, usize)>)>,
 }
 
 /// One state of a field, for its own undo.
@@ -96,6 +105,7 @@ impl Field {
             history: Vec::new(),
             redo: Vec::new(),
             last: Edit::Structural,
+            preedit: None,
         }
     }
 
@@ -205,6 +215,30 @@ impl Field {
         self.caret = start;
         self.anchor = None;
         true
+    }
+
+    /// Applies an input method's change: delete, then commit, then preedit.
+    ///
+    /// The order is the protocol's and the type carries it, so this cannot get
+    /// it wrong — see [`sk_plat::TextChange`].
+    pub fn compose(&mut self, change: &sk_plat::TextChange) {
+        let (before, after) = change.delete;
+        for _ in 0..before {
+            self.backspace();
+        }
+        for _ in 0..after {
+            self.delete();
+        }
+        if !change.commit.is_empty() {
+            self.insert(&change.commit);
+        }
+        self.preedit = (!change.preedit.is_empty()).then(|| {
+            let cursor =
+                change.preedit_cursor.map(|(begin, end)| (begin as usize, end as usize)).filter(
+                    |(begin, end)| *begin <= change.preedit.len() && *end <= change.preedit.len(),
+                );
+            (change.preedit.clone(), cursor)
+        });
     }
 
     /// Inserts text at the caret, replacing the selection if there is one.

@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Eleven crates, 485
-tests, 77 GUI scenarios **on both Wayland and X11**, nineteen golden frames, every
+tests, 78 GUI scenarios **on both Wayland and X11**, twenty-one golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -19,8 +19,9 @@ undo stack over all of it — and **delete for good**, which takes two presses a
 is on no stack, because rule 3 calls it "an explicit, differently-shaped action"
 — a status line that counts what a copy has done, files that open in the
 application the desktop says owns them or in **the one you pick**, **Properties**
-and **a terminal here**, and a clipboard that takes files, paths, and the text
-inside a text file. Every command is reachable by keyboard
+and **a terminal here**, a clipboard that takes files, paths, and the text
+inside a text file, and text from **a real input method** — dead keys and
+Compose on both servers, `text-input-v3` on Wayland. Every command is reachable by keyboard
 alone and by pointer alone, and a test fails the build for one that is not. What
 is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the

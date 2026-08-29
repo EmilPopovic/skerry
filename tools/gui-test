@@ -808,7 +808,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 77
+FEWEST_SCENARIOS = 78
 
 
 def scenario(name, fresh: bool = False):
@@ -3574,6 +3574,71 @@ def properties(run: Run, fixture: Path) -> None:
     if after["properties"]:
         raise Failure("a key left the panel open")
     expect(after, cursor=before)
+
+
+@scenario("an-input-method-composes-into-a-field")
+def input_method(run: Run, fixture: Path) -> None:
+    """A real input method types into the rename field.
+
+    **Wayland only.** `text-input-v3` is the protocol a Chinese, Japanese or
+    Korean input method reaches a client through, and X11's equivalent is XIM,
+    which is not written — the window reports the capability absent there.
+
+    The peer is `skerry-drive --ime`, which speaks `zwp_input_method_v2`: it
+    waits for the window to *enable* its text input, shows a preedit, holds it,
+    then commits. Without a peer this whole path is a conversation with nobody,
+    and a client that dropped every event would look exactly like one that works.
+    """
+    if SERVER.driver_flag() != "--wayland":
+        raise Skipped("text-input-v3 is Wayland's; X11 reports the capability absent")
+
+    run.drive("sleep 500\nkey down\nsleep 200\nkey f2\nsleep 500\nkey f12\nsleep 200\n")
+    naming = run.state()
+    if not naming["naming"]:
+        raise Failure("the rename field did not open")
+
+    # **Its output goes to a file, not a pipe.** A `peek` on a pipe blocks, and
+    # the first version of this hung the whole suite for ten minutes reading the
+    # peer's stderr to explain a failure.
+    said = run.log.parent / "ime.err"
+    with said.open("wb") as errors:
+        peer = subprocess.Popen(
+            [str(DRIVE), "--ime", "にほん", "日本", "900"],
+            env=with_server(),
+            stdout=subprocess.DEVNULL,
+            stderr=errors,
+        )
+    try:
+        # While the preedit is held: shown, and *not* part of the name.
+        run.drive("sleep 500\nkey f12\nsleep 200\n")
+        composing = run.state()
+        if composing["composing"] != "にほん":
+            raise Failure(f"composing is {composing['composing']!r}")
+        if "にほん" in composing["naming"]:
+            raise Failure("the preedit was typed into the name before it was committed")
+
+        # **Resized while the method is composing.** The caret's rectangle
+        # changes, so the window sends a new one and commits mid-conversation —
+        # and what is asserted below is that the commit still lands. It does
+        # *not* reach the serial-mismatch branch: that needs the compositor to
+        # answer a stale commit, which nothing here can arrange, and the branch
+        # follows the specification rather than a test.
+        run.make_floating()
+        SERVER.resize(900, 600)
+
+        # And after the commit: in the name, and no longer composing.
+        peer.wait(timeout=10)
+        run.drive("sleep 400\nkey f12\nsleep 200\n")
+        committed = run.state()
+        expect(committed, composing="")
+        if "日本" not in committed["naming"]:
+            raise Failure(f"the name reads {committed['naming']!r}")
+    finally:
+        if peer.poll() is None:
+            peer.kill()
+        peer.wait(timeout=5)
+        if peer.returncode not in (0, -9) and said.exists():
+            raise Failure(f"the input method refused: {said.read_text().strip()[:200]}")
 
 
 @scenario("a-permanent-delete-takes-two-presses", fresh=True)

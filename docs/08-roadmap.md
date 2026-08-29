@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 485 tests, 77 GUI scenarios on two display servers and nineteen golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 485 tests, 78 GUI scenarios on two display servers and twenty-one golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -145,7 +145,7 @@ defects they exposed.
 | --- | --- |
 | Wayland windowing, `xdg_shell`, decoration negotiation and the client-drawn frame that GNOME requires — **and X11**, behind a runtime-selected seam ([ADR 0009](adr/0009-x11-backend-behind-a-runtime-selected-enum.md)): `x11rb` with `dl-libxcb`, EWMH state, `_MOTIF_WM_HINTS`, a keymap from `_XKB_RULES_NAMES` rather than a linked `libxkbcommon-x11`, selections with `INCR`, and scale from `Xft.dpi` | — |
 | Exact fractional scale through `wp_fractional_scale_v1` + `wp_viewporter`, reconfigured per change, **frame 1 included** — a one-pixel buffer maps the surface first, because the scale arrives at map and not before it | — |
-| Keyboard through `xkbcommon`, with key repeat implemented client-side **and shared by both backends**, so a held key behaves identically on either — and **dead keys and Compose sequences**, from the user's own table, on both servers | **A full input method.** `text-input-v3` on Wayland and XIM or ibus on X11 are what a Chinese or Japanese input method needs, and neither is written. Compose is the half that needs no protocol at all and is what most of Europe needs; the rest is owed |
+| Keyboard through `xkbcommon`, with key repeat implemented client-side **and shared by both backends**, so a held key behaves identically on either; **dead keys and Compose sequences** from the user's own table, on both servers; and **`text-input-v3`** on Wayland — a real input method composes into any of the three fields, with the preedit underlined at the caret and not committed until the method says so. Tested against `skerry-drive --ime`, an input method the harness runs beside the window | **An input method on X11.** The equivalent is XIM, a protocol over properties and `ClientMessage`s, or ibus over D-Bus; neither is written, and the capability is reported absent rather than pretended |
 | Pointer with counted clicks, coalesced high-resolution scroll, rubber-band selection, the **pointer-shape protocol** where the compositor has one, and **touchpad gestures**: a three-finger swipe navigates, a pinch zooms the list, and `Ctrl` with a wheel does what the pinch does | Gestures on X11. `XInput` 2.4 has the events and this backend reads core ones; reported as an absent capability rather than worked around |
 | **Clipboard and primary selection**, as a source and as a target, with three of Spike D's four ordering invariants structural, and a paste that pastes **files** | Nothing. `x-special/gnome-copied-files` is published and read, so a cut here is a move in Nautilus and a cut there is a move here; and files drag **both ways** between this window and a real GTK application, on both display servers, asserted by two scenarios that run a GTK peer beside the window under test |
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle**, on both servers | — |
@@ -166,7 +166,7 @@ measured the negotiated action reported zero times and `dnd_finished` delivered 
 some peers and not others, and deleting an original on a confirmation that may
 never arrive is how a drag loses somebody's files.
 
-**The 77 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The 78 GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are

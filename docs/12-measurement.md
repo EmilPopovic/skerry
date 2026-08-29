@@ -1025,3 +1025,39 @@ was watched failing without it.
 Two guards, identical in appearance: one dead, one holding up the feature. The
 difference took one probe against the header on this machine, and no amount of
 reading around the subject would have decided it.
+
+## A protocol client with nobody on the other end is a client that cannot fail
+
+`text-input-v3` is how an input method reaches a window on Wayland. Written
+against the specification alone, it looked right, compiled, and typed nothing —
+and there was no way to tell that from a client that worked, because with no
+input method running the whole conversation is a client talking to itself.
+
+So the harness got one: `skerry-drive --ime` speaks `zwp_input_method_v2`, the
+protocol ibus and fcitx use, waits for the window to enable its text input, shows
+a preedit, holds it, and commits. It found three defects on its first three runs,
+none of which a reading of the specification had:
+
+* **The serial rule read backwards.** `done` carries the number of commits the
+  compositor has seen, and the first draft dropped any change whose serial did
+  not match. The specification says the opposite in as many words — "must
+  proceed with evaluating and applying the changes as normal" — and what a
+  mismatch withholds is the *client's own* pending state.
+* **`enter` and `leave` treated as nothing.** A comment said this window has one
+  surface so there is nothing to do with either. An input method appearing while
+  a field is open produces a `leave` and then an `enter`, and a client that
+  enabled once at the start goes deaf the moment anybody starts one.
+* **Enabling before `enter`.** The correction to the second defect re-enabled on
+  every pass, which is a request the compositor answers with a `leave` — so the
+  fix reproduced the symptom by a different route.
+
+The golden frame found a fourth on its own: the preedit's underline was placed at
+`snap(baseline + 2)`, and `baseline` is *already* device pixels. At 100% `snap`
+is the identity and the line is exactly where it belongs. At 125% it is a quarter
+of the way down the window and clipped away — which is why that frame is rendered
+at 125%, and which is the trap
+[CLAUDE.md](../CLAUDE.md) names in its third bullet.
+
+The peer is a hundred and fifty lines. The rule is not "write a peer for every
+protocol" — it is that **a protocol whose other end never speaks cannot be tested
+by exercising this end**, and either a peer exists or the code ships as a hope.
