@@ -2690,6 +2690,28 @@ sizes={known}/{running} jobs={jobs}/{panics}",
         (drawn, hovered, aim)
     }
 
+    /// The middle of every drawn menu row, by the directory it names.
+    ///
+    /// So a scenario clicks a name instead of counting rows and copying this
+    /// file's constants — the same trade the context menu and the palette make.
+    fn crumb_menu_aim(&self) -> String {
+        let Some(menu) = &self.crumb_menu else { return String::new() };
+        let (_, drawn) = menu.window();
+        drawn
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, name)| {
+                let area = self.hits.crumb_menu.get(offset)?;
+                Some(format!(
+                    "{name}@{:.1}:{:.1}",
+                    area.x + area.width / 2.0,
+                    area.y + area.height / 2.0
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// The open sibling menu: how many rows, which separator, what is chosen.
     fn crumb_menu_state(&self) -> (i64, i64, String) {
         let Some(menu) = &self.crumb_menu else { return (-1, -1, String::new()) };
@@ -2746,6 +2768,7 @@ sizes={known}/{running} jobs={jobs}/{panics}",
         // The middle of the crumb one level up, which is the one a test clicks.
         let (separators, separator_hover, separator_aim) = self.separator_state();
         let (crumb_menu, crumb_menu_depth, crumb_menu_active) = self.crumb_menu_state();
+        let crumb_menu_aim = self.crumb_menu_aim();
         let parent_crumb_x = self
             .hits
             .crumbs
@@ -2759,6 +2782,7 @@ frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
 crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
 crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={crumb_menu_active:?} \
+crumb_menu_aim={crumb_menu_aim:?} \
 {menu_report} {palette_report} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
@@ -3292,10 +3316,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return false;
         }
         let Some(row) = self.crumb_menu_at(position) else {
-            if self.separator_at(position).is_none() {
-                self.close_crumb_menu();
+            // The separator itself is left alone: the branch that owns it
+            // toggles, and closing here would make a second press reopen what it
+            // had just shut.
+            if self.separator_at(position).is_some() {
+                return false;
             }
-            return false;
+            // **Closes, and only closes.** A press that dismisses a menu must not
+            // also act behind it, which is the rule the context menu follows and
+            // the reason a row under this panel does not light up either.
+            self.close_crumb_menu();
+            return true;
         };
         if let Some(menu) = &mut self.crumb_menu {
             menu.hover(row);
@@ -3765,6 +3796,76 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
     }
 
+    /// Lights whatever overlay is under the pointer. Whether one took it.
+    ///
+    /// **In z-order**, and each one answers alone: an overlay is over the window,
+    /// so nothing beneath it hovers — a row lighting up behind a panel reads as a
+    /// click that will land there, and it will not.
+    fn hover_an_overlay(&mut self, position: Point) -> bool {
+        // The palette is over everything the menu is over, and over the menu, so
+        // it answers first and nothing beneath it hovers.
+        if self.palette.is_some() {
+            let offset = self.palette_at(position);
+            let (first, _) = self.palette.as_ref().map_or((0, 0), crate::palette::Palette::window);
+            let clickable = offset
+                .and_then(|offset| self.palette.as_ref()?.row(first + offset))
+                .is_some_and(|row| row.enabled);
+            let hovered = offset.map(|offset| first + offset);
+            if self.palette.as_mut().is_some_and(|palette| palette.hover(hovered)) {
+                self.dirty = true;
+            }
+            let over_field =
+                self.hits.palette_field.is_some_and(|a| a.contains(position.x, position.y));
+            self.point(match (clickable, over_field) {
+                (true, _) => sk_plat::Cursor::Hand,
+                (false, true) => sk_plat::Cursor::Text,
+                (false, false) => sk_plat::Cursor::Arrow,
+            });
+            return true;
+        }
+        // An open menu is over everything, so nothing under it hovers: a row
+        // lighting up behind a menu reads as a click that will land there.
+        if self.menu.is_some() {
+            let row = self.menu_at(position);
+            // **Only where a click would do something.** `menu_at` answers where
+            // the pointer is and not whether anything is there to run, so a
+            // dimmed row was reported as a hand — the interface promising a click
+            // that `menu_press` then dropped.
+            let clickable = row
+                .and_then(|row| self.menu.as_ref()?.items.get(row))
+                .is_some_and(|item| item.enabled);
+            if self.menu.as_mut().is_some_and(|menu| menu.hover(row)) {
+                self.dirty = true;
+            }
+            self.point(if clickable { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow });
+            return true;
+        }
+        // A separator's menu is over the list, so nothing under it hovers: a row
+        // lighting up behind a panel reads as a click that will land there, and
+        // the click does not — a press outside this menu closes it and does
+        // nothing else, which is the rule the context menu already follows.
+        //
+        // **The return is the whole of it.** Nothing needs putting out first: the
+        // pointer has to cross to the chevron to open this, which clears whatever
+        // it was lighting on the way, and after that no branch that sets a hover
+        // is reached at all.
+        //
+        // The chevrons keep hovering, because moving between them while one is
+        // open is how a person changes their mind about which depth they meant.
+        if self.crumb_menu.is_some() || self.crumb_pending.is_some() {
+            self.hover_the_path_bar(position);
+            let over_row = self.crumb_menu_at(position).is_some();
+            let over_chevron = self.separator_at(position).is_some();
+            self.point(if over_row || over_chevron {
+                sk_plat::Cursor::Hand
+            } else {
+                sk_plat::Cursor::Arrow
+            });
+            return true;
+        }
+        false
+    }
+
     fn moved(&mut self, position: Point, commands: &Registry<Self>) {
         self.pointer = position;
         // A press on the title bar that has now moved is a window drag after all.
@@ -3792,42 +3893,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.drag_files_to(position);
             return;
         }
-        // The palette is over everything the menu is over, and over the menu, so
-        // it answers first and nothing beneath it hovers.
-        if self.palette.is_some() {
-            let offset = self.palette_at(position);
-            let (first, _) = self.palette.as_ref().map_or((0, 0), crate::palette::Palette::window);
-            let clickable = offset
-                .and_then(|offset| self.palette.as_ref()?.row(first + offset))
-                .is_some_and(|row| row.enabled);
-            let hovered = offset.map(|offset| first + offset);
-            if self.palette.as_mut().is_some_and(|palette| palette.hover(hovered)) {
-                self.dirty = true;
-            }
-            let over_field =
-                self.hits.palette_field.is_some_and(|a| a.contains(position.x, position.y));
-            self.point(match (clickable, over_field) {
-                (true, _) => sk_plat::Cursor::Hand,
-                (false, true) => sk_plat::Cursor::Text,
-                (false, false) => sk_plat::Cursor::Arrow,
-            });
-            return;
-        }
-        // An open menu is over everything, so nothing under it hovers: a row
-        // lighting up behind a menu reads as a click that will land there.
-        if self.menu.is_some() {
-            let row = self.menu_at(position);
-            // **Only where a click would do something.** `menu_at` answers where
-            // the pointer is and not whether anything is there to run, so a
-            // dimmed row was reported as a hand — the interface promising a click
-            // that `menu_press` then dropped.
-            let clickable = row
-                .and_then(|row| self.menu.as_ref()?.items.get(row))
-                .is_some_and(|item| item.enabled);
-            if self.menu.as_mut().is_some_and(|menu| menu.hover(row)) {
-                self.dirty = true;
-            }
-            self.point(if clickable { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow });
+        if self.hover_an_overlay(position) {
             return;
         }
         let over = self.layout.button_at(position.x, position.y);

@@ -2150,6 +2150,34 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
         peer.close()
 
 
+def row_under_point(state: dict[str, str], percent_y: float, run: Run) -> int | None:
+    """Which list row is under a point given as the driver's percentage.
+
+    So a scenario can check that the thing it is covering is really there: an
+    assertion about what does *not* light up is worth nothing if nothing was
+    going to.
+    """
+    _, top, _, height = SERVER.window_box()
+    _, down = SERVER.output_size()
+    del run
+    logical_y = percent_y / 100.0 * down - top
+    body_top, row_h = float(state["body_top"]), float(state["row_h"])
+    if logical_y < body_top:
+        return None
+    row = int((logical_y - body_top) // row_h)
+    return row if row < int(state["rows"]) else None
+
+
+def crumb_row_aim(run: Run, state: dict[str, str], name: str) -> tuple[float, float]:
+    """Where to click a row of the open sibling menu, by the directory it names."""
+    for entry in state.get("crumb_menu_aim", "").split(","):
+        row, _, point = entry.partition("@")
+        if row == name:
+            x, _, y = point.partition(":")
+            return aim(run, state, float(x), float(y))
+    raise Failure(f"no menu row called {name!r}: {state.get('crumb_menu_aim')!r}")
+
+
 def separator_aim(run: Run, state: dict[str, str], depth: int) -> tuple[float, float]:
     """Where to click the breadcrumb separator after component `depth`.
 
@@ -2225,6 +2253,14 @@ def the_last_separator_lists_children(run: Run, fixture: Path) -> None:
     start = run.state()
     deep = int(start["crumbs"])
 
+    # Over a breadcrumb first, so something *is* lit when the menu opens — the
+    # pointer reaches a chevron by crossing the component beside it, and a
+    # component left lit under the panel is the same false promise as a row.
+    crumb = aim(run, start, float(start["parent_crumb_x"]), 22.0)
+    run.drive(f"move {crumb[0]:.1f} {crumb[1]:.1f}\nsleep 250\nkey f12\nsleep 200\n")
+    if run.state()["crumb_hover"] == "-1":
+        raise Failure("the breadcrumb did not light, so nothing is being covered")
+
     where = separator_aim(run, start, deep - 1)
     run.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n")
     opened = run.state()
@@ -2238,6 +2274,20 @@ def the_last_separator_lists_children(run: Run, fixture: Path) -> None:
     # One key per drive, and asserted between: a `Down` and an `Enter` sent
     # together race the frame that processes the first, and an `Enter` that
     # arrives with nothing highlighted does nothing at all.
+    # **Nothing under the panel lights up.** The menu hangs over the list, and a
+    # row lighting up behind it reads as a click that will land there — which it
+    # will not: a press outside this menu closes it and does nothing else.
+    #
+    # `gamma` and not `alpha`: the first menu row sits above the list's first,
+    # so hovering it would prove nothing whichever way the code went. The row
+    # chosen here is checked below to be over a real one.
+    over = crumb_row_aim(run, opened, "gamma")
+    covered = row_under_point(opened, over[1], run)
+    if covered is None:
+        raise Failure("the menu row chosen does not cover a list row, so this proves nothing")
+    run.drive(f"move {over[0]:.1f} {over[1]:.1f}\nsleep 300\nkey f12\nsleep 250\n")
+    expect(run.state(), crumb_menu_active="gamma", hover="-1", hover_name="", crumb_hover="-1")
+
     run.drive("key down\nsleep 300\nkey f12\nsleep 300\n")
     chosen = run.state()["crumb_menu_active"]
     if not chosen:

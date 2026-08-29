@@ -825,3 +825,40 @@ outside.
 forty runs at the last measurement, against one in four before the fixes — which
 is not enough to tell "rarer" from "gone", and saying so is the point. The next
 occurrence will name the command it refused.
+
+## An assertion about what does *not* happen has to cover something
+
+A menu opened by the path bar hangs over the list, and the row beneath it was
+lighting up — a hover that promises a click which the panel will swallow. The
+fix was one early return. The test written for it hovered the menu's first row
+and asserted the list showed nothing.
+
+It passed. It also passed with the fix removed. It passed with a second guard
+removed, and with **both** removed — because that first menu row sits *above* the
+list's first row, so nothing was under it either way. A test written for a
+specific reported defect could not detect that defect.
+
+Aiming at a row that genuinely overlaps the list fails with `hover is '1'`, which
+is the bug exactly. The scenario now checks that the row it is covering is really
+there before asserting that it stays dark, because **an assertion about what does
+not light up is worth nothing if nothing was going to**. That check is three
+lines and it is the difference between a test and a decoration.
+
+The same session had already found this shape twice — an assertion between two
+readings of an absent value, and a fixture whose coincidence hid a bug — and it
+still went in. Watching a test fail is not a step to be skipped when the fix is
+"obviously" right; the two minutes it costs is the only thing that separates a
+green test from a green test.
+
+## Unreachable defensive code is untested code
+
+The same fix arrived with a companion: a `clear_hovers` that put out anything lit
+at the moment the menu opened. It looked prudent and it was dead. The pointer has
+to cross to the chevron to open the menu, and crossing there clears whatever it
+was lighting; after that the early return means no branch that sets a hover is
+reached at all.
+
+It was removed rather than kept "just in case". A guard for a state that cannot
+happen is a guard nothing exercises, and it tells the next reader that the state
+*can* happen — which is worse than the two lines it saves. What replaced it is a
+comment saying why nothing needs clearing.
