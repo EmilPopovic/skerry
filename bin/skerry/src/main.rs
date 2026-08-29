@@ -36,6 +36,7 @@ struct Overlays {
     keys: bool,
     menu: bool,
     row_menu: bool,
+    clash: bool,
     path_entry: bool,
     palette: bool,
     filter: bool,
@@ -55,6 +56,7 @@ impl Overlays {
             "--keys" => &mut self.keys,
             "--menu" => &mut self.menu,
             "--menu-row" => &mut self.row_menu,
+            "--clash" => &mut self.clash,
             "--path-entry" => &mut self.path_entry,
             "--palette" => &mut self.palette,
             "--filter" => &mut self.filter,
@@ -145,6 +147,7 @@ fn main() -> std::process::ExitCode {
             keys: overlays.keys,
             menu: overlays.menu,
             row_menu: overlays.row_menu,
+            clash: overlays.clash,
             path_entry: overlays.path_entry,
             palette: overlays.palette,
             filter: overlays.filter,
@@ -215,6 +218,7 @@ skerry [OPTIONS] [PATH]
   --keys           show the keyboard overlay
   --menu           show the context menu, for a golden frame of it
   --menu-row       show the menu a secondary click on a row opens
+  --clash          show the panel that asks about a name already taken
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it

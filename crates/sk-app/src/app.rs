@@ -1336,6 +1336,15 @@ impl App {
         if self.menu.is_some() && self.menu_key(event, commands) {
             return;
         }
+        // **The question comes first, and there is no key that dismisses it.**
+        // A name that is already taken has four answers and none of them is
+        // "never mind": the queue is stopped mid-way with files still to place,
+        // and a stray key that closed the panel would leave it stopped with
+        // nothing on screen saying so. `Escape` is bound to Stop, which is the
+        // answer a person means by it.
+        if self.edits.asking() && self.clash_key(event, commands) {
+            return;
+        }
         // The Open With list takes the keyboard while it is up: arrows move,
         // Enter launches, and anything else closes it — the same contract the
         // context menu has, and for the same reason.
@@ -3109,6 +3118,74 @@ impl App {
         true
     }
 
+    /// A key while a name-taken question is open. Whether it was taken.
+    ///
+    /// Arrows walk the four answers, `Space` toggles whether the answer covers
+    /// the rest of the queue, `Enter` gives it and `Escape` stops.
+    fn clash_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.answer_the_clash(crate::edit::Answer::Stop),
+            Key::Named(Named::Down | Named::Right) if bare => self.edits.step_answer(1),
+            Key::Named(Named::Up | Named::Left) if bare => self.edits.step_answer(-1),
+            Key::Character(' ') if bare => self.edits.for_the_rest = !self.edits.for_the_rest,
+            Key::Named(Named::Enter) => {
+                let answer = self.edits.chosen_answer();
+                self.answer_the_clash(answer);
+            }
+            _ => {
+                // The diagnostic report passes through, for the reason it passes
+                // through an open menu: it is the only way the harness sees this.
+                let diagnostic = commands
+                    .resolve(event, Scope::Global)
+                    .and_then(|id| commands.describe(id))
+                    .is_some_and(|command| command.id == "help.dump");
+                return !diagnostic;
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Gives the answer and lets the queue go on.
+    fn answer_the_clash(&mut self, answer: crate::edit::Answer) {
+        self.edits.answer(answer, &self.jobs);
+        if !self.edits.asking() && !self.edits.busy() {
+            self.notice = Some((
+                sk_model::i18n::lookup(match answer {
+                    crate::edit::Answer::Stop => "notice.cancelled",
+                    _ => "notice.done",
+                })
+                .to_owned(),
+                Instant::now(),
+            ));
+        }
+        self.panes.focused_mut().refresh(&self.jobs);
+        self.dirty = true;
+    }
+
+    /// A press while a name-taken question is open. Whether it was taken.
+    ///
+    /// **Always taken.** Every other overlay here closes on a press that misses
+    /// it; this one has no dismissal, so a press outside it does nothing at all
+    /// rather than leaving a stopped queue with no way back to the question.
+    fn press_in_the_clash(&mut self, position: Point) -> bool {
+        if !self.edits.asking() {
+            return false;
+        }
+        if let Some(row) = self.hits.answers.iter().position(|a| a.contains(position.x, position.y))
+        {
+            self.edits.answering = row;
+            let answer = self.edits.chosen_answer();
+            self.answer_the_clash(answer);
+        } else if self.hits.for_the_rest.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.edits.for_the_rest = !self.edits.for_the_rest;
+            self.dirty = true;
+        }
+        true
+    }
+
     /// A press while the Open With list is up. Whether it was taken.
     fn press_in_the_openers(&mut self, position: Point) -> bool {
         if self.openers.is_none() {
@@ -3586,6 +3663,19 @@ impl App {
             .and_then(|id| self.placement.leaves.iter().position(|leaf| leaf.id == id))
             .map_or(-1, |at| i64::try_from(at).unwrap_or(-1));
         let drop_whole = i32::from(self.drop_pane().is_some());
+        // The open question, which is the one overlay a scenario cannot see any
+        // other way: it draws no row, changes no listing, and the whole point of
+        // it is that nothing has happened yet.
+        let asking = self.edits.asking();
+        let clash = self
+            .edits
+            .clash
+            .as_ref()
+            .map(|it| crate::panes::title_of(&it.existing).to_owned())
+            .unwrap_or_default();
+        let clash_rest = self.edits.clash.as_ref().map_or(0, |it| it.rest);
+        let answer = if asking { self.edits.chosen_answer().key() } else { "" };
+        let for_the_rest = self.edits.for_the_rest;
         let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
         // The display server's own view, which is not the same question: one is
         // "this window is carrying something", the other is "the server has a
@@ -3609,6 +3699,8 @@ hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
+asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
+for_the_rest={for_the_rest} \
 filtering={} filter={:?} drop_row={drop_row} drop_leaf={drop_leaf} drop_whole={drop_whole} \
 dragging={dragging} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
@@ -4010,6 +4102,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         commands: &Registry<Self>,
     ) {
         self.pointer = position;
+        // First, and it takes every press: the question has no dismissal, so a
+        // press that fell through to the list behind it would move a selection
+        // the queue is about to act on.
+        if self.press_in_the_clash(position) {
+            return;
+        }
         if self.palette.is_some() {
             self.palette_press(position, commands);
             return;
@@ -5325,6 +5423,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         (physical, scale, tools)
     }
 
+    // The same shape `assemble` is, and settled the same way: almost all of it
+    // is one struct literal with one call site, over fields the destructure has
+    // already split the borrow of. Two halves would each hold part of an `App`
+    // and neither could be read without the other.
+    #[expect(clippy::too_many_lines, reason = "a struct literal with one call site")]
     fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
         let (physical, scale, tools) = self.before_frame(commands);
         self.list.begin(physical);
@@ -5395,6 +5498,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_place: sidebar.hover,
             drop_row: dropping.and_then(|drag| drag.row),
             drop_pane: dropping.and_then(|drag| drag.into_pane),
+            clash: edits.clash.as_ref(),
+            answering: edits.answering,
+            for_the_rest: edits.for_the_rest,
             naming: edits.naming.as_ref(),
             tools,
             filtering: *filtering,

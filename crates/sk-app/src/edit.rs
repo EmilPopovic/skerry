@@ -37,6 +37,9 @@ enum Pending {
 enum Outcome {
     /// A mutation finished, for better or worse.
     Did(Result<Change, Problem>),
+    /// A mutation did not start: something is already called that, and only a
+    /// person can say what should happen to it.
+    Clashed(Box<Clash>),
     /// An inverse finished.
     Undid(Result<(), Problem>),
     /// A repeat finished, with the change it actually produced.
@@ -111,6 +114,19 @@ pub struct Edits {
     doing: Queued,
     /// Paths still to work through, next one last.
     queue: Vec<PathBuf>,
+    /// The clash a person is being asked about, while one is open.
+    ///
+    /// The queue does not advance while this is set: that is what makes it a
+    /// question rather than a notification.
+    pub clash: Option<Clash>,
+    /// Which of the answers the panel is on.
+    pub answering: usize,
+    /// Whether the answer applies to every remaining clash.
+    pub for_the_rest: bool,
+    /// The standing answer, once one has been given for the rest.
+    standing: Option<Answer>,
+    /// The answer for the one item about to run, taken by the next job.
+    once: Option<Answer>,
     /// How many were asked for, so the notice can count them.
     queued: usize,
     done: Receiver<Outcome>,
@@ -143,12 +159,124 @@ enum Queued {
     },
 }
 
+/// A name the queue wants that is already taken, and the two files under it.
+///
+/// **Both files' facts, gathered on the job that found the clash.** "Replace or
+/// keep both" is not a question anybody can answer about two names; it is a
+/// question about a 4 MB file from this morning and a 12 MB one from last year,
+/// and the frame loop may not `statx` to find that out.
+pub struct Clash {
+    /// What the queue is placing.
+    pub source: PathBuf,
+    /// Where it is going.
+    pub into: PathBuf,
+    /// What is already called that.
+    pub existing: PathBuf,
+    /// The file that is there.
+    pub theirs: Option<sk_fs::facts::Facts>,
+    /// The one arriving.
+    pub ours: Option<sk_fs::facts::Facts>,
+    /// Whether this is a move rather than a copy, so the panel says which.
+    pub moving: bool,
+    /// How many are still to come after this one, so "for the rest" is offered
+    /// only when there is a rest.
+    pub rest: usize,
+}
+
+impl Clash {
+    /// The answers this one offers, which is not the same set for a move.
+    #[must_use]
+    pub fn answers(&self) -> &'static [Answer] {
+        if self.moving { &Answer::FOR_A_MOVE } else { &Answer::FOR_A_COPY }
+    }
+}
+
+/// What to do about a name that is already taken.
+///
+/// **Not commands, and deliberately.** These are the four answers to one
+/// question the program asked, the way the Open With list is the applications
+/// this machine has rather than four registry entries — putting them in the
+/// registry would put "Skip" in the palette, where it would mean nothing and be
+/// runnable at any time. Rule 2 is kept by there being no other way to reach
+/// them: the panel is the question, and the question is the only thing that
+/// opens it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Answer {
+    /// Put what is there in the Trash and place this one.
+    Replace,
+    /// Place this one beside it, under a free name.
+    KeepBoth,
+    /// Leave both alone and go on.
+    Skip,
+    /// Stop the whole queue here.
+    Stop,
+}
+
+impl Answer {
+    /// What a copy offers, in the order the panel puts them.
+    pub const FOR_A_COPY: [Self; 4] = [Self::Replace, Self::KeepBoth, Self::Skip, Self::Stop];
+
+    /// What a move offers.
+    ///
+    /// **No "keep both".** A move that renamed would leave two files under names
+    /// neither of them chose and no way to tell which is which, which is why
+    /// [`sk_fs::ops::Conflict::Rename`] is a copy's answer only. Offering it here
+    /// would be offering a button the engine refuses.
+    pub const FOR_A_MOVE: [Self; 3] = [Self::Replace, Self::Skip, Self::Stop];
+
+    /// What it is called, through the catalogue.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Replace => "clash.replace",
+            Self::KeepBoth => "clash.keep_both",
+            Self::Skip => "clash.skip",
+            Self::Stop => "clash.stop",
+        }
+    }
+}
+
 /// What a finished operation asks the rest of the program to do.
 pub enum Landed {
     /// Say this, and put the cursor on that path if it is in the listing.
     Notice(String, Option<PathBuf>),
     /// Say this; nothing moved.
     Failed(String),
+}
+
+/// Whether `source` would land on a name that is already taken, and what the
+/// two files are.
+///
+/// **Runs on a job**: two `statx` calls and a `readlink`, which is what `facts`
+/// costs, and rule 1 has no exemption for a cheap syscall.
+///
+/// `None` when there is nothing to ask about: the name is free, the answer is
+/// already standing, or the copy is into the folder the file came from — which
+/// is a duplicate and has never asked.
+fn clash_at(
+    source: &std::path::Path,
+    into: &std::path::Path,
+    moving: bool,
+    answer: Option<Answer>,
+    rest: usize,
+) -> Option<Clash> {
+    if answer.is_some() {
+        return None;
+    }
+    if !moving && source.parent() == Some(into) {
+        return None;
+    }
+    let existing = into.join(source.file_name()?);
+    let theirs = sk_fs::facts::describe(&existing)?;
+    Some(Clash {
+        source: source.to_path_buf(),
+        into: into.to_path_buf(),
+        existing,
+        ours: sk_fs::facts::describe(source),
+        theirs: Some(theirs),
+        moving,
+        rest,
+    })
 }
 
 impl Edits {
@@ -173,6 +301,11 @@ impl Edits {
             progress_tx,
             doing: Queued::Trash,
             queue: Vec::new(),
+            clash: None,
+            answering: 0,
+            for_the_rest: false,
+            standing: None,
+            once: None,
             queued: 0,
             done,
             sender,
@@ -190,6 +323,12 @@ impl Edits {
         // flight, and `Ctrl+Z` between two of them would undo one file out of
         // four with three more arriving behind it.
         self.pending.is_some() || !self.queue.is_empty()
+    }
+
+    /// Whether a question is open and waiting to be answered.
+    #[must_use]
+    pub const fn asking(&self) -> bool {
+        self.clash.is_some()
     }
 
     /// Makes a directory in `parent`, choosing a free name.
@@ -282,11 +421,13 @@ impl Edits {
 
     /// Starts the next queued operation, if nothing is in flight.
     pub fn next_in_queue(&mut self, jobs: &Jobs) {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.clash.is_some() {
             return;
         }
         let Some(path) = self.queue.pop() else {
             self.queued = 0;
+            self.standing = None;
+            self.for_the_rest = false;
             return;
         };
         let doing = self.doing.clone();
@@ -308,6 +449,10 @@ impl Edits {
         let updates = self.progress_tx.clone();
         let wake = self.wake.clone();
         let carried_bytes = self.running.as_ref().map_or(0, |it| it.bytes);
+        // The answer this one item runs under, whether it came from the panel
+        // just now or from a "for the rest" given several items ago.
+        let answer = self.once.take().or(self.standing);
+        let queue_left = self.queue.len();
         self.start(Pending::Doing, jobs, move |cancel| {
             // Throttled to ten a second: a copy of ten thousand small files would
             // otherwise wake the frame loop ten thousand times, and the loop
@@ -324,15 +469,93 @@ impl Edits {
                     wake.wake();
                 }
             };
+            let (into, moving) = match &doing {
+                Queued::Copy { into, .. } => (Some(into.clone()), false),
+                Queued::Move { into } => (Some(into.clone()), true),
+                Queued::Trash | Queued::Erase => (None, false),
+            };
+            // **Asked here, on the job.** Whether a name is taken is a `statx`,
+            // and rule 1 has no exemption for a fast one — so the question is
+            // put where the work already is, and what comes back is either the
+            // clash or the change.
+            if let Some(into) = &into
+                && let Some(clash) = clash_at(&path, into, moving, answer, queue_left)
+            {
+                return Outcome::Clashed(Box::new(clash));
+            }
+            let conflict = match answer {
+                Some(Answer::Replace) => sk_fs::ops::Conflict::Replace,
+                Some(Answer::KeepBoth) => sk_fs::ops::Conflict::Rename,
+                _ => sk_fs::ops::Conflict::Refuse,
+            };
             Outcome::Did(match doing {
                 Queued::Trash => ops::trash(&path),
                 Queued::Erase => ops::erase(&path, cancel),
-                Queued::Copy { into, conflict } => {
+                // **A paste into the folder the file came from renames**, with
+                // nothing asked: that is what Duplicate is and what pasting
+                // where you copied from means, and a panel asking "replace this
+                // with itself?" would be a question with no right answer.
+                Queued::Copy { into, conflict: policy } => {
+                    let same = path.parent() == Some(into.as_path());
+                    let conflict = if same { policy } else { conflict };
                     ops::copy_into(&path, &into, conflict, cancel, &mut watch)
                 }
-                Queued::Move { into } => ops::move_into(&path, &into, cancel, &mut watch),
+                Queued::Move { into } => ops::move_into(&path, &into, conflict, cancel, &mut watch),
             })
         });
+    }
+
+    /// Answers the open question and lets the queue go on.
+    pub fn answer(&mut self, answer: Answer, jobs: &Jobs) {
+        let Some(clash) = self.clash.take() else { return };
+        if self.for_the_rest {
+            self.standing = Some(answer);
+        }
+        match answer {
+            Answer::Stop => {
+                self.queue.clear();
+                self.queued = 0;
+                self.standing = None;
+                self.for_the_rest = false;
+                self.cancelled_queue = true;
+                self.finish_the_batch();
+                return;
+            }
+            // The item was put back so an answer could run it; skipping takes it
+            // off again.
+            Answer::Skip => {
+                self.queue.pop();
+                if self.queue.is_empty() {
+                    self.finish_the_batch();
+                }
+            }
+            Answer::Replace | Answer::KeepBoth => self.once = Some(answer),
+        }
+        let _ = clash;
+        self.next_in_queue(jobs);
+    }
+
+    /// Moves the panel's highlight, wrapping at both ends.
+    pub fn step_answer(&mut self, delta: isize) {
+        let Some(offered) = self.clash.as_ref().map(Clash::answers) else { return };
+        let Ok(from) = isize::try_from(self.answering) else { return };
+        let Ok(span) = isize::try_from(offered.len()) else { return };
+        self.answering = usize::try_from(from.wrapping_add(delta).rem_euclid(span)).unwrap_or(0);
+    }
+
+    /// The answer the panel is on, or `Stop` when there is no panel.
+    #[must_use]
+    pub fn chosen_answer(&self) -> Answer {
+        let Some(offered) = self.clash.as_ref().map(Clash::answers) else { return Answer::Stop };
+        offered.get(self.answering).copied().unwrap_or(Answer::Stop)
+    }
+
+    /// Records what a drained queue changed, as one undo entry.
+    fn finish_the_batch(&mut self) {
+        if !self.batch.is_empty() {
+            let changes = std::mem::take(&mut self.batch);
+            self.history.record(Change::Batch(changes));
+        }
     }
 
     /// How many are still to go, and how many there were.
@@ -358,6 +581,14 @@ impl Edits {
         let outcome = self.done.try_recv().ok()?;
         self.pending = None;
         self.stop = None;
+        if let Outcome::Clashed(clash) = outcome {
+            // Back on the queue, so whichever answer comes back runs it. `pop`
+            // takes the last, so this is the next one out.
+            self.queue.push(clash.source.clone());
+            self.answering = 0;
+            self.clash = Some(*clash);
+            return None;
+        }
         // The queue carries the count and the rate across its entries, so this
         // goes only when there is nothing left to carry them for.
         if self.queue.is_empty() {
@@ -419,10 +650,7 @@ impl Edits {
                 };
                 if self.queue.is_empty() {
                     self.queued = 0;
-                    if !self.batch.is_empty() {
-                        let changes = std::mem::take(&mut self.batch);
-                        self.history.record(Change::Batch(changes));
-                    }
+                    self.finish_the_batch();
                 }
                 Some(Landed::Notice(message, subject))
             }
@@ -449,6 +677,9 @@ impl Edits {
                 Some(Landed::Failed(problem.message()))
             }
             Outcome::Undid(Err(problem)) => Some(Landed::Failed(problem.message())),
+            // Taken above, before the queue's bookkeeping runs: a clash is the
+            // absence of an outcome, not one of them.
+            Outcome::Clashed(_) => None,
         }
     }
 

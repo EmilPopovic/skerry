@@ -825,7 +825,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 84
+FEWEST_SCENARIOS = 86
 
 
 def scenario(name, fresh: bool = False):
@@ -2079,6 +2079,99 @@ def the_drop_ring(run: Run, fixture: Path) -> None:
     expect(run.state(), dragging="false")
     if (fixture / "alpha" / "file-1.txt").exists():
         raise Failure("a drop on its own pane moved the file anyway")
+
+
+@scenario("a-taken-name-is-a-question-not-a-guess", fresh=True)
+def a_taken_name_asks(run: Run, fixture: Path) -> None:
+    """Paste onto a name that is taken, and the queue stops and asks.
+
+    Two files with the same name in two folders, so the second paste has a real
+    choice to make. What this covers is the whole shape: the queue stops rather
+    than guessing, `Replace` keeps the displaced file rather than destroying it,
+    and one `Ctrl+Z` walks back both halves of that.
+    """
+    (fixture / "alpha" / "file-1.txt").write_text("the one arriving")
+    listed(run)
+
+    # Copy `alpha/file-1.txt`, then paste it over the one in `beta`.
+    run.drive("text alpha\nsleep 500\nkey enter\nsleep 900\n")
+    listed(run)
+    run.drive("text file-1.txt\nsleep 400\nkey ctrl+c\nsleep 400\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor="file-1.txt")
+    run.drive("key alt+up\nsleep 900\n")
+    listed(run)
+    run.drive("text beta\nsleep 500\nkey enter\nsleep 900\n")
+    listed(run)
+    (fixture / "beta" / "file-1.txt").write_text("the one there")
+    run.drive("key f5\nsleep 600\n")
+    listed(run)
+
+    run.drive("key ctrl+v\nsleep 1200\nkey f12\nsleep 300\n")
+    asked = run.state()
+    expect(asked, asking="true", answer="clash.replace")
+    if asked["clash"] != "file-1.txt":
+        raise Failure(f"the question is about {asked['clash']!r}")
+    # Nothing has happened yet: a question that had already acted would be a
+    # notification with buttons on it.
+    if (fixture / "beta" / "file-1.txt").read_text() != "the one there":
+        raise Failure("the paste went ahead without waiting for an answer")
+
+    # Down twice and back once, so the wrap and the highlight are both exercised.
+    run.drive("key down\nkey down\nkey up\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), answer="clash.keep_both")
+    run.drive("key up\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), answer="clash.replace")
+
+    run.drive("key enter\nsleep 1500\nkey f12\nsleep 400\n")
+    done = run.state()
+    expect(done, asking="false")
+    if (fixture / "beta" / "file-1.txt").read_text() != "the one arriving":
+        raise Failure("Replace did not put the arriving file in place")
+
+    # **The displaced file is in the Trash, not gone.** That is the whole reason
+    # Replace is allowed to exist here at all.
+    run.drive("key ctrl+z\nsleep 2000\nkey f12\nsleep 500\n")
+    if (fixture / "beta" / "file-1.txt").read_text() != "the one there":
+        raise Failure("undo did not bring back the file that Replace displaced")
+
+
+@scenario("keep-both-and-skip-answer-the-same-question", fresh=True)
+def keep_both_and_skip(run: Run, fixture: Path) -> None:
+    """The other two answers, and the one that covers the rest of a queue.
+
+    Two files pasted onto two taken names: the first is answered `Keep both`,
+    and the answer is marked for the rest — so the second never asks.
+    """
+    for name in ("file-1.txt", "file-2.txt"):
+        (fixture / "alpha" / name).write_text("arriving")
+        (fixture / "beta" / name).write_text("already there")
+    listed(run)
+    run.drive("text alpha\nsleep 500\nkey enter\nsleep 900\n")
+    listed(run)
+    run.drive("text file-1.txt\nsleep 400\nkey shift+down\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), selected="2")
+    run.drive("key ctrl+c\nsleep 400\nkey alt+up\nsleep 900\n")
+    listed(run)
+    run.drive("text beta\nsleep 500\nkey enter\nsleep 900\n")
+    listed(run)
+
+    run.drive("key ctrl+v\nsleep 1200\nkey f12\nsleep 300\n")
+    asked = run.state()
+    expect(asked, asking="true", for_the_rest="false")
+    if asked["clash_rest"] == "0":
+        raise Failure("the panel offered no 'for the rest' with one still queued")
+    # Space marks it, Down picks Keep both, Enter answers for both files.
+    run.drive("key space\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), for_the_rest="true")
+    run.drive("key down\nsleep 200\nkey enter\nsleep 2500\nkey f12\nsleep 500\n")
+    expect(run.state(), asking="false")
+    for name in ("file-1.txt", "file-2.txt"):
+        stem, _, extension = name.partition(".")
+        beside = fixture / "beta" / f"{stem} (copy).{extension}"
+        if not beside.is_file():
+            raise Failure(f"Keep both did not place {beside.name}")
+        if (fixture / "beta" / name).read_text() != "already there":
+            raise Failure(f"{name} was replaced rather than kept")
 
 
 PEER = ROOT / "tools" / "gtk-drag-peer"

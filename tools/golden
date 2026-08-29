@@ -118,6 +118,11 @@ FRAMES = [
     # row offers, over a folder. Two menus and one of them had no frame at all,
     # which is how a row added to it could change nothing anyone could see.
     ("context-menu-row", ["--size", "900x520", "--scale", "125", "--menu-row"]),
+    # The one panel with no way to dismiss it, and the only one whose content is
+    # a *comparison*: two files' sizes and dates side by side, which is what
+    # makes "replace or keep both" a question anybody can answer. Also the only
+    # frame with a checkbox in it.
+    ("name-taken", ["--size", "900x520", "--scale", "125", "--clash"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.

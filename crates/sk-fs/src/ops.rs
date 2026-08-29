@@ -244,6 +244,17 @@ pub fn copy_into(
         };
     }
     let destination = into.join(name);
+    if conflict == Conflict::Replace && taken(&destination) {
+        return replace_into(name, into, &mut |staging| {
+            crate::copy::copy_to(source, staging, cancel, watch)
+        })
+        .map(|displaced| {
+            Change::Batch(vec![
+                displaced,
+                Change::Copied { source: source.to_path_buf(), destination },
+            ])
+        });
+    }
     let mut progress = crate::copy::Progress::default();
     match crate::copy::copy_into(
         source,
@@ -279,6 +290,22 @@ pub enum Conflict {
     /// tell which is which — so a move with a taken name is refused and said out
     /// loud.
     Rename,
+    /// Put what is already there in the Trash, then place this one.
+    ///
+    /// **Trash, never overwrite.** Every other file manager writes over the file
+    /// that was there, and the file that was there is then gone — which
+    /// [rule 3](../../../docs/03-principles.md) does not allow anything here to
+    /// do. Trashing it first makes the whole thing one
+    /// [`Change::Batch`], so `Ctrl+Z` removes what arrived *and* brings back
+    /// what it displaced, in that order.
+    ///
+    /// The cost is that this fails where the trash does — a file on a drive with
+    /// no per-volume `.Trash-$uid`, which is the same gap
+    /// [`ProblemKind::AcrossFilesystems`] names. Reported rather than downgraded
+    /// to an overwrite: "Replace" that silently became "destroy" on some drives
+    /// and not others is the kind of difference nobody can see until it costs
+    /// them something.
+    Replace,
 }
 
 /// Deletes `path` and everything under it, for good.
@@ -299,9 +326,25 @@ pub fn erase(path: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
 pub fn move_into(
     source: &Path,
     into: &Path,
+    conflict: Conflict,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
+    // **A move never renames.** [`Conflict::Rename`] is a copy's answer, and a
+    // move that quietly renamed would leave two files under names neither of
+    // them chose — so it is not offered for one, and reaching here with it
+    // refuses the way a taken name always has.
+    if conflict == Conflict::Replace
+        && let Some(name) = source.file_name()
+        && taken(&into.join(name))
+    {
+        let destination = into.join(name);
+        let displaced = replace_into(name, into, &mut |staging| {
+            crate::copy::move_file(source, staging, crate::copy::Options::default()).map(|_| ())
+        })?;
+        let moved = Change::Renamed { from: source.to_path_buf(), to: destination };
+        return Ok(Change::Batch(vec![displaced, moved]));
+    }
     let mut progress = crate::copy::Progress::default();
     let destination = crate::copy::move_into(
         source,
@@ -312,6 +355,64 @@ pub fn move_into(
         watch,
     )?;
     Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
+}
+
+/// Whether something is already called that.
+///
+/// `SYMLINK_NOFOLLOW`, so a dangling symlink counts as taken — which it is, to
+/// `rename` and to `open` with `O_EXCL`.
+fn taken(path: &Path) -> bool {
+    rustix::fs::statat(rustix::fs::CWD, path, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).is_ok()
+}
+
+/// Puts something where `name` already is, and returns what it displaced.
+///
+/// **Three steps, and the order is the whole of it.** `place` puts the arriving
+/// file in the directory under a free name, the file that was there goes to the
+/// Trash, and only then does the arrival take the name. Every other order has a
+/// window where a failure leaves *nothing* at the name: copying over the old one
+/// destroys it before anything knows whether the new one arrives, and trashing
+/// first does the same with an extra step. Here a failure at any point leaves
+/// the directory as it was.
+fn replace_into(
+    name: &std::ffi::OsStr,
+    into: &Path,
+    place: &mut dyn FnMut(&Path) -> Result<(), Problem>,
+) -> Result<Change, Problem> {
+    let destination = into.join(name);
+    let Some(free) = crate::copy::free_name(into, name) else {
+        return Err(Problem::new(
+            ProblemKind::NameTaken,
+            destination.display().to_string(),
+            "no free name to stage a replacement under",
+        ));
+    };
+    let staging = into.join(&free);
+    let discard = || {
+        // A fresh token: the staged copy is being removed *because* the
+        // operation is over, and the one that stopped it is already cancelled.
+        let _ = crate::copy::remove_tree(&staging, &sk_util::Cancel::new());
+    };
+    if let Err(problem) = place(&staging) {
+        discard();
+        return Err(problem);
+    }
+    let displaced = match trash(&destination) {
+        Ok(change) => change,
+        Err(problem) => {
+            discard();
+            return Err(problem);
+        }
+    };
+    if let Err(problem) = move_no_replace(&staging, &destination) {
+        // The name was freed one line ago, so this is very close to impossible —
+        // and "very close to" is why what was trashed is put back rather than
+        // left in the Trash with nothing on the undo stack pointing at it.
+        let _ = revert(&displaced);
+        discard();
+        return Err(problem);
+    }
+    Ok(displaced)
 }
 
 /// Undoes a change. Refuses rather than guessing.
@@ -602,7 +703,9 @@ mod tests {
         std::fs::write(&from, b"contents").unwrap();
         std::fs::create_dir(&into).unwrap();
 
-        let change = move_into(&from, &into, &sk_util::Cancel::new(), &mut |_| {}).expect("moved");
+        let change =
+            move_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+                .expect("moved");
         assert!(!from.exists());
         assert!(into.join("one.txt").is_file());
 
@@ -715,6 +818,107 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Replace keeps what it replaced, which is the whole reason it exists.
+    ///
+    /// Every other file manager writes over the file that was there. Rule 3 does
+    /// not allow that, so this is one batch: the arrival, and the displaced file
+    /// in the Trash — and `Ctrl+Z` undoes both, in that order.
+    #[test]
+    fn replacing_puts_what_was_there_in_the_trash_and_undo_brings_it_back() {
+        with_trash("replace", |root| {
+            let from = root.join("from");
+            let into = root.join("into");
+            std::fs::create_dir_all(&from).unwrap();
+            std::fs::create_dir_all(&into).unwrap();
+            std::fs::write(from.join("report.pdf"), b"the new one").unwrap();
+            std::fs::write(into.join("report.pdf"), b"the old one").unwrap();
+
+            let change = copy_into(
+                &from.join("report.pdf"),
+                &into,
+                Conflict::Replace,
+                &sk_util::Cancel::new(),
+                &mut |_| {},
+            )
+            .expect("replaced");
+            assert_eq!(
+                std::fs::read(into.join("report.pdf")).unwrap(),
+                b"the new one",
+                "the arriving file did not take the name"
+            );
+            // And nothing is left staged beside it under the name the
+            // replacement was copied in as.
+            assert!(!into.join("report (copy).pdf").exists(), "the staging name was left behind");
+
+            revert(&change).expect("undone");
+            assert_eq!(
+                std::fs::read(into.join("report.pdf")).unwrap(),
+                b"the old one",
+                "undo did not bring back what was replaced"
+            );
+        });
+    }
+
+    /// The failure this ordering exists for.
+    ///
+    /// A copy that cannot happen must leave the directory exactly as it was —
+    /// not with the old file trashed and nothing in its place, which is what
+    /// trashing first would do.
+    #[test]
+    fn a_replacement_that_cannot_be_copied_leaves_the_original_where_it_was() {
+        with_trash("replace-fails", |root| {
+            let into = root.join("into");
+            std::fs::create_dir_all(&into).unwrap();
+            std::fs::write(into.join("report.pdf"), b"the old one").unwrap();
+
+            // The *same* name, or the destination is not taken and the whole
+            // replacing path is never entered — which is how the first version
+            // of this test passed against the ordering it exists to forbid.
+            let problem = copy_into(
+                &root.join("report.pdf"),
+                &into,
+                Conflict::Replace,
+                &sk_util::Cancel::new(),
+                &mut |_| {},
+            )
+            .expect_err("a source that is not there was copied");
+            assert_eq!(problem.kind(), ProblemKind::Gone);
+            assert_eq!(
+                std::fs::read(into.join("report.pdf")).unwrap(),
+                b"the old one",
+                "the file that was there went to the Trash for a copy that never happened"
+            );
+        });
+    }
+
+    /// A move over a taken name keeps the old one too, and is one batch.
+    #[test]
+    fn moving_over_a_name_trashes_what_was_there() {
+        with_trash("replace-move", |root| {
+            let from = root.join("from");
+            let into = root.join("into");
+            std::fs::create_dir_all(&from).unwrap();
+            std::fs::create_dir_all(&into).unwrap();
+            std::fs::write(from.join("notes.txt"), b"arriving").unwrap();
+            std::fs::write(into.join("notes.txt"), b"displaced").unwrap();
+
+            let change = move_into(
+                &from.join("notes.txt"),
+                &into,
+                Conflict::Replace,
+                &sk_util::Cancel::new(),
+                &mut |_| {},
+            )
+            .expect("moved over");
+            assert!(!from.join("notes.txt").exists(), "the move left the source behind");
+            assert_eq!(std::fs::read(into.join("notes.txt")).unwrap(), b"arriving");
+
+            revert(&change).expect("undone");
+            assert_eq!(std::fs::read(into.join("notes.txt")).unwrap(), b"displaced");
+            assert_eq!(std::fs::read(from.join("notes.txt")).unwrap(), b"arriving");
+        });
     }
 
     fn with_trash<T>(label: &str, body: impl FnOnce(&Path) -> T) -> T {

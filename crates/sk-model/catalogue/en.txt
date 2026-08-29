@@ -211,6 +211,19 @@ action.zoom_in = Larger rows
 action.zoom_out = Smaller rows
 action.zoom_reset = Default size
 
+# A name that is already taken, and the four answers.
+clash.title = {0} is already there
+clash.into_copy = Copying into {0}
+clash.into_move = Moving into {0}
+clash.there = The one there
+clash.arriving = The one arriving
+clash.unknown = Cannot be read
+clash.replace = Replace it (the old one goes to the Trash)
+clash.keep_both = Keep both
+clash.skip = Skip this one
+clash.stop = Stop
+clash.for_the_rest = Do this for the other {0}
+
 # Properties.
 properties.items = {0} items
 properties.kind = Kind

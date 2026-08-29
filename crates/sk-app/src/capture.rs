@@ -61,6 +61,8 @@ pub struct Capture {
     pub menu: bool,
     /// Whether to draw the menu a secondary click on a row opens instead.
     pub row_menu: bool,
+    /// Whether to draw the panel that asks about a name already taken.
+    pub clash: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
@@ -139,6 +141,34 @@ fn sample_context_menu(
     }
 }
 
+/// The question a paste onto a taken name asks.
+///
+/// Stated rather than provoked: a capture has no queue and no pool, and the
+/// panel's whole content is two files' facts and four answers. The two files are
+/// the fixture's own, so the sizes and the dates in the frame are the ones every
+/// other frame already shows.
+fn sample_clash(path: &std::path::Path) -> crate::edit::Clash {
+    let existing = path.join("report.pdf");
+    let source = path.join("build").join("report.pdf");
+    crate::edit::Clash {
+        theirs: sk_fs::facts::describe(&existing),
+        // Not on disk — the fixture holds one `report.pdf`, not two — so this
+        // states what the other one would be. A frame of "Cannot be read" in
+        // the arriving column would be a frame of the empty case.
+        ours: sk_fs::facts::describe(&existing).map(|mut facts| {
+            facts.path.clone_from(&source);
+            facts.size = 4_512_000;
+            facts.modified = FIXED_MTIME - 60 * 60 * 24 * 400;
+            facts
+        }),
+        source,
+        into: path.to_path_buf(),
+        existing,
+        moving: false,
+        rest: 3,
+    }
+}
+
 /// The palette with a query in it, narrowed but not to one row.
 ///
 /// `co` rather than nothing and rather than something exact: an empty query is a
@@ -187,6 +217,7 @@ struct Overlays {
     naming: Option<crate::edit::Naming>,
     properties: Option<crate::properties::Properties>,
     openers: Option<crate::openers::Openers>,
+    clash: Option<crate::edit::Clash>,
 }
 
 /// A rename in progress over the row whose name has two dots in it.
@@ -351,6 +382,7 @@ fn sample_overlays(
         ),
         properties: request.properties.then(sample_properties),
         openers: request.open_with.then(sample_openers),
+        clash: request.clash.then(|| sample_clash(&request.path)),
     }
 }
 
@@ -436,6 +468,8 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         hovered_place: None,
         drop_row: None,
         drop_pane: None,
+        answering: 1,
+        for_the_rest: true,
         naming: sample.overlays.naming.as_ref(),
         // What a freshly opened directory looks like: nowhere to go
         // back to, nowhere forward, a parent and a reload. Hardcoded
@@ -460,6 +494,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
+        clash: sample.overlays.clash.as_ref(),
         hint: sample.hint,
         leaves: sample.leaves,
         dividers: sample.dividers,

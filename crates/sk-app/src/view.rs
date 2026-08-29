@@ -66,6 +66,12 @@ pub struct Chrome<'a> {
     /// The pane whose whole list would take a drop, ringed rather than a row
     /// highlighted, because the target is the directory it is showing.
     pub drop_pane: Option<PaneId>,
+    /// The name-taken question, while one is open.
+    pub clash: Option<&'a crate::edit::Clash>,
+    /// Which answer it is on.
+    pub answering: usize,
+    /// Whether the answer would cover the rest of the queue.
+    pub for_the_rest: bool,
     /// The breadcrumb separator under the pointer.
     pub hovered_separator: Option<usize>,
     /// The sibling menu a separator has opened, while one is open.
@@ -145,6 +151,10 @@ pub struct Hits {
     pub palette: Vec<Area>,
     /// The same, for the Open With list's drawn rows.
     pub openers: Vec<Area>,
+    /// One rectangle per answer to an open name-taken question, in panel order.
+    pub answers: Vec<Area>,
+    /// Its "for the rest of them" toggle, when there is a rest.
+    pub for_the_rest: Option<Area>,
     /// The palette's query field, so a click into it can place the caret.
     pub palette_field: Option<Area>,
 }
@@ -255,6 +265,15 @@ pub fn draw(
     }
     if let Some(list) = chrome.openers {
         open_with(painter, layout, list, hits);
+    }
+    // Over both of those: it is the one overlay with no way to dismiss it, so
+    // anything drawn on top of it would be drawn on top of the only thing on
+    // screen that can be acted on.
+    if let Some(clash) = chrome.clash {
+        clash_panel(painter, layout, clash, chrome.answering, chrome.for_the_rest, now, hits);
+    } else {
+        hits.answers.clear();
+        hits.for_the_rest = None;
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, here, typed);
@@ -868,6 +887,151 @@ fn open_with(
         );
     }
 }
+
+/// The name-taken question: which two files, and the four answers.
+///
+/// **Both files described, not just named.** "Replace or keep both" cannot be
+/// answered about two identical strings. It can be answered about 4 MB from this
+/// morning against 12 MB from last year, which is what the two columns are for
+/// and why the facts are gathered on the job that found the clash.
+fn clash_panel(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    clash: &crate::edit::Clash,
+    on: usize,
+    for_the_rest: bool,
+    now: i64,
+    hits: &mut Hits,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let name = crate::panes::title_of(&clash.existing).to_owned();
+    let title = i18n::format("clash.title", &[&name]);
+    let where_ = i18n::format(
+        if clash.moving { "clash.into_move" } else { "clash.into_copy" },
+        &[&clash.into.display()],
+    );
+
+    let offered = clash.answers();
+    let rows = offered.len() as f32;
+    let asks_the_rest = clash.rest > 0;
+    let width = CLASH_WIDTH.min(layout.window.width - 16.0).max(240.0);
+    let height = CLASH_TITLE
+        + CLASH_FACTS
+        + rows * CLASH_STEP
+        + if asks_the_rest { CLASH_STEP } else { 0.0 }
+        + PROPERTIES_INSET;
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: ((layout.window.height - height) / 2.0).max(8.0),
+        width,
+        height,
+    };
+    panel_shape(painter, area);
+    let inner = area.width - PROPERTIES_INSET * 2.0;
+    let left = area.x + PROPERTIES_INSET;
+
+    let baseline = painter.baseline(area.y + 4.0, PROPERTIES_TITLE - 12.0, metrics.path_size);
+    line(
+        painter,
+        &title,
+        TextStyle::new(metrics.path_size, theme.palette.text).bold(),
+        left,
+        inner,
+        baseline,
+    );
+    let under = painter.baseline(area.y + PROPERTIES_TITLE - 14.0, 16.0, metrics.header_size);
+    let subtitle = TextStyle::new(metrics.header_size, theme.palette.dim);
+    line(painter, &where_, subtitle, left, inner, under);
+    painter.hairline(left, area.y + CLASH_TITLE - 1.0, inner, theme.palette.divider);
+
+    clash_files(painter, clash, left, area.y + CLASH_TITLE + 6.0, inner, now);
+
+    hits.answers.clear();
+    let first = area.y + CLASH_TITLE + CLASH_FACTS;
+    for (index, answer) in offered.iter().copied().enumerate() {
+        let top = first + index as f32 * CLASH_STEP;
+        hits.answers.push(Area { x: area.x, y: top, width: area.width, height: CLASH_STEP });
+        if index == on {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, CLASH_STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let colour = if index == on { theme.palette.selected_text } else { theme.palette.text };
+        let baseline = painter.baseline(top, CLASH_STEP, metrics.text_size);
+        line(
+            painter,
+            i18n::lookup(answer.key()),
+            TextStyle::new(metrics.text_size, colour),
+            left,
+            inner,
+            baseline,
+        );
+    }
+
+    hits.for_the_rest = asks_the_rest.then(|| {
+        let top = first + rows * CLASH_STEP;
+        let box_ = painter.rect(left, top + 6.0, 14.0, 14.0);
+        let ring = painter.px(1.0).round().max(1.0);
+        painter.list.stroke(box_, theme.palette.dim, painter.px(3.0), ring);
+        if for_the_rest {
+            let tick = painter.rect(left + 4.0, top + 10.0, 6.0, 6.0);
+            painter.list.rect(tick, theme.palette.accent, painter.px(1.0));
+        }
+        let label = i18n::format("clash.for_the_rest", &[&clash.rest]);
+        let baseline = painter.baseline(top, CLASH_STEP, metrics.text_size);
+        line(painter, &label, subtitle, left + 22.0, inner - 22.0, baseline);
+        Area { x: area.x, y: top, width: area.width, height: CLASH_STEP }
+    });
+}
+
+/// The two files, side by side, so the difference is where the eye already is
+/// rather than two paragraphs apart.
+fn clash_files(
+    painter: &mut Painter<'_>,
+    clash: &crate::edit::Clash,
+    left: f32,
+    top: f32,
+    inner: f32,
+    now: i64,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let subtitle = TextStyle::new(metrics.header_size, theme.palette.dim);
+    let column = (inner - PROPERTIES_GAP) / 2.0;
+    for (at, (key, facts)) in
+        [("clash.there", &clash.theirs), ("clash.arriving", &clash.ours)].into_iter().enumerate()
+    {
+        let x = left + at as f32 * (column + PROPERTIES_GAP);
+        let head = painter.baseline(top, 16.0, metrics.header_size);
+        line(painter, i18n::lookup(key), subtitle, x, column, head);
+        let detail = facts.as_ref().map_or_else(
+            || i18n::lookup("clash.unknown").to_owned(),
+            |it| {
+                format!(
+                    "{}\u{2002}·\u{2002}{}",
+                    format::size(it.size),
+                    format::modified(it.modified, now)
+                )
+            },
+        );
+        let body = painter.baseline(top + 18.0, metrics.row_height, metrics.text_size);
+        line(
+            painter,
+            &detail,
+            TextStyle::new(metrics.text_size, theme.palette.text),
+            x,
+            column,
+            body,
+        );
+    }
+}
+
+/// The question panel: its title strip, its two-column comparison, one answer
+/// row, and how wide it is before the window narrows it.
+const CLASH_TITLE: f32 = 54.0;
+const CLASH_FACTS: f32 = 52.0;
+const CLASH_STEP: f32 = 26.0;
+const CLASH_WIDTH: f32 = 440.0;
 
 /// How much smaller a tab's shape is than the space it is given, at each edge.
 const TAB_INSET: f32 = 3.0;
@@ -2283,6 +2447,9 @@ mod tests {
                 hovered_place: None,
                 drop_row: None,
                 drop_pane: None,
+                clash: None,
+                answering: 0,
+                for_the_rest: false,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,
