@@ -75,6 +75,14 @@ verb.deleting = Deleting
 verb.trashing = Moving to Trash
 notice.progress = {0}… {1} of {2}
 notice.progress_rate = {0}… {1} of {2}, {3} at {4}/s
+notice.progress_eta = {0}… {1} of {2}, {3} of {4} at {5}/s, {6} left
+notice.paused = {0} paused — {1} of {2}, {3} done
+
+# How long something has left, rounded to what a person can act on.
+time.a_moment = a moment
+time.seconds = {0} seconds
+time.minutes = {0} minutes
+time.hours = {0} hours
 notice.cancelled = Stopped. What was already copied is still there — Ctrl+Z takes it back.
 action.cancel = Stop the operation
 action.select_all_text = Select the whole name, in a field
@@ -135,6 +143,7 @@ key.page_up = Page Up
 key.page_down = Page Down
 key.insert = Insert
 key.menu = Menu
+key.pause = Pause
 key.function = F{0}
 
 # Abbreviated month names. Three letters in English; not necessarily three in
@@ -178,6 +187,7 @@ action.terminal = Open a terminal here
 action.duplicate = Duplicate
 action.delete = Delete permanently
 action.trash = Move to Trash
+action.pause = Pause or continue
 action.undo = Undo
 action.redo = Redo
 action.filter = Filter the list

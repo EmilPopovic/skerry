@@ -39,6 +39,7 @@ fn named(keysym: u32) -> Option<Named> {
         sym::KEY_Page_Down | sym::KEY_KP_Page_Down => Named::PageDown,
         sym::KEY_Insert | sym::KEY_KP_Insert => Named::Insert,
         sym::KEY_Menu => Named::Menu,
+        sym::KEY_Pause => Named::Pause,
         sym::KEY_F1..=sym::KEY_F24 => Named::Function((keysym - sym::KEY_F1 + 1) as u8),
         _ => return None,
     })

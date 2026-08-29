@@ -117,6 +117,10 @@ pub enum Named {
     PageDown,
     Insert,
     Menu,
+    /// The key most desktop keyboards have and most laptops do not. Bound
+    /// because it is the one key whose name is what it does, and reachable
+    /// without it through the menu and the palette.
+    Pause,
     /// A function key, one-based: `Function(1)` is F1.
     Function(u8),
 }

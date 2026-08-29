@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use sk_cmd::History;
 use sk_fs::ops::{self, Change};
 use sk_model::Problem;
-use sk_util::{Cancel, Lane, WakeHandle};
+use sk_util::{Cancel, Lane, Pause, WakeHandle};
 
 use crate::field::Field;
 use crate::pane::Jobs;
@@ -68,6 +68,23 @@ struct Progress {
     bytes: u64,
 }
 
+/// How much there turned out to be, once something counted it.
+///
+/// **The whole reason there was no ETA.** A rate needs a total, and the total is
+/// not known until something has walked to the last file — so this is that walk,
+/// running beside the copy on its own job. Metadata is far cheaper than the data
+/// the copy is moving, so it almost always finishes first; where it does not, the
+/// line goes on saying what has happened, which is what it said before.
+#[derive(Clone, Copy, Debug, Default)]
+struct Total {
+    bytes: u64,
+    files: u64,
+    /// Whether the walk reached the end. **Nothing is estimated from a partial
+    /// total**: a percentage that counts up to 40% and then starts over because
+    /// the walk found more is worse than no percentage at all.
+    complete: bool,
+}
+
 /// What is in flight, for the status line.
 struct Running {
     /// The catalogue key for the word: copying, moving, or trashing.
@@ -100,6 +117,27 @@ pub struct Edits {
     pending: Option<Pending>,
     /// The token for the operation in flight, for the ones worth stopping.
     stop: Option<Cancel>,
+    /// When the last progress update was sent, shared by every job of one queue.
+    ///
+    /// **One instant for the queue, not one per item.** Each entry is its own
+    /// job, so a throttle starting at each job's own start swallows every update
+    /// from an entry that finishes inside the window — and a queue of twenty
+    /// folders that each copy in 80 ms reported *no bytes at all*, so the line
+    /// never showed a rate and the ETA could never appear. Found by a scenario
+    /// asking for the ETA; the one before it only asked whether the line said
+    /// "Copying".
+    reported: std::sync::Arc<std::sync::Mutex<std::time::Instant>>,
+    /// The latch the whole queue waits on, held for as long as it is paused.
+    ///
+    /// One for the queue rather than one per job, so a pause taken between two
+    /// files is still a pause when the next one starts.
+    pause: Pause,
+    /// How much the queue has to move, once the walk beside it has finished.
+    total: Total,
+    totals: Receiver<Total>,
+    totals_tx: Sender<Total>,
+    /// The walk's own token, so a cancelled queue does not leave one running.
+    counting: Option<Cancel>,
     /// Whether the queue in flight was stopped, so the notice says so once.
     cancelled_queue: bool,
     /// What a queued operation has changed so far, recorded as one entry when it
@@ -285,6 +323,7 @@ impl Edits {
     pub fn new(wake: WakeHandle) -> Self {
         let (sender, done) = std::sync::mpsc::channel();
         let (progress_tx, progress) = std::sync::mpsc::channel();
+        let (totals_tx, totals) = std::sync::mpsc::channel();
         // Two hundred is a long session's worth of mutations and a bounded
         // amount of memory. Rule 3 asks for visible history, not infinite.
         Self {
@@ -294,6 +333,12 @@ impl Edits {
             naming_owed: false,
             pending: None,
             stop: None,
+            reported: std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now())),
+            pause: Pause::new(),
+            total: Total::default(),
+            totals,
+            totals_tx,
+            counting: None,
             cancelled_queue: false,
             batch: Vec::new(),
             running: None,
@@ -416,7 +461,86 @@ impl Edits {
         // at.
         self.queue = paths;
         self.queue.reverse();
+        self.reported = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        self.start_counting(jobs);
         self.next_in_queue(jobs);
+    }
+
+    /// Walks everything the queue holds, so the line can say how much is left.
+    ///
+    /// **Its own job, beside the copy rather than before it.** Counting first
+    /// would make every paste wait on a walk it does not need to start, and the
+    /// walk is the cheap half: `statx` per entry against the bytes the copy is
+    /// actually moving.
+    ///
+    /// Trash and Erase are not counted. Neither moves bytes, so a rate over them
+    /// would be a number with no meaning, and the line already counts entries.
+    fn start_counting(&mut self, jobs: &Jobs) {
+        self.total = Total::default();
+        if let Some(running) = self.counting.take() {
+            running.cancel();
+        }
+        if matches!(self.doing, Queued::Trash | Queued::Erase) {
+            return;
+        }
+        let paths = self.queue.clone();
+        let sender = self.totals_tx.clone();
+        let wake = self.wake.clone();
+        let token = Cancel::new();
+        self.counting = Some(token.clone());
+        jobs.pool.spawn(Lane::Parallel, token, move |cancel| {
+            let mut carried = Total::default();
+            for path in &paths {
+                let mut here = sk_index::size::Progress::default();
+                sk_index::size::measure(path, cancel, &mut |progress| {
+                    here = progress;
+                    let running = Total {
+                        bytes: carried.bytes + progress.bytes,
+                        files: carried.files + progress.files,
+                        complete: false,
+                    };
+                    if sender.send(running).is_ok() {
+                        wake.wake();
+                    }
+                });
+                if cancel.is_cancelled() {
+                    return;
+                }
+                carried.bytes += here.bytes;
+                carried.files += here.files;
+            }
+            carried.complete = true;
+            if sender.send(carried).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Holds the queue where it is, or lets it go.
+    ///
+    /// **Between files, which is where a cancel also takes effect.** The engine
+    /// checks both at the same checkpoints, so a 4 GiB file paused half way
+    /// finishes that file and stops before the next. A finer grain would need
+    /// the per-extent loop to take a token, which is the same change that would
+    /// make a single huge file cancellable — and it is not, today.
+    pub fn hold(&mut self, held: bool) {
+        if held {
+            self.pause.hold();
+        } else {
+            self.pause.release();
+        }
+    }
+
+    /// Whether the queue is standing still.
+    #[must_use]
+    pub fn held(&self) -> bool {
+        self.pause.held()
+    }
+
+    /// How much the walk beside the queue has counted, and whether it finished.
+    #[must_use]
+    pub const fn counted(&self) -> (u64, bool) {
+        (self.total.bytes, self.total.complete)
     }
 
     /// Starts the next queued operation, if nothing is in flight.
@@ -453,16 +577,26 @@ impl Edits {
         // just now or from a "for the rest" given several items ago.
         let answer = self.once.take().or(self.standing);
         let queue_left = self.queue.len();
+        let pause = self.pause.clone();
+        let reported = std::sync::Arc::clone(&self.reported);
         self.start(Pending::Doing, jobs, move |cancel| {
             // Throttled to ten a second: a copy of ten thousand small files would
             // otherwise wake the frame loop ten thousand times, and the loop
             // exists to sleep.
-            let mut last = std::time::Instant::now();
             let mut watch = |progress: sk_fs::copy::Progress| {
+                // **The pause happens here, and it is not throttled.** The engine
+                // calls this at every point it also checks the cancel token —
+                // once per file, per symlink and per directory — so this closure
+                // is the checkpoint, and putting the wait behind the throttle
+                // would make a pause land up to a tenth of a second of files
+                // later than it was asked for.
+                pause.wait(cancel);
+                let Ok(mut last) = reported.lock() else { return };
                 if last.elapsed() < std::time::Duration::from_millis(100) {
                     return;
                 }
-                last = std::time::Instant::now();
+                *last = std::time::Instant::now();
+                drop(last);
                 let update =
                     Progress { done: progress.done, bytes: carried_bytes + progress.bytes };
                 if updates.send(update).is_ok() {
@@ -729,6 +863,14 @@ impl Edits {
         if let Some(stop) = self.stop.as_ref() {
             stop.cancel();
         }
+        if let Some(counting) = self.counting.take() {
+            counting.cancel();
+        }
+        // **Released, or a queue stopped while paused never stops.** The latch
+        // outlives the job holding it, so a cancel that left it closed would
+        // hold the *next* operation too, and the only thing on screen saying so
+        // would be a progress line that had already gone.
+        self.pause.release();
     }
 
     /// Whether there is something worth stopping.
@@ -739,43 +881,78 @@ impl Edits {
 
     /// What to say about the operation in flight, if anything.
     ///
-    /// **Counted, never estimated from a guess.** The total is not known until
-    /// the walk finds the last file, so this says what has been done — and the
-    /// rate, once there is enough of a sample for one. [Rule
-    /// 7](../../../docs/03-principles.md) is that progress is honest, and a bar
-    /// derived from a prediction is what it exists to forbid.
+    /// **Three sentences, and which one appears says how much is known.** What
+    /// has been done, always. The rate, once there is a quarter of a second of
+    /// sample. The time left, once the walk beside the copy has reached the last
+    /// file — and not before, because an estimate against a total that is still
+    /// climbing counts up to 40% and then starts over.
+    ///
+    /// [Rule 7](../../../docs/03-principles.md) is that progress is honest, and
+    /// a bar derived from a prediction is what it exists to forbid. This is a
+    /// prediction from two measurements: a total that was counted and a rate that
+    /// was observed.
     #[must_use]
     pub fn progress_line(&self) -> Option<String> {
         let running = self.running.as_ref()?;
         let elapsed = running.started.elapsed().as_secs_f64();
         let queued = self.queued.max(1);
-        let left = self.queue.len();
+        let of = queued - self.queue.len();
+        let verb = sk_model::i18n::lookup(running.verb);
+        if self.pause.held() {
+            return Some(sk_model::i18n::format(
+                "notice.paused",
+                &[&verb, &of, &queued, &sk_ui::format::size(running.bytes)],
+            ));
+        }
         // A rate needs a sample. Under a quarter of a second of it is noise, and
         // a number that jumps between 4 MB/s and 900 MB/s is worse than none.
-        let rate =
-            (elapsed > 0.25 && running.bytes > 0).then(|| (running.bytes as f64 / elapsed) as u64);
-        let of = queued - left;
-        Some(match rate {
-            Some(rate) => sk_model::i18n::format(
-                "notice.progress_rate",
+        let Some(rate) =
+            (elapsed > 0.25 && running.bytes > 0).then(|| (running.bytes as f64 / elapsed) as u64)
+        else {
+            return Some(sk_model::i18n::format("notice.progress", &[&verb, &of, &queued]));
+        };
+        let done = sk_ui::format::size(running.bytes);
+        let speed = sk_ui::format::size(rate);
+        let left = (self.total.complete && rate > 0)
+            .then(|| self.total.bytes.saturating_sub(running.bytes) / rate);
+        Some(match left {
+            Some(seconds) => sk_model::i18n::format(
+                "notice.progress_eta",
                 &[
-                    &sk_model::i18n::lookup(running.verb),
+                    &verb,
                     &of,
                     &queued,
-                    &sk_ui::format::size(running.bytes),
-                    &sk_ui::format::size(rate),
+                    &done,
+                    &sk_ui::format::size(self.total.bytes),
+                    &speed,
+                    &sk_ui::format::how_long(seconds),
                 ],
             ),
             None => sk_model::i18n::format(
-                "notice.progress",
-                &[&sk_model::i18n::lookup(running.verb), &of, &queued],
+                "notice.progress_rate",
+                &[&verb, &of, &queued, &done, &speed],
             ),
         })
+    }
+
+    /// How far along the whole queue is, from 0 to 1, once that is knowable.
+    ///
+    /// `None` until the walk has finished, for the reason the ETA is: a fraction
+    /// of a total that is still growing goes backwards.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f32> {
+        let running = self.running.as_ref()?;
+        (self.total.complete && self.total.bytes > 0)
+            .then(|| (running.bytes as f32 / self.total.bytes as f32).clamp(0.0, 1.0))
     }
 
     /// Takes delivery of progress updates. Returns whether anything moved.
     pub fn drain_progress(&mut self) -> bool {
         let mut moved = false;
+        while let Ok(total) = self.totals.try_recv() {
+            self.total = total;
+            moved = true;
+        }
         while let Ok(update) = self.progress.try_recv() {
             if let Some(running) = self.running.as_mut() {
                 running.done = update.done;

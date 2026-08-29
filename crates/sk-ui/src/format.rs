@@ -78,6 +78,23 @@ pub fn modified(epoch_seconds: i64, now: i64) -> String {
     format!("{} {} {}", when.day, month_name(when.month), when.year)
 }
 
+/// How long is left, as something a person reads rather than counts.
+///
+/// **Rounded, coarsely, and deliberately.** "4 minutes 37 seconds" is a number
+/// nobody can act on and one that is wrong a second later; "about 5 minutes" is
+/// the same information without the false precision. The granularity coarsens
+/// with the magnitude for the same reason — a second of error in "12 seconds"
+/// matters and a second in "about 2 hours" does not.
+#[must_use]
+pub fn how_long(seconds: u64) -> String {
+    match seconds {
+        0..=4 => i18n::lookup("time.a_moment").to_owned(),
+        5..=89 => i18n::format("time.seconds", &[&(seconds.div_ceil(5) * 5)]),
+        90..=5399 => i18n::format("time.minutes", &[&((seconds + 30) / 60).max(2)]),
+        _ => i18n::format("time.hours", &[&((seconds as f64 / 3600.0 * 10.0).round() / 10.0)]),
+    }
+}
+
 /// Reads the timezone database, once, wherever it is called.
 ///
 /// glibc initialises the timezone lazily on the first `localtime_r`, and that

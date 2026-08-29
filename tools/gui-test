@@ -825,7 +825,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 86
+FEWEST_SCENARIOS = 87
 
 
 def scenario(name, fresh: bool = False):
@@ -3258,6 +3258,82 @@ def progress_and_cancel(run: Run, fixture: Path) -> None:
     after = sum(1 for _ in (fixture / "target").rglob("*"))
     if after >= before:
         raise Failure(f"the undo removed nothing: {before} entries, then {after}")
+
+
+@scenario("a-copy-pauses-where-it-is-and-carries-on", fresh=True)
+def pause_and_resume(run: Run, fixture: Path) -> None:
+    """A running copy is held still, and the disk stops changing while it is.
+
+    **What makes this a pause rather than a stop and a restart**: the job stands
+    on a latch holding what it has open, so nothing is redone when it goes on.
+    The claim the assertions make is the observable half of that — the file count
+    does not move while it is held, and the copy finishes without the queue
+    starting over.
+
+    Also the ETA, which is the other half of rule 7 and was owed. It appears only
+    once the walk running beside the copy has reached the last file, so the
+    diagnostic line's `total_done` is what this waits for rather than a `sleep`.
+    """
+    big = fixture / "big"
+    # Twenty entries, so the queue is long enough that a pause asked for in the
+    # second `drive` call lands while it is still running. `a-big-copy` explains
+    # why syscalls per file rather than bytes is the lever.
+    for bucket in range(30):
+        (big / f"bucket-{bucket}").mkdir(parents=True)
+        for index in range(2500):
+            (big / f"bucket-{bucket}" / f"part-{index:04}.bin").write_bytes(b"x" * 128)
+    (fixture / "target").mkdir()
+
+    run.drive("sleep 700\ntext big\nsleep 400\nkey enter\nsleep 900\nkey f12\nsleep 150\n")
+    expect(run.state(), rows="30")
+    run.drive("key ctrl+a\nsleep 250\nkey ctrl+c\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), selected="30")
+    run.drive("key backspace\nsleep 900\nsleep 700\ntext target\nsleep 400\nkey enter\nsleep 900\n")
+
+    # Sampled throughout rather than at a chosen moment, for the reason
+    # `a-big-copy` gives: one `f12` at one instant is a bet on how long a copy
+    # takes, and this one has to catch the window where the rate is known and the
+    # queue is still running.
+    run.drive("key ctrl+v\nsleep 200\n" + "key f12\nsleep 70\n" * 3)
+    expect(run.state(), busy="true", paused="false")
+    run.drive("key pause\nsleep 400\nkey f12\nsleep 150\n")
+    held = run.state()
+    if held["busy"] != "true":
+        raise Failure("the copy finished before the pause could land; it needs to be longer")
+    expect(held, paused="true")
+    if "aused" not in held["progress"]:
+        raise Failure(f"the line does not say it is paused: {held['progress']!r}")
+
+    # **The disk stops changing.** A pause that only changed a word in the status
+    # line would pass every assertion above this one.
+    settled = sum(1 for _ in (fixture / "target").rglob("*.bin"))
+    run.drive("sleep 1200\nkey f12\nsleep 150\n")
+    still = sum(1 for _ in (fixture / "target").rglob("*.bin"))
+    expect(run.state(), paused="true", busy="true")
+    if still != settled:
+        raise Failure(f"{still - settled} more files arrived while the copy was paused")
+    if still == 0:
+        raise Failure("nothing had been copied before the pause, so nothing was held")
+
+    # The count beside the copy has reached the end by now, which is the whole
+    # condition on there being a time left to show.
+    if run.state()["total_done"] != "true":
+        raise Failure("the walk beside the copy never finished counting")
+
+    run.drive("key pause\nsleep 120\n" + "key f12\nsleep 70\n" * 6)
+    running = next((it for it in run.states() if "left" in it.get("progress", "")), None)
+    if running is None:
+        seen = {it.get("progress", "") for it in run.states()}
+        raise Failure(f"no sample showed a time left; the lines seen were {sorted(seen)}")
+
+    for _ in range(60):
+        run.drive("sleep 500\nkey f12\nsleep 100\n")
+        if run.state()["busy"] == "false":
+            break
+    expect(run.state(), busy="false", paused="false")
+    arrived = sum(1 for _ in (fixture / "target").rglob("*.bin"))
+    if arrived != 75_000:
+        raise Failure(f"{arrived} of 75,000 files arrived after the pause was let go")
 
 
 @scenario("a-rename-offers-the-name-and-keeps-the-extension", fresh=True)

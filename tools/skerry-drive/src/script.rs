@@ -293,7 +293,7 @@ fn keycode(name: &str) -> Option<u32> {
         ("9", 10),
         ("0", 11),
     ];
-    const NAMED: [(&str, u32); 22] = [
+    const NAMED: [(&str, u32); 23] = [
         ("escape", 1),
         ("esc", 1),
         ("backspace", 14),
@@ -316,6 +316,9 @@ fn keycode(name: &str) -> Option<u32> {
         ("period", 52),
         ("slash", 53),
         ("minus", 12),
+        // `KEY_PAUSE`. The one key whose name is what it does, and the one bound
+        // to holding a running operation still.
+        ("pause", 119),
     ];
     /// Every key a US layout produces without Shift, as the character itself, so
     /// `text my-file.txt` types a filename rather than refusing one. `SHIFTED`

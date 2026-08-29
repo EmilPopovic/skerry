@@ -121,6 +121,7 @@ fn named(word: &str) -> Option<Named> {
         "pagedown" | "page_down" | "pgdn" => Named::PageDown,
         "insert" | "ins" => Named::Insert,
         "menu" => Named::Menu,
+        "pause" => Named::Pause,
         function if function.starts_with('f') && function.len() <= 3 => {
             // xkb maps F1 to F24 and nothing above it, so `f99` is a typo and
             // not a key. Accepting it would bind a command to a chord no
@@ -179,6 +180,7 @@ fn key_name(key: Key) -> String {
             Named::PageDown => named("key.page_down"),
             Named::Insert => named("key.insert"),
             Named::Menu => named("key.menu"),
+            Named::Pause => named("key.pause"),
             Named::Function(number) => sk_model::i18n::format("key.function", &[&number]),
         },
     }
@@ -316,6 +318,7 @@ mod tests {
                     Named::PageDown,
                     Named::Insert,
                     Named::Menu,
+                    Named::Pause,
                 ]
                 .map(Key::Named),
             )

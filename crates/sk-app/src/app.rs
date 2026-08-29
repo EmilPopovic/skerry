@@ -2771,6 +2771,23 @@ impl App {
         self.edits.cancellable()
     }
 
+    /// Whether there is anything worth holding still.
+    ///
+    /// The same set as [`Self::can_cancel`]: a trash is one syscall with nothing
+    /// between its start and its end to pause at, and a queue that is already
+    /// paused is worth un-pausing.
+    #[must_use]
+    pub fn can_pause(&self) -> bool {
+        self.edits.cancellable()
+    }
+
+    /// Holds the queue where it is, or lets it go.
+    pub(crate) fn toggle_pause(&mut self) {
+        let held = !self.edits.held();
+        self.edits.hold(held);
+        self.dirty = true;
+    }
+
     /// Whether there is anything on the clipboard worth pasting.
     ///
     /// Asked of what the peer *offers*, not of what it holds: reading the bytes
@@ -3676,6 +3693,10 @@ impl App {
         let clash_rest = self.edits.clash.as_ref().map_or(0, |it| it.rest);
         let answer = if asking { self.edits.chosen_answer().key() } else { "" };
         let for_the_rest = self.edits.for_the_rest;
+        let paused = self.edits.held();
+        // The counted total, and whether the count reached the end — which is
+        // the whole condition on there being an ETA at all.
+        let (total, total_done) = self.edits.counted();
         let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
         // The display server's own view, which is not the same question: one is
         // "this window is carrying something", the other is "the server has a
@@ -3700,7 +3721,7 @@ naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
-for_the_rest={for_the_rest} \
+for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
 filtering={} filter={:?} drop_row={drop_row} drop_leaf={drop_leaf} drop_whole={drop_whole} \
 dragging={dragging} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
@@ -5501,6 +5522,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             clash: edits.clash.as_ref(),
             answering: edits.answering,
             for_the_rest: edits.for_the_rest,
+            progress: edits.fraction(),
             naming: edits.naming.as_ref(),
             tools,
             filtering: *filtering,

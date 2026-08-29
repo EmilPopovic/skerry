@@ -65,6 +65,68 @@ impl Cancel {
     }
 }
 
+/// A shared latch a job waits on and its owner opens.
+///
+/// **Blocks the worker, and that is the point.** "Pause" implemented by stopping
+/// and starting again is not a pause: a tree copy that stopped between files and
+/// started over would redo the file it was in the middle of, and one that stopped
+/// mid-file would leave a partial nobody asked for. A real pause has the job
+/// stand still, holding whatever it has open, until it is let go.
+///
+/// **At most one job is ever paused**, because at most one mutation is ever in
+/// flight — see `sk_app::edit`. A paused job holds one worker of
+/// `available_parallelism`, and a design that could pause many would have to
+/// count them against the pool's width.
+#[derive(Clone, Default, Debug)]
+pub struct Pause(Arc<(Mutex<bool>, Condvar)>);
+
+impl Pause {
+    /// A latch that is open.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Closes it. The next job to reach a checkpoint stops there.
+    pub fn hold(&self) {
+        if let Ok(mut held) = self.0.0.lock() {
+            *held = true;
+        }
+    }
+
+    /// Opens it and wakes whatever was waiting.
+    pub fn release(&self) {
+        if let Ok(mut held) = self.0.0.lock() {
+            *held = false;
+        }
+        self.0.1.notify_all();
+    }
+
+    /// Whether it is closed.
+    #[must_use]
+    pub fn held(&self) -> bool {
+        self.0.0.lock().is_ok_and(|held| *held)
+    }
+
+    /// Stands still while it is closed, and returns when it opens.
+    ///
+    /// `cancel` is checked as well as waited on: a queue stopped while it is
+    /// paused must not need un-pausing first, which is a state a person can
+    /// reach and not get out of.
+    pub fn wait(&self, cancel: &Cancel) {
+        let Ok(mut held) = self.0.0.lock() else { return };
+        while *held && !cancel.is_cancelled() {
+            // Timed rather than plain, so a `cancel` that arrives while this is
+            // waiting is noticed without the canceller having to know there is a
+            // latch to open as well.
+            let Ok((next, _)) = self.0.1.wait_timeout(held, Duration::from_millis(50)) else {
+                return;
+            };
+            held = next;
+        }
+    }
+}
+
 type Task = Box<dyn FnOnce(&Cancel) + Send + 'static>;
 
 struct Job {
@@ -358,10 +420,61 @@ impl WakeHandle {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Cancel, Lane, Pool, SHUTDOWN_GRACE, Waker};
+    use super::{Cancel, Lane, Pause, Pool, SHUTDOWN_GRACE, Waker};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+
+    /// A held job stands still and goes on when it is let go.
+    #[test]
+    fn a_paused_job_stops_at_its_checkpoint_and_carries_on() {
+        let pause = Pause::new();
+        let cancel = Cancel::new();
+        let reached = Arc::new(AtomicUsize::new(0));
+        pause.hold();
+
+        let running = {
+            let (pause, cancel, reached) = (pause.clone(), cancel.clone(), Arc::clone(&reached));
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    pause.wait(&cancel);
+                    reached.fetch_add(1, Ordering::Release);
+                }
+            })
+        };
+
+        // Long enough that a latch which did not hold would have run all three.
+        let a_while = std::time::Duration::from_millis(120);
+        std::thread::sleep(a_while); // skerry-allow: no-blocking-ui — time passing is the claim
+        assert_eq!(reached.load(Ordering::Acquire), 0, "the job ran through a closed latch");
+        pause.release();
+        running.join().expect("the job did not finish after the latch opened");
+        assert_eq!(reached.load(Ordering::Acquire), 3);
+    }
+
+    /// **A queue stopped while paused must stop.** Without this a person can
+    /// pause, press cancel, and be left with a job that is waiting on a latch
+    /// nothing on screen says is closed.
+    #[test]
+    fn a_cancel_gets_a_job_out_of_a_pause_nobody_opened() {
+        let pause = Pause::new();
+        let cancel = Cancel::new();
+        pause.hold();
+        let running = {
+            let (pause, cancel) = (pause.clone(), cancel.clone());
+            std::thread::spawn(move || pause.wait(&cancel))
+        };
+        let a_while = std::time::Duration::from_millis(60);
+        std::thread::sleep(a_while); // skerry-allow: no-blocking-ui — time passing is the claim
+        assert!(!running.is_finished(), "the latch did not hold");
+        cancel.cancel();
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while !running.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(running.is_finished(), "a cancelled job stayed in the pause");
+        assert!(pause.held(), "the cancel opened the latch instead of leaving it closed");
+    }
 
     /// A worker inside a blocking syscall cannot be asked to stop, and joining
     /// one meant the window vanished and the process never exited — a peer that

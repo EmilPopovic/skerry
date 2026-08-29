@@ -21,4 +21,4 @@
 
 pub mod pool;
 
-pub use pool::{Cancel, Lane, Pool, WakeHandle, Waker};
+pub use pool::{Cancel, Lane, Pause, Pool, WakeHandle, Waker};

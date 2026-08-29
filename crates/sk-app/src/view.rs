@@ -72,6 +72,8 @@ pub struct Chrome<'a> {
     pub answering: usize,
     /// Whether the answer would cover the rest of the queue.
     pub for_the_rest: bool,
+    /// How far along a running operation is, once that is knowable.
+    pub progress: Option<f32>,
     /// The breadcrumb separator under the pointer.
     pub hovered_separator: Option<usize>,
     /// The sibling menu a separator has opened, while one is open.
@@ -2122,6 +2124,14 @@ fn status(
     let metrics = theme.metrics;
     fill(painter, layout.status, theme.palette.chrome);
     painter.hairline(0.0, layout.status.y, layout.status.width, theme.palette.divider);
+    // **A determinate bar, or none at all** — rule 7 forbids the indeterminate
+    // kind, and until something had counted the total there was nothing honest
+    // to draw. On the divider rather than beside the text: it is the full width
+    // of the window, so a glance reads it without finding it first.
+    if let Some(fraction) = chrome.progress {
+        let bar = painter.rect(0.0, layout.status.y, layout.status.width * fraction, 2.0);
+        painter.list.rect(bar, theme.palette.accent, 0.0);
+    }
     let size = metrics.header_size;
     let baseline = painter.baseline(layout.status.y, layout.status.height, size);
 
@@ -2450,6 +2460,7 @@ mod tests {
                 clash: None,
                 answering: 0,
                 for_the_rest: false,
+                progress: None,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,

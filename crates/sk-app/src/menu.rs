@@ -32,7 +32,7 @@ pub const ON_ROW: &[&[&str]] = &[
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],
-    &["edit.undo", "edit.redo", "edit.cancel"],
+    &["edit.undo", "edit.redo", "edit.pause", "edit.cancel"],
     &["select.all", "view.filter"],
     &["view.hidden", "view.theme", "view.sidebar"],
     &["view.zoom_in", "view.zoom_out", "view.zoom_reset"],

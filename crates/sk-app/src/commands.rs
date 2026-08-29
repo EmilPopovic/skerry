@@ -611,6 +611,18 @@ fn file(registry: &mut Registry<App>) {
             run: App::copy_content,
         },
         CommandSpec {
+            id: "edit.pause",
+            name: "action.pause",
+            group: Group::Edit,
+            // The one key whose name is what it does — and most laptops have no
+            // Pause key at all, which is why this is also on the background menu
+            // and in the palette. A chord over a letter would be arbitrary and
+            // would be the first thing a rebindable keymap has to fight over.
+            keys: &["pause"],
+            enabled: App::can_pause,
+            run: App::toggle_pause,
+        },
+        CommandSpec {
             id: "edit.cancel",
             name: "action.cancel",
             group: Group::Edit,

@@ -120,6 +120,7 @@ fn chrome_of<'a>(
         clash: None,
         answering: 0,
         for_the_rest: false,
+        progress: None,
         naming: None,
         tools: [true, true, true, true],
         filtering: false,
