@@ -680,7 +680,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("select.none", "a click on empty space"));
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("view.path_entry", "a click on the path strip beside the breadcrumbs"));
-    reach.push(("tab.close", "the cross on a tab"));
+    reach.push(("tab.close", "the cross on a tab, or a double click on it"));
     for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND] {
         for id in groups.iter().flat_map(|group| group.iter()) {
             reach.push((id, "the context menu"));

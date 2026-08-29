@@ -3409,9 +3409,13 @@ def tabs(run: Run, fixture: Path) -> None:
         raise Failure(f"the reopened tab is showing {reopened['path']}")
 
 
-@scenario("a-click-picks-a-tab-and-the-cross-closes-it")
+@scenario("a-tab-answers-a-click-a-double-click-and-its-cross")
 def tab_pointer(run: Run, fixture: Path) -> None:
-    """Every tab action is reachable with a pointer alone."""
+    """Every tab action is reachable with a pointer alone.
+
+    A click picks the tab, a double click closes it, and so does the cross —
+    which are three gestures and, through the registry, one action.
+    """
     run.drive("sleep 500\nkey ctrl+t\nsleep 600\nkey f12\nsleep 200\n")
     state = run.state()
     expect(state, tabs="2", tab="1")
@@ -3428,6 +3432,22 @@ def tab_pointer(run: Run, fixture: Path) -> None:
     cross = aim(run, state, float(x), float(y))
     run.drive(f"move {cross[0]:.1f} {cross[1]:.1f}\nsleep 200\nclick\nsleep 500\nkey f12\nsleep 200\n")
     expect(run.state(), tabs="1")
+
+    # A double click anywhere on a tab closes it too — on the *body* of the tab
+    # rather than its cross, which the click before this one already covered.
+    run.drive("key ctrl+t\nsleep 600\nkey f12\nsleep 200\n")
+    two = run.state()
+    expect(two, tabs="2")
+    body = tab_aim(run, two, 0)
+    run.drive(f"move {body[0]:.1f} {body[1]:.1f}\nsleep 250\ndouble\nsleep 600\nkey f12\nsleep 300\n")
+    expect(run.state(), tabs="1")
+
+    # And the last tab of the last pane closes the window, which is what
+    # `Ctrl+W` does and what a person who has used a browser expects.
+    last = tab_aim(run, run.state(), 0)
+    run.drive(f"move {last[0]:.1f} {last[1]:.1f}\nsleep 250\ndouble\nsleep 700\n")
+    if run.process.poll() is None:
+        raise Failure("a double click on the last tab left the window open")
 
 
 def plus_aim(run: Run, state: dict[str, str]) -> tuple[float, float]:
@@ -3563,15 +3583,17 @@ def per_pane_watch(run: Run, fixture: Path) -> None:
     run.drive("sleep 500\nkey f3\nsleep 800\n")
     # The new half goes into the subdirectory; the first stays here.
     run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
-    run.drive(f"text {fixture / 'alpha'}\nkey enter\nsleep 900\nkey f12\nsleep 300\n")
-    state = run.state()
+    run.drive(f"text {fixture / 'alpha'}\nkey enter\nsleep 200\n")
+    # Waited for rather than slept through: a row count read before the read
+    # lands is zero, and every assertion below is against that zero.
+    state = listed(run)
     expect(state, panes="2")
     if state["pane_paths"] != f"{fixture.name},alpha":
         raise Failure(f"the two panes are showing {state['pane_paths']!r}")
     rows_alpha = int(state["rows"])
 
-    run.drive("key f6\nsleep 400\nkey f12\nsleep 200\n")
-    here = run.state()
+    run.drive("key f6\nsleep 400\n")
+    here = listed(run)
     expect(here, pane_focus="0")
     rows_here = int(here["rows"])
     run.drive("key f6\nsleep 400\nkey f12\nsleep 200\n")
@@ -3956,7 +3978,21 @@ def clean_close(run: Run, fixture: Path) -> None:
 
 @scenario("no-cpu-when-idle")
 def no_cpu_when_idle(run: Run, fixture: Path) -> None:
-    run.drive("sleep 1500\n")  # let the folder walks finish
+    """Rule 1's gate: a window nobody is touching uses no CPU at all.
+
+    **Waited for, not slept through.** The folder totals are recursive walks on
+    the job pool, and one tick of CPU is a walk that had not finished when the
+    measurement started — which a `sleep 1500` calls idle on a quiet machine and
+    does not on a busy one. The window reports how many walks are running, so
+    this asks.
+    """
+    for _ in range(40):
+        run.drive("key f12\nsleep 150\n")
+        state = run.state()
+        if state.get("sizes", "").endswith("/0") and state.get("loading") == "false":
+            break
+    else:
+        raise Failure(f"the folder walks never finished: sizes={run.state().get('sizes')!r}")
     ticks = lambda: sum(
         int(value) for value in Path(f"/proc/{run.process.pid}/stat").read_text().split()[13:15]
     )

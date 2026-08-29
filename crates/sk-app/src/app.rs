@@ -2336,7 +2336,12 @@ impl App {
     /// is *not* spent: it moves the keyboard and then goes on to select the row
     /// it landed on, which is what a click into another pane means everywhere
     /// else on the desktop.
-    fn press_in_the_tree(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+    fn press_in_the_tree(
+        &mut self,
+        position: Point,
+        clicks: u8,
+        commands: &Registry<Self>,
+    ) -> bool {
         if let Some(divider) = self.divider_at(position) {
             self.placement.dragging = Some(divider);
             return true;
@@ -2353,12 +2358,18 @@ impl App {
             return true;
         }
         let Some((index, closing)) = self.tab_at(position) else { return false };
-        if closing {
-            // Through the registry, like every other pointer route: the cross
-            // and the chord are one action, and a second way of closing a tab is
-            // a second thing to keep in step — rule 2.
+        // The cross, and a double click anywhere on the tab — which is what a
+        // person who has used a browser reaches for, and which is the same
+        // action. Through the registry, like every other pointer route: a second
+        // way of closing a tab must not be a second piece of code to keep in
+        // step, which is rule 2.
+        if closing || clicks >= 2 {
             self.panes.show_tab(id, index);
             self.settle_panes();
+            // The tab this press started a possible drag on is about to stop
+            // existing, and a drag of an index that is gone would move whatever
+            // took its place.
+            self.tab_press = None;
             if let Some(command) = commands.find("tab.close") {
                 commands.run(command, self);
             }
@@ -3953,7 +3964,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         // The tree before the header and the list, because both of those are
         // questions about *which* pane — and the answer can change here.
-        if self.press_in_the_tree(position, commands) {
+        if self.press_in_the_tree(position, clicks, commands) {
             return;
         }
         if self.placement.here.header.contains(position.x, position.y) {

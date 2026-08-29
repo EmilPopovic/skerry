@@ -1084,3 +1084,31 @@ failing against the original inversion.
 **Where a value has an identity, assert about the identity.** A count, a length
 and a `is_some()` are all the same trap: they are true of the right answer and of
 the wrong one that happens to be the same size.
+
+## Five flaky scenarios, one defect: a sleep where a wait belonged
+
+Five full runs of the GUI suite produced five failures in five *different*
+scenarios, each passing on its own. It read as an unreliable machine. It was one
+mistake, made five times:
+
+    run.drive("sleep 400\n key down\n ...")   # is the listing there yet?
+
+A directory read takes as long as it takes. A `sleep` before the first key is a
+guess at that, and a guess calibrated on an idle machine is wrong on a busy one —
+so `Down` moved a cursor that did not exist yet, a row count was read as zero and
+every later assertion compared against that zero, a copy's progress was sampled
+once after the copy had finished, and the idle-CPU gate started measuring while a
+folder walk was still running.
+
+The window already reports everything needed to *ask*: `loading`, `rows`, and how
+many size walks are running. `listed(run)` polls the state until the read has
+landed, and the four scenarios that guessed now wait. The copy samples throughout
+its window instead of at one instant.
+
+Two things worth keeping from this. The first is that **a flaky test is a defect
+in the test until proven otherwise** — five different names made it look
+environmental, and grouping them by *shape* rather than by name found the one
+cause. The second is that every repair was checked for still being able to fail:
+the idle gate against a frame loop that sleeps on an 8 ms timer, the watch
+scenario against a watcher that watches only the focused pane. A test made
+reliable by weakening it is worse than a flaky one, because nothing announces it.
