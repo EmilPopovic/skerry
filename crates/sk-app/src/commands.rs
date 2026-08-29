@@ -113,6 +113,18 @@ fn navigate(registry: &mut Registry<App>) {
             run: App::go_home,
         },
         CommandSpec {
+            id: "go.search",
+            name: "action.search",
+            group: Group::Navigate,
+            // `Ctrl+Shift+F` is search-in-project everywhere a person has met
+            // one, and `Ctrl+F` is already the find popup over the listing on
+            // screen — which is the same relationship those two keys have in
+            // every editor: narrow what is here, or go looking.
+            keys: &["ctrl+shift+f"],
+            enabled: |_| true,
+            run: App::open_search,
+        },
+        CommandSpec {
             id: "go.reload",
             name: "action.reload",
             group: Group::Navigate,

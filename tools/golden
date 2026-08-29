@@ -123,6 +123,10 @@ FRAMES = [
     # makes "replace or keep both" a question anybody can answer. Also the only
     # frame with a checkbox in it.
     ("name-taken", ["--size", "900x520", "--scale", "125", "--clash"]),
+    # The subtree search: results from three different folders, each with the
+    # folder it is in beside it, over a summary that says the walk is still
+    # going. The only frame whose rows are not one directory's.
+    ("search", ["--size", "900x520", "--scale", "125", "--search"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.

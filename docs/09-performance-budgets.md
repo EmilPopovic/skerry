@@ -57,6 +57,7 @@ the same renderer and the same glyph atlas the window uses.
 | Open a 10k-entry directory | < 30 ms | **23.9 ms** to a sorted, painted listing | met |
 | Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% at 200,000. At **973,759**: 1 run in 5 breaches, worst frame **16.4 ms** | met at 200,000; **missed at 1M**, see below |
 | Sort a large listing | < 120 ms at 1M | **166.0 ms** median of 5 at 973,759, on a job — down from 1,460 ms | **missed** by 1.4×, see below |
+| First search result | < 50 ms | **0.7 ms** median of 7 over 817,288 entries, **2.9 ms** over 563,605 | met by 17×, and see below for what it does not say |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window, on **both** display servers. On X11 the frame loop was traced across a three-second idle window and made **zero syscalls** | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
 | RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |
@@ -243,6 +244,32 @@ screen is what the process costs before any of our data exists, and 10,000
 entries add 1.3 MB to it. This is the same shape as Spike A's finding, where the
 NVIDIA proprietary driver's floor was 332 MB against a 300 MB bar. The marginal
 cost is the number under our control and it is 100 bytes an entry.
+
+### What "first search result" measures, and what it does not
+
+**Method.** `sk_index::find` over two real trees on the laptop above, load
+average 1.4–1.8 rather than idle, warm page cache, seven runs each, median
+reported: `$HOME/repos` at 817,288 entries for `report`, and `/usr` at 563,605
+for `config`. The clock runs from the call to the first report that carries a
+match. The load is recorded because
+[12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded)
+prices contamination at 6×, and 6× of 0.7 ms is still 12× inside the bar — which
+is the only reason a number taken on a busy machine is worth writing down here.
+
+**It is a measure of the first match, not of the answer.** The walk is
+depth-first from the folder the search started in, so a query whose matches are
+spread through the tree produces one almost at once. A query whose *only* match
+is the last file read takes the whole walk: **944 ms** over those 817,288
+entries, **629 ms** over the 563,605. There is no shortcut without the index
+[ADR 0008](adr/0008-persistent-index-is-required.md) requires, and this row is
+about the scope that does not have one — one subtree, walked now. The panel
+counts entries looked at while it goes, which is what stops the honest 944 ms
+case from looking like a hang.
+
+**The interval was the number before the work was.** Reports were throttled to
+one every 64 ms, so the first result could not have arrived inside 50 ms however
+fast the walk ran — the measurement would have been of the throttle. The first
+match now goes out at once and the interval takes over after it.
 
 ### The two numbers that were wrong before they were right
 

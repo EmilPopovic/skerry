@@ -117,6 +117,7 @@ fn chrome_of<'a>(
         hovered_place: None,
         drop_row: None,
         drop_pane: None,
+        search: None,
         clash: None,
         answering: 0,
         for_the_rest: false,

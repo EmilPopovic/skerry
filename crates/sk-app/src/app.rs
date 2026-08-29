@@ -376,6 +376,8 @@ enum Claim {
     Path,
     /// The command palette's query.
     Palette,
+    /// The subtree search's query.
+    Search,
 }
 
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
@@ -486,6 +488,9 @@ struct Replies {
     facts_rx: Receiver<sk_fs::facts::Facts>,
     openers_tx: std::sync::mpsc::Sender<crate::openers::Openers>,
     openers_rx: Receiver<crate::openers::Openers>,
+    /// A search report, and the query it is an answer to.
+    found_tx: std::sync::mpsc::Sender<(String, sk_index::Found)>,
+    found_rx: Receiver<(String, sk_index::Found)>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -508,6 +513,7 @@ impl Replies {
         let (launched_tx, launched_rx) = mpsc::channel();
         let (siblings_tx, siblings_rx) = mpsc::channel();
         let (facts_tx, facts_rx) = mpsc::channel();
+        let (found_tx, found_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
         Self {
             paste_tx,
@@ -522,6 +528,8 @@ impl Replies {
             facts_rx,
             openers_tx,
             openers_rx,
+            found_tx,
+            found_rx,
         }
     }
 }
@@ -666,6 +674,8 @@ pub struct App {
     typing_path: Option<crate::field::Field>,
     /// The command palette, while it is open.
     palette: Option<crate::palette::Palette>,
+    /// The subtree search, while it is open.
+    search: Option<crate::search::Search>,
     /// The Properties panel, while it is open.
     properties: Option<crate::properties::Properties>,
     /// The Open With list, while it is open.
@@ -946,6 +956,7 @@ impl App {
             hint: String::new(),
             typing_path: None,
             palette: None,
+            search: None,
             properties: None,
             openers: None,
             tab_press: None,
@@ -1031,6 +1042,7 @@ impl App {
             self.drain_launches();
             self.drain_facts();
             self.drain_openers();
+            self.drain_found();
             if self.edits.drain_progress() {
                 self.dirty = true;
             }
@@ -1492,6 +1504,11 @@ impl App {
         if self.palette.is_some() && self.palette_key(event, commands) {
             return;
         }
+        // The search takes it on the same terms and for the same reason: it is a
+        // field over the window, and every letter belongs to the query.
+        if self.search.is_some() && self.search_key(event, commands) {
+            return;
+        }
         // **A field-scoped command comes before the field's own editing keys.**
         // `Ctrl+A` over a listing is Select all and inside a field is Select the
         // whole name, and the registry is the only place that difference can live
@@ -1819,7 +1836,7 @@ impl App {
                 self.theme.metrics.path_size,
                 crate::view::PATH_INSET,
             ),
-            Claim::Filter | Claim::Palette => return,
+            Claim::Filter | Claim::Palette | Claim::Search => return,
         };
         let Some(offset) = self.text_offset_at(which, area, size, inset, x) else { return };
         if let Some(field) = self.field_for(which) {
@@ -1834,6 +1851,7 @@ impl App {
             Claim::Path => self.typing_path.as_mut(),
             Claim::Naming => self.edits.naming.as_mut().map(|naming| &mut naming.field),
             Claim::Palette => self.palette.as_mut().map(|palette| &mut palette.query),
+            Claim::Search => self.search.as_mut().map(|search| &mut search.query),
             Claim::Filter => None,
         }
     }
@@ -1882,6 +1900,7 @@ impl App {
             Claim::Path => self.typing_path.as_mut(),
             Claim::Naming => self.edits.naming.as_mut().map(|naming| &mut naming.field),
             Claim::Palette => self.palette.as_mut().map(|palette| &mut palette.query),
+            Claim::Search => self.search.as_mut().map(|search| &mut search.query),
             Claim::Filter => None,
         }) else {
             return;
@@ -1971,6 +1990,9 @@ impl App {
         }
         if keep != Claim::Path && self.typing_path.take().is_some() {
             self.dirty = true;
+        }
+        if keep != Claim::Search && self.search.is_some() {
+            self.close_search();
         }
         if keep != Claim::Palette && self.palette.take().is_some() {
             self.dirty = true;
@@ -3410,6 +3432,174 @@ impl App {
         self.dirty = true;
     }
 
+    /// The subtree search, which changes no listing while it is open and is
+    /// otherwise invisible from outside: how many results, and which one is on.
+    fn search_report(&self) -> String {
+        let Some(search) = self.search.as_ref() else {
+            return "searching=false search_query=\"\" search_hits=0 search_done=false \
+search_active=\"\""
+                .to_owned();
+        };
+        let active = search
+            .chosen()
+            .map(|hit| crate::panes::title_of(&hit.path).to_owned())
+            .unwrap_or_default();
+        format!(
+            "searching=true search_query={:?} search_hits={} search_done={} \
+search_active={active:?}",
+            search.query.text,
+            search.found.hits.len(),
+            search.found.complete,
+        )
+    }
+
+    /// Opens the search over everything under the folder being shown.
+    pub(crate) fn open_search(&mut self) {
+        if self.search.is_some() {
+            self.close_search();
+            return;
+        }
+        self.claim_keyboard(Claim::Search);
+        self.search = Some(crate::search::Search::new(self.panes.focused().path.clone()));
+        self.dirty = true;
+    }
+
+    /// Closes it and stops the walk.
+    pub(crate) fn close_search(&mut self) {
+        if let Some(search) = self.search.take() {
+            search.cancel.cancel();
+        }
+        self.dirty = true;
+    }
+
+    /// Starts a walk for whatever is typed now, stopping the one before it.
+    ///
+    /// **A walk per keystroke, and the old one is cancelled rather than left to
+    /// finish.** A tree of a hundred thousand entries takes a second or two, and
+    /// six characters typed at speed would otherwise put six walks on the pool at
+    /// once — five of them for questions nobody is asking any more.
+    fn search_again(&mut self) {
+        let Some(search) = self.search.as_mut() else { return };
+        let query = search.query.text.clone();
+        if query == search.asked {
+            return;
+        }
+        search.cancel.cancel();
+        search.asked.clone_from(&query);
+        search.found = sk_index::Found::default();
+        search.active = 0;
+        search.scroll = 0;
+        if query.is_empty() {
+            self.dirty = true;
+            return;
+        }
+        let cancel = sk_util::Cancel::new();
+        search.cancel = cancel.clone();
+        let root = search.root.clone();
+        let sender = self.replies.found_tx.clone();
+        let wake = self.waker.handle();
+        let lane = self.panes.focused().lane();
+        self.jobs.pool.spawn(lane, cancel, move |cancel| {
+            sk_index::find(&root, &query, cancel, &mut |found| {
+                if sender.send((query.clone(), found.clone())).is_ok() {
+                    wake.wake();
+                }
+            });
+        });
+        self.dirty = true;
+    }
+
+    /// Takes delivery of search reports.
+    fn drain_found(&mut self) {
+        while let Ok((query, found)) = self.replies.found_rx.try_recv() {
+            let Some(search) = self.search.as_mut() else { continue };
+            if search.arrived(&query, found) {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Goes to the highlighted result: its folder, with the cursor on it.
+    fn follow_search(&mut self) {
+        let Some(hit) = self.search.as_ref().and_then(crate::search::Search::chosen) else {
+            return;
+        };
+        let (path, name) = (hit.path.clone(), hit.path.file_name().map(std::ffi::OsStr::to_owned));
+        let Some(parent) = path.parent().map(std::path::Path::to_path_buf) else { return };
+        self.close_search();
+        // Already there: navigating would re-read the directory the results came
+        // from, which is a listing that is already on screen.
+        if parent == self.panes.focused().path {
+            self.panes.focused_mut().refresh(&self.jobs);
+        } else {
+            self.panes.focused_mut().open(parent, &self.jobs);
+        }
+        if let Some(name) = name {
+            self.panes.focused_mut().select_after(name.to_string_lossy().into_owned());
+        }
+        self.settle_panes();
+    }
+
+    /// A key while the search is open. Whether it was taken.
+    fn search_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.close_search(),
+            Key::Named(Named::Down) if bare => self.step_search(1),
+            Key::Named(Named::Up) if bare => self.step_search(-1),
+            Key::Named(Named::Enter) => self.follow_search(),
+            _ => {
+                let diagnostic = commands
+                    .resolve(event, Scope::Global)
+                    .and_then(|id| commands.describe(id))
+                    .is_some_and(|command| command.id == "help.dump");
+                if diagnostic {
+                    return false;
+                }
+                // Everything else is typing, which is what a field does with it.
+                let Some(search) = self.search.as_mut() else { return false };
+                if !search.query.key(event) {
+                    return false;
+                }
+                self.search_again();
+                self.dirty = true;
+                return true;
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn step_search(&mut self, delta: isize) {
+        if let Some(search) = self.search.as_mut() {
+            search.step(delta);
+        }
+    }
+
+    /// A press while the search is open. Whether it was taken.
+    fn press_in_the_search(&mut self, position: Point) -> bool {
+        if self.search.is_none() {
+            return false;
+        }
+        if let Some(offset) =
+            self.hits.search.iter().position(|a| a.contains(position.x, position.y))
+        {
+            if let Some(search) = self.search.as_mut() {
+                search.hover(offset);
+            }
+            self.follow_search();
+            return true;
+        }
+        if self.hits.search_field.is_some_and(|a| a.contains(position.x, position.y)) {
+            return true;
+        }
+        // A press outside it closes it and does nothing else, which is the rule
+        // every overlay here follows.
+        self.close_search();
+        true
+    }
+
     /// Takes delivery of what a path turned out to be.
     fn drain_facts(&mut self) {
         while let Ok(facts) = self.replies.facts_rx.try_recv() {
@@ -3805,6 +3995,7 @@ impl App {
         let clash_rest = self.edits.clash.as_ref().map_or(0, |it| it.rest);
         let answer = if asking { self.edits.chosen_answer().key() } else { "" };
         let for_the_rest = self.edits.for_the_rest;
+        let search = self.search_report();
         let paused = self.edits.held();
         // The three settings a session restores that nothing else on this line
         // reports. `hidden` is already here, from the pane.
@@ -3839,7 +4030,7 @@ path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
 for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
-theme={theme} zoom={zoom} sidebar_open={sidebar_open} \
+theme={theme} zoom={zoom} sidebar_open={sidebar_open} {search} \
 filtering={} filter={:?} drop_row={drop_row} drop_leaf={drop_leaf} drop_whole={drop_whole} \
 dragging={dragging} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
@@ -4249,6 +4440,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         if self.palette.is_some() {
             self.palette_press(position, commands);
+            return;
+        }
+        if self.press_in_the_search(position) {
             return;
         }
         if self.properties.take().is_some() {
@@ -5608,6 +5802,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             menu,
             typing_path,
             palette,
+            search,
             properties,
             openers,
             placement,
@@ -5637,6 +5832,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_place: sidebar.hover,
             drop_row: dropping.and_then(|drag| drag.row),
             drop_pane: dropping.and_then(|drag| drag.into_pane),
+            search: search.as_ref(),
             clash: edits.clash.as_ref(),
             answering: edits.answering,
             for_the_rest: edits.for_the_rest,

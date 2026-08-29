@@ -66,6 +66,8 @@ pub struct Chrome<'a> {
     /// The pane whose whole list would take a drop, ringed rather than a row
     /// highlighted, because the target is the directory it is showing.
     pub drop_pane: Option<PaneId>,
+    /// The subtree search, while it is open.
+    pub search: Option<&'a crate::search::Search>,
     /// The name-taken question, while one is open.
     pub clash: Option<&'a crate::edit::Clash>,
     /// Which answer it is on.
@@ -153,6 +155,11 @@ pub struct Hits {
     pub palette: Vec<Area>,
     /// The same, for the Open With list's drawn rows.
     pub openers: Vec<Area>,
+    /// One rectangle per *drawn* search result, in draw order — so the index a
+    /// click reports is an offset from the list's scroll.
+    pub search: Vec<Area>,
+    /// The search's query field, so a click into it can place the caret.
+    pub search_field: Option<Area>,
     /// One rectangle per answer to an open name-taken question, in panel order.
     pub answers: Vec<Area>,
     /// Its "for the rest of them" toggle, when there is a rest.
@@ -261,6 +268,12 @@ pub fn draw(
     }
     if let Some(palette) = chrome.palette {
         command_palette(painter, layout, palette, hits);
+    }
+    if let Some(search) = chrome.search {
+        search_panel(painter, layout, search, hits);
+    } else {
+        hits.search.clear();
+        hits.search_field = None;
     }
     if let Some(panel) = chrome.properties {
         properties(painter, layout, panel, now);
@@ -1117,6 +1130,96 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
     }
     let _ = VISIBLE;
 }
+
+/// The subtree search: a field, a summary, and results in other folders.
+///
+/// **Each row is a name and the folder it is in**, which is the difference
+/// between this and the find popup: a result out of a hundred thousand entries
+/// is not identifiable by its name alone, and *which* `Makefile` is the whole
+/// question. The folder is shown relative to where the search started, so a deep
+/// tree reads as `a/b/c` rather than as the same absolute prefix on every line.
+fn search_panel(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    search: &crate::search::Search,
+    hits: &mut Hits,
+) {
+    use crate::palette::{FIELD, INSET, STEP, TOP, WIDTH};
+
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let (first, drawn) = search.window();
+    let width = (layout.window.width - 80.0).clamp(WIDTH.0.min(layout.window.width), WIDTH.1);
+    let rows = drawn.len().max(1) as f32;
+    let height = FIELD + SEARCH_SUMMARY + rows * STEP + 6.0;
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: TOP.min((layout.window.height - height).max(8.0)),
+        width,
+        height,
+    };
+    panel_shape(painter, area);
+
+    let field_area = Area { x: area.x, y: area.y, width: area.width, height: FIELD };
+    hits.search_field = Some(field_area);
+    let baseline = painter.baseline(area.y, FIELD, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, theme.palette.text);
+    if search.query.text.is_empty() {
+        let prompt = TextStyle::new(metrics.path_size, theme.palette.dim);
+        let label = i18n::format("search.title", &[&crate::panes::title_of(&search.root)]);
+        line(painter, &label, prompt, area.x + INSET, area.width - INSET * 2.0, baseline);
+    }
+    field_text(painter, field_area, (&search.query).into(), style, INSET, baseline);
+    painter.hairline(area.x, area.y + FIELD, area.width, theme.palette.divider);
+
+    let dim = TextStyle::new(metrics.header_size, theme.palette.dim);
+    let head = painter.baseline(area.y + FIELD, SEARCH_SUMMARY, metrics.header_size);
+    let inner = area.width - INSET * 2.0;
+    line(painter, &search.summary(), dim, area.x + INSET, inner, head);
+
+    hits.search.clear();
+    if drawn.is_empty() {
+        if !search.asked.is_empty() && search.found.complete {
+            let top = area.y + FIELD + SEARCH_SUMMARY;
+            let baseline = painter.baseline(top, STEP, metrics.text_size);
+            let style = TextStyle::new(metrics.text_size, theme.palette.dim);
+            line(painter, i18n::lookup("search.none"), style, area.x + INSET, inner, baseline);
+        }
+        return;
+    }
+    for (offset, hit) in drawn.iter().enumerate() {
+        let top = area.y + FIELD + SEARCH_SUMMARY + offset as f32 * STEP;
+        hits.search.push(Area { x: area.x, y: top, width: area.width, height: STEP });
+        let highlighted = search.active == first + offset;
+        if highlighted {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let (name_colour, where_colour) = if highlighted {
+            (theme.palette.selected_text, theme.palette.selected_text)
+        } else {
+            (theme.palette.text, theme.palette.dim)
+        };
+        let baseline = painter.baseline(top, STEP, metrics.text_size);
+        let name = crate::panes::title_of(&hit.path).to_owned();
+        let where_ = hit
+            .path
+            .parent()
+            .and_then(|parent| parent.strip_prefix(&search.root).ok())
+            .map(|relative| relative.display().to_string())
+            .filter(|relative| !relative.is_empty())
+            .unwrap_or_else(|| ".".to_owned());
+        let where_width = text_width(painter, &where_, metrics.header_size, false);
+        let x = area.x + INSET;
+        let name_style = TextStyle::new(metrics.text_size, name_colour);
+        line(painter, &name, name_style, x, inner - where_width - 16.0, baseline);
+        let where_style = TextStyle::new(metrics.header_size, where_colour).right();
+        line(painter, &where_, where_style, x, inner, baseline);
+    }
+}
+
+/// The summary line between the field and the results.
+const SEARCH_SUMMARY: f32 = 22.0;
 
 /// The filter, as a panel over the top-right of the list.
 ///
@@ -2457,6 +2560,7 @@ mod tests {
                 hovered_place: None,
                 drop_row: None,
                 drop_pane: None,
+                search: None,
                 clash: None,
                 answering: 0,
                 for_the_rest: false,

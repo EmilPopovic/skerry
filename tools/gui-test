@@ -840,7 +840,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 88
+FEWEST_SCENARIOS = 89
 
 
 def scenario(name, fresh: bool = False):
@@ -2254,6 +2254,71 @@ def the_session_survives(run: Run, fixture: Path) -> None:
         expect(named.state(), panes="1", tabs="1")
     finally:
         named.close()
+
+
+@scenario("a-search-finds-a-file-three-folders-down", fresh=True)
+def subtree_search(run: Run, fixture: Path) -> None:
+    """`Ctrl+Shift+F`, type, and results arrive from folders that are not open.
+
+    The find popup narrows the listing already on screen; this walks the tree
+    under it. What the assertions cover is the difference: a file in
+    `alpha/nested`, which no listing in this window has ever held, and `Enter`
+    landing the pane on it.
+    """
+    (fixture / "alpha" / "nested" / "buried-treasure.txt").write_text("here")
+    (fixture / "beta" / "treasure-map.txt").write_text("there")
+    listed(run)
+    here = run.state()
+
+    run.drive("key ctrl+shift+f\nsleep 400\nkey f12\nsleep 200\n")
+    expect(run.state(), searching="true", search_hits="0")
+    # Typed a character at a time, which is what restarts the walk each time.
+    run.drive("text treasure\nsleep 250\n")
+    found = None
+    for _ in range(40):
+        run.drive("key f12\nsleep 120\n")
+        state = run.state()
+        if state["searching"] == "true" and state["search_done"] == "true":
+            found = state
+            break
+    if found is None:
+        raise Failure("the walk never finished")
+    expect(found, search_query="treasure", search_hits="2")
+
+    # The list is in walk order, so which one is first is not a promise. Both are
+    # reachable, and one of them is three folders down.
+    run.drive("key down\nsleep 150\nkey f12\nsleep 150\n")
+    second = run.state()["search_active"]
+    run.drive("key up\nsleep 150\nkey f12\nsleep 150\n")
+    first = run.state()["search_active"]
+    if {first, second} != {"buried-treasure.txt", "treasure-map.txt"}:
+        raise Failure(f"the results are {first!r} and {second!r}")
+
+    # Onto the buried one, and Enter goes to the folder holding it.
+    if first != "buried-treasure.txt":
+        run.drive("key down\nsleep 150\n")
+    run.drive("key enter\nsleep 1200\n")
+    landed = listed(run)
+    expect(landed, searching="false", cursor="buried-treasure.txt")
+    if landed["path"] != str(fixture / "alpha" / "nested"):
+        raise Failure(f"Enter landed on {landed['path']!r}")
+
+    # A query that matches nothing says so rather than showing the last answer.
+    run.drive("key ctrl+shift+f\nsleep 400\ntext zzzznothing\nsleep 250\n")
+    for _ in range(40):
+        run.drive("key f12\nsleep 120\n")
+        if run.state()["search_done"] == "true":
+            break
+    expect(run.state(), searching="true", search_hits="0", search_active="")
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), searching="false")
+
+    # And it searches from where the pane is, not from where the window started:
+    # back at the fixture root, the buried file is under it and findable again.
+    run.drive("key alt+left\nsleep 900\n")
+    listed(run)
+    if run.state()["path"] != here["path"]:
+        raise Failure("Back did not return to the folder the search started from")
 
 
 PEER = ROOT / "tools" / "gtk-drag-peer"

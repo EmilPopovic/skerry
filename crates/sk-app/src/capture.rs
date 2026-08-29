@@ -63,6 +63,8 @@ pub struct Capture {
     pub row_menu: bool,
     /// Whether to draw the panel that asks about a name already taken.
     pub clash: bool,
+    /// Whether to draw the subtree search, with results in it.
+    pub search: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
@@ -169,6 +171,38 @@ fn sample_clash(path: &std::path::Path) -> crate::edit::Clash {
     }
 }
 
+/// The subtree search, with a query and results from more than one folder.
+///
+/// Stated rather than walked: a capture has no pool to run a walk on, and what
+/// the frame is of is a *list* — a name, the folder it is in, and a summary that
+/// says the walk is still going. The paths are the fixture's own, so the frame
+/// is the same on every machine.
+fn sample_search(path: &std::path::Path) -> crate::search::Search {
+    let mut search = crate::search::Search::new(path.to_path_buf());
+    search.query = crate::field::Field::new("re".to_owned());
+    "re".clone_into(&mut search.asked);
+    let hit = |where_: &str, name: &str, size: u64, directory: bool| sk_index::Hit {
+        path: path.join(where_).join(name),
+        size,
+        modified: FIXED_MTIME,
+        directory,
+    };
+    search.found = sk_index::Found {
+        hits: vec![
+            hit(".", "report.pdf", 1_048_576, false),
+            hit("build", "release", 4096, true),
+            hit("build/release", "core.rs", 8_192, false),
+            hit("documents", "read-me.md", 640, false),
+        ],
+        scanned: 18_402,
+        complete: false,
+        partial: false,
+        capped: false,
+    };
+    search.active = 2;
+    search
+}
+
 /// The palette with a query in it, narrowed but not to one row.
 ///
 /// `co` rather than nothing and rather than something exact: an empty query is a
@@ -218,6 +252,7 @@ struct Overlays {
     properties: Option<crate::properties::Properties>,
     openers: Option<crate::openers::Openers>,
     clash: Option<crate::edit::Clash>,
+    search: Option<crate::search::Search>,
 }
 
 /// A rename in progress over the row whose name has two dots in it.
@@ -383,6 +418,7 @@ fn sample_overlays(
         properties: request.properties.then(sample_properties),
         openers: request.open_with.then(sample_openers),
         clash: request.clash.then(|| sample_clash(&request.path)),
+        search: request.search.then(|| sample_search(&request.path)),
     }
 }
 
@@ -495,6 +531,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
+        search: sample.overlays.search.as_ref(),
         clash: sample.overlays.clash.as_ref(),
         hint: sample.hint,
         leaves: sample.leaves,

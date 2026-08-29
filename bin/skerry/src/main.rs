@@ -37,6 +37,7 @@ struct Overlays {
     menu: bool,
     row_menu: bool,
     clash: bool,
+    search: bool,
     path_entry: bool,
     palette: bool,
     filter: bool,
@@ -57,6 +58,7 @@ impl Overlays {
             "--menu" => &mut self.menu,
             "--menu-row" => &mut self.row_menu,
             "--clash" => &mut self.clash,
+            "--search" => &mut self.search,
             "--path-entry" => &mut self.path_entry,
             "--palette" => &mut self.palette,
             "--filter" => &mut self.filter,
@@ -72,6 +74,50 @@ impl Overlays {
         *slot = true;
         true
     }
+}
+
+/// What a `--capture` is a capture of, apart from which overlay is up.
+struct Shape {
+    file: PathBuf,
+    path: PathBuf,
+    logical: (u32, u32),
+    scale_120: u32,
+    dark: bool,
+    stats: bool,
+    own_frame: bool,
+    sidebar: bool,
+}
+
+/// Renders one frame to a file.
+///
+/// Split out of `main` because the two halves are one struct literal each and
+/// `main` is at the hundred-line limit — the same reason `Overlays` exists.
+fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem> {
+    sk_app::capture(&Capture {
+        file: shape.file.clone(),
+        path: shape.path.clone(),
+        logical: shape.logical,
+        scale_120: shape.scale_120,
+        dark: shape.dark,
+        keys: overlays.keys,
+        menu: overlays.menu,
+        row_menu: overlays.row_menu,
+        clash: overlays.clash,
+        search: overlays.search,
+        path_entry: overlays.path_entry,
+        palette: overlays.palette,
+        filter: overlays.filter,
+        crumbs: overlays.crumbs,
+        crumbs_empty: overlays.crumbs_empty,
+        properties: overlays.properties,
+        open_with: overlays.open_with,
+        composing: overlays.composing,
+        split: overlays.split,
+        rename: overlays.rename,
+        stats: shape.stats,
+        own_frame: shape.own_frame,
+        sidebar: shape.sidebar,
+    })
 }
 
 fn main() -> std::process::ExitCode {
@@ -139,30 +185,10 @@ fn main() -> std::process::ExitCode {
 
     let scale_120 = forced_scale.unwrap_or(120);
     let outcome = match (capture, bench) {
-        (Some(file), _) => sk_app::capture(&Capture {
-            file,
-            path,
-            logical,
-            scale_120,
-            dark,
-            keys: overlays.keys,
-            menu: overlays.menu,
-            row_menu: overlays.row_menu,
-            clash: overlays.clash,
-            path_entry: overlays.path_entry,
-            palette: overlays.palette,
-            filter: overlays.filter,
-            crumbs: overlays.crumbs,
-            crumbs_empty: overlays.crumbs_empty,
-            properties: overlays.properties,
-            open_with: overlays.open_with,
-            composing: overlays.composing,
-            split: overlays.split,
-            rename: overlays.rename,
-            stats,
-            own_frame,
-            sidebar: !no_sidebar,
-        })
+        (Some(file), _) => render_one(
+            &Shape { file, path, logical, scale_120, dark, stats, own_frame, sidebar: !no_sidebar },
+            &overlays,
+        )
         .map(|()| true),
         (None, Some(frames)) => {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
@@ -233,6 +259,7 @@ skerry [OPTIONS] [PATH]
   --menu           show the context menu, for a golden frame of it
   --menu-row       show the menu a secondary click on a row opens
   --clash          show the panel that asks about a name already taken
+  --search         show the search over everything under this folder
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it

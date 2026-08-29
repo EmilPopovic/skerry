@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 503 tests, 88 GUI scenarios on two display servers and twenty-three golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 513 tests, 89 GUI scenarios on two display servers and twenty-four golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -151,7 +151,7 @@ defects they exposed.
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle**, on both servers | — |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, Spike E's matrix nightly on four filesystems it builds itself, and **`tools/check` on `aarch64`** — the second architecture [06-portability.md](06-portability.md) claims | Spike E's matrix is still `x86_64` only, and so are the frames: the ARM image's fonts are not the ones the references were blessed on |
-| Twenty-three golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on, compared by **CIE76 ΔE against the just-noticeable difference** — and a second pass over both images blurred by a pixel, which separates a glyph that moved from one that blended differently and says which in the failure | — |
+| Twenty-four golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on, compared by **CIE76 ΔE against the just-noticeable difference** — and a second pass over both images blurred by a pixel, which separates a glyph that moved from one that blended differently and says which in the failure | — |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8). **Deliberately not in CI**: a shared runner's worst frame says more about its neighbours than about this code, and [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded) prices that at 6× |
 
 The two capabilities left are the expensive ones, and Spike D already knows what
@@ -166,7 +166,7 @@ measured the negotiated action reported zero times and `dnd_finished` delivered 
 some peers and not others, and deleting an original on a confirmation that may
 never arrive is how a drag loses somebody's files.
 
-**The 88 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The 89 GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are
@@ -222,7 +222,9 @@ that is always there with a `+` at the end of its tabs, the divider drag,
 it and dragged into a strip joins it, with the landing place shaded before the
 button comes up — `Ctrl+T` / `Ctrl+W` / `Ctrl+Shift+T` / `Ctrl+Tab`, `F3` /
 `Shift+F3` / `Ctrl+F3` / `F6`, and a watcher that watches every visible pane
-rather than one directory. **Still owed here:** middle-click to split, the view
+rather than one directory. **Session persistence landed too**, in
+[ADR 0011](adr/0011-one-plain-text-state-file-written-atomically.md)'s terms.
+**Still owed here:** middle-click to split, the view
 modes, per-folder settings, and session persistence — the tree serializes to a
 recursive four-line form, which is what ADR 0010 chose the shape for, but nothing
 writes it yet.
@@ -319,7 +321,7 @@ to have run.
 | | What | From | Bar |
 | --- | --- | --- | --- |
 | 4 | ~~**Copy, move and permanent delete**~~ **Done.** Spike E's engine is `sk-fs::copy`: reflink, `copy_file_range` per extent, a hole-preserving floor, temp-then-rename, the three-step placement chain, recursive trees, symlinks recreated, and cancellation | M3 | Per-extent `copy_file_range` and the placement chain survive as tests rather than being rediscovered — met. The sparse test was watched failing against the naive loop: **131,072 blocks against 32** |
-| 5 | **The queue: honest progress and cancel** — done. **An ETA and pause** — not | M3, [rule 7](03-principles.md#7-honest-progress) | The status line counts entries and reports a measured rate; `Ctrl+.` stops a tree copy between files and the partial copy is one undo entry. **No ETA**: a rate needs a total and the total is not known until the walk finds the last file, so what is shown is what has happened. **No pause**: stopping and restarting is not pausing, and a real one needs the job to block |
+| 5 | ~~**The queue: honest progress, cancel, an ETA and pause**~~ **Done, and conflict resolution with it.** A walk runs beside the copy and counts what there is, so the line adds a rate and then a time left, and the status strip's divider becomes a determinate bar. `sk_util::Pause` is a latch the job waits on between files, which is where a cancel also lands. A taken name stops the queue and asks, with both files' sizes and dates | M3, [rule 7](03-principles.md#7-honest-progress) | Real throughput, a real ETA and per-file conflict resolution — met. **Replace trashes what it replaces**, as one `Change::Batch`, because [rule 3](03-principles.md#3-everything-is-reversible) does not let anything here destroy a file; where the trash refuses, the answer fails and says so. The one clause still unmet is *resumable*: a copy stopped part way is recorded as a change rather than as something to pick up |
 | 6 | ~~**A paste that pastes files, and Cut**~~ **Mostly done.** `Ctrl+V` pastes what the clipboard names, `Ctrl+X` cuts, both undoable, both on the menus. `Ctrl+V` took over from *Go to the copied folder*, which moved to `Ctrl+Shift+V` | M0 owed | A file copied in Nautilus pastes here — **unverified**, and the reverse needs `x-special/gnome-copied-files` for a cut to arrive as a move rather than a copy. That marker is what is left |
 | 7 | **Undo across copy and move** — done — **and a visible history**, which is not | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation: met, and asserted through the window for a file, a cut and a whole folder. Undoing a copy removes only what the copy made, which is why its inverse may be recursive at all |
 
@@ -359,7 +361,7 @@ so no policy above `sk-plat` may depend on `dnd_finished` arriving.
 | | What | From | Bar |
 | --- | --- | --- | --- |
 | 11 | **Tabs, the split-pane tree, and per-folder view settings** | M2 | A pane tree of any shape survives a resize and a scale change with no reflow above 8 ms |
-| 12 | **Session persistence**, and the config file that is a serialization of the same registry | M2, [rule 6](03-principles.md#6-state-survives-everything) | Every tab, pane, scroll offset, sort and filter survives `kill -9` |
+| 12 | ~~**Session persistence**~~ **Done**, decided by [ADR 0011](adr/0011-one-plain-text-state-file-written-atomically.md); the **config file** that is a serialization of the same registry is M6's and is not | M2, [rule 6](03-principles.md#6-state-survives-everything) | Every tab, pane, scroll offset and sort survives `kill -9` — met, and the scenario uses that signal rather than a clean exit, which writes the file on its way out. **The filter and the selection are deliberately not saved**, and the ADR says why rather than leaving it looking like an oversight |
 
 M2 says the layout model is the hardest thing to retrofit later, which is an
 argument for doing it earlier than this. The reason it is not earlier: a split pane
@@ -396,8 +398,19 @@ Three rows claim a gate that does not exist. Each is a job in
 
 ### After those, and in this order
 
-**Search** (M4) over the index [Spike F](../spikes/f-index-and-search/README.md) said
-go on, then **quick look and the inspector** (M5), then **desktop citizenship** (M7)
+**Search over the index** (M4) [Spike F](../spikes/f-index-and-search/README.md) said
+go on. **One subtree is searchable now** — `Ctrl+Shift+F`, a walk on the pool,
+results arriving live with the folder each is in, first result at **0.7 ms over
+817,288 entries** against a 50 ms bar
+([09](09-performance-budgets.md#what-first-search-result-measures-and-what-it-does-not)).
+What that scope does *not* need is the index, which is exactly why it exists
+first; the whole filesystem does, and the index is still not built. **The
+flattened view is also still owed**: results are navigated to, not selected,
+copied and dragged in place, because a `Listing` is what a directory read owns
+and every `path.join(name)` in the program assumes one directory behind it.
+Extension facets and ignore rules are untouched.
+
+Then **quick look and the inspector** (M5), then **desktop citizenship** (M7)
 — FileManager1, udisks2, portals, the GoTo popup — then **M8**, whose first job is the
 performance regression gate that CI deliberately does not have yet.
 

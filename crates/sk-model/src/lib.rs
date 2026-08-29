@@ -34,7 +34,7 @@ pub mod sort;
 pub use arena::{StrArena, StrRef};
 pub use bitset::BitSet;
 pub use collate::natural_cmp;
-pub use listing::{EntryId, Flags, Listing};
+pub use listing::{EntryId, Flags, Listing, contains_folded};
 pub use problem::{Problem, ProblemKind};
 pub use radix::KeySet;
 pub use selection::Selection;

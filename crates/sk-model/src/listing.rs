@@ -137,7 +137,14 @@ pub struct Listing {
 /// bargain [`crate::collate`] makes and the same one type-ahead makes: full
 /// Unicode case folding is a table, and it belongs with the search work rather
 /// than with a substring test. A Turkish `İ` therefore matches only itself.
-fn contains_folded(haystack: &str, needle: &str) -> bool {
+///
+/// **Public because [rule 8](../../../docs/03-principles.md) says the filter
+/// grammar is the same in every view.** The find popup narrows one directory
+/// with this and the subtree search in `sk-index` narrows a whole tree with it,
+/// and two copies of a substring rule is two places for "why did that not
+/// match" to have different answers.
+#[must_use]
+pub fn contains_folded(haystack: &str, needle: &str) -> bool {
     // Byte windows, and both sides folded by the comparison: a multi-byte
     // character is a sequence of bytes that `eq_ignore_ascii_case` leaves alone,
     // so it matches itself and nothing else.

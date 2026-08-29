@@ -234,6 +234,15 @@ clash.skip = Skip this one
 clash.stop = Stop
 clash.for_the_rest = Do this for the other {0}
 
+# Searching everything under a folder.
+search.title = Find under {0}
+search.type = Type to search everything under this folder
+search.running = {0} so far, {1} looked at…
+search.done = {0} found in {1} entries
+search.capped = the first {0}, of {1} entries — narrow the search
+search.none = Nothing under here is called that
+action.search = Find a file
+
 # Properties.
 properties.items = {0} items
 properties.kind = Kind

@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 503
-tests, 88 GUI scenarios **on both Wayland and X11**, twenty-three golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 513
+tests, 89 GUI scenarios **on both Wayland and X11**, twenty-four golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -21,7 +21,14 @@ is on no stack, because rule 3 calls it "an explicit, differently-shaped action"
 application the desktop says owns them or in **the one you pick**, **Properties**
 and **a terminal here**, a clipboard that takes files, paths, and the text
 inside a text file, and text from **a real input method** — dead keys and
-Compose on both servers, `text-input-v3` on Wayland. Every command is reachable by keyboard
+Compose on both servers, `text-input-v3` on Wayland. Files drag between the halves
+of a split; a taken name **stops the queue and asks**, and Replace trashes what it
+replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and can
+be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
+result at **0.7 ms over 817,288 entries**; and the window **comes back the way it was
+left** after `kill -9`
+([ADR 0011](docs/adr/0011-one-plain-text-state-file-written-atomically.md)).
+Every command is reachable by keyboard
 alone and by pointer alone, and a test fails the build for one that is not. What
 is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the
@@ -129,6 +136,7 @@ arguments. The full reasoning is one link away; do not re-derive it in review.
 | A new dependency arrives with its row in the same commit | `tools/dep-budget.py` finds no row | rule 10, [07](docs/07-dependencies.md) |
 | Every action is one entry in one registry | a menu item or setting the palette cannot find | rule 2 |
 | Every mutation is undoable | `Ctrl+Z` cannot walk it back | rule 3 |
+| The layout survives the process | `kill -9` loses a tab, a split or a sort | rule 6, [ADR 0011](docs/adr/0011-one-plain-text-state-file-written-atomically.md) |
 
 Two more that only bite once code exists: `wgpu` types must not appear above
 `sk-gpu` ([ADR 0003](docs/adr/0003-wgpu-first-backend.md)), and every
