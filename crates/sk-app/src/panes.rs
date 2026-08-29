@@ -431,7 +431,17 @@ impl Panes {
     /// Shows the tab at `index` of the leaf `id`. Whether anything moved.
     pub(crate) fn show_tab(&mut self, id: PaneId, index: usize) -> bool {
         self.focus_on(id);
-        let leaf = self.focused_leaf_mut();
+        self.reveal_tab(id, index)
+    }
+
+    /// The same, without moving the keyboard.
+    ///
+    /// A press on a tab is also a press in that pane, so [`Self::show_tab`]
+    /// focuses it. A drag resting on one is not: the hand is carrying files, and
+    /// taking the keyboard to wherever the pointer happened to pause is a second
+    /// thing happening that nobody asked for.
+    pub(crate) fn reveal_tab(&mut self, id: PaneId, index: usize) -> bool {
+        let Some(leaf) = self.leaf_mut(id) else { return false };
         if index >= leaf.panes.len() || leaf.active == index {
             return false;
         }
@@ -1043,6 +1053,32 @@ mod tests {
         assert_eq!(panes.focused().path, PathBuf::from("/tmp"));
         let shown: Vec<&Path> = panes.visible().map(|pane| pane.path.as_path()).collect();
         assert_eq!(shown, [Path::new("/tmp"), Path::new("/usr")], "the new pane is not second");
+    }
+
+    /// What a drag resting on a tab does, and the half of it that is easy to
+    /// lose: the strip moves and the keyboard does not.
+    ///
+    /// A drop that took the keyboard to whichever tab the pointer paused over
+    /// would leave the hand carrying files in one pane and every chord aimed at
+    /// another, which is a second thing happening that nobody asked for.
+    #[test]
+    fn a_revealed_tab_shows_without_taking_the_keyboard() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.split(Axis::Beside, &jobs);
+        let here = panes.focus();
+        let there = panes.leaves().map(|leaf| leaf.id).find(|id| *id != here).unwrap();
+        panes.leaf_mut(there).unwrap().panes.push(Pane::new(PathBuf::from("/usr")));
+
+        assert!(panes.reveal_tab(there, 1));
+        assert_eq!(panes.focus(), here, "revealing a tab took the keyboard with it");
+        assert_eq!(panes.leaf(there).unwrap().showing().path, PathBuf::from("/usr"));
+        assert!(!panes.reveal_tab(there, 1), "revealing the tab already showing moved something");
+        assert!(!panes.reveal_tab(there, 9), "a tab that does not exist was revealed");
+
+        // And the press it is the quiet half of does take the keyboard, which is
+        // the difference the two exist to draw.
+        assert!(panes.show_tab(there, 0));
+        assert_eq!(panes.focus(), there);
     }
 
     #[test]

@@ -81,6 +81,9 @@ pub struct Capture {
     pub composing: bool,
     /// Whether to split the window, with two tabs in the lower half.
     pub split: bool,
+    /// Whether to mark the second of those tabs as the one a drag of files would
+    /// land in. Nothing without `split`: a leaf with one tab draws no strip.
+    pub tab_drop: bool,
     /// Whether to draw that menu over a folder that holds no folders.
     pub crumbs_empty: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
@@ -492,6 +495,7 @@ struct Sample<'a> {
     hint: &'a str,
     leaves: &'a [crate::panes::PaneLayout],
     dividers: &'a [crate::panes::Divider],
+    drop_tab: Option<(crate::panes::PaneId, usize)>,
 }
 
 /// The chrome of the frame this capture was asked for.
@@ -514,6 +518,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         places: sample.places,
         hovered_place: None,
         drop_row: None,
+        drop_tab: sample.drop_tab,
         drop_pane: None,
         answering: 1,
         for_the_rest: true,
@@ -597,6 +602,10 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         panes.layout(layout.content, &theme.metrics, &mut leaves, &mut dividers);
         here = leaves.first().copied().unwrap_or_default();
     }
+    // The tab `split_the_sample` left *behind* in the lower half, which is the
+    // only tab in this frame that is not the one its leaf is showing — and being
+    // the one that is not showing is the whole of what this mark means.
+    let drop_tab = (request.split && request.tab_drop).then(|| (panes.focus(), 0));
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -618,6 +627,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         hint: &keyboard_hint,
         leaves: &leaves,
         dividers: &dividers,
+        drop_tab,
     };
     let mut stats = FrameStats::default();
     for pass in 0..MAX_PASSES {

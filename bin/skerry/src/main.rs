@@ -48,6 +48,7 @@ struct Overlays {
     open_with: bool,
     composing: bool,
     split: bool,
+    tab_drop: bool,
     rename: bool,
 }
 
@@ -70,6 +71,7 @@ impl Overlays {
             "--open-with" => &mut self.open_with,
             "--composing" => &mut self.composing,
             "--split" => &mut self.split,
+            "--tab-drop" => &mut self.tab_drop,
             "--rename" => &mut self.rename,
             _ => return false,
         };
@@ -116,6 +118,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         open_with: overlays.open_with,
         composing: overlays.composing,
         split: overlays.split,
+        tab_drop: overlays.tab_drop,
         rename: overlays.rename,
         stats: shape.stats,
         own_frame: shape.own_frame,

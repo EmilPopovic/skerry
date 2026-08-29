@@ -180,6 +180,11 @@ FRAMES = [
     # second column header halfway down the window — where a rule drawn from the
     # window's left edge rather than the header's own cuts through the sidebar.
     ("split", ["--size", "900x620", "--scale", "125", "--split"]),
+    # The same two panes with a drag of files resting on the lower half's second
+    # tab: the mark that says a drop lands in the directory *that tab* holds and
+    # not the one its leaf is showing. The only frame with a tab marked by
+    # anything but the keyboard.
+    ("tab-drop", ["--size", "900x620", "--scale", "125", "--split", "--tab-drop"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

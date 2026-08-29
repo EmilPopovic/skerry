@@ -84,22 +84,16 @@ struct FilesDrag {
     /// `None` for a drag another application started: it came from outside, so
     /// every pane is somewhere else.
     origin: Option<crate::panes::PaneId>,
-    /// The directory under the pointer that would take the drop.
-    onto: Option<PathBuf>,
-    /// The folder row that directory is, for the highlight: which pane, and
-    /// which display row in it.
-    row: Option<(crate::panes::PaneId, usize)>,
-    /// The pane whose own directory would take the drop, when the pointer is on
-    /// no folder row. The whole list is ringed, because the target is the
-    /// directory the pane is showing rather than anything drawn in it.
-    into_pane: Option<crate::panes::PaneId>,
-    /// The folder row the pointer has been resting on, and since when.
+    /// Where a drop would land, and what is marked to promise it.
+    landing: Landing,
+    /// What the pointer has been resting on, and since when.
     ///
-    /// Held still for long enough, the pane opens it — which is what makes it
-    /// possible to drop three folders deep in a gesture that cannot let go on the
-    /// way. Reset every time the target changes, so passing over a folder on the
-    /// way to another one does not open it.
-    resting: Option<(crate::panes::PaneId, PathBuf, Instant)>,
+    /// Held still for long enough it opens: a folder row into the pane showing
+    /// it, a tab into the strip holding it. That is what makes it possible to
+    /// drop three folders deep, or into another tab, in a gesture that cannot let
+    /// go on the way. Reset every time the target changes, so passing over a
+    /// folder on the way to another one does not open it.
+    resting: Option<(Spring, Instant)>,
     /// Where the pointer was when a folder last sprang open.
     ///
     /// **A spring needs a fresh aim.** Opening a folder puts a different listing
@@ -109,6 +103,34 @@ struct FilesDrag {
     /// hand happened to stop. Measured: a file aimed at `alpha` ended up in
     /// `alpha/nested`.
     sprung_at: Option<Point>,
+}
+
+/// Where a drop would land, and what the frame marks to say so.
+///
+/// One value rather than four fields, because all four answer "where would this
+/// go", all four are recomputed by the same call, and a mark that agrees with
+/// three of them is a promise the drop does not keep.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Landing {
+    /// The directory that would take the files.
+    onto: Option<PathBuf>,
+    /// The folder row that directory is: which pane, and which display row in it.
+    row: Option<(crate::panes::PaneId, usize)>,
+    /// The tab that directory is: which leaf, and which of its tabs.
+    tab: Option<(crate::panes::PaneId, usize)>,
+    /// The pane whose own directory would take the drop, when the pointer is on
+    /// neither. The whole list is ringed, because the target is the directory the
+    /// pane is showing rather than anything drawn in it.
+    into_pane: Option<crate::panes::PaneId>,
+}
+
+/// What a drag would open if the hand stopped on it.
+#[derive(Clone, PartialEq, Eq)]
+enum Spring {
+    /// A folder row: the leaf showing it, and the directory it names.
+    Into(crate::panes::PaneId, PathBuf),
+    /// A tab that is not the one its leaf is showing.
+    Tab(crate::panes::PaneId, usize),
 }
 
 /// Whether the pointer is still where a spring left it.
@@ -3486,6 +3508,7 @@ impl App {
         let leaf = self
             .drop_row()
             .map(|(id, _)| id)
+            .or_else(|| self.drop_tab().map(|(id, _)| id))
             .or_else(|| self.drop_pane())
             .and_then(|id| self.placement.leaves.iter().position(|leaf| leaf.id == id))
             .map_or(-1, |at| i64::try_from(at).unwrap_or(-1));
@@ -3497,8 +3520,10 @@ impl App {
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let tab = self.drop_tab().map_or(-1, |(_, at)| i64::try_from(at).unwrap_or(-1));
         format!(
-            "drop_row={row} drop_leaf={leaf} drop_whole={} dragging={} carrying={carrying:?}",
+            "drop_row={row} drop_leaf={leaf} drop_tab={tab} drop_whole={} dragging={} \
+carrying={carrying:?}",
             i32::from(self.drop_pane().is_some()),
             self.files_drag.as_ref().is_some_and(|drag| drag.active),
         )
@@ -4617,18 +4642,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     }
 
     /// Follows a drag of files, and finds what would take the drop.
-    ///
-    /// A drop target is a **directory that is not part of what is being
-    /// dragged**: dropping a folder into itself is a request nobody means, and
-    /// the engine underneath would follow the loop until it ran out of depth.
     fn drag_files_to(&mut self, position: Point) {
         let Some(drag) = &self.files_drag else { return };
         let moved = (position.x - drag.from.x).abs().max((position.y - drag.from.y).abs());
         if !drag.active && moved <= DRAG_THRESHOLD {
             return;
         }
-        let target = self.folder_under(position);
-        let over = self.pane_under(position);
         let Some(drag) = &mut self.files_drag else { return };
         let starting = !drag.active;
         drag.active = true;
@@ -4643,7 +4662,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             let actions = [sk_plat::DragAction::Copy, sk_plat::DragAction::Move];
             let _ = self.window.start_drag(content, &actions);
         }
-        let Some(drag) = &mut self.files_drag else { return };
+        let Some(drag) = &self.files_drag else { return };
+        // **The card is drawn at the pointer, so a pointer that has moved is a
+        // frame that is out of date** — whether or not what it is over changed.
+        // This used to be marked only when the *target* changed, which is a card
+        // that jumps from one folder row to the next instead of following the
+        // hand. Before the spring's early return, because that return is taken
+        // for movements up to the click threshold and four pixels is visible.
+        if !drag.paths.is_empty() {
+            self.dirty = true;
+        }
         // **Nothing is recomputed while the pointer sits where a spring left
         // it.** Opening a folder puts a different listing under a pointer that
         // has not moved: the row beneath it is one the listing moved there, and
@@ -4651,87 +4679,107 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // into it. Measured — a file aimed at `alpha` landed in `alpha/nested`,
         // and suppressing only the spring left the drop doing it anyway. What
         // the spring already set stands until a hand moves.
-        let resting_where_it_sprang = still_there(drag.sprung_at, position);
-        if !resting_where_it_sprang {
-            drag.sprung_at = None;
-        }
-        let carrying = !drag.paths.is_empty();
-        // **The card is drawn at the pointer, so a pointer that has moved is a
-        // frame that is out of date** — whether or not what it is over changed.
-        // This used to be marked only when the *target* changed, which is a card
-        // that jumps from one folder row to the next instead of following the
-        // hand. Before the spring's early return, because that return is taken
-        // for movements up to the click threshold and four pixels is visible.
-        if carrying {
-            self.dirty = true;
-        }
-        if resting_where_it_sprang {
+        if still_there(drag.sprung_at, position) {
             return;
         }
+        let landing = self.landing_at(position);
+        // **Restarted whenever the target changes**, so passing over four folders
+        // on the way to a fifth opens none of them.
+        let resting = self.spring_from(&landing);
         let Some(drag) = &mut self.files_drag else { return };
-        let (row, onto) = match target {
-            Some((leaf, row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
-                (Some((leaf, row)), Some(path))
+        drag.sprung_at = None;
+        if drag.landing != landing {
+            drag.landing = landing;
+            self.dirty = true;
+        }
+        match (&drag.resting, resting) {
+            (Some((held, _)), Some(next)) if *held == next => {}
+            (_, next) => drag.resting = next.map(|spring| (spring, Instant::now())),
+        }
+    }
+
+    /// Where a drop at `position` would land.
+    ///
+    /// Three answers, in order: the tab under the pointer, the folder row under
+    /// it, or the directory a *different* pane is showing.
+    ///
+    /// A target is a **directory that is not part of what is being dragged**:
+    /// dropping a folder into itself is a request nobody means, and the engine
+    /// underneath would follow the loop until it ran out of depth.
+    fn landing_at(&self, position: Point) -> Landing {
+        let Some(drag) = self.files_drag.as_ref() else { return Landing::default() };
+        let held = |path: &std::path::Path| drag.paths.iter().any(|it| path.starts_with(it));
+        if let Some((leaf, index, path)) = self.tab_under(position) {
+            // **A tab is the directory it holds, not the pane it sits over.** So
+            // a drop on tab 2 lands in tab 2 whether or not the strip has
+            // switched to it yet, and a hand that has read the labels can aim at
+            // one. The exception is the tab this drag started on, which is a move
+            // to where the files already are.
+            let home = drag.origin == Some(leaf)
+                && self.panes.leaf(leaf).is_some_and(|tabs| tabs.active == index);
+            if home || held(&path) {
+                return Landing::default();
             }
-            _ => (None, None),
-        };
+            return Landing { onto: Some(path), tab: Some((leaf, index)), ..Landing::default() };
+        }
+        if let Some((leaf, row, path)) = self.folder_under(position)
+            && !held(&path)
+        {
+            return Landing { onto: Some(path), row: Some((leaf, row)), ..Landing::default() };
+        }
         // **A pane other than the one this started in takes the drop into the
         // directory it is showing.** That is the whole gesture a split exists
         // for: pick files up on the left, put them down on the right, with no
         // folder to aim at. The origin pane is excluded because dropping files
         // back where they came from is a move to where they already are, and the
         // ring would promise something that would then do nothing.
-        let into_pane =
-            onto.is_none().then(|| over.filter(|id| Some(*id) != drag.origin)).flatten();
-        if drag.row != row || drag.onto != onto || drag.into_pane != into_pane {
-            drag.row = row;
-            drag.onto.clone_from(&onto);
-            drag.into_pane = into_pane;
-            self.dirty = true;
-        }
-        // **Restarted whenever the target changes**, so passing over four folders
-        // on the way to a fifth opens none of them. Only a folder row springs: a
-        // pane's own directory is already open, and there is nothing to enter.
-        let resting = match (row, onto) {
-            (Some((leaf, _)), Some(path)) => Some((leaf, path)),
-            _ => None,
-        };
-        match (&drag.resting, resting) {
-            (Some((_, held, _)), Some((_, path))) if *held == path => {}
-            (_, Some((leaf, path))) => drag.resting = Some((leaf, path, Instant::now())),
-            (_, None) => drag.resting = None,
-        }
+        let into_pane = self.pane_under(position).filter(|id| Some(*id) != drag.origin);
+        Landing { into_pane, ..Landing::default() }
     }
 
-    /// Opens a folder the drag has been resting on, if it has rested long enough.
+    /// What a landing would open if the hand stayed on it.
+    ///
+    /// A folder row and a tab, and nothing else: a pane's own directory is
+    /// already open and there is nothing to enter, and neither is the tab its
+    /// leaf is already showing.
+    fn spring_from(&self, landing: &Landing) -> Option<Spring> {
+        if let Some((leaf, index)) = landing.tab {
+            let showing = self.panes.leaf(leaf).is_some_and(|tabs| tabs.active == index);
+            return (!showing).then_some(Spring::Tab(leaf, index));
+        }
+        let (leaf, _) = landing.row?;
+        Some(Spring::Into(leaf, landing.onto.clone()?))
+    }
+
+    /// Opens what the drag has been resting on, if it has rested long enough.
     ///
     /// **The origin is forgotten with it.** A pane that has sprung is no longer
     /// showing the directory the files came from, so the rule that stops a drop
     /// landing where the files already are no longer applies to it — and without
     /// this, springing inside the pane you started in leaves a pane that takes no
-    /// drop at all.
+    /// drop at all. Which is the whole of the tab case: tab 1 and tab 2 are the
+    /// same leaf.
     fn spring_open(&mut self) {
         let Some(drag) = self.files_drag.as_ref() else { return };
         if !drag.active {
             return;
         }
-        let Some((leaf, path, since)) = drag.resting.clone() else { return };
+        let Some((spring, since)) = drag.resting.clone() else { return };
         if since.elapsed() < SPRING {
             return;
         }
-        let Some(tabs) = self.panes.leaf_mut(leaf) else { return };
-        tabs.showing_mut().open(path, &self.jobs);
+        let opened = match spring {
+            Spring::Into(leaf, path) => self.spring_into(leaf, path),
+            // **Nothing is frozen for a tab.** A folder that springs puts a
+            // different listing under a still hand, which is why that one stops
+            // recomputing until the hand moves; a strip that switches leaves
+            // every tab exactly where it was, so the tab under the pointer is
+            // still the target it was a moment ago, release included.
+            Spring::Tab(leaf, index) => self.panes.reveal_tab(leaf, index).then_some(leaf),
+        };
+        let Some(leaf) = opened else { return };
         let Some(drag) = self.files_drag.as_mut() else { return };
         drag.resting = None;
-        // The row that was the target has gone with the listing it was in, and
-        // **the pane that opened is the target now** — set here rather than left
-        // to the next motion, because the gesture this exists for is one where
-        // the pointer is deliberately not moving. Without it a release straight
-        // after a spring found no target at all and collapsed into a click.
-        drag.row = None;
-        drag.onto = None;
-        drag.into_pane = Some(leaf);
-        drag.sprung_at = Some(self.pointer);
         if drag.origin == Some(leaf) {
             drag.origin = None;
         }
@@ -4739,24 +4787,57 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.dirty = true;
     }
 
-    /// How long until a resting drag opens the folder it is over.
+    /// Opens a folder into the pane that was showing its row, and makes that
+    /// pane the target. The leaf, if it is still there.
+    fn spring_into(
+        &mut self,
+        leaf: crate::panes::PaneId,
+        path: PathBuf,
+    ) -> Option<crate::panes::PaneId> {
+        self.panes.leaf_mut(leaf)?.showing_mut().open(path, &self.jobs);
+        let pointer = self.pointer;
+        let drag = self.files_drag.as_mut()?;
+        // The row that was the target has gone with the listing it was in, and
+        // **the pane that opened is the target now** — set here rather than left
+        // to the next motion, because the gesture this exists for is one where
+        // the pointer is deliberately not moving. Without it a release straight
+        // after a spring found no target at all and collapsed into a click.
+        drag.landing = Landing { into_pane: Some(leaf), ..Landing::default() };
+        drag.sprung_at = Some(pointer);
+        Some(leaf)
+    }
+
+    /// How long until a resting drag opens what it is over.
     fn spring_due(&self) -> Option<Duration> {
         let drag = self.files_drag.as_ref().filter(|drag| drag.active)?;
-        let (_, _, since) = drag.resting.as_ref()?;
+        let (_, since) = drag.resting.as_ref()?;
         Some(SPRING.saturating_sub(since.elapsed()))
     }
 
     /// The pane whose list is under `position`, whichever pane has the keyboard.
     ///
-    /// The body rather than the whole leaf: the tab strip is a drop target for a
-    /// *tab* and the header sorts, and a file dropped on either of those is a
-    /// file dropped on a control that means something else.
+    /// The body rather than the whole leaf: a tab answers for the directory it
+    /// holds — see [`Self::tab_under`] — and the header sorts, so a file dropped
+    /// on the strip is not a file dropped on this.
     fn pane_under(&self, position: Point) -> Option<crate::panes::PaneId> {
         self.placement
             .leaves
             .iter()
             .find(|leaf| leaf.body.contains(position.x, position.y))
             .map(|leaf| leaf.id)
+    }
+
+    /// The tab under `position`, whichever leaf's strip it is in, and the
+    /// directory that tab is showing.
+    ///
+    /// The directory comes from the tab rather than from the leaf: the two differ
+    /// for every tab but the one on top, and that difference is the whole point
+    /// of aiming at one.
+    fn tab_under(&self, position: Point) -> Option<(crate::panes::PaneId, usize, PathBuf)> {
+        let leaf = self.leaf_at(position)?;
+        let (index, _) = self.tab_at(position)?;
+        let path = self.panes.leaf(leaf)?.panes.get(index)?.path.clone();
+        Some((leaf, index, path))
     }
 
     /// The folder row under `position` in any pane, and the path it names.
@@ -4796,9 +4877,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 id: None,
                 active: true,
                 origin: None,
-                onto: None,
-                row: None,
-                into_pane: None,
+                landing: Landing::default(),
                 resting: None,
                 sprung_at: None,
             });
@@ -4813,9 +4892,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
     /// The directory a drop would land in.
     ///
-    /// Three answers, in order: the folder row under the pointer, the directory
-    /// a *different* pane is showing, or — for a peer's drag only — the
-    /// directory this pane is showing.
+    /// Whatever [`Self::landing_at`] found — a tab, a folder row, or a
+    /// *different* pane — or, for a peer's drag only, the directory this pane is
+    /// showing.
     ///
     /// **A peer's drag can land anywhere in the list; ours cannot.** Files from
     /// another application belong in the directory being shown, and requiring a
@@ -4825,10 +4904,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// still takes a folder.
     fn drop_target(&self) -> Option<PathBuf> {
         let drag = self.files_drag.as_ref()?;
-        if let Some(onto) = &drag.onto {
+        if let Some(onto) = &drag.landing.onto {
             return Some(onto.clone());
         }
-        if let Some(id) = drag.into_pane {
+        if let Some(id) = drag.landing.into_pane {
             return self.panes.leaf(id).map(|leaf| leaf.showing().path.clone());
         }
         drag.paths.is_empty().then(|| self.panes.focused().path.clone())
@@ -4896,13 +4975,19 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// Which pane's row a drag of files would land on, for the highlight.
     #[must_use]
     pub(crate) fn drop_row(&self) -> Option<(crate::panes::PaneId, usize)> {
-        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.row)
+        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.landing.row)
+    }
+
+    /// Which tab it would land in instead, for the highlight on that tab.
+    #[must_use]
+    pub(crate) fn drop_tab(&self) -> Option<(crate::panes::PaneId, usize)> {
+        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.landing.tab)
     }
 
     /// Which whole pane would take it instead, for the ring around its list.
     #[must_use]
     pub(crate) fn drop_pane(&self) -> Option<crate::panes::PaneId> {
-        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.into_pane)
+        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.landing.into_pane)
     }
 
     /// Finishes a drag of files, or collapses it back into a plain click.
@@ -4968,9 +5053,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 id: Some(id),
                 active: false,
                 origin: Some(self.panes.focus()),
-                onto: None,
-                row: None,
-                into_pane: None,
+                landing: Landing::default(),
                 resting: None,
                 sprung_at: None,
             });
@@ -5997,8 +6080,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_tool: *hovered_tool,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,
-            drop_row: dropping.and_then(|drag| drag.row),
-            drop_pane: dropping.and_then(|drag| drag.into_pane),
+            drop_row: dropping.and_then(|drag| drag.landing.row),
+            drop_tab: dropping.and_then(|drag| drag.landing.tab),
+            drop_pane: dropping.and_then(|drag| drag.landing.into_pane),
             carrying: carrying.as_ref(),
             search: search.as_ref(),
             clash: edits.clash.as_ref(),

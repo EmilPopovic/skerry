@@ -63,6 +63,10 @@ pub struct Chrome<'a> {
     pub hovered_place: Option<usize>,
     /// The row a drag of files would drop into, while one is in flight.
     pub drop_row: Option<(PaneId, usize)>,
+    /// The tab it would drop into instead, marked on the tab itself: a drop on
+    /// a tab lands in the directory that tab is holding, not the one its leaf
+    /// happens to be showing.
+    pub drop_tab: Option<(PaneId, usize)>,
     /// The pane whose whole list would take a drop, ringed rather than a row
     /// highlighted, because the target is the directory it is showing.
     pub drop_pane: Option<PaneId>,
@@ -1900,7 +1904,23 @@ fn tab_strip(
         };
         let pill = painter.rect(shape.x, shape.y, shape.width, shape.height);
         painter.list.rect(pill, background, painter.px(metrics.radius));
-        let colour = if active { theme.palette.text } else { theme.palette.dim };
+        // Where a drop of files would land. The same accent fill a row takes,
+        // because a tab and a row are the same promise — this is the directory
+        // the files go into — and the ring means "the keyboard is here"
+        // everywhere else in this window.
+        let marked = chrome.drop_tab == Some((layout.id, index));
+        if marked {
+            painter.list.rect(
+                pill,
+                theme.palette.accent.with_alpha(90),
+                painter.px(metrics.radius),
+            );
+        }
+        // A marked tab reads at full strength whether or not it is the one
+        // showing: the dim a background tab is drawn in is a tint away from the
+        // chrome, and over an accent wash on the light palette it is a label
+        // nobody can read.
+        let colour = if active || marked { theme.palette.text } else { theme.palette.dim };
         let baseline = painter.baseline(shape.y, shape.height, metrics.text_size);
         let close = crate::panes::tab_close(area);
         let room = close.map_or(area.width - 20.0, |it| it.x - area.x - 16.0);
@@ -2647,6 +2667,7 @@ mod tests {
                 places: &[],
                 hovered_place: None,
                 drop_row: None,
+                drop_tab: None,
                 drop_pane: None,
                 carrying: None,
                 search: None,

@@ -877,7 +877,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 92
+FEWEST_SCENARIOS = 93
 
 
 def scenario(name, fresh: bool = False):
@@ -2454,6 +2454,81 @@ def no_spring_in_passing(run: Run, fixture: Path) -> None:
     if passing["path"] != str(fixture):
         raise Failure(f"a folder opened while the pointer was crossing it: {passing['path']!r}")
     run.drive("release\nsleep 800\n")
+
+
+@scenario("a-drag-held-on-a-tab-switches-to-it", fresh=True)
+def spring_onto_a_tab(run: Run, fixture: Path) -> None:
+    """Rest a drag on another tab and the strip goes to it, so the drop can too.
+
+    The gesture is the one the split already has, aimed at the other axis a pane
+    divides on: files picked up in tab 1 and put down in tab 2, without opening a
+    second window and without putting them down in between.
+
+    **The second tab is showing `alpha/nested`, which is not a row anywhere in
+    the first.** A file that ends up there cannot have got there by the folder
+    under the pointer, which is the other way into the same directory and the
+    thing this would otherwise be testing twice.
+    """
+    listed(run)
+    run.drive("key ctrl+t\nsleep 700\nkey ctrl+l\nsleep 250\nkey ctrl+u\n")
+    run.drive(f"text {fixture / 'alpha' / 'nested'}\nkey enter\nsleep 900\n")
+    if listed(run)["path"] != str(fixture / "alpha" / "nested"):
+        raise Failure(f"the second tab is showing {run.state()['path']!r}")
+    run.drive("key ctrl+tab\nsleep 600\n")
+    home = listed(run)
+    expect(home, tabs="2", tab="0", path=str(fixture))
+
+    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+    chosen = run.state()
+    expect(chosen, cursor="file-1.txt")
+    held = point_at(run, int(chosen["cursor_row"]))
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    onto = tab_aim(run, held, 1)
+
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        + creep(from_point, onto)
+        + "sleep 300\nkey f12\nsleep 200\n"
+    )
+    over = run.state()
+    # The tab is the target *before* it is the one showing, which is what makes
+    # the mark on it honest — and three hundred milliseconds is not a rest, so
+    # the strip has not moved yet.
+    expect(over, dragging="true", carrying="file-1.txt", drop_tab="1", tab="0")
+
+    run.drive("sleep 1200\nkey f12\nsleep 250\n")
+    sprung = run.state()
+    expect(sprung, tab="1", dragging="true", carrying="file-1.txt")
+    if sprung["path"] != str(fixture / "alpha" / "nested"):
+        raise Failure(f"resting on the tab did not switch to it: {sprung['path']!r}")
+
+    run.drive("release\nsleep 1500\nkey f12\nsleep 300\n")
+    if not (fixture / "alpha" / "nested" / "file-1.txt").is_file():
+        raise Failure("the drop did not land in the tab that opened")
+    if (fixture / "file-1.txt").exists():
+        raise Failure("the original is still there, so the drop copied rather than moved")
+    expect(run.state(), dragging="false", carrying="")
+
+    # And the other direction, without the wait: a tab dropped on takes the files
+    # whether or not anybody held still long enough to switch to it. The strip is
+    # still on the second tab afterwards, which is the half of the rule that
+    # keeps a pointer merely crossing the strip from moving the ground.
+    landed = listed(run)
+    expect(landed, tab="1")
+    run.drive("text deep.txt\nsleep 400\nkey f12\nsleep 200\n")
+    picked = run.state()
+    expect(picked, cursor="deep.txt")
+    deep = point_at(run, int(picked["cursor_row"]))
+    start = aim(run, deep, name_x(deep), row_y(deep, int(picked["cursor_row"])))
+    first = tab_aim(run, deep, 0)
+    run.drive(
+        f"move {start[0]:.1f} {start[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        + creep(start, first)
+        + "sleep 250\nrelease\nsleep 1500\nkey f12\nsleep 300\n"
+    )
+    if not (fixture / "deep.txt").is_file():
+        raise Failure("a drop on a tab did not land in the directory that tab holds")
+    expect(run.state(), tab="1", dragging="false")
 
 
 @scenario("the-carried-card-follows-the-pointer", fresh=True)
