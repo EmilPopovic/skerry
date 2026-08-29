@@ -51,6 +51,14 @@ const NOTICE_WINDOW: Duration = Duration::from_secs(4);
 /// anyone notices and two orders of magnitude cheaper.
 const REFRESH_FLOOR: Duration = Duration::from_millis(250);
 
+/// The soonest the session file may be written again.
+///
+/// Two seconds. A scroll offset changes sixty times a second and none of those
+/// changes is worth an `fsync`; two seconds is short enough that a crash loses
+/// nothing anybody would notice and long enough that a wheel spinning for a
+/// minute writes the file thirty times rather than three thousand.
+const SESSION_FLOOR: Duration = Duration::from_secs(2);
+
 /// A press on a selected row, before it is known whether it is a drag.
 ///
 /// **The selection is not replaced until the release.** A plain press on a row
@@ -99,14 +107,24 @@ const BAND_SLOP: f32 = 3.0;
 /// pixel off — which is what repeated multiplication does.
 const ZOOM: [f32; 7] = [0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 1.75];
 /// Which of them is 1.0.
-const ZOOM_DEFAULT: usize = 2;
+pub(crate) const ZOOM_DEFAULT: usize = 2;
 
 /// How to start.
 pub struct Options {
     /// The directory to open.
     pub path: PathBuf,
+    /// Whether the saved session may decide the window's shape.
+    ///
+    /// `false` when a path was named on the command line: `skerry /etc` is an
+    /// explicit request for one directory, and restoring four tabs over it would
+    /// answer a question nobody asked.
+    pub restore: bool,
     /// Whether to start in the dark palette.
-    pub dark: bool,
+    ///
+    /// `None` — the ordinary case — means nothing was said, so the session
+    /// decides and the default decides where there is no session. `--light` is
+    /// the only thing that says otherwise, and it wins over the file.
+    pub dark: Option<bool>,
     /// Whether the statistics overlay is on from the first frame.
     pub stats: bool,
     /// Ask for a client-drawn window frame even where the compositor offers one.
@@ -118,6 +136,11 @@ pub struct Options {
     /// this is the only way to run at anything but 100% — which makes it the
     /// only way to test a fractional scale headlessly.
     pub scale_120: Option<u32>,
+    /// Whether to open with the list of places showing.
+    ///
+    /// `None` for the same reason [`Options::dark`] is: `--no-sidebar` is an
+    /// instruction and the absence of it is not.
+    pub sidebar: Option<bool>,
     /// When the process started, for the cold-start measurement.
     pub started: Instant,
 }
@@ -611,6 +634,11 @@ pub struct App {
     /// A step rather than a factor, so `Ctrl +` and a pinch land on the same
     /// sizes and a round trip out and back is exactly where it started.
     zoom: usize,
+    /// The session file as it was last written, so an unchanged one is not
+    /// rewritten.
+    session_text: String,
+    /// When it was last considered, which is the floor's clock.
+    session_at: Instant,
     /// Where the last layout put the panes, and what the pointer is on.
     ///
     /// Copies rather than lookups, for the same reason `layout` is a field: a
@@ -738,17 +766,92 @@ pub struct App {
 impl App {
     /// Opens a window, a device and a directory.
     pub fn new(options: &Options) -> Result<Self, Problem> {
+        // **Read before the window is opened**, because the size it asks for is
+        // in the file. One `openat` and one read of a few hundred bytes, before
+        // there is a frame loop for it to be a rule 1 violation of.
+        let session = options.restore.then(crate::session::load).flatten();
         let window_started = Instant::now();
         let window = Window::open(&WindowConfig {
             own_frame: options.own_frame,
             scale_120: options.scale_120,
+            logical: session.as_ref().map_or(WindowConfig::default().logical, |it| it.window),
             ..WindowConfig::default()
         })?;
         let window_us = window_started.elapsed().as_micros();
         report_globals(&window);
+        // The directory the command line named, read while the GPU is opening —
+        // and thrown away where a session replaces it, which costs one read of a
+        // directory somebody was about to look at anyway.
         let background = Background::start(options.path.clone())?;
         let drawing = open_drawing(&window)?;
-        Ok(Self::assemble(options, window, window_us, background, drawing))
+        let mut app = Self::assemble(options, window, window_us, background, drawing);
+        if let Some(session) = session {
+            app.restore_session(&session, options);
+        }
+        Ok(app)
+    }
+
+    /// Puts the window back the way the file says it was.
+    fn restore_session(&mut self, session: &crate::session::Session, options: &Options) {
+        // What was asked for on the command line wins over what was saved: a
+        // flag is an instruction for this run and the file is a memory of the
+        // last one.
+        let dark = options.dark.unwrap_or(session.dark);
+        if dark != self.theme.dark {
+            self.theme = if dark { Theme::dark() } else { Theme::light() };
+        }
+        self.sidebar.open = options.sidebar.unwrap_or(session.sidebar);
+        self.zoom = session.zoom.min(ZOOM.len() - 1);
+        self.panes = crate::panes::Panes::restore(&session.tree, &self.jobs);
+        for pane in self.panes.every_mut() {
+            pane.show_hidden = session.hidden;
+        }
+        // `apply_zoom` rebuilds the metrics from the palette just chosen and
+        // relays out, which is also what puts the restored tree on screen.
+        self.apply_zoom();
+        self.settle_panes();
+    }
+
+    /// What the window is doing, for the session file.
+    fn session(&self) -> crate::session::Session {
+        crate::session::Session {
+            dark: self.theme.dark,
+            sidebar: self.sidebar.open,
+            hidden: self.panes.focused().show_hidden,
+            zoom: self.zoom,
+            window: (self.logical.width as u32, self.logical.height as u32),
+            tree: self.panes.describe(),
+        }
+    }
+
+    /// Writes the session where [`crate::session::path`] says, if it has moved.
+    ///
+    /// **Compared rather than tracked.** Every state worth saving is reachable
+    /// from twenty places, and a `dirty` flag each of them has to remember to set
+    /// is a flag one of them will not. Rendering the file is a few dozen lines of
+    /// string and one allocation per tab; comparing it is a `str` compare. The
+    /// floor is what keeps that off the frames that matter — a scroll changes
+    /// sixty times a second and none of those is a reason to write a file.
+    fn keep_the_session(&mut self, now: bool) {
+        if !now && self.session_at.elapsed() < SESSION_FLOOR {
+            return;
+        }
+        self.session_at = Instant::now();
+        let text = crate::session::render(&self.session());
+        if text == self.session_text {
+            return;
+        }
+        self.session_text.clone_from(&text);
+        if now {
+            // **Written here rather than on a job**, and only here: this is the
+            // last thing the process does, and a job queued now races the pool's
+            // shutdown. There is no frame left to block.
+            crate::session::write(&text);
+            return;
+        }
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            crate::session::write(&text);
+        });
     }
 
     /// Puts the window, the jobs and the renderer together into one `App`.
@@ -782,7 +885,7 @@ impl App {
         let watch_target = pane.path.clone();
 
         let Drawing { renderer, fonts, physical, gpu_us, font_us } = drawing;
-        let theme = if options.dark { Theme::dark() } else { Theme::light() };
+        let theme = if options.dark.unwrap_or(true) { Theme::dark() } else { Theme::light() };
         let logical = window.logical();
         let scale_120 = window.scale_120();
         let capabilities = describe(&window);
@@ -819,6 +922,8 @@ impl App {
             watching: true,
             capabilities,
             zoom: ZOOM_DEFAULT,
+            session_text: String::new(),
+            session_at: now,
             placement: crate::panes::Placement::default(),
             measurer,
             sidebar,
@@ -880,6 +985,8 @@ impl App {
         // The tree has to be laid out before the first frame, not at the first
         // resize: a window that opens at the size it asked for gets no resize at
         // all, and every pane would be a rectangle of zeros until one arrived.
+        // `--no-sidebar` is the only thing that says so before a session does.
+        app.sidebar.open = options.sidebar.unwrap_or(true);
         app.divide();
         app
     }
@@ -942,7 +1049,12 @@ impl App {
                 self.render(&commands, turn);
                 self.dirty = false;
             }
+            // **After the frame, never before it.** Rendering the file is
+            // cheap and comparing it is cheaper, but neither belongs between
+            // the input that caused this turn and the pixels that answer it.
+            self.keep_the_session(false);
         }
+        self.keep_the_session(true);
         self.window.failure().map(str::to_owned)
     }
 
@@ -3694,6 +3806,11 @@ impl App {
         let answer = if asking { self.edits.chosen_answer().key() } else { "" };
         let for_the_rest = self.edits.for_the_rest;
         let paused = self.edits.held();
+        // The three settings a session restores that nothing else on this line
+        // reports. `hidden` is already here, from the pane.
+        let theme = if self.theme.dark { "dark" } else { "light" };
+        let zoom = self.zoom;
+        let sidebar_open = self.sidebar.open;
         // The counted total, and whether the count reached the end — which is
         // the whole condition on there being an ETA at all.
         let (total, total_done) = self.edits.counted();
@@ -3722,6 +3839,7 @@ path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
 for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
+theme={theme} zoom={zoom} sidebar_open={sidebar_open} \
 filtering={} filter={:?} drop_row={drop_row} drop_leaf={drop_leaf} drop_whole={drop_whole} \
 dragging={dragging} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \

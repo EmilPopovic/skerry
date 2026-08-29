@@ -39,6 +39,7 @@ mod palette;
 mod pane;
 mod panes;
 mod properties;
+mod session;
 mod sidebar;
 mod sizes;
 mod view;

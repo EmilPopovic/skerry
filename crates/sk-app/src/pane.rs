@@ -190,6 +190,14 @@ pub struct Pane {
     /// cursor on the folder you came out of — and the listing that contains it
     /// does not exist yet at the moment the decision is made.
     select_after_load: Option<String>,
+    /// Where a restored session says the list was, applied when it can be.
+    ///
+    /// **Not applied at once.** `Scroll::to` clamps to the extent, and the extent
+    /// is zero until there is a listing to be an extent of — so a session's
+    /// offset set before the read lands is set to zero. It waits here for the
+    /// names, which is the same shape `select_after_load` has and for the same
+    /// reason.
+    scroll_when_loaded: Option<f32>,
 }
 
 impl Pane {
@@ -223,6 +231,7 @@ impl Pane {
             sort_cancel: Cancel::new(),
             sort_epoch: 0,
             select_after_load: None,
+            scroll_when_loaded: None,
         }
     }
 
@@ -460,6 +469,14 @@ impl Pane {
                 self.sort_us = sort_us;
                 self.lane = lane;
                 self.restore_cursor();
+                // The extent is set from the row count on the next frame, and
+                // `Scroll::to` clamps against it — so this is a request that the
+                // frame after this one honours, and a session asking for row
+                // 900 of a directory that now holds nine lands at the bottom
+                // rather than nowhere.
+                if let Some(offset) = self.scroll_when_loaded.take() {
+                    self.scroll.want(offset);
+                }
                 self.dispatch_metadata(&names, jobs);
                 // Sorted, filtered or unhidden while the read was in flight.
                 if view != self.view() {
@@ -592,6 +609,11 @@ impl Pane {
     /// brings it in — so the answer is remembered rather than looked up.
     pub fn select_after(&mut self, name: String) {
         self.select_after_load = Some(name);
+    }
+
+    /// Asks for this scroll offset once there is a listing to scroll.
+    pub fn scroll_when_loaded(&mut self, offset: f32) {
+        self.scroll_when_loaded = (offset > 0.0).then_some(offset);
     }
 
     /// What the display order is currently derived from.

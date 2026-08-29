@@ -38,6 +38,8 @@ pub struct Scroll {
     offset: f32,
     target: f32,
     max: f32,
+    /// A position asked for before there was an extent to clamp it against.
+    wanted: Option<f32>,
 }
 
 impl Scroll {
@@ -60,6 +62,17 @@ impl Scroll {
         (self.target - self.offset).abs() > SETTLED
     }
 
+    /// Asks for a position that the extent may not allow yet.
+    ///
+    /// **The one setter that survives not knowing how long the list is.**
+    /// [`Scroll::to`] clamps against `max`, and `max` is zero until a listing has
+    /// arrived — so an offset restored from a session before the read lands is
+    /// silently set to zero. This one is held until the next
+    /// [`Scroll::set_extent`] can honour it, and clamped then.
+    pub fn want(&mut self, offset: f32) {
+        self.wanted = Some(offset.max(0.0));
+    }
+
     /// Sets the furthest position, clamping the current one into range.
     ///
     /// Called every frame because the content grows while a listing streams in.
@@ -67,6 +80,14 @@ impl Scroll {
     /// of a short listing from stranding the view past the end of a long one.
     pub fn set_extent(&mut self, content: f32, viewport: f32) {
         self.max = (content - viewport).max(0.0);
+        // Taken only once the extent is something other than nothing, or a
+        // request made before the first row arrived is clamped to zero and lost.
+        if self.max > 0.0
+            && let Some(wanted) = self.wanted.take()
+        {
+            self.target = wanted.clamp(0.0, self.max);
+            self.offset = self.target;
+        }
         self.target = self.target.clamp(0.0, self.max);
         self.offset = self.offset.clamp(0.0, self.max);
     }

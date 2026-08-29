@@ -557,7 +557,7 @@ class Run:
         self,
         display: str,
         work: Path,
-        path: Path,
+        path: Path | None,
         arguments: list[str],
         instance: str = "",
         environment: dict | None = None,
@@ -568,8 +568,12 @@ class Run:
         self.log = work / "app.log"
         self.err = work / "app.err"
         environment = with_server(environment or {})
+        # **No path means the saved session decides**, which is the only way to
+        # reach that half of the program: a named directory is an explicit
+        # request for one directory and turns restoring off.
+        named = [str(path)] if path is not None else []
         self.process = subprocess.Popen(
-            [*(wrap or []), str(SKERRY), *arguments, str(path)],
+            [*(wrap or []), str(SKERRY), *arguments, *named],
             stdout=self.log.open("w"),
             stderr=self.err.open("w"),
             env=environment,
@@ -644,6 +648,17 @@ class Run:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+
+    def kill(self) -> None:
+        """`kill -9`, which is the signal rule 6 names.
+
+        No handler runs, no destructor runs, and nothing is flushed. Whatever is
+        on disk afterwards is whatever was written before the moment it died.
+        """
+        if self.process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+        self.process.wait(timeout=5)
 
 
 def row_y(state: dict[str, str], row: int) -> float:
@@ -825,7 +840,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 87
+FEWEST_SCENARIOS = 88
 
 
 def scenario(name, fresh: bool = False):
@@ -2172,6 +2187,73 @@ def keep_both_and_skip(run: Run, fixture: Path) -> None:
             raise Failure(f"Keep both did not place {beside.name}")
         if (fixture / "beta" / name).read_text() != "already there":
             raise Failure(f"{name} was replaced rather than kept")
+
+
+@scenario("the-layout-survives-kill-9", fresh=True)
+def the_session_survives(run: Run, fixture: Path) -> None:
+    """Rule 6, at the signal it names.
+
+    Build a layout — a split, two tabs, the light palette, hidden files, a zoom
+    step — then `kill -9` and start again with no path, and it is all there.
+    `kill -9` rather than a clean exit on purpose: the clean exit writes the file
+    on its way out, so a test that used one would pass with no periodic save at
+    all, and rule 6's stated failure is losing state to a hard kill.
+    """
+    run.close()
+    state = run.log.parent / "state" / "kill-9"
+    home = run.log.parent / "home-kill-9"
+    home.mkdir(parents=True, exist_ok=True)
+    place = {"XDG_STATE_HOME": str(state), "HOME": str(home)}
+
+    built = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(built)
+        # A split whose halves show different directories, a second tab in the
+        # first of them, and three settings that are not the defaults.
+        built.drive("text alpha\nsleep 500\nkey shift+enter\nsleep 900\n")
+        listed(built)
+        built.drive("key ctrl+t\nsleep 700\nkey ctrl+h\nsleep 300\n")
+        built.drive("key ctrl+shift+d\nsleep 300\nkey ctrl+=\nsleep 300\nkey f12\nsleep 250\n")
+        before = built.state()
+        # Asserted as the values they are, not just carried: a scenario that only
+        # compared before with after would pass with nothing restored and nothing
+        # changed either.
+        expect(before, panes="2", tabs="2", theme="light", hidden="true", zoom="3")
+        wanted = (before["pane_paths"], before["theme"], before["hidden"], before["zoom"])
+
+        # Long enough for the two-second floor to have let a write through, and
+        # then killed outright.
+        built.drive("sleep 2500\nkey f12\nsleep 200\n")
+        saved = state / "skerry" / "session"
+        if not saved.is_file():
+            raise Failure(f"nothing was written to {saved}")
+        text = saved.read_text()
+        if not text.startswith("skerry 1\n"):
+            raise Failure(f"the file does not start with a version line: {text[:40]!r}")
+        built.kill()
+    finally:
+        built.close()
+
+    back = Run(run.display, run.log.parent, None, [], run.instance, place)
+    try:
+        listed(back)
+        back.drive("sleep 400\nkey f12\nsleep 200\n")
+        after = back.state()
+        got = (after["pane_paths"], after["theme"], after["hidden"], after["zoom"])
+        if got != wanted:
+            raise Failure(f"came back as {got}, was {wanted}")
+        expect(after, panes="2", tabs="2")
+    finally:
+        back.close()
+
+    # And a path named on the command line is an explicit request, so the saved
+    # layout stays saved rather than being opened over the top of it.
+    named = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(named)
+        expect(named.state(), panes="1", tabs="1")
+    finally:
+        named.close()
 
 
 PEER = ROOT / "tools" / "gtk-drag-peer"

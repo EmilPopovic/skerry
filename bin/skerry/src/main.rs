@@ -130,6 +130,7 @@ fn main() -> std::process::ExitCode {
         }
     }
 
+    let named_path = path.clone();
     let path = path.or_else(home).unwrap_or_else(|| PathBuf::from("/"));
     // `.` and `../..` are legitimate arguments and illegitimate things to show in
     // a path bar. Resolved here rather than in the pane, because a pane's path is
@@ -167,7 +168,20 @@ fn main() -> std::process::ExitCode {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
         }
         (None, None) => {
-            window(&Options { path, dark, stats, own_frame, scale_120: forced_scale, started })
+            window(&Options {
+                // A named directory is an explicit request for one directory,
+                // so the saved layout stays saved and is not opened over it.
+                restore: named_path.is_none(),
+                path,
+                // `Some` only where a flag said so: the absence of `--light` is
+                // not an instruction to be dark, it is the absence of one.
+                dark: (!dark).then_some(false),
+                sidebar: no_sidebar.then_some(false),
+                stats,
+                own_frame,
+                scale_120: forced_scale,
+                started,
+            })
         }
     };
 
@@ -234,6 +248,11 @@ skerry [OPTIONS] [PATH]
                    to. Always on where the compositor offers no decorations,
                    which is GNOME.
   -h, --help       this
+
+With no PATH, the window comes back the way it was left — the tabs, the
+splits, the sort orders and the scroll offsets — from
+$XDG_STATE_HOME/skerry/session. Naming a PATH opens that directory instead and
+leaves the saved layout alone.
 
 Rendering one frame without a display server, for a golden-frame test or for
 looking at:

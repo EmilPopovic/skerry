@@ -74,6 +74,73 @@ impl Tabs {
     }
 }
 
+fn describe_node(node: &Node) -> crate::session::Node {
+    match node {
+        Node::Leaf(tabs) => crate::session::Node::Leaf {
+            active: tabs.active,
+            tabs: tabs
+                .panes
+                .iter()
+                .map(|pane| crate::session::Tab {
+                    path: pane.path.clone(),
+                    sort: pane.sort,
+                    scroll: pane.scroll.offset(),
+                })
+                .collect(),
+        },
+        Node::Split { axis, ratio, first, second, .. } => crate::session::Node::Split {
+            axis: *axis,
+            ratio: *ratio,
+            first: Box::new(describe_node(first)),
+            second: Box::new(describe_node(second)),
+        },
+    }
+}
+
+fn restore_node(described: &crate::session::Node, next: &mut u32, jobs: &Jobs) -> Node {
+    match described {
+        crate::session::Node::Leaf { active, tabs } => {
+            let id = PaneId(*next);
+            *next += 1;
+            let panes: Vec<Pane> = tabs
+                .iter()
+                .map(|tab| {
+                    let mut pane = Pane::new(tab.path.clone());
+                    pane.sort = tab.sort;
+                    pane.scroll_when_loaded(tab.scroll);
+                    pane.reload(jobs);
+                    pane
+                })
+                .collect();
+            // The parser refuses a leaf with no tabs, and the tree's invariant is
+            // that there is always one — restated here because this constructor
+            // is reachable from a file rather than from the program.
+            let panes = if panes.is_empty() { vec![Pane::new(PathBuf::from("/"))] } else { panes };
+            let active = (*active).min(panes.len() - 1);
+            Node::Leaf(Tabs { id, panes, active })
+        }
+        crate::session::Node::Split { axis, ratio, first, second } => {
+            let id = SplitId(*next);
+            *next += 1;
+            Node::Split {
+                id,
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(restore_node(first, next, jobs)),
+                second: Box::new(restore_node(second, next, jobs)),
+            }
+        }
+    }
+}
+
+/// The leftmost leaf, which is where the keyboard starts.
+fn first_leaf(node: &Node) -> PaneId {
+    match node {
+        Node::Leaf(tabs) => tabs.id,
+        Node::Split { first, .. } => first_leaf(first),
+    }
+}
+
 /// The name a tab carries: the directory's own, and `/` for the root.
 pub(crate) fn title_of(path: &Path) -> &str {
     path.file_name().and_then(std::ffi::OsStr::to_str).unwrap_or("/")
@@ -110,6 +177,28 @@ impl Panes {
             next: 1,
             closed: Vec::new(),
         }
+    }
+
+    /// What the tree is, for the session file.
+    ///
+    /// Total: every tree has a description, and the description of a tree of one
+    /// leaf on one tab is what a fresh window writes.
+    pub(crate) fn describe(&self) -> crate::session::Node {
+        describe_node(&self.root)
+    }
+
+    /// Rebuilds a tree from a session's description and starts every read.
+    ///
+    /// **Every pane, not only the visible one.** A background tab whose read
+    /// waits until it is switched to is a tab that takes a second to show
+    /// something the first time it is clicked, which is the thing this program
+    /// exists not to do — and the reads are on the pool, in parallel, so the cost
+    /// is the pool's rather than the window's.
+    pub(crate) fn restore(described: &crate::session::Node, jobs: &Jobs) -> Self {
+        let mut next = 0;
+        let root = restore_node(described, &mut next, jobs);
+        let focus = first_leaf(&root);
+        Self { root, focus, next, closed: Vec::new() }
     }
 
     fn mint(&mut self) -> u32 {

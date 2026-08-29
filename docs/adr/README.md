@@ -18,6 +18,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0008](0008-persistent-index-is-required.md) | A persistent filename index in `sk-index`, not an optional extra | Accepted |
 | [0009](0009-x11-backend-behind-a-runtime-selected-enum.md) | An X11 backend behind a runtime-selected enum, with scale from `Xft.dpi` | Accepted |
 | [0010](0010-a-split-tree-of-tab-strips.md) | A binary split tree whose leaves are tab strips | Accepted |
+| [0011](0011-one-plain-text-state-file-written-atomically.md) | One plain-text state file, written whole and renamed into place | Accepted |
 
 ## Triggers that have been answered
 
