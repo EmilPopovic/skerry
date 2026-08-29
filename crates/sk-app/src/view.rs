@@ -62,7 +62,10 @@ pub struct Chrome<'a> {
     /// The sidebar row under the pointer.
     pub hovered_place: Option<usize>,
     /// The row a drag of files would drop into, while one is in flight.
-    pub drop_row: Option<usize>,
+    pub drop_row: Option<(PaneId, usize)>,
+    /// The pane whose whole list would take a drop, ringed rather than a row
+    /// highlighted, because the target is the directory it is showing.
+    pub drop_pane: Option<PaneId>,
     /// The breadcrumb separator under the pointer.
     pub hovered_separator: Option<usize>,
     /// The sibling menu a separator has opened, while one is open.
@@ -196,6 +199,19 @@ pub fn draw(
         tab_strip(painter, tabs, leaf, chrome, has_keyboard);
         header(painter, tabs.showing(), leaf);
         body(painter, tabs.showing(), leaf, now, chrome, has_keyboard);
+    }
+    // **Over the pane, and after every pane is drawn.** A drop that lands in the
+    // directory a pane is showing has no row to point at, so what is marked is
+    // the list itself. Drawn here rather than inside `body` because a ring
+    // inside the clip would lose the edge it is a ring around.
+    if let Some(target) = chrome.drop_pane
+        && let Some(leaf) = chrome.leaves.iter().find(|leaf| leaf.id == target)
+    {
+        let theme = *painter.theme;
+        let shape = painter.rect(leaf.body.x, leaf.body.y, leaf.body.width, leaf.body.height);
+        painter.list.rect(shape, theme.palette.accent.with_alpha(28), 0.0);
+        let ring = painter.px(2.0).round().max(1.0);
+        painter.list.stroke(shape, theme.palette.accent, 0.0, ring);
     }
     // After the panes, so a divider is a line over two edges rather than a gap
     // between them, and before the status strip, which spans the window.
@@ -1681,7 +1697,7 @@ fn body(
         let context = RowContext {
             types: chrome.types,
             naming: chrome.naming.filter(|_| has_keyboard),
-            drop_row: chrome.drop_row.filter(|_| has_keyboard),
+            drop_row: chrome.drop_row.filter(|(id, _)| *id == layout.id).map(|(_, row)| row),
         };
         row_at(painter, pane, layout, now, row, context);
     }
@@ -2266,6 +2282,7 @@ mod tests {
                 places: &[],
                 hovered_place: None,
                 drop_row: None,
+                drop_pane: None,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,

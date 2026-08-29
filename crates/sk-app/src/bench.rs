@@ -116,6 +116,7 @@ fn chrome_of<'a>(
         places,
         hovered_place: None,
         drop_row: None,
+        drop_pane: None,
         naming: None,
         tools: [true, true, true, true],
         filtering: false,

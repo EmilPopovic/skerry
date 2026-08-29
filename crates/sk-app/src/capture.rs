@@ -435,6 +435,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         places: sample.places,
         hovered_place: None,
         drop_row: None,
+        drop_pane: None,
         naming: sample.overlays.naming.as_ref(),
         // What a freshly opened directory looks like: nowhere to go
         // back to, nowhere forward, a parent and a reload. Hardcoded

@@ -825,7 +825,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 82
+FEWEST_SCENARIOS = 84
 
 
 def scenario(name, fresh: bool = False):
@@ -1975,6 +1975,110 @@ def dragging_files_onto_a_folder(run: Run, fixture: Path) -> None:
     for name in ("file-1.txt", "file-2.txt"):
         if not (fixture / name).is_file():
             raise Failure(f"undo did not bring {name} back")
+
+
+@scenario("dragging-files-into-another-pane", fresh=True)
+def dragging_between_panes(run: Run, fixture: Path) -> None:
+    """Pick a file up on the left, drop it on the right pane's empty space.
+
+    The gesture a split exists for. Inside one pane a drop still needs a folder
+    to aim at — dropping files back where they came from would be a move to
+    where they already are — so what makes this work is that the *other* pane's
+    list is itself a target, marked with a ring rather than a row highlight.
+    """
+    listed(run)
+    # The right pane, showing `alpha`, opened from the row itself so the two
+    # panes are showing different directories without a path being typed.
+    run.drive("text alpha\nsleep 500\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor="alpha")
+    run.drive("key shift+enter\nsleep 900\nkey f12\nsleep 300\n")
+    split = run.state()
+    expect(split, panes="2", pane_focus="0")
+    if split["pane_paths"] != f"{Path(split['path']).name},alpha":
+        raise Failure(f"the panes are showing {split['pane_paths']!r}")
+
+    # One file, chosen with the keyboard, in the pane that still has it.
+    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+    chosen = run.state()
+    expect(chosen, selected="1", cursor="file-1.txt")
+    held = point_at(run, int(chosen["cursor_row"]))
+    if held["hover_name"] != "file-1.txt":
+        raise Failure(f"the pointer is over {held['hover_name']!r}, wanted file-1.txt")
+
+    # Low in the right pane's list, which is empty space: `alpha` holds two
+    # entries and they are drawn at the top.
+    x, y, width, height = (float(part) for part in held["pane_body"].split(",")[1].split(":"))
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    to_point = aim(run, held, x + width / 2.0, y + height - 24.0)
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\n"
+        f"drag {from_point[0]:.1f} {from_point[1]:.1f} {to_point[0]:.1f} {to_point[1]:.1f}\n"
+        "sleep 1200\nkey f12\nsleep 400\n"
+    )
+    if not (fixture / "alpha" / "file-1.txt").is_file():
+        landed = sorted(path.name for path in (fixture / "alpha").iterdir())
+        raise Failure(f"file-1.txt did not land in alpha: {landed}")
+    if (fixture / "file-1.txt").exists():
+        raise Failure("file-1.txt is still where it was, so the drop copied rather than moved")
+    expect(run.state(), undo="true", dragging="false", drag_in="false", drag_out="false")
+
+    run.drive("key ctrl+z\nsleep 1500\nkey f12\nsleep 400\n")
+    if not (fixture / "file-1.txt").is_file():
+        raise Failure("undo did not bring file-1.txt back")
+
+
+def creep(frm: tuple[float, float], to: tuple[float, float], steps: int = 8) -> str:
+    """Driver lines that walk the pointer from one point to another.
+
+    **A drag is a sequence of motions, not a jump.** `skerry-drive`'s own `drag`
+    sends eight for the same reason: once a drag has begun the compositor owns
+    the pointer, and a single warp to the far side arrives as nothing at all —
+    which reads as a target that never updated rather than as a motion that was
+    never sent.
+    """
+    lines = []
+    for step in range(1, steps + 1):
+        at = step / steps
+        lines.append(f"move {frm[0] + (to[0] - frm[0]) * at:.1f} {frm[1] + (to[1] - frm[1]) * at:.1f}")
+        lines.append("sleep 40")
+    return "\n".join(lines) + "\n"
+
+
+@scenario("a-pane-under-a-drag-is-ringed-and-its-own-pane-is-not", fresh=True)
+def the_drop_ring(run: Run, fixture: Path) -> None:
+    """What the frame promises before the button comes up, in both panes.
+
+    The ring is the only thing that says a drop into empty space will do
+    anything, and the pane the drag started in must not draw one — there it
+    would promise a move to where the files already are.
+    """
+    listed(run)
+    run.drive("text alpha\nsleep 500\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor="alpha")
+    run.drive("key shift+enter\nsleep 900\nkey f12\nsleep 300\n")
+    expect(run.state(), panes="2", pane_focus="0")
+    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+    chosen = run.state()
+    held = point_at(run, int(chosen["cursor_row"]))
+    left = [float(part) for part in held["pane_body"].split(",")[0].split(":")]
+    right = [float(part) for part in held["pane_body"].split(",")[1].split(":")]
+
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    over_right = aim(run, held, right[0] + right[2] / 2.0, right[1] + right[3] - 24.0)
+    over_left = aim(run, held, left[0] + left[2] / 2.0, left[1] + left[3] - 24.0)
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        + creep(from_point, over_right)
+        + "sleep 350\nkey f12\nsleep 250\n"
+    )
+    expect(run.state(), dragging="true", drop_whole="1", drop_leaf="1", drop_row="-1")
+    run.drive(creep(over_right, over_left) + "sleep 350\nkey f12\nsleep 250\n")
+    over_its_own = run.state()
+    expect(over_its_own, dragging="true", drop_whole="0", drop_leaf="-1")
+    run.drive("release\nsleep 600\nkey f12\nsleep 250\n")
+    expect(run.state(), dragging="false")
+    if (fixture / "alpha" / "file-1.txt").exists():
+        raise Failure("a drop on its own pane moved the file anyway")
 
 
 PEER = ROOT / "tools" / "gtk-drag-peer"

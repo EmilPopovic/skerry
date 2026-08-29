@@ -70,10 +70,21 @@ struct FilesDrag {
     id: Option<sk_model::EntryId>,
     /// Set once the pointer has moved past the threshold.
     active: bool,
+    /// The pane the press was in, so a drop back into it is not a move to where
+    /// the files already are.
+    ///
+    /// `None` for a drag another application started: it came from outside, so
+    /// every pane is somewhere else.
+    origin: Option<crate::panes::PaneId>,
     /// The directory under the pointer that would take the drop.
     onto: Option<PathBuf>,
-    /// The display row of that directory, for the highlight.
-    row: Option<usize>,
+    /// The folder row that directory is, for the highlight: which pane, and
+    /// which display row in it.
+    row: Option<(crate::panes::PaneId, usize)>,
+    /// The pane whose own directory would take the drop, when the pointer is on
+    /// no folder row. The whole list is ringed, because the target is the
+    /// directory the pane is showing rather than anything drawn in it.
+    into_pane: Option<crate::panes::PaneId>,
 }
 
 /// How far the pointer must travel before a press becomes a rubber band.
@@ -1229,7 +1240,13 @@ impl App {
                     // left alive outlives the gesture — measured, one compositor
                     // sends a single `enter` after the button is already up and
                     // then nothing at all.
-                    let inside = self.placement.here.body.contains(position.x, position.y);
+                    //
+                    // **Any pane's list, not the focused one's.** This asked
+                    // about `placement.here`, so a drop into the *other* half of
+                    // a split released a button the server still thought was
+                    // dragging: the files moved and the gesture never ended,
+                    // leaving a drag over the window that nothing could clear.
+                    let inside = self.pane_under(position).is_some();
                     if inside && self.window.dragging_out() {
                         self.window.cancel_drag();
                     }
@@ -3558,7 +3575,17 @@ impl App {
         let cursor_row =
             self.panes.focused().cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let progress = self.edits.progress_line().unwrap_or_default();
-        let drop_row = self.drop_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        // Which pane as well as which row: a scenario dragging between two panes
+        // cannot tell "the right pane's row 2" from "the left pane's row 2", and
+        // that is the whole thing it is asserting about.
+        let drop_row = self.drop_row().map_or(-1, |(_, row)| i64::try_from(row).unwrap_or(-1));
+        let drop_leaf = self
+            .drop_row()
+            .map(|(id, _)| id)
+            .or_else(|| self.drop_pane())
+            .and_then(|id| self.placement.leaves.iter().position(|leaf| leaf.id == id))
+            .map_or(-1, |at| i64::try_from(at).unwrap_or(-1));
+        let drop_whole = i32::from(self.drop_pane().is_some());
         let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
         // The display server's own view, which is not the same question: one is
         // "this window is carrying something", the other is "the server has a
@@ -3582,7 +3609,8 @@ hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
 undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
-filtering={} filter={:?} drop_row={drop_row} dragging={dragging} \
+filtering={} filter={:?} drop_row={drop_row} drop_leaf={drop_leaf} drop_whole={drop_whole} \
+dragging={dragging} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
 refused={refused:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",
@@ -3811,10 +3839,25 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             .map(|leaf| format!("{:.0}x{:.0}", leaf.area.width, leaf.area.height))
             .collect::<Vec<_>>()
             .join(",");
+        // Each leaf's list, so a scenario can put the pointer inside a pane that
+        // does not have the keyboard — which `body_top` and `name_x` cannot,
+        // because they answer about the focused one.
+        let bodies = self
+            .placement
+            .leaves
+            .iter()
+            .map(|leaf| {
+                format!(
+                    "{:.0}:{:.0}:{:.0}:{:.0}",
+                    leaf.body.x, leaf.body.y, leaf.body.width, leaf.body.height
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
             "panes={} pane_focus={order} pane_sizes={widths:?} pane_paths={paths:?} \
 tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} plus_aim={plus_aim:?} \
-tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?}",
+tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} pane_body={bodies:?}",
             self.placement.leaves.len(),
             leaf.panes.len(),
             leaf.active,
@@ -4092,14 +4135,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if !drag.active && moved <= DRAG_THRESHOLD {
             return;
         }
-        let target = self.row_under(position).and_then(|row| {
-            let id = self.panes.focused().listing.at(row)?;
-            if !self.panes.focused().listing.flags(id).has(sk_model::Flags::DIR) {
-                return None;
-            }
-            let path = self.panes.focused().path.join(self.panes.focused().listing.name(id));
-            Some((row, path))
-        });
+        let target = self.folder_under(position);
+        let over = self.pane_under(position);
         let Some(drag) = &mut self.files_drag else { return };
         let starting = !drag.active;
         drag.active = true;
@@ -4116,16 +4153,53 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         let Some(drag) = &mut self.files_drag else { return };
         let (row, onto) = match target {
-            Some((row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
-                (Some(row), Some(path))
+            Some((leaf, row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
+                (Some((leaf, row)), Some(path))
             }
             _ => (None, None),
         };
-        if drag.row != row || drag.onto != onto {
+        // **A pane other than the one this started in takes the drop into the
+        // directory it is showing.** That is the whole gesture a split exists
+        // for: pick files up on the left, put them down on the right, with no
+        // folder to aim at. The origin pane is excluded because dropping files
+        // back where they came from is a move to where they already are, and the
+        // ring would promise something that would then do nothing.
+        let into_pane =
+            onto.is_none().then(|| over.filter(|id| Some(*id) != drag.origin)).flatten();
+        if drag.row != row || drag.onto != onto || drag.into_pane != into_pane {
             drag.row = row;
             drag.onto = onto;
+            drag.into_pane = into_pane;
             self.dirty = true;
         }
+    }
+
+    /// The pane whose list is under `position`, whichever pane has the keyboard.
+    ///
+    /// The body rather than the whole leaf: the tab strip is a drop target for a
+    /// *tab* and the header sorts, and a file dropped on either of those is a
+    /// file dropped on a control that means something else.
+    fn pane_under(&self, position: Point) -> Option<crate::panes::PaneId> {
+        self.placement
+            .leaves
+            .iter()
+            .find(|leaf| leaf.body.contains(position.x, position.y))
+            .map(|leaf| leaf.id)
+    }
+
+    /// The folder row under `position` in any pane, and the path it names.
+    fn folder_under(&self, position: Point) -> Option<(crate::panes::PaneId, usize, PathBuf)> {
+        let leaf =
+            self.placement.leaves.iter().find(|it| it.body.contains(position.x, position.y))?;
+        let pane = self.panes.leaf(leaf.id)?.showing();
+        let row = leaf
+            .row_at(position.y, pane.scroll.offset(), self.theme.metrics.row_height)
+            .filter(|row| *row < pane.listing.rows())?;
+        let id = pane.listing.at(row)?;
+        if !pane.listing.flags(id).has(sk_model::Flags::DIR) {
+            return None;
+        }
+        Some((leaf.id, row, pane.path.join(pane.listing.name(id))))
     }
 
     /// Follows a drag over this window, whoever started it.
@@ -4149,8 +4223,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 paths: Vec::new(),
                 id: None,
                 active: true,
+                origin: None,
                 onto: None,
                 row: None,
+                into_pane: None,
             });
         }
         self.drag_files_to(position);
@@ -4161,19 +4237,26 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.window.accept_drag(wanted, sk_plat::DragAction::Copy);
     }
 
-    /// The directory a drop would land in: the folder under the pointer, or the
-    /// one being shown.
+    /// The directory a drop would land in.
+    ///
+    /// Three answers, in order: the folder row under the pointer, the directory
+    /// a *different* pane is showing, or — for a peer's drag only — the
+    /// directory this pane is showing.
+    ///
+    /// **A peer's drag can land anywhere in the list; ours cannot.** Files from
+    /// another application belong in the directory being shown, and requiring a
+    /// folder under the pointer would refuse every drop onto a row or onto empty
+    /// space, which is most of the window. Our own selection dropped on the pane
+    /// it came from is a move to where it already is, so inside that one pane it
+    /// still takes a folder.
     fn drop_target(&self) -> Option<PathBuf> {
         let drag = self.files_drag.as_ref()?;
         if let Some(onto) = &drag.onto {
             return Some(onto.clone());
         }
-        // **A peer's drag can land anywhere in the list; ours cannot.** Files
-        // from another application belong in the directory being shown, and
-        // requiring a folder under the pointer would refuse every drop onto a
-        // row or onto empty space — which is most of the window. Our own
-        // selection dropped on its own directory is a move to where it already
-        // is, so that needs a folder.
+        if let Some(id) = drag.into_pane {
+            return self.panes.leaf(id).map(|leaf| leaf.showing().path.clone());
+        }
         drag.paths.is_empty().then(|| self.panes.focused().path.clone())
     }
 
@@ -4202,8 +4285,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.dirty = true;
             return;
         }
-        let into = self.files_drag.as_ref().and_then(|drag| drag.onto.clone());
-        let into = into.unwrap_or_else(|| self.panes.focused().path.clone());
+        let into = self.drop_target().unwrap_or_else(|| self.panes.focused().path.clone());
         self.files_drag = None;
         self.dirty = true;
         let Some(fd) = self.window.take_drop("text/uri-list") else { return };
@@ -4237,21 +4319,32 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         });
     }
 
-    /// Where a drag of files would land, for the highlight.
+    /// Which pane's row a drag of files would land on, for the highlight.
     #[must_use]
-    pub(crate) fn drop_row(&self) -> Option<usize> {
+    pub(crate) fn drop_row(&self) -> Option<(crate::panes::PaneId, usize)> {
         self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.row)
+    }
+
+    /// Which whole pane would take it instead, for the ring around its list.
+    #[must_use]
+    pub(crate) fn drop_pane(&self) -> Option<crate::panes::PaneId> {
+        self.files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.into_pane)
     }
 
     /// Finishes a drag of files, or collapses it back into a plain click.
     ///
-    /// **Move, and `Ctrl` copies.** Every target reachable by dragging inside one
-    /// pane is on the filesystem the pane is showing, so "same device means move"
-    /// — which is what GNOME and KDE decide per drop — is always move here, and a
-    /// rule that is always the same is better stated than computed.
+    /// **Move, and `Ctrl` copies.** GNOME and KDE decide this per drop from the
+    /// device each side is on, so the same gesture moves or copies depending on
+    /// something nobody can see. Stated instead: a drag moves, `Ctrl` copies, and
+    /// `Ctrl+Z` takes either back. A drop into another pane can now cross
+    /// devices — the engine handles that, and the rule does not change with it.
     fn drop_files(&mut self, copying: bool) {
+        // Asked before the drag is taken, because the answer for a drop into
+        // another pane is the directory *that pane* is showing and the drag is
+        // what says which pane that is.
+        let landing = self.drop_target();
         let Some(drag) = self.files_drag.take() else { return };
-        let Some(into) = drag.onto.filter(|_| drag.active) else {
+        let Some(into) = landing.filter(|_| drag.active) else {
             // Never moved, or moved and landed on nothing: the press was a plain
             // click after all, and the selection it deferred happens now.
             if !drag.active
@@ -4300,8 +4393,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 paths: self.selected_paths(),
                 id: Some(id),
                 active: false,
+                origin: Some(self.panes.focus()),
                 onto: None,
                 row: None,
+                into_pane: None,
             });
         }
     }
@@ -5280,6 +5375,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // Built only when the overlay is up, which is why it may allocate.
         let rows = show_keys.then(|| crate::commands::overlay_rows(commands));
         let progress = edits.progress_line();
+        let dropping = files_drag.as_ref().filter(|drag| drag.active);
         let chrome = Chrome {
             keys: rows.as_deref(),
             stats: *show_stats,
@@ -5297,7 +5393,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_tool: *hovered_tool,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,
-            drop_row: files_drag.as_ref().filter(|drag| drag.active).and_then(|drag| drag.row),
+            drop_row: dropping.and_then(|drag| drag.row),
+            drop_pane: dropping.and_then(|drag| drag.into_pane),
             naming: edits.naming.as_ref(),
             tools,
             filtering: *filtering,
