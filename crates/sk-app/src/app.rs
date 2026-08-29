@@ -216,7 +216,7 @@ impl Background {
         let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
             Problem::plain(ProblemKind::OutOfResources, format!("inotify: {error}"))
         })?;
-        watcher.watch(pane.path.clone());
+        watcher.watch(vec![pane.path.clone()]);
 
         Ok(Self {
             waker,
@@ -1018,8 +1018,11 @@ impl App {
             // then took you back to it.
             self.abandon_fields();
             self.watch_target = self.pane.path.clone();
-            self.watcher.watch(self.watch_target.clone());
-        } else if !self.watcher.armed() && !self.pane.loading && self.pane.problem.is_none() {
+            self.watcher.watch(vec![self.watch_target.clone()]);
+        } else if !self.watcher.armed(&self.watch_target)
+            && !self.pane.loading
+            && self.pane.problem.is_none()
+        {
             // The watch is gone but the directory is not. That is what an
             // atomic replace looks like — a `git checkout` across a branch that
             // deletes and recreates it, `rsync --delete`, a `mv` over the top —
@@ -1028,12 +1031,12 @@ impl App {
             // saying "not watching for changes" until the user navigated away
             // and back. Rate-limited by the same floor as the read it follows.
             if self.refreshed.elapsed() >= REFRESH_FLOOR {
-                self.watcher.watch(self.watch_target.clone());
+                self.watcher.watch(vec![self.watch_target.clone()]);
             }
         }
         // Read every pass rather than once at arm time: the thread establishes the
         // watch asynchronously, so the answer is not known when `watch` returns.
-        let armed = self.watcher.armed();
+        let armed = self.watcher.armed(&self.watch_target);
         if armed != self.watching {
             self.watching = armed;
             self.dirty = true;

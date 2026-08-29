@@ -17,6 +17,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0007](0007-runtime-capability-detection.md) | Runtime capability probing, never build-time features | Accepted |
 | [0008](0008-persistent-index-is-required.md) | A persistent filename index in `sk-index`, not an optional extra | Accepted |
 | [0009](0009-x11-backend-behind-a-runtime-selected-enum.md) | An X11 backend behind a runtime-selected enum, with scale from `Xft.dpi` | Accepted |
+| [0010](0010-a-split-tree-of-tab-strips.md) | A binary split tree whose leaves are tab strips | Accepted |
 
 ## Triggers that have been answered
 

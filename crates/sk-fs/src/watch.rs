@@ -11,9 +11,10 @@
 //!   overflow is a *queue*-wide event: another watcher in this process filling it
 //!   loses our events too, so it is handled rather than assumed away.
 //! * **The watch budget is per-user and shared**, between 60,793 and 65,536, and
-//!   one `node_modules` tree costs 34% of it. Not a constraint yet — this watches
-//!   one directory — and the reason `Watcher` retargets a single watch instead of
-//!   accumulating them.
+//!   one `node_modules` tree costs 34% of it. The reason this watches the
+//!   *visible* directories and not every directory a session has open: one watch
+//!   per split pane is bounded by the layout, where one per tab is bounded by
+//!   nothing.
 //!
 //! **inotify does not work on NFS at all: no event, no error.** A listing of a
 //! network mount is therefore stale until something asks for it again, and
@@ -47,18 +48,25 @@ use sk_util::WakeHandle;
 const COALESCE: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// What happened to a watched directory.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// The three that name a directory carry it, because several are watched at once
+/// and a notification that does not say where is a notification every pane has to
+/// act on.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
     /// Something in it was created, deleted, renamed or written.
     ///
     /// Deliberately not "what" — the caller re-reads. A listing is 5 ms for ten
     /// thousand entries and applying a per-event delta correctly is where every
     /// file manager's refresh bugs live.
-    Touched,
+    Touched(PathBuf),
     /// The kernel dropped events. Everything must be re-read.
+    ///
+    /// Queue-wide and so pathless: `IN_Q_OVERFLOW` arrives on watch descriptor
+    /// `-1` and means the loss is not attributable to any one directory.
     Overflowed,
     /// The directory itself was deleted or unmounted.
-    Vanished,
+    Vanished(PathBuf),
     /// The mount table changed: something was mounted or unmounted anywhere on
     /// the machine.
     ///
@@ -101,11 +109,16 @@ fn mount_table() -> Option<OwnedFd> {
     .ok()
 }
 
-/// Watches one directory at a time, on its own thread.
+/// Watches a set of directories, on its own thread.
 pub struct Watcher {
-    wanted: Arc<Mutex<Option<PathBuf>>>,
-    /// Written by the thread, read by the caller.
-    armed: Arc<AtomicBool>,
+    /// The set the caller last asked for, or `None` when the thread has taken
+    /// delivery of it. A whole set rather than a difference: the caller knows
+    /// what it wants watched and the thread works out which watches that adds
+    /// and removes, so no caller can leak a watch by forgetting to drop one.
+    wanted: Arc<Mutex<Option<Vec<PathBuf>>>>,
+    /// The directories a watch was actually established on. Written by the
+    /// thread, read by the caller.
+    armed: Arc<Mutex<Vec<PathBuf>>>,
     /// Wakes the thread out of `poll` when the target changes or it should stop.
     control: OwnedFd,
     stopping: Arc<AtomicBool>,
@@ -128,7 +141,7 @@ impl Watcher {
         let thread_control = control.try_clone()?;
 
         let wanted = Arc::new(Mutex::new(None));
-        let armed = Arc::new(AtomicBool::new(false));
+        let armed = Arc::new(Mutex::new(Vec::new()));
         let stopping = Arc::new(AtomicBool::new(false));
 
         let thread = std::thread::Builder::new().name("skerry-watch".to_owned()).spawn({
@@ -145,7 +158,7 @@ impl Watcher {
                     stopping,
                     changes,
                     wake,
-                    watch: None,
+                    watches: Vec::new(),
                 };
                 state.run();
             }
@@ -154,22 +167,22 @@ impl Watcher {
         Ok(Self { wanted, armed, control, stopping, thread: Some(thread) })
     }
 
-    /// Watches `path` instead of whatever was being watched.
-    pub fn watch(&self, path: PathBuf) {
+    /// Watches exactly `paths`, dropping every watch not in it.
+    pub fn watch(&self, paths: Vec<PathBuf>) {
         if let Ok(mut wanted) = self.wanted.lock() {
-            *wanted = Some(path);
+            *wanted = Some(paths);
         }
         self.poke();
     }
 
-    /// Whether a watch is currently established.
+    /// Whether a watch is currently established on `path`.
     ///
     /// `false` on a filesystem inotify does not cover — NFS gives no event and no
     /// error, so this is the only way a caller can know the listing is not being
     /// kept fresh.
     #[must_use]
-    pub fn armed(&self) -> bool {
-        self.armed.load(Ordering::Acquire)
+    pub fn armed(&self, path: &Path) -> bool {
+        self.armed.lock().is_ok_and(|armed| armed.iter().any(|it| it == path))
     }
 
     fn poke(&self) {
@@ -194,12 +207,15 @@ struct Thread {
     /// volumes are a snapshot.
     mounts: Option<OwnedFd>,
     control: OwnedFd,
-    wanted: Arc<Mutex<Option<PathBuf>>>,
-    armed: Arc<AtomicBool>,
+    wanted: Arc<Mutex<Option<Vec<PathBuf>>>>,
+    armed: Arc<Mutex<Vec<PathBuf>>>,
     stopping: Arc<AtomicBool>,
     changes: Sender<Change>,
     wake: WakeHandle,
-    watch: Option<i32>,
+    /// Every established watch, by descriptor. `inotify_add_watch` returns the
+    /// same descriptor for the same directory, so two panes on one path share
+    /// one entry and one kernel watch.
+    watches: Vec<(i32, PathBuf)>,
 }
 
 impl Thread {
@@ -267,40 +283,63 @@ impl Thread {
         }
     }
 
-    /// Moves the watch if the caller has asked for a different directory.
+    /// Establishes exactly the set the caller last asked for.
     fn retarget(&mut self) {
         let Ok(mut wanted) = self.wanted.lock() else { return };
-        let Some(path) = wanted.take() else { return };
+        let Some(paths) = wanted.take() else { return };
         drop(wanted);
-        self.disarm();
-        // The one syscall in this file that can block on a hung mount, which is
-        // why it happens here and not on the frame loop.
-        match inotify::add_watch(self.inotify.as_fd(), &path, watched_events()) {
-            Ok(descriptor) => {
-                self.watch = Some(descriptor);
-                self.armed.store(true, Ordering::Release);
+
+        self.watches.retain(|(descriptor, path)| {
+            let keep = paths.contains(path);
+            if !keep {
+                let _ = inotify::remove_watch(self.inotify.as_fd(), *descriptor);
             }
+            keep
+        });
+        for path in paths {
+            if self.watches.iter().any(|(_, it)| *it == path) {
+                continue;
+            }
+            // The one syscall in this file that can block on a hung mount, which
+            // is why it happens here and not on the frame loop.
+            //
             // A directory inotify cannot cover — NFS, or one that vanished
-            // between the read and the watch. Reported as "not armed" rather
-            // than as an error, because the listing is still valid.
-            Err(_) => self.armed.store(false, Ordering::Release),
+            // between the read and the watch — is left out of the set rather
+            // than reported as an error, because the listing is still valid and
+            // `armed` is how a caller asks.
+            if let Ok(descriptor) =
+                inotify::add_watch(self.inotify.as_fd(), &path, watched_events())
+            {
+                self.watches.push((descriptor, path));
+            }
         }
+        self.publish();
     }
 
+    /// Drops every watch. Only the way out: the thread is stopping.
     fn disarm(&mut self) {
-        if let Some(descriptor) = self.watch.take() {
+        for (descriptor, _) in self.watches.drain(..) {
             let _ = inotify::remove_watch(self.inotify.as_fd(), descriptor);
         }
-        self.armed.store(false, Ordering::Release);
+        self.publish();
+    }
+
+    /// Copies the armed set out for [`Watcher::armed`] to read.
+    fn publish(&self) {
+        if let Ok(mut armed) = self.armed.lock() {
+            armed.clear();
+            armed.extend(self.watches.iter().map(|(_, path)| path.clone()));
+        }
     }
 
     /// Reads everything queued, gathers a coalescing window, and sends one
-    /// notification for the whole burst.
+    /// notification per directory the burst touched.
     fn drain(&mut self) {
         // Uninitialized because `Reader` fills it from the kernel and hands back
         // only the bytes it wrote. 8 KiB is about 250 events per read.
         let mut buffer = [std::mem::MaybeUninit::<u8>::uninit(); 8192];
-        let mut worst = None;
+        let mut worst: Vec<(i32, Kind)> = Vec::new();
+        let mut overflowed = false;
         let deadline = std::time::Instant::now() + COALESCE;
 
         loop {
@@ -308,12 +347,21 @@ impl Thread {
             // `Errno::AGAIN` on a non-blocking descriptor is the end of the
             // queue, and it is the only way out of this loop.
             while let Ok(event) = reader.next() {
-                // Only events for the watch we currently hold. Retargeting leaves
-                // an `IN_IGNORED` for the old descriptor queued behind the new
-                // watch, and treating it as ours would classify it as `Vanished`
-                // and tear down the watch that was just established.
-                if Some(event.wd()) == self.watch {
-                    worst = Some(worse_of(worst, classify(&event)));
+                if event.events().contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
+                    overflowed = true;
+                    continue;
+                }
+                // Only events for a watch we currently hold. Dropping a watch
+                // leaves an `IN_IGNORED` for it queued behind the ones that
+                // remain, and treating that as ours would classify it as
+                // `Vanished` for whichever directory reused the descriptor.
+                if !self.watches.iter().any(|(descriptor, _)| *descriptor == event.wd()) {
+                    continue;
+                }
+                let kind = classify(&event);
+                match worst.iter_mut().find(|(descriptor, _)| *descriptor == event.wd()) {
+                    Some(slot) => slot.1 = worse_of(Some(slot.1), kind),
+                    None => worst.push((event.wd(), kind)),
                 }
             }
 
@@ -333,25 +381,47 @@ impl Thread {
             }
         }
 
-        if let Some(change) = worst {
-            if change == Change::Vanished {
-                self.disarm();
-            }
-            if self.changes.send(change).is_ok() {
-                self.wake.wake();
-            } else {
-                // Nobody is listening any more.
-                self.stopping.store(true, Ordering::Release);
-            }
+        if overflowed {
+            self.report(Change::Overflowed);
+        }
+        for (descriptor, kind) in worst {
+            let Some(index) = self.watches.iter().position(|(it, _)| *it == descriptor) else {
+                continue;
+            };
+            let change = match kind {
+                Kind::Touched => Change::Touched(self.watches[index].1.clone()),
+                // The kernel has already dropped this watch — `IN_IGNORED` is it
+                // saying so — and a directory that is gone must not keep a slot
+                // that a later `add_watch` would hand out again.
+                Kind::Vanished => {
+                    let (_, path) = self.watches.remove(index);
+                    self.publish();
+                    Change::Vanished(path)
+                }
+            };
+            self.report(change);
+        }
+    }
+
+    fn report(&self, change: Change) {
+        if self.changes.send(change).is_ok() {
+            self.wake.wake();
+        } else {
+            // Nobody is listening any more.
+            self.stopping.store(true, Ordering::Release);
         }
     }
 }
 
-fn classify(event: &inotify::Event<'_>) -> Change {
+/// The most serious thing that happened to one directory in one burst.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Touched,
+    Vanished,
+}
+
+fn classify(event: &inotify::Event<'_>) -> Kind {
     let flags = event.events();
-    if flags.contains(inotify::ReadFlags::QUEUE_OVERFLOW) {
-        return Change::Overflowed;
-    }
     // `IGNORED` is the kernel saying the watch is gone, which it sends after a
     // `DELETE_SELF` and also after an unmount — the one case with no event of
     // its own in `WatchFlags`.
@@ -359,9 +429,9 @@ fn classify(event: &inotify::Event<'_>) -> Change {
         || flags.contains(inotify::ReadFlags::MOVE_SELF)
         || flags.contains(inotify::ReadFlags::IGNORED)
     {
-        return Change::Vanished;
+        return Kind::Vanished;
     }
-    Change::Touched
+    Kind::Touched
 }
 
 /// Reads a descriptor to the end. `false` where a read failed.
@@ -377,20 +447,13 @@ fn drain_to_end(fd: std::os::fd::BorrowedFd<'_>) -> bool {
     }
 }
 
-/// The more serious of two changes.
+/// The more serious of two things that happened to one directory.
 ///
 /// A burst that contains both a write and an unmount is an unmount: acting on the
 /// lesser one would re-read a directory that is not there.
-fn worse_of(left: Option<Change>, right: Change) -> Change {
-    let rank = |change: Change| match change {
-        // Never reaches this function: it comes from the mount table and not
-        // from an inotify event, so it is not part of a directory's burst.
-        Change::Mounts | Change::Touched => 0,
-        Change::Overflowed => 1,
-        Change::Vanished => 2,
-    };
+fn worse_of(left: Option<Kind>, right: Kind) -> Kind {
     match left {
-        Some(left) if rank(left) >= rank(right) => left,
+        Some(Kind::Vanished) => Kind::Vanished,
         _ => right,
     }
 }
@@ -409,7 +472,7 @@ pub fn can_watch(path: &Path) -> bool {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Change, Watcher, can_watch, worse_of};
+    use super::{Change, Kind, Watcher, can_watch, worse_of};
     use sk_util::Waker;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
@@ -433,15 +496,15 @@ mod tests {
     /// says nothing about it yet. Spinning on the observable state rather than
     /// sleeping for a guessed interval: a sleep long enough to be reliable is
     /// slower than this, and one short enough to be fast is a flaky test.
-    fn settle(watcher: &Watcher, wanted: bool) -> bool {
+    fn settle(watcher: &Watcher, path: &Path, wanted: bool) -> bool {
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
-            if watcher.armed() == wanted {
+            if watcher.armed(path) == wanted {
                 return true;
             }
             std::thread::yield_now();
         }
-        watcher.armed() == wanted
+        watcher.armed(path) == wanted
     }
 
     #[test]
@@ -450,15 +513,15 @@ mod tests {
         let waker = Waker::new().expect("eventfd");
         let (sender, changes) = mpsc::channel();
         let watcher = Watcher::new(sender, waker.handle()).expect("watcher");
-        watcher.watch(root.clone());
+        watcher.watch(vec![root.clone()]);
 
-        assert!(settle(&watcher, true), "the watch was never established");
+        assert!(settle(&watcher, &root, true), "the watch was never established");
 
         // Ten files in one burst: one notification, not ten.
         for index in 0..10 {
             std::fs::write(root.join(format!("file-{index}")), b"x").unwrap();
         }
-        assert_eq!(wait_for(&changes), Some(Change::Touched));
+        assert_eq!(wait_for(&changes), Some(Change::Touched(root.clone())));
         assert!(changes.recv_timeout(Duration::from_millis(200)).is_err(), "coalesced to one");
 
         assert!(waker.drain(), "the frame loop was woken");
@@ -471,18 +534,18 @@ mod tests {
         let waker = Waker::new().expect("eventfd");
         let (sender, changes) = mpsc::channel();
         let watcher = Watcher::new(sender, waker.handle()).expect("watcher");
-        watcher.watch(root.clone());
-        assert!(settle(&watcher, true));
+        watcher.watch(vec![root.clone()]);
+        assert!(settle(&watcher, &root, true));
 
         std::fs::remove_dir_all(&root).unwrap();
         // The burst may carry the child deletions too; what matters is that the
         // most serious thing in it wins.
         let mut seen = wait_for(&changes);
-        while seen == Some(Change::Touched) {
+        while seen == Some(Change::Touched(root.clone())) {
             seen = changes.recv_timeout(Duration::from_millis(500)).ok();
         }
-        assert_eq!(seen, Some(Change::Vanished));
-        assert!(settle(&watcher, false), "the watch outlived the directory");
+        assert_eq!(seen, Some(Change::Vanished(root.clone())));
+        assert!(settle(&watcher, &root, false), "the watch outlived the directory");
     }
 
     #[test]
@@ -493,9 +556,9 @@ mod tests {
         let (sender, changes) = mpsc::channel();
         let watcher = Watcher::new(sender, waker.handle()).expect("watcher");
 
-        watcher.watch(first.clone());
-        assert!(settle(&watcher, true));
-        watcher.watch(second.clone());
+        watcher.watch(vec![first.clone()]);
+        assert!(settle(&watcher, &first, true));
+        watcher.watch(vec![second.clone()]);
 
         // The retarget lands on the watcher's thread, so wait for evidence that
         // it has rather than for a duration: write into the new directory until
@@ -517,7 +580,7 @@ mod tests {
             "the abandoned directory is still being reported"
         );
         std::fs::write(second.join("noticed"), b"x").unwrap();
-        assert_eq!(wait_for(&changes), Some(Change::Touched));
+        assert_eq!(wait_for(&changes), Some(Change::Touched(second.clone())));
 
         let _ = std::fs::remove_dir_all(&first);
         let _ = std::fs::remove_dir_all(&second);
@@ -551,20 +614,75 @@ mod tests {
 
         // Arm on something real first, so that observing `false` afterwards is
         // evidence the retarget happened rather than evidence nothing has.
-        watcher.watch(root.clone());
-        assert!(settle(&watcher, true));
-        watcher.watch(PathBuf::from("/nonexistent-skerry-watch"));
-        assert!(settle(&watcher, false), "a watch on a missing directory looked established");
+        watcher.watch(vec![root.clone()]);
+        assert!(settle(&watcher, &root, true));
+        let missing = PathBuf::from("/nonexistent-skerry-watch");
+        watcher.watch(vec![missing.clone()]);
+        assert!(
+            settle(&watcher, &missing, false),
+            "a watch on a missing directory looked established"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn the_more_serious_change_wins_a_burst() {
-        assert_eq!(worse_of(None, Change::Touched), Change::Touched);
-        assert_eq!(worse_of(Some(Change::Touched), Change::Vanished), Change::Vanished);
-        assert_eq!(worse_of(Some(Change::Vanished), Change::Touched), Change::Vanished);
-        assert_eq!(worse_of(Some(Change::Touched), Change::Overflowed), Change::Overflowed);
-        assert_eq!(worse_of(Some(Change::Overflowed), Change::Vanished), Change::Vanished);
+        assert_eq!(worse_of(None, Kind::Touched), Kind::Touched);
+        assert_eq!(worse_of(Some(Kind::Touched), Kind::Vanished), Kind::Vanished);
+        assert_eq!(worse_of(Some(Kind::Vanished), Kind::Touched), Kind::Vanished);
+    }
+
+    /// The reason the watcher holds a set: two panes are two directories, and a
+    /// notification that does not say which one is a notification both have to
+    /// act on.
+    #[test]
+    fn two_directories_are_watched_at_once_and_each_change_names_its_own() {
+        let left = fixture("both-left");
+        let right = fixture("both-right");
+        let waker = Waker::new().expect("eventfd");
+        let (sender, changes) = mpsc::channel();
+        let watcher = Watcher::new(sender, waker.handle()).expect("watcher");
+        watcher.watch(vec![left.clone(), right.clone()]);
+        assert!(settle(&watcher, &left, true));
+        assert!(settle(&watcher, &right, true));
+
+        std::fs::write(left.join("one"), b"x").unwrap();
+        assert_eq!(wait_for(&changes), Some(Change::Touched(left.clone())));
+        std::fs::write(right.join("two"), b"x").unwrap();
+        assert_eq!(wait_for(&changes), Some(Change::Touched(right.clone())));
+
+        // Dropping one of the two leaves the other armed. The old design could
+        // not fail this test, because it could not hold two.
+        watcher.watch(vec![right.clone()]);
+        assert!(settle(&watcher, &left, false), "the abandoned watch survived");
+        assert!(watcher.armed(&right), "the watch that was kept was dropped with it");
+        std::fs::write(left.join("ignored"), b"x").unwrap();
+        std::fs::write(right.join("three"), b"x").unwrap();
+        assert_eq!(wait_for(&changes), Some(Change::Touched(right.clone())));
+
+        let _ = std::fs::remove_dir_all(&left);
+        let _ = std::fs::remove_dir_all(&right);
+    }
+
+    /// One directory in two panes is one kernel watch, because
+    /// `inotify_add_watch` answers with the descriptor it already has — and the
+    /// watch budget Spike C measured is per-user and shared.
+    #[test]
+    fn the_same_directory_twice_costs_one_watch() {
+        let root = fixture("twice");
+        let waker = Waker::new().expect("eventfd");
+        let (sender, changes) = mpsc::channel();
+        let watcher = Watcher::new(sender, waker.handle()).expect("watcher");
+        watcher.watch(vec![root.clone(), root.clone()]);
+        assert!(settle(&watcher, &root, true));
+
+        std::fs::write(root.join("one"), b"x").unwrap();
+        assert_eq!(wait_for(&changes), Some(Change::Touched(root.clone())));
+        assert!(
+            changes.recv_timeout(Duration::from_millis(300)).is_err(),
+            "one directory reported twice"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
