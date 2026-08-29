@@ -9,6 +9,9 @@
 # runner's neighbours, and docs/12-measurement.md prices load contamination at
 # 6x. The GUI scenarios used to stay local too, for a reason that stopped being
 # true when the X11 backend arrived — see the `scenarios` job.
+#
+# Two architectures, because 06-portability.md claims two. The `aarch64` job runs
+# the same `tools/check` and not a subset of it.
 name: check
 
 on:
@@ -134,7 +137,7 @@ jobs:
     # half drives a nested compositor through `zwp_virtual_keyboard_manager_v1`
     # and `zwlr_virtual_pointer_manager_v1`, and a compositor only offers those
     # to a real session with a seat — which a runner has not got. `XTEST` needs
-    # neither, so the *same* 68 scenarios run against a private `Xvfb` here.
+    # neither, so the *same* 72 scenarios run against a private `Xvfb` here.
     #
     # The same scenarios and not a second set written for X11: a scenario that
     # has only ever run on one display server is evidence about that server, and
@@ -181,6 +184,51 @@ jobs:
         # A fractional scale, which on X11 means `Xft.dpi` in the root resource
         # database. At 100% the scale assertions cannot fail.
         run: ./tools/gui-test --x11 --scale=1.25
+
+  aarch64:
+    # **The second architecture.** [06-portability.md](../../docs/06-portability.md)
+    # claims x86-64 *and* aarch64 are "both built and tested in CI from the first
+    # commit", and until now both the gates and the frames were `x86_64` — so the
+    # claim had nothing behind it. This is `tools/check` on ARM: the same gates,
+    # the same tests, a different word size for every `usize` and a different
+    # memory model for every atomic.
+    #
+    # **Not the golden frames.** `ubuntu-24.04-arm` is the ARM image GitHub
+    # offers, and its font packages are not 26.04's — the harness compares the
+    # hash of every face file and refuses rather than reporting a million
+    # differing samples. `tools/check` skips them by itself when there is no
+    # release build, which is what this job leaves.
+    #
+    # The workspace was checked against `aarch64-unknown-linux-musl` on the
+    # machine this was written on, so the job is expected to pass on its first
+    # run rather than hoped to; what the job adds is that it keeps passing.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal \
+            --component clippy,rustfmt --no-self-update
+          rustup default "$RUST"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: aarch64-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: aarch64-${{ env.RUST }}-
+      - name: Lockfile
+        run: cargo fetch --locked
+      - name: tools/check
+        run: ./tools/check
 
   msrv:
     # `rust-version = "1.90"` is a promise to anyone whose distribution is a

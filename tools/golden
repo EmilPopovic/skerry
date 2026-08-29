@@ -14,9 +14,17 @@ under the status bar at 200%.
 depend on whose GPU produced it. Measured on this machine, the same frame differs
 by at most **two channel levels of 255** between llvmpipe, RADV and the NVIDIA
 proprietary driver — one level between the two hardware ones. Blending in an
-sRGB target is not bit-exact across implementations, so the comparison allows
-that much and nothing more: a real regression moves a glyph or changes a colour,
-which is tens or hundreds of levels, never two.
+sRGB target is not bit-exact across implementations, so the comparison has to
+allow that much and nothing more.
+
+**The comparison is a perceptual one**: CIE76 ΔE in CIELAB, failing above the
+just-noticeable difference of 2.3. Two channel levels is at worst ΔE 1.7 — near
+black, where the sRGB curve is steepest — so every driver difference measured
+passes and nothing a person could see does. A channel threshold was the same
+number everywhere, which is a different amount of visible difference in a dark
+region than in a bright one, and it could not say *what* changed. This can: a
+second pass over both images blurred by a pixel separates a glyph that moved from
+one that blended differently, and the failure says which.
 
 The fixture lives at a **fixed absolute path**, because the path bar is part of
 the frame and `mkdtemp` would put a different string in every reference. Its
@@ -40,6 +48,7 @@ both are pinned here:
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -54,8 +63,34 @@ REFERENCES = ROOT / "tests" / "golden"
 FACES = REFERENCES / "faces.txt"
 FIXTURE = Path("/tmp/skerry-golden")
 
-# How far a channel may differ from the reference before it is a regression.
-TOLERANCE = 2
+# How far a pixel may differ from the reference before it is a regression, as
+# **CIE76 ΔE** — a distance in CIELAB, where 1.0 is about the smallest difference
+# a person can see side by side and 2.3 is the textbook just-noticeable
+# difference.
+#
+# This replaced "two channel levels of 255", which was a threshold rather than a
+# metric: two levels is a different amount of visible difference in a dark region
+# than in a bright one, and it says nothing about *what* changed. Measured on
+# this machine, the same frame across llvmpipe, RADV and the NVIDIA proprietary
+# driver moves at most two levels, which is ΔE 1.7 at its worst — near black,
+# where the sRGB curve is steepest. So this bound admits every driver difference
+# measured and nothing a person would see.
+JND = 2.3
+
+# Where a difference stops being blending and starts being geometry.
+#
+# Both images are blurred by one pixel and compared again. A glyph that *moved*
+# displaces its whole edge, so the blurred difference is about as large as the
+# sharp one; coverage noise is scattered single pixels, which a blur averages
+# away almost entirely. Measured on this frame: a line of text nudged one pixel
+# leaves 3,546 blurred pixels against 2,268 sharp ones, and 400 scattered pixels
+# at ΔE 8.7 leave one.
+#
+# Reported rather than gated — the gate is JND above — because this is the number
+# that says *which kind* of change it is, which a channel threshold could never
+# answer.
+STRUCTURAL = 2.3
+GEOMETRY_RATIO = 0.5
 
 # A fixed instant in a past year, so the Modified column renders as a date and
 # not as a clock time that changes at midnight.
@@ -264,8 +299,42 @@ def faces_differ(chain: list[str]) -> str | None:
     )
 
 
+def delta_e_squared(a, b):
+    """Per-pixel CIE76 ΔE², as an `F` image.
+
+    Squared, because the comparison and the threshold can both be squared and
+    `ImageMath` has no square root. Pillow's `LAB` mode puts L* in 0–255 and a*
+    and b* in 0–255 around 128, so only L* needs rescaling to get real units.
+    """
+    from PIL import ImageMath
+
+    def bands(image):
+        return [band.convert("F") for band in image.convert("LAB").split()]
+
+    (la, aa, ba), (lb, ab, bb) = bands(a), bands(b)
+    return ImageMath.lambda_eval(
+        lambda args: (
+            ((args["la"] - args["lb"]) * (100.0 / 255.0)) ** 2
+            + (args["aa"] - args["ab"]) ** 2
+            + (args["ba"] - args["bb"]) ** 2
+        ),
+        la=la, lb=lb, aa=aa, ab=ab, ba=ba, bb=bb,
+    )
+
+
+def over(field, threshold: float):
+    """How many pixels of a ΔE² field exceed `threshold`, and where they are."""
+    from PIL import ImageMath
+
+    limit = threshold * threshold
+    mask = ImageMath.lambda_eval(
+        lambda args: (args["field"] > args["limit"]) * 255, field=field, limit=limit
+    ).convert("L")
+    return sum(mask.histogram()[1:]), mask.getbbox()
+
+
 def compare(name: str, fresh: Path, reference: Path) -> None:
-    from PIL import Image, ImageChops
+    from PIL import Image, ImageFilter
 
     if not reference.is_file():
         raise Failure(f"{name}: no reference — run tools/golden --bless")
@@ -273,15 +342,23 @@ def compare(name: str, fresh: Path, reference: Path) -> None:
         a, b = a.convert("RGB"), b.convert("RGB")
         if a.size != b.size:
             raise Failure(f"{name}: {a.size} against a {b.size} reference")
-        difference = ImageChops.difference(a, b)
-        worst = max(max(band.getextrema()) for band in difference.split())
-        if worst <= TOLERANCE:
+        field = delta_e_squared(a, b)
+        visible, box = over(field, JND)
+        if visible == 0:
             return
-        over = sum(sum(band.histogram()[TOLERANCE + 1 :]) for band in difference.split())
-        box = difference.getbbox()
+        worst = math.sqrt(field.getextrema()[1])
+        # Blurred by a pixel: what survives that is geometry, not coverage.
+        blur = ImageFilter.GaussianBlur(1)
+        moved, _ = over(delta_e_squared(a.filter(blur), b.filter(blur)), STRUCTURAL)
+        kind = (
+            f"{moved} survive a one-pixel blur, so something moved"
+            if moved >= visible * GEOMETRY_RATIO
+            else f"only {moved} survive a one-pixel blur, so this is blending rather "
+            "than geometry — a driver, a colour, or an alpha"
+        )
         raise Failure(
-            f"{name}: {over} samples differ by more than {TOLERANCE} "
-            f"(worst {worst}) inside {box}"
+            f"{name}: {visible} pixels over ΔE {JND} (worst ΔE {worst:.1f}) "
+            f"inside {box}; {kind}"
         )
 
 
