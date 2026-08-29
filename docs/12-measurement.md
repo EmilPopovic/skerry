@@ -1000,3 +1000,28 @@ was wrong was running them next to a build, which is the *same* 6× that
 prices for benchmarks — and which is easy to forget for a test suite, because a
 test suite is supposed to be a yes or a no rather than a measurement. A scenario
 that waits 300 ms for a directory read is a measurement.
+
+## The received wisdom about a library is worth one probe
+
+"Do not feed modifier keysyms to `xkb_compose_state_feed`" is advice that appears
+in every toolkit's input code, and a guard for it went in with a confident
+comment: a `Shift` press mid-sequence would cancel the sequence, so every capital
+letter in one would break.
+
+`xkbcommon-compose.h` says the opposite in its second paragraph — "some keysyms,
+such as keysyms for modifier keys, are ignored" — and twenty lines of probe
+confirmed it: feeding `Shift_L` between `Multi_key` and `a` returns `Ignored`,
+leaves the status at `Composing`, and the sequence completes. The guard was a
+guard against nothing, and its comment was a false explanation sitting where the
+next reader would believe it.
+
+The probe found the *real* invariant on the way past, which the guard had been
+hiding. An ignored keysym does not trigger the automatic reset that a real one
+does, so a `Shift` press after a sequence *finishes* leaves the status at
+`Composed` — and a caller that had not reset reads the same character out of it
+again and types `áá`. That reset is now load-bearing, has a test, and the test
+was watched failing without it.
+
+Two guards, identical in appearance: one dead, one holding up the feature. The
+difference took one probe against the header on this machine, and no amount of
+reading around the subject would have decided it.

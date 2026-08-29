@@ -37,6 +37,130 @@ pub(crate) const MULTI_CLICK_SLOP: f32 = 5.0;
 pub(crate) const DEFAULT_REPEAT_DELAY: Duration = Duration::from_millis(600);
 pub(crate) const DEFAULT_REPEAT_INTERVAL: Duration = Duration::from_millis(40);
 
+/// What a key types, if anything.
+///
+/// Not what it *is*: `Ctrl+C` types nothing a text field should insert, and
+/// `Escape` reports a control character. Here rather than in each backend
+/// because it is a decision — and because the two copies it replaces had already
+/// drifted: the X11 half let `Alt` through, so `Alt+D` typed a `d` into the path
+/// field the same chord had just opened.
+pub(crate) fn typed(text: String, mods: Modifiers) -> Option<String> {
+    (!text.is_empty() && !mods.ctrl && !mods.alt && !mods.logo)
+        .then_some(text)
+        .filter(|text| !text.chars().any(char::is_control))
+}
+
+/// Dead keys and Compose sequences, from the user's own `Compose` file.
+///
+/// **The half of input-method support that needs no protocol.** `text-input-v3`
+/// is how a Wayland compositor drives a full input method, and X11's equivalent
+/// is XIM; neither is involved in `Compose + a + '` producing `á`, which
+/// libxkbcommon does from the same file every other toolkit reads. So it works
+/// on both display servers, with no server support at all, and it is what most
+/// of Europe actually needs from an input method.
+pub(crate) struct Composer {
+    state: Option<xkb::compose::State>,
+}
+
+/// What a keysym did to a compose sequence.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Composed {
+    /// Nothing to do with a sequence. Use the key as it is.
+    Passthrough,
+    /// Part of one, with nothing to show yet. The key types nothing.
+    ///
+    /// A cancelled sequence is this too: both mean the key produced no text,
+    /// and a cancellation that typed the last dead key would be worse than one
+    /// that types nothing.
+    Swallowed,
+    /// A sequence finished, and this is what it produced.
+    Typed(String),
+}
+
+impl Composer {
+    /// A composer over a table written out here, for a test.
+    ///
+    /// The locale's own table is whatever this machine has installed, which is a
+    /// different table on a runner and on a laptop — so what the sequences *are*
+    /// is stated where it is asserted about.
+    #[cfg(test)]
+    pub(crate) fn from_rules(context: &xkb::Context, rules: &str) -> Self {
+        let table = xkb::compose::Table::new_from_buffer(
+            context,
+            rules.as_bytes(),
+            "C",
+            xkb::compose::FORMAT_TEXT_V1,
+            xkb::compose::COMPILE_NO_FLAGS,
+        )
+        .ok();
+        Self {
+            state: table
+                .map(|table| xkb::compose::State::new(&table, xkb::compose::STATE_NO_FLAGS)),
+        }
+    }
+
+    /// Reads the table for the current locale.
+    ///
+    /// `None` where there is none — a `LANG` nothing is installed for, or a
+    /// malformed `~/.XCompose` — and then every key passes through. A missing
+    /// compose table is a keyboard without dead keys, not a failure to start.
+    pub(crate) fn new(context: &xkb::Context) -> Self {
+        let locale = std::ffi::OsString::from(locale());
+        let table =
+            xkb::compose::Table::new_from_locale(context, &locale, xkb::compose::COMPILE_NO_FLAGS)
+                .ok();
+        let state =
+            table.map(|table| xkb::compose::State::new(&table, xkb::compose::STATE_NO_FLAGS));
+        Self { state }
+    }
+
+    /// Feeds one keysym, and says what the key should now type.
+    ///
+    /// **Modifiers are not filtered out here.** The received wisdom is that they
+    /// must be, and it is wrong: `xkbcommon-compose.h` says "some keysyms, such
+    /// as keysyms for modifier keys, are ignored", and feeding `Shift_L` in the
+    /// middle of a sequence was measured returning `Ignored` and leaving the
+    /// status at `Composing`. A guard would be a guard against nothing.
+    ///
+    /// **The reset after a finished sequence is not.** An *ignored* keysym does
+    /// not trigger the automatic reset that a real one does, so a `Shift` press
+    /// after a sequence completes leaves the status at `Composed` — and a caller
+    /// that had not reset would read the same character out of it a second time.
+    pub(crate) fn feed(&mut self, keysym: u32) -> Composed {
+        let Some(state) = self.state.as_mut() else { return Composed::Passthrough };
+        state.feed(keysym.into());
+        match state.status() {
+            xkb::compose::Status::Composing => Composed::Swallowed,
+            xkb::compose::Status::Composed => {
+                let text = state.utf8().unwrap_or_default();
+                state.reset();
+                if text.is_empty() { Composed::Swallowed } else { Composed::Typed(text) }
+            }
+            xkb::compose::Status::Cancelled => {
+                state.reset();
+                Composed::Swallowed
+            }
+            xkb::compose::Status::Nothing => Composed::Passthrough,
+        }
+    }
+}
+
+/// The locale the compose table is read for.
+///
+/// The three variables in the order POSIX gives them, which is the order every
+/// other toolkit reads them in — and `C` when none is set, which has a table
+/// with the Unicode sequences in it.
+fn locale() -> String {
+    for name in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            return value;
+        }
+    }
+    "C".to_owned()
+}
+
 /// How far a swipe travels before it means anything, in logical pixels.
 ///
 /// Far enough that resting three fingers and shifting a little is not a
@@ -272,6 +396,100 @@ pub(crate) fn modifiers_of(state: &xkb::State) -> Modifiers {
 mod tests {
     use super::*;
     use crate::event::{Key, Named};
+
+    /// A table of two sequences, so the assertions are about a table this file
+    /// can see rather than about whatever the machine has installed.
+    fn composer() -> Composer {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        Composer::from_rules(
+            &context,
+            "<Multi_key> <a> <apostrophe> : \"á\"\n<dead_acute> <e> : \"é\"\n",
+        )
+    }
+
+    /// The half of input-method support that needs no protocol, and the only
+    /// half a unit test can reach — an input method is a second process.
+    #[test]
+    fn a_sequence_types_nothing_until_it_finishes() {
+        use xkbcommon::xkb::keysyms as sym;
+        let mut compose = composer();
+        assert_eq!(compose.feed(sym::KEY_Multi_key), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_a), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_apostrophe), Composed::Typed("á".to_owned()));
+        // And the next key is an ordinary key again.
+        assert_eq!(compose.feed(sym::KEY_b), Composed::Passthrough);
+    }
+
+    #[test]
+    fn a_dead_key_composes_with_the_letter_after_it() {
+        use xkbcommon::xkb::keysyms as sym;
+        let mut compose = composer();
+        assert_eq!(compose.feed(sym::KEY_dead_acute), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_e), Composed::Typed("é".to_owned()));
+    }
+
+    /// A sequence that goes nowhere types nothing at all — not the dead key it
+    /// started with, which is what a caller that ignored the cancellation would
+    /// insert.
+    #[test]
+    fn a_cancelled_sequence_types_nothing() {
+        use xkbcommon::xkb::keysyms as sym;
+        let mut compose = composer();
+        assert_eq!(compose.feed(sym::KEY_dead_acute), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_z), Composed::Swallowed);
+        // And the *next* sequence starts from nothing rather than from the wreck
+        // of the last one — which is what a missing reset leaves behind, and
+        // which a third ordinary key cannot tell apart.
+        assert_eq!(compose.feed(sym::KEY_dead_acute), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_e), Composed::Typed("é".to_owned()));
+    }
+
+    /// A capital in the middle of a sequence: the `Shift` press must not break
+    /// it. libxkbcommon ignores modifier keysyms itself — measured — so this
+    /// passes without a guard, and the guard that was written for it was a guard
+    /// against nothing.
+    #[test]
+    fn a_modifier_in_the_middle_does_not_break_a_sequence() {
+        use xkbcommon::xkb::keysyms as sym;
+        let mut compose = composer();
+        assert_eq!(compose.feed(sym::KEY_Multi_key), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_Shift_L), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_a), Composed::Swallowed);
+        assert_eq!(compose.feed(sym::KEY_apostrophe), Composed::Typed("á".to_owned()));
+    }
+
+    /// **What the reset is for.** An ignored keysym does not trigger the
+    /// automatic reset a real one does, so a `Shift` press after a sequence
+    /// finishes leaves the status at `Composed` — and a caller that had not
+    /// reset reads the same character out of it again, typing `áá`.
+    #[test]
+    fn a_finished_sequence_is_not_typed_twice() {
+        use xkbcommon::xkb::keysyms as sym;
+        let mut compose = composer();
+        compose.feed(sym::KEY_Multi_key);
+        compose.feed(sym::KEY_a);
+        assert_eq!(compose.feed(sym::KEY_apostrophe), Composed::Typed("á".to_owned()));
+        assert_eq!(compose.feed(sym::KEY_Shift_L), Composed::Passthrough, "typed twice");
+    }
+
+    /// The rule both display servers now share. The X11 half used to filter only
+    /// control characters, so `Alt+D` typed a `d` into the field it had opened.
+    #[test]
+    fn a_chord_types_nothing_and_a_letter_types_itself() {
+        let plain = Modifiers::default();
+        assert_eq!(typed("d".to_owned(), plain), Some("d".to_owned()));
+        let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
+        assert_eq!(typed("d".to_owned(), ctrl), None);
+        let alt = Modifiers { alt: true, ..Modifiers::default() };
+        assert_eq!(typed("d".to_owned(), alt), None);
+        let logo = Modifiers { logo: true, ..Modifiers::default() };
+        assert_eq!(typed("d".to_owned(), logo), None);
+        // Shift is not a chord: it is how a capital is typed.
+        let shift = Modifiers { shift: true, ..Modifiers::default() };
+        assert_eq!(typed("D".to_owned(), shift), Some("D".to_owned()));
+        // And a control character is never text, whatever is held.
+        assert_eq!(typed("\u{1b}".to_owned(), plain), None);
+    }
 
     /// **No harness can synthesise a touchpad gesture.** Neither
     /// `zwlr_virtual_pointer_manager_v1` nor `XTEST` has swipe or pinch events,

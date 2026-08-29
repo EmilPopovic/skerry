@@ -1036,11 +1036,9 @@ impl Window {
         // The mask on the event is the state *before* it, so a press of `Ctrl`
         // itself reports no Ctrl — which is right, and is why the modifier is
         // absorbed before the event is built rather than after.
-        if let Some(keyboard) = &mut self.keyboard {
-            keyboard.absorb(state.bits());
-        }
-        let Some(keyboard) = &self.keyboard else { return };
-        let (event, keysym, repeats) = keyboard.event(keycode);
+        let Some(keyboard) = &mut self.keyboard else { return };
+        keyboard.absorb(state.bits());
+        let (event, keysym, repeats) = keyboard.event(keycode, down);
         if down {
             self.repeat.press(&event, keysym, repeats);
             self.events.push_back(Event::KeyDown(event));

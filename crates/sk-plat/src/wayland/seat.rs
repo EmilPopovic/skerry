@@ -28,7 +28,9 @@ use wayland_protocols::wp::pointer_gestures::zv1::client::{
 use xkbcommon::xkb;
 
 use crate::event::{Button, Event, KeyEvent, Modifiers, Point};
-use crate::input::{Clicks, Gestures, Repeater, WHEEL_NOTCH, modifiers_of};
+use crate::input::{
+    Clicks, Composed, Composer, Gestures, Repeater, WHEEL_NOTCH, modifiers_of, typed,
+};
 use crate::keys;
 
 use super::State;
@@ -89,6 +91,7 @@ pub struct Seat {
     scroll: PendingScroll,
     clicks: Clicks,
     gestures: Gestures,
+    compose: Composer,
     /// Held only so they live as long as the pointer does: the compositor sends
     /// gesture events to these objects, and dropping them stops the gestures.
     swipe: Option<zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1>,
@@ -109,11 +112,12 @@ pub struct Seat {
 
 impl Seat {
     pub fn new(seat: &wl_seat::WlSeat, _handle: &QueueHandle<State>) -> Self {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         Self {
             object: seat.clone(),
             keyboard: None,
             pointer: None,
-            context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            context: context.clone(),
             keymap: None,
             xkb_state: None,
             mods: Modifiers::default(),
@@ -122,6 +126,7 @@ impl Seat {
             scroll: PendingScroll::default(),
             clicks: Clicks::default(),
             gestures: Gestures::default(),
+            compose: Composer::new(&context),
             swipe: None,
             pinch: None,
             keyboard_serial: None,
@@ -174,7 +179,13 @@ impl Seat {
     }
 
     /// Builds the event for one physical key, or `None` without a keymap.
-    fn key_event(&self, evdev_code: u32) -> Option<(KeyEvent, u32, bool)> {
+    ///
+    /// `&mut` because a compose sequence is state: the dead key that starts one
+    /// types nothing and the key that finishes it types both.
+    /// `down` because a compose sequence advances on a *press*: fed on the
+    /// release as well, every physical key would feed the sequence twice and a
+    /// dead key would cancel itself.
+    fn key_event(&mut self, evdev_code: u32, down: bool) -> Option<(KeyEvent, u32, bool)> {
         let state = self.xkb_state.as_ref()?;
         // wayland.xml: the protocol's keycode is evdev's, and xkb's is that plus
         // eight. Getting it wrong shifts the whole keyboard by one row.
@@ -183,12 +194,13 @@ impl Seat {
         let text = state.key_get_utf8(code);
         let repeats = self.keymap.as_ref().is_some_and(|keymap| keymap.key_repeats(code));
         let key = keys::from_keysym(keysym.raw());
-        // Text is what the key typed, not what it is: `Ctrl+C` types nothing a
-        // text field should insert, and `Escape` reports a control character.
-        let text = (!text.is_empty() && !self.mods.ctrl && !self.mods.alt && !self.mods.logo)
-            .then_some(text)
-            .filter(|text| !text.chars().any(char::is_control));
-        Some((KeyEvent { key, text, mods: self.mods, repeat: false }, keysym.raw(), repeats))
+        let mods = self.mods;
+        let text = match if down { self.compose.feed(keysym.raw()) } else { Composed::Swallowed } {
+            Composed::Passthrough => typed(text, mods),
+            Composed::Swallowed => None,
+            Composed::Typed(composed) => Some(composed),
+        };
+        Some((KeyEvent { key, text, mods, repeat: false }, keysym.raw(), repeats))
     }
 }
 
@@ -265,8 +277,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
             }
             wl_keyboard::Event::Key { serial, key, state: pressed, .. } => {
                 state.seat.keyboard_serial = Some(serial);
-                let Some((event, keysym, repeats)) = state.seat.key_event(key) else { return };
                 let down = matches!(pressed, WEnum::Value(wl_keyboard::KeyState::Pressed));
+                let Some((event, keysym, repeats)) = state.seat.key_event(key, down) else {
+                    return;
+                };
                 if down {
                     state.seat.repeat.press(&event, keysym, repeats);
                     state.events.push_back(Event::KeyDown(event));

@@ -70,6 +70,9 @@ pub(super) struct Keyboard {
     /// once from the keymap rather than assumed: assuming `Mod1` is Alt is right
     /// on most keyboards and wrong on the ones that made `xkb_keymap` necessary.
     masks: Masks,
+    /// Dead keys and compose sequences, from the same shared policy the Wayland
+    /// half uses — so `Compose + a + '` types the same character in both.
+    compose: crate::input::Composer,
 }
 
 #[derive(Default)]
@@ -116,7 +119,8 @@ impl Keyboard {
             num: mask("Mod2"),
         };
         let state = xkb::State::new(&keymap);
-        Some(Self { state, mods: Modifiers::default(), masks })
+        let compose = crate::input::Composer::new(&context);
+        Some(Self { state, mods: Modifiers::default(), masks, compose })
     }
 
     /// Adopts the modifier mask that came with an input event.
@@ -155,7 +159,10 @@ impl Keyboard {
     ///
     /// Returns the event, its keysym, and whether the key is one that repeats —
     /// which is a property of the keymap, so `Shift` held down does not type.
-    pub(super) fn event(&self, keycode: u8) -> (KeyEvent, u32, bool) {
+    /// `down` because a compose sequence advances on a *press*: fed on the
+    /// release as well, every physical key would feed the sequence twice and a
+    /// dead key would cancel itself.
+    pub(super) fn event(&mut self, keycode: u8, down: bool) -> (KeyEvent, u32, bool) {
         // X11 keycodes and xkb keycodes are the same numbers; it is *evdev* that
         // is offset by eight, and Wayland speaks evdev. Two protocols, one
         // conversion each, and getting this backwards shifts the whole keyboard
@@ -164,9 +171,19 @@ impl Keyboard {
         let keysym = self.state.key_get_one_sym(code);
         let key = keys::from_keysym(keysym.raw());
         let text = self.state.key_get_utf8(code);
-        let text = (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text);
         let repeats = self.state.get_keymap().key_repeats(code);
-        (KeyEvent { key, text, mods: self.mods, repeat: false }, keysym.raw(), repeats)
+        let mods = self.mods;
+        // The shared rule, not a second copy of it: this half used to filter
+        // only control characters, so `Alt+D` typed a `d` into the path field
+        // the same chord had just opened.
+        let composed =
+            if down { self.compose.feed(keysym.raw()) } else { crate::input::Composed::Swallowed };
+        let text = match composed {
+            crate::input::Composed::Passthrough => crate::input::typed(text, mods),
+            crate::input::Composed::Swallowed => None,
+            crate::input::Composed::Typed(composed) => Some(composed),
+        };
+        (KeyEvent { key, text, mods, repeat: false }, keysym.raw(), repeats)
     }
 }
 
