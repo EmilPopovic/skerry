@@ -23,6 +23,7 @@ use crate::app::App;
 pub fn registry() -> Registry<App> {
     let mut registry = Registry::new();
     navigate(&mut registry);
+    panes(&mut registry);
     select(&mut registry);
     view(&mut registry);
     file(&mut registry);
@@ -41,7 +42,7 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.open",
             group: Group::Navigate,
             keys: &["enter"],
-            enabled: |app: &App| app.pane.focused().is_some(),
+            enabled: |app: &App| app.panes.focused().focused().is_some(),
             run: App::open_focused,
         },
         CommandSpec {
@@ -51,7 +52,7 @@ fn navigate(registry: &mut Registry<App>) {
             // Both, because both are somebody's muscle memory: `Backspace` from
             // every file manager, `Alt ↑` from every browser and from GTK.
             keys: &["backspace", "alt+up"],
-            enabled: |app: &App| app.pane.path.parent().is_some(),
+            enabled: |app: &App| app.panes.focused().path.parent().is_some(),
             run: App::go_up,
         },
         CommandSpec {
@@ -59,7 +60,7 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.back",
             group: Group::Navigate,
             keys: &["alt+left"],
-            enabled: |app: &App| app.pane.can_go().0,
+            enabled: |app: &App| app.panes.focused().can_go().0,
             run: App::go_back,
         },
         CommandSpec {
@@ -67,7 +68,7 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.forward",
             group: Group::Navigate,
             keys: &["alt+right"],
-            enabled: |app: &App| app.pane.can_go().1,
+            enabled: |app: &App| app.panes.focused().can_go().1,
             run: App::go_forward,
         },
         CommandSpec {
@@ -163,10 +164,10 @@ fn select(registry: &mut Registry<App>) {
             name: "action.select_all",
             group: Group::Select,
             keys: &["ctrl+a"],
-            enabled: |app: &App| app.pane.listing.rows() > 0,
+            enabled: |app: &App| app.panes.focused().listing.rows() > 0,
             run: |app: &mut App| {
-                let rows = app.pane.listing.order().to_vec();
-                app.pane.selection.select_all(&rows);
+                let rows = app.panes.focused().listing.order().to_vec();
+                app.panes.focused_mut().selection.select_all(&rows);
             },
         },
         CommandSpec {
@@ -200,7 +201,7 @@ fn edit(registry: &mut Registry<App>) {
             // F2 in every file manager on every desktop, which is why the frame
             // statistics moved off it.
             keys: &["f2"],
-            enabled: |app: &App| app.pane.focused().is_some() && !app.busy(),
+            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
             run: App::start_rename,
         },
         CommandSpec {
@@ -208,7 +209,7 @@ fn edit(registry: &mut Registry<App>) {
             name: "action.trash",
             group: Group::File,
             keys: &["delete"],
-            enabled: |app: &App| app.pane.focused().is_some() && !app.busy(),
+            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
             run: App::trash_selection,
         },
         CommandSpec {
@@ -263,9 +264,98 @@ fn window(registry: &mut Registry<App>) {
             id: "window.close",
             name: "action.close",
             group: Group::Window,
-            keys: &["ctrl+w", "ctrl+q"],
+            // Not `Ctrl+W`: that is `tab.close`, which closes the window when
+            // the last tab goes.
+            keys: &["ctrl+q"],
             enabled: |_| true,
             run: App::close_window,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// Tabs and splits: how many panes there are and which has the keyboard.
+fn panes(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "tab.new",
+            name: "action.new_tab",
+            group: Group::Pane,
+            keys: &["ctrl+t"],
+            enabled: |_| true,
+            run: App::new_tab,
+        },
+        CommandSpec {
+            id: "tab.close",
+            name: "action.close_tab",
+            group: Group::Pane,
+            // `Ctrl+W` closes the tab, and the window when it is the last one —
+            // which is what every tabbed application does and what a person who
+            // has used one expects. `window.close` keeps `Ctrl+Q`.
+            keys: &["ctrl+w"],
+            enabled: |_| true,
+            run: App::close_tab,
+        },
+        CommandSpec {
+            id: "tab.reopen",
+            name: "action.reopen_tab",
+            group: Group::Pane,
+            keys: &["ctrl+shift+t"],
+            enabled: |app: &App| app.panes.can_reopen(),
+            run: App::reopen_tab,
+        },
+        CommandSpec {
+            id: "tab.next",
+            name: "action.next_tab",
+            group: Group::Pane,
+            keys: &["ctrl+tab", "ctrl+page_down"],
+            enabled: |app: &App| app.panes.focused_leaf().panes.len() > 1,
+            run: App::next_tab,
+        },
+        CommandSpec {
+            id: "tab.previous",
+            name: "action.previous_tab",
+            group: Group::Pane,
+            keys: &["ctrl+shift+tab", "ctrl+page_up"],
+            enabled: |app: &App| app.panes.focused_leaf().panes.len() > 1,
+            run: App::previous_tab,
+        },
+        CommandSpec {
+            id: "pane.split_beside",
+            name: "action.split_beside",
+            group: Group::Pane,
+            // Dolphin's key for the same thing, which is the one a Linux file
+            // manager's users already have in their hands.
+            keys: &["f3"],
+            enabled: |_| true,
+            run: App::split_beside,
+        },
+        CommandSpec {
+            id: "pane.split_below",
+            name: "action.split_below",
+            group: Group::Pane,
+            keys: &["shift+f3"],
+            enabled: |_| true,
+            run: App::split_below,
+        },
+        CommandSpec {
+            id: "pane.close",
+            name: "action.close_pane",
+            group: Group::Pane,
+            keys: &["ctrl+f3"],
+            enabled: |app: &App| app.panes.leaf_count() > 1,
+            run: App::close_pane,
+        },
+        CommandSpec {
+            id: "pane.next",
+            name: "action.next_pane",
+            group: Group::Pane,
+            // What GTK and Qt both cycle panes with, everywhere else on the
+            // desktop.
+            keys: &["f6"],
+            enabled: |app: &App| app.panes.leaf_count() > 1,
+            run: App::next_pane,
         },
     ] {
         registry.add(spec);
@@ -283,7 +373,7 @@ fn view(registry: &mut Registry<App>) {
             // has met does, and which costs nothing: a filename cannot contain
             // a slash, so no type-ahead is lost to it.
             keys: &["ctrl+f", "/"],
-            enabled: |app: &App| !app.pane.listing.is_empty(),
+            enabled: |app: &App| !app.panes.focused().listing.is_empty(),
             run: App::toggle_filter,
         },
         CommandSpec {
@@ -338,7 +428,8 @@ fn view(registry: &mut Registry<App>) {
             id: "view.theme",
             name: "action.toggle_theme",
             group: Group::View,
-            keys: &["ctrl+t"],
+            // Not `Ctrl+T`, which is a new tab everywhere a person has met one.
+            keys: &["ctrl+shift+d"],
             enabled: |_| true,
             run: App::toggle_theme,
         },
@@ -379,7 +470,7 @@ fn file(registry: &mut Registry<App>) {
             name: "action.copy",
             group: Group::File,
             keys: &["ctrl+c"],
-            enabled: |app: &App| app.pane.listing.rows() > 0,
+            enabled: |app: &App| app.panes.focused().listing.rows() > 0,
             run: App::copy_selection,
         },
         CommandSpec {
@@ -387,7 +478,7 @@ fn file(registry: &mut Registry<App>) {
             name: "action.copy_path",
             group: Group::File,
             keys: &["ctrl+shift+c"],
-            enabled: |app: &App| app.pane.listing.rows() > 0,
+            enabled: |app: &App| app.panes.focused().listing.rows() > 0,
             run: App::copy_path,
         },
         CommandSpec {
@@ -419,7 +510,7 @@ fn file(registry: &mut Registry<App>) {
             name: "action.cut",
             group: Group::File,
             keys: &["ctrl+x"],
-            enabled: |app: &App| app.pane.focused().is_some(),
+            enabled: |app: &App| app.panes.focused().focused().is_some(),
             run: App::cut_selection,
         },
         CommandSpec {
@@ -504,6 +595,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("select.none", "a click on empty space"));
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("view.path_entry", "a click on the path strip beside the breadcrumbs"));
+    reach.push(("tab.close", "the cross on a tab"));
     for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND] {
         for id in groups.iter().flat_map(|group| group.iter()) {
             reach.push((id, "the context menu"));
@@ -528,6 +620,9 @@ const POINTER_EXEMPT: &[(&str, &str)] = &[
     ("select.page_down", "a pointer pages with the scroll wheel and the thumb"),
     ("select.top", "a pointer reaches the top by dragging the thumb"),
     ("select.bottom", "a pointer reaches the bottom by dragging the thumb"),
+    ("tab.next", "a pointer switches tabs by clicking the one it wants"),
+    ("tab.previous", "a pointer switches tabs by clicking the one it wants"),
+    ("pane.next", "a pointer moves the keyboard by clicking in the pane"),
     ("help.dump", "a diagnostic for a bug report, not an action on a file"),
     ("help.stats", "a diagnostic for a bug report, not an action on a file"),
     // A field's own four. A pointer selects text by dragging in the field, which

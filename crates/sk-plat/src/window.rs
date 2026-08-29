@@ -180,6 +180,16 @@ pub enum Cursor {
     Text,
     /// Over a resize edge, named by the edge.
     Resize(Edge),
+    /// Over a divider between two panes, which moves along one axis only.
+    ///
+    /// Not `Resize(Left)`: an edge cursor points the one way the edge can go,
+    /// and a divider goes both. `col-resize` and `row-resize` are the shapes
+    /// every toolkit puts on a splitter, and the fallbacks are what a theme
+    /// older than the CSS names has.
+    Divider {
+        /// Whether it moves left and right rather than up and down.
+        horizontal: bool,
+    },
     /// Dragging something that follows the pointer.
     Grabbing,
 }
@@ -197,6 +207,8 @@ impl Cursor {
             Self::Hand => &["pointer", "hand2", "hand1"],
             Self::Text => &["text", "xterm", "ibeam"],
             Self::Grabbing => &["grabbing", "closedhand", "hand2"],
+            Self::Divider { horizontal: true } => &["col-resize", "sb_h_double_arrow", "e-resize"],
+            Self::Divider { horizontal: false } => &["row-resize", "sb_v_double_arrow", "s-resize"],
             Self::Resize(edge) => edge.theme_names(),
         }
     }

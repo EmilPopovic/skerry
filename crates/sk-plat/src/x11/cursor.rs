@@ -35,6 +35,8 @@ const CORE_TOP_LEFT: u16 = 134; // XC_top_left_corner
 const CORE_TOP_RIGHT: u16 = 136; // XC_top_right_corner
 const CORE_BOTTOM_LEFT: u16 = 12; // XC_bottom_left_corner
 const CORE_BOTTOM_RIGHT: u16 = 14; // XC_bottom_right_corner
+const CORE_H_DOUBLE_ARROW: u16 = 108; // XC_sb_h_double_arrow
+const CORE_V_DOUBLE_ARROW: u16 = 116; // XC_sb_v_double_arrow
 
 /// The cursors this window has resolved, and how.
 #[derive(Default)]
@@ -144,6 +146,8 @@ const fn core_glyph(cursor: Cursor) -> u16 {
         Cursor::Hand => CORE_HAND,
         Cursor::Text => CORE_TEXT,
         Cursor::Grabbing => CORE_GRABBING,
+        Cursor::Divider { horizontal: true } => CORE_H_DOUBLE_ARROW,
+        Cursor::Divider { horizontal: false } => CORE_V_DOUBLE_ARROW,
         Cursor::Resize(edge) => match edge {
             Edge::Top => CORE_TOP,
             Edge::Bottom => CORE_BOTTOM,

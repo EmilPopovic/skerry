@@ -110,7 +110,7 @@ impl Drop for App {
     /// before the fields are dropped, which is the ordering this relies on.
     fn drop(&mut self) {
         self.measurer.stop();
-        self.pane.stop();
+        self.panes.focused().stop();
     }
 }
 
@@ -195,6 +195,7 @@ struct Background {
     jobs: Jobs,
     updates: Receiver<Message>,
     pane: Pane,
+    sidebar: crate::sidebar::Sidebar,
     desktop_rx: Receiver<std::sync::Arc<Desktop>>,
     replies: Replies,
     watcher: sk_fs::Watcher,
@@ -211,6 +212,9 @@ impl Background {
         let mut pane = Pane::new(path);
         pane.reload(&jobs);
 
+        // Open by default, which is what every file manager a person has met
+        // does. Reading what goes in it is a job, started with the others.
+        let sidebar = crate::sidebar::Sidebar::new(&jobs, waker.handle(), true);
         let desktop_rx = read_desktop_databases(&jobs, &waker);
         let (watch_sender, changes) = mpsc::channel();
         let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
@@ -223,6 +227,7 @@ impl Background {
             jobs,
             updates,
             pane,
+            sidebar,
             desktop_rx,
             replies: Replies::new(),
             watcher,
@@ -490,14 +495,23 @@ pub struct App {
     cache: LayoutCache,
     list: DrawList,
     theme: Theme,
+    /// The pane tree: the splits, and the tabs inside each of them.
+    ///
     /// Visible to `crate::commands`, which is where every action on it lives.
-    pub(crate) pane: Pane,
+    pub(crate) panes: crate::panes::Panes,
     jobs: Jobs,
     waker: Waker,
     updates: Receiver<Message>,
     watcher: sk_fs::Watcher,
     changes: Receiver<sk_fs::Change>,
-    /// The directory the watcher is currently on.
+    /// The directories the watcher was last asked for: one per visible pane.
+    ///
+    /// A background tab is not watched. It is re-read when it is shown, and the
+    /// watch budget Spike C measured is per-user and shared — so the count is
+    /// bounded by the splits on screen rather than by every directory a session
+    /// has ever opened.
+    watched: Vec<PathBuf>,
+    /// The directory the focused pane is on.
     ///
     /// Compared against the pane's path every pass rather than retargeted by
     /// each navigation command, so a new way of navigating cannot forget to do
@@ -505,8 +519,9 @@ pub struct App {
     watch_target: PathBuf,
     /// When the last change-driven read was started.
     refreshed: Instant,
-    /// A change arrived inside [`REFRESH_FLOOR`] and is still owed a read.
-    refresh_owed: bool,
+    /// Directories a change arrived for inside [`REFRESH_FLOOR`], still owed a
+    /// read.
+    refresh_owed: Vec<PathBuf>,
     /// When the sidebar last read the mount table, and whether it owes a read.
     ///
     /// The same floor the listing's refresh keeps, for the same reason: `snap`
@@ -559,6 +574,13 @@ pub struct App {
     crumb_pending: Option<usize>,
     /// The navigation button under the pointer.
     hovered_tool: Option<crate::layout::Tool>,
+    /// Where the last layout put the panes, and what the pointer is on.
+    ///
+    /// Copies rather than lookups, for the same reason `layout` is a field: a
+    /// hit test that reads one borrows a field and not the whole `App`, and
+    /// every one of the hundred sites that used to read `layout.body` still
+    /// reads a field.
+    placement: crate::panes::Placement,
     /// The hit regions the last frame produced.
     hits: crate::view::Hits,
     /// The shape last asked of the pointer.
@@ -661,7 +683,7 @@ pub struct App {
 
 impl App {
     /// Opens a window, a device and a directory.
-    pub fn new(options: Options) -> Result<Self, Problem> {
+    pub fn new(options: &Options) -> Result<Self, Problem> {
         let window_started = Instant::now();
         let window = Window::open(&WindowConfig {
             own_frame: options.own_frame,
@@ -669,17 +691,38 @@ impl App {
             ..WindowConfig::default()
         })?;
         let window_us = window_started.elapsed().as_micros();
+        let background = Background::start(options.path.clone())?;
+        let drawing = open_drawing(&window)?;
+        Ok(Self::assemble(options, window, window_us, background, drawing))
+    }
 
-        let background = Background::start(options.path)?;
-        // Open by default, which is what every file manager a person has met
-        // does. Reading what goes in it is a job, started with the others.
-        let sidebar =
-            crate::sidebar::Sidebar::new(&background.jobs, background.waker.handle(), true);
-        let Background { waker, jobs, updates, pane, desktop_rx, replies, watcher, changes } =
-            background;
+    /// Puts the window, the jobs and the renderer together into one `App`.
+    ///
+    /// Split from [`App::new`] because the three things it is given are acquired
+    /// in an order that matters — the window first, so its socket is connected
+    /// while the directory is being read — and assembling them is a different
+    /// question from acquiring them.
+    fn assemble(
+        options: &Options,
+        window: Window,
+        window_us: u128,
+        background: Background,
+        drawing: Drawing,
+    ) -> Self {
+        let Background {
+            waker,
+            jobs,
+            updates,
+            pane,
+            sidebar,
+            desktop_rx,
+            replies,
+            watcher,
+            changes,
+        } = background;
         let watch_target = pane.path.clone();
 
-        let Drawing { renderer, fonts, physical, gpu_us, font_us } = open_drawing(&window)?;
+        let Drawing { renderer, fonts, physical, gpu_us, font_us } = drawing;
         let theme = if options.dark { Theme::dark() } else { Theme::light() };
         let logical = window.logical();
         let scale_120 = window.scale_120();
@@ -688,7 +731,7 @@ impl App {
         let measurer = Measurer::new(waker.handle());
         let edits = crate::edit::Edits::new(waker.handle());
         let now = Instant::now();
-        Ok(Self {
+        let mut app = Self {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
             layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window), true),
@@ -701,19 +744,21 @@ impl App {
             cache: LayoutCache::new(4096),
             list: DrawList::default(),
             theme,
-            pane,
+            panes: crate::panes::Panes::new(pane),
             jobs,
             waker,
             updates,
             watcher,
             changes,
             watch_target,
+            watched: Vec::new(),
             refreshed: Instant::now(),
-            refresh_owed: false,
+            refresh_owed: Vec::new(),
             remounted: Instant::now(),
             mounts_owed: false,
             watching: true,
             capabilities,
+            placement: crate::panes::Placement::default(),
             measurer,
             sidebar,
             edits,
@@ -765,7 +810,12 @@ impl App {
             started: options.started,
             first_frame_reported: false,
             open_time: (window_us, gpu_us, font_us),
-        })
+        };
+        // The tree has to be laid out before the first frame, not at the first
+        // resize: a window that opens at the size it asked for gets no resize at
+        // all, and every pane would be a rectangle of zeros until one arrived.
+        app.divide();
+        app
     }
 
     /// Runs until the window closes.
@@ -843,7 +893,8 @@ impl App {
         let deadlines = [
             (!self.typed.is_empty())
                 .then(|| TYPE_AHEAD_WINDOW.saturating_sub(self.typed_at.elapsed())),
-            self.refresh_owed.then(|| REFRESH_FLOOR.saturating_sub(self.refreshed.elapsed())),
+            (!self.refresh_owed.is_empty())
+                .then(|| REFRESH_FLOOR.saturating_sub(self.refreshed.elapsed())),
             self.mounts_owed.then(|| REFRESH_FLOOR.saturating_sub(self.remounted.elapsed())),
             self.notice.as_ref().map(|(_, at)| NOTICE_WINDOW.saturating_sub(at.elapsed())),
         ];
@@ -865,9 +916,17 @@ impl App {
     fn drain_jobs(&mut self) {
         let mut landed = false;
         {
-            let Self { updates, pane, jobs, dirty, .. } = self;
+            let Self { updates, panes, jobs, dirty, .. } = self;
             while let Ok(message) = updates.try_recv() {
-                if pane.apply(message, jobs) {
+                // Routed by generation, which is unique across the process: a
+                // reply for a tab that has been closed matches no pane and is
+                // dropped, and a reply for a background tab lands there without
+                // touching the frame.
+                // A background tab's listing lands without a frame; a split's
+                // other pane is on screen and needs one.
+                let drawn = panes.is_showing(message.generation);
+                let Some(pane) = panes.by_generation_mut(message.generation) else { continue };
+                if pane.apply(message, jobs) && drawn {
                     *dirty = true;
                     landed = true;
                 }
@@ -875,35 +934,41 @@ impl App {
         }
         if landed {
             self.settle_naming();
-            if self.edits.name_after_load.is_some() && !self.pane.loading {
+            if self.edits.name_after_load.is_some() && !self.panes.focused().loading {
                 self.name_when_it_arrives();
             }
         }
     }
 
     /// Applies change notifications, at most one read per [`REFRESH_FLOOR`].
+    ///
+    /// A notification names the directory it happened in, so a change under one
+    /// split refreshes that pane and leaves the other alone — including the
+    /// case where both are showing the same directory, which is two panes and
+    /// one watch and has to refresh both.
     fn drain_changes(&mut self) {
-        let mut owed = self.refresh_owed;
+        let mut owed = std::mem::take(&mut self.refresh_owed);
         let mut mounted = self.mounts_owed;
         while let Ok(change) = self.changes.try_recv() {
-            if change == sk_fs::Change::Mounts {
+            match change {
                 // A disk plugged in or unmounted. Only the sidebar's Volumes
-                // section is affected, and re-reading the listing for it would
-                // be a refresh of a directory nothing happened to.
+                // section is affected, and re-reading a listing for it would be
+                // a refresh of a directory nothing happened to.
                 //
                 // **Coalesced, like the listing's own refresh.** `snap` brings
                 // up thirty squashfs mounts at login and a card reader announces
                 // one per slot; a job each would parse `/proc/self/mountinfo`
                 // thirty times and take the highlight out from under the pointer
                 // on every delivery.
-                mounted = true;
-                continue;
+                sk_fs::Change::Mounts => mounted = true,
+                // The kernel dropped events and cannot say for which directory,
+                // so every visible listing is suspect.
+                sk_fs::Change::Overflowed => owed.extend(self.watched.iter().cloned()),
+                // `Vanished` re-reads too, and the read fails with a message
+                // that says the directory is gone — which is the honest thing to
+                // show, rather than the entries it used to have.
+                sk_fs::Change::Touched(path) | sk_fs::Change::Vanished(path) => owed.push(path),
             }
-            // Every one of the other three means the same thing to a listing:
-            // read it again. `Vanished` reads it again too, and the read fails
-            // with a message that says the directory is gone — which is the
-            // honest thing to show, rather than the entries it used to have.
-            owed = true;
         }
         if mounted {
             self.mounts_owed = self.remounted.elapsed() < REFRESH_FLOOR;
@@ -912,17 +977,21 @@ impl App {
                 self.sidebar.reload(&self.jobs);
             }
         }
-        if !owed {
+        if owed.is_empty() {
             return;
         }
         if self.refreshed.elapsed() < REFRESH_FLOOR {
-            self.refresh_owed = true;
+            self.refresh_owed = owed;
             return;
         }
-        self.refresh_owed = false;
         self.refreshed = Instant::now();
-        self.pane.refresh(&self.jobs);
-        self.dirty = true;
+        let Self { panes, jobs, dirty, .. } = self;
+        for pane in panes.visible_mut() {
+            if owed.contains(&pane.path) {
+                pane.refresh(jobs);
+                *dirty = true;
+            }
+        }
     }
 
     /// Takes delivery of folder totals.
@@ -937,7 +1006,7 @@ impl App {
         self.drain_siblings();
         let Ok(pasted) = self.replies.paste_rx.try_recv() else { return };
         match pasted {
-            Pasted::Folder(path) => self.pane.open(path, &self.jobs),
+            Pasted::Folder(path) => self.panes.focused_mut().open(path, &self.jobs),
             Pasted::NotAFolder => {
                 self.notice = Some((
                     sk_model::i18n::lookup("error.clipboard_not_a_folder").to_owned(),
@@ -950,7 +1019,7 @@ impl App {
                 // to copy — the originals are not where the clipboard says any
                 // more.
                 self.cutting = false;
-                let into = self.pane.path.clone();
+                let into = self.panes.focused().path.clone();
                 self.edits.paste_all(paths, into, moving, &self.jobs);
             }
             Pasted::Dropped(paths, into) => {
@@ -992,7 +1061,7 @@ impl App {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        if self.pane.scroll.advance(elapsed) {
+        if self.panes.focused_mut().scroll.advance(elapsed) {
             self.dirty = true;
         }
         if !self.typed.is_empty() && self.typed_at.elapsed() > TYPE_AHEAD_WINDOW {
@@ -1009,7 +1078,7 @@ impl App {
             self.relayout();
             self.dirty = true;
         }
-        if self.watch_target != self.pane.path {
+        if self.watch_target != self.panes.focused().path {
             // **Every field belongs to the directory it was opened in.** This is
             // the one place that notices a navigation whatever caused it — a
             // chord, a breadcrumb, a sidebar row, a pasted path — and each of
@@ -1017,11 +1086,12 @@ impl App {
             // the path bar holding the path you had just left, and `Enter`
             // then took you back to it.
             self.abandon_fields();
-            self.watch_target = self.pane.path.clone();
-            self.watcher.watch(vec![self.watch_target.clone()]);
-        } else if !self.watcher.armed(&self.watch_target)
-            && !self.pane.loading
-            && self.pane.problem.is_none()
+            self.watch_target = self.panes.focused().path.clone();
+        }
+        self.retarget_watches();
+        if self.watched.iter().any(|path| !self.watcher.armed(path))
+            && !self.panes.focused().loading
+            && self.panes.focused().problem.is_none()
         {
             // The watch is gone but the directory is not. That is what an
             // atomic replace looks like — a `git checkout` across a branch that
@@ -1031,7 +1101,7 @@ impl App {
             // saying "not watching for changes" until the user navigated away
             // and back. Rate-limited by the same floor as the read it follows.
             if self.refreshed.elapsed() >= REFRESH_FLOOR {
-                self.watcher.watch(vec![self.watch_target.clone()]);
+                self.watcher.watch(self.watched.clone());
             }
         }
         // Read every pass rather than once at arm time: the thread establishes the
@@ -1079,7 +1149,7 @@ impl App {
                 // pointer leaving a row left a breadcrumb lit and a window button
                 // shaded until it came back.
                 let gone = [
-                    self.pane.hover.take().is_some(),
+                    self.panes.focused_mut().hover.take().is_some(),
                     self.hovered_button.take().is_some(),
                     self.hovered_crumb.take().is_some(),
                     self.hovered_tool.take().is_some(),
@@ -1101,7 +1171,7 @@ impl App {
                     // left alive outlives the gesture — measured, one compositor
                     // sends a single `enter` after the button is already up and
                     // then nothing at all.
-                    let inside = self.layout.body.contains(position.x, position.y);
+                    let inside = self.placement.here.body.contains(position.x, position.y);
                     if inside && self.window.dragging_out() {
                         self.window.cancel_drag();
                     }
@@ -1117,11 +1187,17 @@ impl App {
                 // The palette takes the wheel while it is open. Without this the
                 // twelfth result of fifty is unreachable by pointer alone, and
                 // the listing scrolls behind a panel covering it.
-                eprintln!("SCROLLDEBUG delta={:?} palette={}", delta, self.palette.is_some());
                 if let Some(palette) = self.palette.as_mut() {
                     palette.wheel(delta.y);
+                } else if self.menu.is_some() {
+                    // A menu taller than the window scrolls; one that fits does
+                    // not move, and neither does the list behind it.
+                    let room = self.layout.window.height - crate::menu::MARGIN * 2.0;
+                    if let Some(menu) = self.menu.as_mut() {
+                        menu.wheel(delta.y, room);
+                    }
                 } else {
-                    self.pane.scroll.by(delta.y, *precise);
+                    self.panes.focused_mut().scroll.by(delta.y, *precise);
                 }
                 self.dirty = true;
             }
@@ -1244,7 +1320,7 @@ impl App {
         if let Some(text) = keys::type_ahead(event) {
             self.typed.push_str(text);
             self.typed_at = Instant::now();
-            if self.pane.jump_to(&self.typed) {
+            if self.panes.focused_mut().jump_to(&self.typed) {
                 self.reveal_cursor();
             }
             self.dirty = true;
@@ -1360,10 +1436,10 @@ impl App {
     fn naming_field(&self) -> Area {
         let Some(naming) = self.edits.naming.as_ref() else { return Area::default() };
         crate::view::name_field(
-            &self.layout,
+            &self.placement.here,
             &self.theme.metrics,
             naming.row,
-            self.pane.scroll.offset(),
+            self.panes.focused().scroll.offset(),
         )
     }
 
@@ -1376,10 +1452,10 @@ impl App {
     fn place_caret(&mut self, x: f32) {
         let Some(row) = self.edits.naming.as_ref().map(|naming| naming.row) else { return };
         let area = crate::view::name_field(
-            &self.layout,
+            &self.placement.here,
             &self.theme.metrics,
             row,
-            self.pane.scroll.offset(),
+            self.panes.focused().scroll.offset(),
         );
         let size = self.theme.metrics.text_size;
         self.place_caret_in(Claim::Naming, area, size, crate::view::NAME_INSET, x);
@@ -1391,16 +1467,16 @@ impl App {
     /// keyed by path rather than by row, so a new listing shows what is already
     /// known instead of starting again.
     fn settle_rows(&mut self) {
-        let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
-        self.pane.scroll.set_extent(content, self.layout.body.height);
+        let content = self.panes.focused().listing.rows() as f32 * self.theme.metrics.row_height;
+        self.panes.focused_mut().scroll.set_extent(content, self.placement.here.body.height);
         let visible = sk_ui::visible_rows(
-            self.pane.scroll.offset(),
-            self.layout.body.height,
+            self.panes.focused().scroll.offset(),
+            self.placement.here.body.height,
             self.theme.metrics.row_height,
-            self.pane.listing.rows(),
+            self.panes.focused().listing.rows(),
         );
-        let Self { measurer, pane, jobs, .. } = self;
-        measurer.update(pane, visible, jobs);
+        let Self { measurer, panes, jobs, .. } = self;
+        measurer.update(panes.focused_mut(), visible, jobs);
     }
 
     /// Puts the caret where a click in the path field landed.
@@ -1471,10 +1547,10 @@ impl App {
             Claim::Naming => {
                 let Some(row) = self.edits.naming.as_ref().map(|naming| naming.row) else { return };
                 let area = crate::view::name_field(
-                    &self.layout,
+                    &self.placement.here,
                     &self.theme.metrics,
                     row,
-                    self.pane.scroll.offset(),
+                    self.panes.focused().scroll.offset(),
                 );
                 (area, self.theme.metrics.text_size, crate::view::NAME_INSET)
             }
@@ -1668,7 +1744,9 @@ impl App {
         self.claim_keyboard(Claim::Path);
         self.typing_path = match self.typing_path {
             Some(_) => None,
-            None => Some(crate::field::Field::new(self.pane.path.to_string_lossy().into_owned())),
+            None => Some(crate::field::Field::new(
+                self.panes.focused().path.to_string_lossy().into_owned(),
+            )),
         };
         self.dirty = true;
     }
@@ -1686,16 +1764,20 @@ impl App {
         }
         let path = expand_home(typed).unwrap_or_else(|| {
             let path = std::path::Path::new(typed);
-            if path.is_absolute() { path.to_path_buf() } else { self.pane.path.join(path) }
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                self.panes.focused().path.join(path)
+            }
         });
-        if path != self.pane.path {
-            self.pane.open(path, &self.jobs);
+        if path != self.panes.focused().path {
+            self.panes.focused_mut().open(path, &self.jobs);
         }
     }
 
     /// Feeds one key to the open filter. Returns whether it was consumed.
     fn filter_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
-        let mut wanted = self.pane.filter.clone();
+        let mut wanted = self.panes.focused().filter.clone();
         match event.key {
             sk_plat::Key::Named(sk_plat::Named::Backspace) if event.mods.none() => {
                 // **An empty filter swallows Backspace rather than closing.**
@@ -1728,7 +1810,7 @@ impl App {
                 None => return false,
             },
         }
-        if self.pane.set_filter(wanted, &self.jobs) {
+        if self.panes.focused_mut().set_filter(wanted, &self.jobs) {
             self.reveal_cursor();
         }
         self.dirty = true;
@@ -1788,7 +1870,7 @@ impl App {
     /// `New folder`, which is what a person expects and is one `Ctrl+Z` from
     /// gone.
     pub(crate) fn new_folder(&mut self) {
-        let parent = self.pane.path.clone();
+        let parent = self.panes.focused().path.clone();
         self.edits.new_directory(parent, &self.jobs);
         // The job picks the name — `New folder`, or `New folder 2` if that is
         // taken — so what is owed here is "name whatever it made", and the name
@@ -1799,18 +1881,18 @@ impl App {
     /// Starts renaming whatever the cursor is on.
     pub(crate) fn start_rename(&mut self) {
         self.claim_keyboard(Claim::Naming);
-        let Some(id) = self.pane.focused() else { return };
-        let Some(row) = self.pane.listing.row_of(id) else { return };
-        let name = self.pane.listing.name(id).to_owned();
-        let directory = self.pane.listing.flags(id).has(sk_model::Flags::DIR);
-        self.pane.scroll.reveal(
+        let Some(id) = self.panes.focused().focused() else { return };
+        let Some(row) = self.panes.focused().listing.row_of(id) else { return };
+        let name = self.panes.focused().listing.name(id).to_owned();
+        let directory = self.panes.focused().listing.flags(id).has(sk_model::Flags::DIR);
+        self.panes.focused_mut().scroll.reveal(
             row as f32 * self.theme.metrics.row_height,
             (row + 1) as f32 * self.theme.metrics.row_height,
-            self.layout.body.height,
+            self.placement.here.body.height,
         );
         self.edits.naming = Some(crate::edit::Naming {
             row,
-            path: self.pane.path.join(&name),
+            path: self.panes.focused().path.join(&name),
             // The whole name for a directory, which has no extension to keep, and
             // the part before the extension for a file — the edit a rename almost
             // always is. One gesture either way: a rename opens with something
@@ -1861,21 +1943,21 @@ impl App {
         let doomed: Vec<&std::ffi::OsStr> =
             going.iter().filter_map(|path| path.file_name()).collect();
         let survives = |app: &Self, row: usize| {
-            app.pane.listing.at(row).is_some_and(|id| {
-                let name = app.pane.listing.name(id);
+            app.panes.focused().listing.at(row).is_some_and(|id| {
+                let name = app.panes.focused().listing.name(id);
                 !doomed.iter().any(|going| *going == name)
             })
         };
-        let rows = self.pane.listing.rows();
-        let from = self.pane.cursor_row().unwrap_or(0);
+        let rows = self.panes.focused().listing.rows();
+        let from = self.panes.focused().cursor_row().unwrap_or(0);
         let next = (from + 1..rows)
             .find(|row| survives(self, *row))
             .or_else(|| (0..from).rev().find(|row| survives(self, *row)));
         match next {
-            Some(row) => self.pane.cursor_to(row, false),
+            Some(row) => self.panes.focused_mut().cursor_to(row, false),
             // Everything is going. Nothing to point at, and nothing to do.
             None => {
-                self.pane.selection.set_cursor(None);
+                self.panes.focused_mut().selection.set_cursor(None);
             }
         }
     }
@@ -1888,6 +1970,251 @@ impl App {
     /// Does the most recently undone change again.
     pub(crate) fn redo(&mut self) {
         self.edits.redo(&self.jobs);
+    }
+
+    /// Opens a tab on the directory this one is showing.
+    pub(crate) fn new_tab(&mut self) {
+        let path = self.panes.focused().path.clone();
+        self.panes.open_tab(path, &self.jobs);
+        self.settle_panes();
+    }
+
+    /// Closes the showing tab, and the window when it was the last one.
+    pub(crate) fn close_tab(&mut self) {
+        if self.panes.close_tab() {
+            self.settle_panes();
+        } else {
+            self.close_window();
+        }
+    }
+
+    pub(crate) fn reopen_tab(&mut self) {
+        if self.panes.reopen(&self.jobs) {
+            self.settle_panes();
+        }
+    }
+
+    pub(crate) fn next_tab(&mut self) {
+        if self.panes.step_tab(1) {
+            self.settle_panes();
+        }
+    }
+
+    pub(crate) fn previous_tab(&mut self) {
+        if self.panes.step_tab(-1) {
+            self.settle_panes();
+        }
+    }
+
+    pub(crate) fn split_beside(&mut self) {
+        self.panes.split(crate::panes::Axis::Beside, &self.jobs);
+        self.settle_panes();
+    }
+
+    pub(crate) fn split_below(&mut self) {
+        self.panes.split(crate::panes::Axis::Below, &self.jobs);
+        self.settle_panes();
+    }
+
+    pub(crate) fn close_pane(&mut self) {
+        if self.panes.close_leaf() {
+            self.settle_panes();
+        }
+    }
+
+    pub(crate) fn next_pane(&mut self) {
+        if self.panes.step_leaf(1) {
+            self.settle_panes();
+        }
+    }
+
+    /// Watches exactly the directories that are on screen.
+    ///
+    /// Called after anything that changes which panes those are — a navigation,
+    /// a split, a tab — rather than by each of them, so a new way of changing
+    /// the tree cannot forget: the same reasoning as the `watch_target` check
+    /// this sits beside.
+    fn retarget_watches(&mut self) {
+        let wanted: Vec<PathBuf> = self.panes.visible().map(|pane| pane.path.clone()).collect();
+        if wanted != self.watched {
+            self.watched.clone_from(&wanted);
+            self.watcher.watch(wanted);
+        }
+    }
+
+    /// A press on the sidebar, a navigation button or a window button.
+    ///
+    /// Each goes through the registry rather than through a method: a dimmed
+    /// button must do nothing when clicked, and `enabled` is the only place that
+    /// knows whether it is dimmed.
+    fn press_on_the_chrome(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+        if let Some(index) = self.place_at(position) {
+            if let Some(entry) = self.sidebar.at(index) {
+                let path = entry.path.clone();
+                if path != self.panes.focused().path {
+                    self.panes.focused_mut().open(path, &self.jobs);
+                }
+            }
+            self.dirty = true;
+            return true;
+        }
+        if let Some(tool) = self.layout.tool_at(position.x, position.y) {
+            if let Some(id) = commands.find(tool.command()) {
+                commands.run(id, self);
+            }
+            self.dirty = true;
+            return true;
+        }
+        if let Some(button) = self.layout.button_at(position.x, position.y) {
+            if let Some(id) = commands.find(button.command()) {
+                commands.run(id, self);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// A press on a divider, a tab, or a pane that does not have the keyboard.
+    ///
+    /// Returns whether the press was spent. A press in an unfocused pane's list
+    /// is *not* spent: it moves the keyboard and then goes on to select the row
+    /// it landed on, which is what a click into another pane means everywhere
+    /// else on the desktop.
+    fn press_in_the_tree(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+        if let Some(divider) = self.divider_at(position) {
+            self.placement.dragging = Some(divider);
+            return true;
+        }
+        let Some(id) = self.leaf_at(position) else { return false };
+        if self.panes.focus() != id {
+            self.panes.focus_on(id);
+            self.settle_panes();
+        }
+        let Some((index, closing)) = self.tab_at(position) else { return false };
+        if closing {
+            // Through the registry, like every other pointer route: the cross
+            // and the chord are one action, and a second way of closing a tab is
+            // a second thing to keep in step — rule 2.
+            self.panes.show_tab(id, index);
+            self.settle_panes();
+            if let Some(command) = commands.find("tab.close") {
+                commands.run(command, self);
+            }
+        } else if self.panes.show_tab(id, index) {
+            self.settle_panes();
+        }
+        true
+    }
+
+    /// The divider whose grab band covers `position`.
+    fn divider_at(&self, position: Point) -> Option<crate::panes::SplitId> {
+        self.placement
+            .dividers
+            .iter()
+            .find(|divider| divider.area.contains(position.x, position.y))
+            .map(|divider| divider.id)
+    }
+
+    /// The leaf `position` is inside.
+    fn leaf_at(&self, position: Point) -> Option<crate::panes::PaneId> {
+        self.placement
+            .leaves
+            .iter()
+            .find(|leaf| leaf.area.contains(position.x, position.y))
+            .map(|leaf| leaf.id)
+    }
+
+    /// The tab under `position`, and whether the press was on its cross.
+    fn tab_at(&self, position: Point) -> Option<(usize, bool)> {
+        let leaf =
+            self.placement.leaves.iter().find(|leaf| leaf.area.contains(position.x, position.y))?;
+        if !leaf.tabs.contains(position.x, position.y) {
+            return None;
+        }
+        let count = self.panes.leaf(leaf.id)?.panes.len();
+        crate::panes::tab_areas(leaf.tabs, count).enumerate().find_map(|(index, area)| {
+            area.contains(position.x, position.y).then(|| {
+                let closing = crate::panes::tab_close(area)
+                    .is_some_and(|cross| cross.contains(position.x, position.y));
+                (index, closing)
+            })
+        })
+    }
+
+    /// Moves the divider being dragged to where the pointer is.
+    fn drag_the_divider(&mut self, id: crate::panes::SplitId, position: Point) {
+        let Some(divider) = self.placement.dividers.iter().find(|it| it.id == id).copied() else {
+            return;
+        };
+        // The ratio is of the split's own extent, which is the two panes either
+        // side of this divider and not the window: a nested split's ratio is
+        // measured inside its parent's half.
+        let (first, second) = self.leaves_either_side(divider);
+        let at = match divider.axis {
+            crate::panes::Axis::Beside => {
+                let span = second.right() - first.x;
+                (position.x - first.x) / span.max(1.0)
+            }
+            crate::panes::Axis::Below => {
+                let span = second.bottom() - first.y;
+                (position.y - first.y) / span.max(1.0)
+            }
+        };
+        self.panes.set_ratio(id, at);
+        self.divide();
+        self.dirty = true;
+    }
+
+    /// The outermost rectangles a divider divides.
+    ///
+    /// A divider's own band is between two *subtrees*, and the leaves in them
+    /// may be several: the extent to measure a ratio against is the union, which
+    /// is the first leaf that starts before the band and the last that ends
+    /// after it.
+    fn leaves_either_side(&self, divider: crate::panes::Divider) -> (Area, Area) {
+        let band = divider.area;
+        let (mut before, mut after) = (band, band);
+        for leaf in &self.placement.leaves {
+            let (starts_before, ends_after) = match divider.axis {
+                crate::panes::Axis::Beside => {
+                    (leaf.area.x < band.x, leaf.area.right() > band.right())
+                }
+                crate::panes::Axis::Below => {
+                    (leaf.area.y < band.y, leaf.area.bottom() > band.bottom())
+                }
+            };
+            let overlaps = match divider.axis {
+                crate::panes::Axis::Beside => {
+                    leaf.area.y < band.bottom() && leaf.area.bottom() > band.y
+                }
+                crate::panes::Axis::Below => {
+                    leaf.area.x < band.right() && leaf.area.right() > band.x
+                }
+            };
+            if !overlaps {
+                continue;
+            }
+            if starts_before {
+                before = before.union(leaf.area);
+            }
+            if ends_after {
+                after = after.union(leaf.area);
+            }
+        }
+        (before, after)
+    }
+
+    /// What every change to the tree owes the rest of the window.
+    ///
+    /// The geometry moved, the keyboard may be somewhere else, and a pane that
+    /// has just become visible needs watching. One function rather than four
+    /// lines at nine call sites, because the site that forgets one of them is a
+    /// pane that draws where it no longer is.
+    fn settle_panes(&mut self) {
+        self.abandon_fields();
+        self.divide();
+        self.retarget_watches();
+        self.dirty = true;
     }
 
     /// Shows or hides the list of places.
@@ -1903,7 +2230,7 @@ impl App {
         self.claim_keyboard(Claim::Filter);
         if self.filtering {
             self.filtering = false;
-            self.pane.set_filter(String::new(), &self.jobs);
+            self.panes.focused_mut().set_filter(String::new(), &self.jobs);
         } else {
             self.filtering = true;
         }
@@ -1913,11 +2240,11 @@ impl App {
     /// Opens the focused entry: a directory in this window, a file in whatever
     /// the desktop says owns it.
     pub(crate) fn open_focused(&mut self) {
-        if self.pane.open_focused(&self.jobs) {
+        if self.panes.focused_mut().open_focused(&self.jobs) {
             return;
         }
-        let Some(id) = self.pane.focused() else { return };
-        let path = self.pane.path.join(self.pane.listing.name(id));
+        let Some(id) = self.panes.focused().focused() else { return };
+        let path = self.panes.focused().path.join(self.panes.focused().listing.name(id));
         self.launch(path);
     }
 
@@ -2095,9 +2422,9 @@ impl App {
     /// open as a large one. Bounded at [`sk_fs::TEXT_LIMIT`], and the job decides
     /// whether the bytes are really text — `enabled` only guesses from the name.
     pub(crate) fn copy_content(&mut self) {
-        let Some(id) = self.pane.focused() else { return };
-        let name = self.pane.listing.name(id).to_owned();
-        let path = self.pane.path.join(&name);
+        let Some(id) = self.panes.focused().focused() else { return };
+        let name = self.panes.focused().listing.name(id).to_owned();
+        let path = self.panes.focused().path.join(&name);
         let sender = self.replies.content_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
@@ -2120,17 +2447,17 @@ impl App {
     /// menu row that cannot work is worth more dimmed than absent.
     #[must_use]
     pub(crate) fn focused_is_text(&self) -> bool {
-        let Some(id) = self.pane.focused() else { return false };
+        let Some(id) = self.panes.focused().focused() else { return false };
         // A directory, a device, a socket, a FIFO, or a link to nothing: the read
         // would refuse each of them, and dimming is a better way to say so than a
         // message after the fact.
-        let flags = self.pane.listing.flags(id);
+        let flags = self.panes.focused().listing.flags(id);
         for refused in [sk_model::Flags::DIR, sk_model::Flags::SPECIAL, sk_model::Flags::BROKEN] {
             if flags.has(refused) {
                 return false;
             }
         }
-        let name = self.pane.listing.name(id);
+        let name = self.panes.focused().listing.name(id);
         self.desktop
             .as_deref()
             .and_then(|desktop| desktop.mime.by_name(name))
@@ -2206,15 +2533,16 @@ impl App {
     /// handed the peer the paths shuffled with respect to the list they were
     /// taken from, and nothing anywhere said so.
     fn selected_paths(&self) -> Vec<PathBuf> {
-        let listing = &self.pane.listing;
+        let listing = &self.panes.focused().listing;
         let mut paths: Vec<PathBuf> = self
-            .pane
+            .panes
+            .focused()
             .selection
             .in_order(listing.order())
-            .map(|id| self.pane.path.join(listing.name(id)))
+            .map(|id| self.panes.focused().path.join(listing.name(id)))
             .collect();
-        if let Some(id) = self.pane.focused().filter(|_| paths.is_empty()) {
-            paths.push(self.pane.path.join(listing.name(id)));
+        if let Some(id) = self.panes.focused().focused().filter(|_| paths.is_empty()) {
+            paths.push(self.panes.focused().path.join(listing.name(id)));
         }
         paths
     }
@@ -2239,7 +2567,7 @@ impl App {
         // mount answered.
         let sender = self.replies.launched_tx.clone();
         let wake = self.waker.handle();
-        self.jobs.pool.spawn(self.pane.lane(), sk_util::Cancel::new(), move |_| {
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
             let mime = desktop.mime.of(&path, false);
             let launched = match desktop.apps.default_for(&mime) {
                 None => Launched {
@@ -2279,8 +2607,8 @@ impl App {
     fn name_when_it_arrives(&mut self) {
         let Some(wanted) = self.edits.name_after_load.take() else { return };
         let Some(row) = self.row_named(&wanted) else { return };
-        let Some(id) = self.pane.listing.at(row) else { return };
-        self.pane.selection.replace_with(id);
+        let Some(id) = self.panes.focused().listing.at(row) else { return };
+        self.panes.focused_mut().selection.replace_with(id);
         self.start_rename();
     }
 
@@ -2290,8 +2618,12 @@ impl App {
     /// field — never per frame. `EntryId` is an index into the listing it came
     /// from, so it is not an identity that survives a re-read; the name is.
     fn row_named(&self, name: &str) -> Option<usize> {
-        (0..self.pane.listing.rows()).find(|row| {
-            self.pane.listing.at(*row).is_some_and(|id| self.pane.listing.name(id) == name)
+        (0..self.panes.focused().listing.rows()).find(|row| {
+            self.panes
+                .focused()
+                .listing
+                .at(*row)
+                .is_some_and(|id| self.panes.focused().listing.name(id) == name)
         })
     }
 
@@ -2307,8 +2639,12 @@ impl App {
         else {
             return;
         };
-        let still_there =
-            self.pane.listing.at(naming.row).is_some_and(|id| self.pane.listing.name(id) == name);
+        let still_there = self
+            .panes
+            .focused()
+            .listing
+            .at(naming.row)
+            .is_some_and(|id| self.panes.focused().listing.name(id) == name);
         if still_there {
             return;
         }
@@ -2340,9 +2676,9 @@ impl App {
                     if std::mem::take(&mut self.edits.naming_owed) {
                         self.edits.name_after_load = Some(name.clone());
                     }
-                    self.pane.select_after(name);
+                    self.panes.focused_mut().select_after(name);
                 }
-                self.pane.refresh(&self.jobs);
+                self.panes.focused_mut().refresh(&self.jobs);
                 message
             }
             crate::edit::Landed::Failed(message) => {
@@ -2374,22 +2710,22 @@ impl App {
 
     /// Goes to the parent directory.
     pub(crate) fn go_up(&mut self) {
-        self.pane.go_up(&self.jobs);
+        self.panes.focused_mut().go_up(&self.jobs);
     }
 
     /// Goes back to where the last navigation came from.
     pub(crate) fn go_back(&mut self) {
-        self.pane.go_back(&self.jobs);
+        self.panes.focused_mut().go_back(&self.jobs);
     }
 
     /// Undoes a Back.
     pub(crate) fn go_forward(&mut self) {
-        self.pane.go_forward(&self.jobs);
+        self.panes.focused_mut().go_forward(&self.jobs);
     }
 
     /// Goes to `$HOME`.
     pub(crate) fn go_home(&mut self) {
-        self.pane.go_home(&self.jobs);
+        self.panes.focused_mut().go_home(&self.jobs);
     }
 
     /// Re-reads the current directory, and re-measures every folder in it.
@@ -2406,32 +2742,33 @@ impl App {
         // `refresh` rather than `reload`: the directory is the same one, so the
         // cursor and the selection are carried across by name. Pressing `F5`
         // should not cost the user what they had picked out.
-        self.pane.refresh(&self.jobs);
+        self.panes.focused_mut().refresh(&self.jobs);
     }
 
     /// Moves the cursor by `delta` rows, extending the selection if asked.
     pub(crate) fn move_cursor(&mut self, delta: isize, extend: bool) {
-        self.pane.move_cursor(delta, extend);
+        self.panes.focused_mut().move_cursor(delta, extend);
         self.reveal_cursor();
     }
 
     /// Moves the cursor by a screenful.
     pub(crate) fn move_page(&mut self, direction: isize) {
-        let rows = (self.layout.body.height / self.theme.metrics.row_height).floor().max(1.0);
-        self.pane.move_cursor(direction * rows as isize, false);
+        let rows =
+            (self.placement.here.body.height / self.theme.metrics.row_height).floor().max(1.0);
+        self.panes.focused_mut().move_cursor(direction * rows as isize, false);
         self.reveal_cursor();
     }
 
     /// Moves the cursor to the first row.
     pub(crate) fn go_top(&mut self) {
-        self.pane.cursor_to(0, false);
-        self.pane.scroll.to(0.0);
+        self.panes.focused_mut().cursor_to(0, false);
+        self.panes.focused_mut().scroll.to(0.0);
     }
 
     /// Moves the cursor to the last row.
     pub(crate) fn go_bottom(&mut self) {
-        let last = self.pane.listing.rows().saturating_sub(1);
-        self.pane.cursor_to(last, false);
+        let last = self.panes.focused().listing.rows().saturating_sub(1);
+        self.panes.focused_mut().cursor_to(last, false);
         self.reveal_cursor();
     }
 
@@ -2445,17 +2782,17 @@ impl App {
         // leaving it running would drop files on the next release with no
         // highlight to say where.
         self.files_drag = None;
-        self.pane.selection.clear();
+        self.panes.focused_mut().selection.clear();
         self.typed.clear();
         self.filtering = false;
-        self.pane.set_filter(String::new(), &self.jobs);
+        self.panes.focused_mut().set_filter(String::new(), &self.jobs);
         self.show_keys = false;
         self.show_stats = false;
     }
 
     /// Shows or hides dotfiles.
     pub(crate) fn toggle_hidden(&mut self) {
-        self.pane.toggle_hidden(&self.jobs);
+        self.panes.focused_mut().toggle_hidden(&self.jobs);
     }
 
     /// Swaps the palette.
@@ -2472,11 +2809,36 @@ impl App {
             frame_of(&self.window),
             self.sidebar.open,
         );
+        self.divide();
+    }
+
+    /// Lays the pane tree out inside the content rectangle.
+    ///
+    /// Separate from [`App::relayout`] because the window's chrome changes when
+    /// the window does and the tree changes when a split, a tab or the focus
+    /// does — and running the wrong one leaves a pane drawing where it no longer
+    /// is, which is a click that lands one pane over.
+    fn divide(&mut self) {
+        let Self { panes, layout, theme, placement, .. } = self;
+        panes.layout(
+            layout.content,
+            &theme.metrics,
+            &mut placement.leaves,
+            &mut placement.dividers,
+        );
+        let focus = panes.focus();
+        placement.here = placement
+            .leaves
+            .iter()
+            .find(|leaf| leaf.id == focus)
+            .or_else(|| placement.leaves.first())
+            .copied()
+            .unwrap_or_default();
     }
 
     /// Sorts by `column`, reversing if it is already the sort column.
     pub(crate) fn sort_by(&mut self, column: SortColumn) {
-        self.pane.sort_by(column, &self.jobs);
+        self.panes.focused_mut().sort_by(column, &self.jobs);
     }
 
     /// Shows or hides the keyboard list.
@@ -2516,17 +2878,19 @@ impl App {
     #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
     fn listing_state(&mut self) -> String {
         let cursor = self
-            .pane
+            .panes
+            .focused()
             .selection
             .cursor()
-            .map(|id| self.pane.listing.name(id).to_owned())
+            .map(|id| self.panes.focused().listing.name(id).to_owned())
             .unwrap_or_default();
-        let hover = self.pane.hover.map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        let hover = self.panes.focused().hover.map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let hover_name = self
-            .pane
+            .panes
+            .focused()
             .hover
-            .and_then(|row| self.pane.listing.at(row))
-            .map(|id| self.pane.listing.name(id).to_owned())
+            .and_then(|row| self.panes.focused().listing.at(row))
+            .map(|id| self.panes.focused().listing.name(id).to_owned())
             .unwrap_or_default();
         let (known, running) = self.measurer.stats();
         let (jobs, panics) = self.jobs.pool.stats();
@@ -2545,7 +2909,8 @@ impl App {
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
         let (queue_left, queue_total) = self.edits.queue_state();
-        let cursor_row = self.pane.cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        let cursor_row =
+            self.panes.focused().cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let progress = self.edits.progress_line().unwrap_or_default();
         let drop_row = self.drop_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
@@ -2575,21 +2940,21 @@ filtering={} filter={:?} drop_row={drop_row} dragging={dragging} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
 refused={refused:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",
-            self.pane.path,
-            self.pane.listing.rows(),
-            self.pane.show_hidden,
-            self.pane.sort.column,
-            self.pane.sort.descending,
-            self.pane.selection.count(),
-            self.pane.scroll.offset(),
-            self.pane.loading,
+            self.panes.focused().path,
+            self.panes.focused().listing.rows(),
+            self.panes.focused().show_hidden,
+            self.panes.focused().sort.column,
+            self.panes.focused().sort.descending,
+            self.panes.focused().selection.count(),
+            self.panes.focused().scroll.offset(),
+            self.panes.focused().loading,
             self.watching,
             self.notice.as_ref().map(|(message, _)| message.as_str()).unwrap_or_default(),
             self.edits.history.can_undo(),
             self.edits.history.can_redo(),
             self.edits.busy(),
             self.filtering,
-            self.pane.filter,
+            self.panes.focused().filter,
         )
     }
 
@@ -2619,6 +2984,9 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             menu.items
                 .iter()
                 .zip(&self.hits.menu)
+                // A row scrolled out of a menu taller than the window has an
+                // empty rectangle, and an aim at it would be an aim at nothing.
+                .filter(|(_, area)| area.width > 0.0)
                 .map(|(item, area)| {
                     format!("{}@{:.0}:{:.0}", item.id, area.x + 20.0, area.y + area.height / 2.0)
                 })
@@ -2726,6 +3094,67 @@ sizes={known}/{running} jobs={jobs}/{panics}",
         )
     }
 
+    /// The shape of the pane tree, and where a pointer would aim at it.
+    ///
+    /// Every value a scenario needs to assert that a split is a split: how many
+    /// panes and tabs there are, which has the keyboard, what each is showing,
+    /// and the middle of every tab and every divider so a click is arithmetic
+    /// over what the frame drew rather than over the harness's own metrics.
+    fn panes_report(&self) -> String {
+        let leaf = self.panes.focused_leaf();
+        let focus = self.panes.focus();
+        let order = self.placement.leaves.iter().position(|it| it.id == focus).unwrap_or(0);
+        let paths = self
+            .panes
+            .visible()
+            .map(|pane| crate::panes::title_of(&pane.path).to_owned())
+            .collect::<Vec<_>>()
+            .join(",");
+        // A leaf with one tab draws no strip, so it offers nothing to aim at:
+        // the rectangles exist and are zero pixels tall, and an aim at one is an
+        // aim at nothing.
+        let strip = self.placement.here.tabs;
+        let count = if strip.height > 0.0 { leaf.panes.len() } else { 0 };
+        let tab_aim = crate::panes::tab_areas(strip, count)
+            .map(|area| format!("{:.0}:{:.0}", area.x + 20.0, area.y + area.height / 2.0))
+            .collect::<Vec<_>>()
+            .join(",");
+        let cross_aim = crate::panes::tab_areas(strip, count)
+            .filter_map(crate::panes::tab_close)
+            .map(|area| {
+                format!("{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let divider_aim = self
+            .placement
+            .dividers
+            .iter()
+            .map(|divider| {
+                format!(
+                    "{:.0}:{:.0}",
+                    divider.area.x + divider.area.width / 2.0,
+                    divider.area.y + divider.area.height / 2.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let widths = self
+            .placement
+            .leaves
+            .iter()
+            .map(|leaf| format!("{:.0}x{:.0}", leaf.area.width, leaf.area.height))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "panes={} pane_focus={order} pane_sizes={widths:?} pane_paths={paths:?} \
+tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} divider_aim={divider_aim:?}",
+            self.placement.leaves.len(),
+            leaf.panes.len(),
+            leaf.active,
+        )
+    }
+
     fn chrome_state(&mut self) -> String {
         let frame = if self.window.needs_own_frame() { "own" } else { "server" };
         let frame_hover = match self.hovered_button {
@@ -2751,6 +3180,8 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             sk_plat::Cursor::Text => "text".to_owned(),
             sk_plat::Cursor::Grabbing => "grabbing".to_owned(),
             sk_plat::Cursor::Resize(edge) => format!("resize-{edge:?}").to_lowercase(),
+            sk_plat::Cursor::Divider { horizontal: true } => "divider-h".to_owned(),
+            sk_plat::Cursor::Divider { horizontal: false } => "divider-v".to_owned(),
         };
         let place_hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         let place_name = self
@@ -2766,6 +3197,7 @@ sizes={known}/{running} jobs={jobs}/{panics}",
         let box_of = crate::view::path_field(&self.layout, &self.theme.metrics);
         let path_field =
             format!("{:.1},{:.1},{:.1},{:.1}", box_of.x, box_of.y, box_of.width, box_of.height);
+        let panes_report = self.panes_report();
         let menu_report = self.menu_report();
         let palette_report = self.palette_report();
         // The middle of the crumb one level up, which is the one a test clicks.
@@ -2786,19 +3218,19 @@ crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
 crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={crumb_menu_active:?} \
 crumb_menu_aim={crumb_menu_aim:?} \
-{menu_report} {palette_report} \
+{panes_report} {menu_report} {palette_report} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
 path_field={path_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
-            self.layout.body.y,
-            self.layout.body.height,
+            self.placement.here.body.y,
+            self.placement.here.body.height,
             self.theme.metrics.row_height,
-            self.layout.name.x,
-            self.layout.size.x,
-            self.layout.size.width,
+            self.placement.here.name.x,
+            self.placement.here.size.x,
+            self.placement.here.size.width,
             self.window_state.maximized,
             self.hits.crumbs.len(),
             self.layout.sidebar.width,
@@ -2819,12 +3251,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     }
 
     fn reveal_cursor(&mut self) {
-        let Some(row) = self.pane.cursor_row() else { return };
+        let Some(row) = self.panes.focused().cursor_row() else { return };
         let height = self.theme.metrics.row_height;
-        self.pane.scroll.reveal(
+        self.panes.focused_mut().scroll.reveal(
             row as f32 * height,
             (row + 1) as f32 * height,
-            self.layout.body.height,
+            self.placement.here.body.height,
         );
     }
 
@@ -2863,29 +3295,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         {
             return;
         }
-        // Through the registry, not through a method: a dimmed button must do
-        // nothing when clicked, and `enabled` is the only place that knows.
-        if let Some(index) = self.place_at(position) {
-            if let Some(entry) = self.sidebar.at(index) {
-                let path = entry.path.clone();
-                if path != self.pane.path {
-                    self.pane.open(path, &self.jobs);
-                }
-            }
-            self.dirty = true;
-            return;
-        }
-        if let Some(tool) = self.layout.tool_at(position.x, position.y) {
-            if let Some(id) = commands.find(tool.command()) {
-                commands.run(id, self);
-            }
-            self.dirty = true;
-            return;
-        }
-        if let Some(button) = self.layout.button_at(position.x, position.y) {
-            if let Some(id) = commands.find(button.command()) {
-                commands.run(id, self);
-            }
+        if self.press_on_the_chrome(position, commands) {
             return;
         }
         // The path field before the drag region, for the same reason a
@@ -2926,14 +3336,19 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.press_on_the_path_strip(position, clicks) {
             return;
         }
-        if self.layout.header.contains(position.x, position.y) {
+        // The tree before the header and the list, because both of those are
+        // questions about *which* pane — and the answer can change here.
+        if self.press_in_the_tree(position, commands) {
+            return;
+        }
+        if self.placement.here.header.contains(position.x, position.y) {
             if let Some(column) = self.column_at(position.x) {
-                self.pane.sort_by(column, &self.jobs);
+                self.panes.focused_mut().sort_by(column, &self.jobs);
                 self.dirty = true;
             }
             return;
         }
-        if !self.layout.body.contains(position.x, position.y) {
+        if !self.placement.here.body.contains(position.x, position.y) {
             return;
         }
         if let Some(grab) = self.thumb_at(position) {
@@ -2943,13 +3358,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
         let Some(row) = self.row_under(position) else {
             // Empty space: clear, and be ready to rubber-band.
-            self.pane.selection.clear();
-            self.pane.selection.set_cursor(None);
+            self.panes.focused_mut().selection.clear();
+            self.panes.focused_mut().selection.set_cursor(None);
             self.band = Some((position, position));
             self.dirty = true;
             return;
         };
-        let Some(id) = self.pane.listing.at(row) else { return };
+        let Some(id) = self.panes.focused().listing.at(row) else { return };
         self.press_on_a_row(id, position, clicks, ctrl, shift);
         if clicks >= 2 {
             // `App::open_focused`, not `Pane::open_focused`: the pane's one
@@ -2973,11 +3388,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
         let target = self.row_under(position).and_then(|row| {
-            let id = self.pane.listing.at(row)?;
-            if !self.pane.listing.flags(id).has(sk_model::Flags::DIR) {
+            let id = self.panes.focused().listing.at(row)?;
+            if !self.panes.focused().listing.flags(id).has(sk_model::Flags::DIR) {
                 return None;
             }
-            let path = self.pane.path.join(self.pane.listing.name(id));
+            let path = self.panes.focused().path.join(self.panes.focused().listing.name(id));
             Some((row, path))
         });
         let Some(drag) = &mut self.files_drag else { return };
@@ -3054,7 +3469,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // row or onto empty space — which is most of the window. Our own
         // selection dropped on its own directory is a move to where it already
         // is, so that needs a folder.
-        drag.paths.is_empty().then(|| self.pane.path.clone())
+        drag.paths.is_empty().then(|| self.panes.focused().path.clone())
     }
 
     /// Takes a drop from another application.
@@ -3083,7 +3498,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
         let into = self.files_drag.as_ref().and_then(|drag| drag.onto.clone());
-        let into = into.unwrap_or_else(|| self.pane.path.clone());
+        let into = into.unwrap_or_else(|| self.panes.focused().path.clone());
         self.files_drag = None;
         self.dirty = true;
         let Some(fd) = self.window.take_drop("text/uri-list") else { return };
@@ -3137,7 +3552,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             if !drag.active
                 && let Some(id) = drag.id
             {
-                self.pane.selection.replace_with(id);
+                self.panes.focused_mut().selection.replace_with(id);
             }
             self.dirty = true;
             return;
@@ -3163,15 +3578,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     ) {
         self.dropped = false;
         if shift {
-            self.pane.selection.extend_to(id, self.pane.listing.order());
+            let pane = self.panes.focused_mut();
+            pane.selection.extend_to(id, pane.listing.order());
             return;
         }
         if ctrl {
-            self.pane.selection.toggle(id);
+            self.panes.focused_mut().selection.toggle(id);
             return;
         }
-        if !self.pane.selection.contains(id) || clicks >= 2 {
-            self.pane.selection.replace_with(id);
+        if !self.panes.focused().selection.contains(id) || clicks >= 2 {
+            self.panes.focused_mut().selection.replace_with(id);
         }
         if clicks < 2 {
             self.files_drag = Some(FilesDrag {
@@ -3193,13 +3609,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let ended = self.band.take().is_some();
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
+        let divided = self.placement.dragging.take().is_some();
         // A press on the title bar that never moved: the person clicked the path
         // strip, which is a request to type a path.
         if self.title_press.take().is_some() {
             self.toggle_path_entry();
             self.path_from_title = self.typing_path.is_some();
         }
-        if ended || released || dragged {
+        if ended || released || dragged || divided {
             self.dirty = true;
         }
     }
@@ -3216,6 +3633,18 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         if let Some(edge) = self.layout.edge_at(position.x, position.y) {
             return sk_plat::Cursor::Resize(edge);
+        }
+        // Before every other shape, and including while one is being dragged:
+        // a divider under the pointer is the most specific thing there, and a
+        // drag that leaves the band must not change shape halfway.
+        if let Some(id) = self.placement.dragging.or_else(|| self.divider_at(position)) {
+            let horizontal = self
+                .placement
+                .dividers
+                .iter()
+                .find(|divider| divider.id == id)
+                .is_some_and(|divider| divider.axis == crate::panes::Axis::Beside);
+            return sk_plat::Cursor::Divider { horizontal };
         }
         // A dimmed navigation button is not clickable, and Back is dimmed for the
         // first navigation of every session — so it is the first thing a pointer
@@ -3236,7 +3665,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.layout.tool_at(position.x, position.y).is_some() {
             return sk_plat::Cursor::Arrow;
         }
-        if self.layout.header.contains(position.x, position.y)
+        if self.placement.here.header.contains(position.x, position.y)
             && self.column_at(position.x).is_some()
         {
             return sk_plat::Cursor::Hand;
@@ -3355,7 +3784,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// The path a breadcrumb at `depth` names: the current path, that deep.
     fn path_to_crumb(&self, depth: usize) -> PathBuf {
         let mut path = PathBuf::from("/");
-        let names = self.pane.path.components().filter_map(|part| match part {
+        let names = self.panes.focused().path.components().filter_map(|part| match part {
             std::path::Component::Normal(name) => Some(name.to_owned()),
             _ => None,
         });
@@ -3385,7 +3814,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.dirty = true;
         let parent = self.path_to_crumb(depth);
         let at = self.hits.separators.get(depth).map_or(0.0, |area| area.x);
-        let show_hidden = self.pane.show_hidden;
+        let show_hidden = self.panes.focused().show_hidden;
         let sender = self.replies.siblings_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |cancel| {
@@ -3408,7 +3837,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // The component of the current path that follows this one, which is the
         // row to mark and to open on.
         let along = self
-            .pane
+            .panes
+            .focused()
             .path
             .strip_prefix(&found.parent)
             .ok()
@@ -3479,7 +3909,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let Some(menu) = &self.crumb_menu else { return };
         let Some(path) = menu.active.and_then(|row| menu.path_of(row)) else { return };
         self.close_crumb_menu();
-        self.pane.open(path, &self.jobs);
+        self.panes.focused_mut().open(path, &self.jobs);
         self.dirty = true;
     }
 
@@ -3487,7 +3917,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     fn go_to_crumb(&mut self, depth: usize) {
         let mut path = std::path::PathBuf::from("/");
         let names: Vec<_> = self
-            .pane
+            .panes
+            .focused()
             .path
             .components()
             .filter_map(|part| match part {
@@ -3500,7 +3931,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         for name in names.iter().take(depth) {
             path.push(name);
         }
-        self.pane.open(path, &self.jobs);
+        self.panes.focused_mut().open(path, &self.jobs);
         self.dirty = true;
     }
 
@@ -3545,10 +3976,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.commit_name();
         }
         let row = self.row_under(position);
-        if let Some(id) = row.and_then(|row| self.pane.listing.at(row))
-            && !self.pane.selection.contains(id)
+        if let Some(id) = row.and_then(|row| self.panes.focused().listing.at(row))
+            && !self.panes.focused().selection.contains(id)
         {
-            self.pane.selection.replace_with(id);
+            self.panes.focused_mut().selection.replace_with(id);
         }
         let groups = if row.is_some() { crate::menu::ON_ROW } else { crate::menu::ON_BACKGROUND };
         self.menu_wanted = Some((position, groups));
@@ -3564,14 +3995,18 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
         let height = self.theme.metrics.row_height;
-        let at = match self.pane.cursor_row() {
+        let at = match self.panes.focused().cursor_row() {
             Some(row) => {
-                let top = self.layout.body.y + row as f32 * height - self.pane.scroll.offset();
-                Point::new(self.layout.name.x, (top + height).max(self.layout.body.y))
+                let top = self.placement.here.body.y + row as f32 * height
+                    - self.panes.focused().scroll.offset();
+                Point::new(
+                    self.placement.here.name.x,
+                    (top + height).max(self.placement.here.body.y),
+                )
             }
-            None => Point::new(self.layout.body.x + 8.0, self.layout.body.y + 8.0),
+            None => Point::new(self.placement.here.body.x + 8.0, self.placement.here.body.y + 8.0),
         };
-        let groups = if self.pane.cursor_row().is_some() {
+        let groups = if self.panes.focused().cursor_row().is_some() {
             crate::menu::ON_ROW
         } else {
             crate::menu::ON_BACKGROUND
@@ -3581,12 +4016,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
     /// Which listing row is under a point, or `None` outside the list.
     fn row_under(&self, position: Point) -> Option<usize> {
-        if !self.layout.body.contains(position.x, position.y) {
+        if !self.placement.here.body.contains(position.x, position.y) {
             return None;
         }
-        self.layout
-            .row_at(position.y, self.pane.scroll.offset(), self.theme.metrics.row_height)
-            .filter(|row| *row < self.pane.listing.rows())
+        self.placement
+            .here
+            .row_at(position.y, self.panes.focused().scroll.offset(), self.theme.metrics.row_height)
+            .filter(|row| *row < self.panes.focused().listing.rows())
     }
 
     /// Which drawn palette result is under a point, if the palette is open.
@@ -3681,12 +4117,21 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// does from everywhere else.
     fn menu_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
         use sk_plat::{Key, Named};
+        // Read before the menu is borrowed: a highlight that moves has to be
+        // brought into view, and how much view there is is the window's.
+        let room = self.layout.window.height - crate::menu::MARGIN * 2.0;
         let Some(menu) = self.menu.as_mut() else { return false };
         let bare = event.mods.none();
         match event.key {
             Key::Named(Named::Escape) => self.menu = None,
-            Key::Named(Named::Down) if bare => menu.step(true),
-            Key::Named(Named::Up) if bare => menu.step(false),
+            Key::Named(Named::Down) if bare => {
+                menu.step(true);
+                menu.reveal(room);
+            }
+            Key::Named(Named::Up) if bare => {
+                menu.step(false);
+                menu.reveal(room);
+            }
             Key::Named(Named::Enter) => {
                 let chosen = menu.active_id();
                 self.menu = None;
@@ -3920,6 +4365,21 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.sidebar.hover = place;
             self.dirty = true;
         }
+        // A divider being dragged owns the pointer until the button comes up.
+        if let Some(id) = self.placement.dragging {
+            self.drag_the_divider(id, position);
+            return;
+        }
+        let divider = self.divider_at(position);
+        if self.placement.hovered_divider != divider {
+            self.placement.hovered_divider = divider;
+            self.dirty = true;
+        }
+        let tab = self.leaf_at(position).zip(self.tab_at(position)).map(|(id, (at, _))| (id, at));
+        if self.placement.hovered_tab != tab {
+            self.placement.hovered_tab = tab;
+            self.dirty = true;
+        }
         let cursor = self.cursor_at(position, commands);
         self.point(cursor);
         if let Some(grab) = self.thumb_grab {
@@ -3941,40 +4401,41 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // **Inside the list, not merely at the same height as it.** `row_at` is
         // told a `y` and answers about rows; the sidebar is at the same `y` as
         // every row of the list, so hovering a place lit the row beside it.
-        // **Inside the list, not merely at the same height as it.** `row_at` is
-        // told a `y` and answers about rows; the sidebar is at the same `y` as
-        // every row of the list, so hovering a place lit the row beside it.
         let row = self
-            .layout
+            .placement
+            .here
             .body
             .contains(position.x, position.y)
             .then(|| {
-                self.layout.row_at(
+                self.placement.here.row_at(
                     position.y,
-                    self.pane.scroll.offset(),
+                    self.panes.focused().scroll.offset(),
                     self.theme.metrics.row_height,
                 )
             })
             .flatten()
-            .filter(|row| *row < self.pane.listing.rows());
-        if self.pane.hover != row {
-            self.pane.hover = row;
+            .filter(|row| *row < self.panes.focused().listing.rows());
+        if self.panes.focused().hover != row {
+            self.panes.focused_mut().hover = row;
             self.dirty = true;
         }
     }
 
     fn select_band(&mut self, from: Point, to: Point) {
         let height = self.theme.metrics.row_height;
-        let offset = self.pane.scroll.offset();
+        let offset = self.panes.focused().scroll.offset();
         let top = from.y.min(to.y);
         let bottom = from.y.max(to.y);
-        let first = ((top - self.layout.body.y + offset) / height).floor().max(0.0) as usize;
-        let last = ((bottom - self.layout.body.y + offset) / height).floor().max(0.0) as usize;
-        self.pane.selection.clear();
-        let order = self.pane.listing.order();
-        for row in first..=last.min(order.len().saturating_sub(1)) {
-            if let Some(id) = order.get(row) {
-                self.pane.selection.toggle(*id);
+        let first =
+            ((top - self.placement.here.body.y + offset) / height).floor().max(0.0) as usize;
+        let last =
+            ((bottom - self.placement.here.body.y + offset) / height).floor().max(0.0) as usize;
+        let pane = self.panes.focused_mut();
+        pane.selection.clear();
+        let rows = pane.listing.rows();
+        for row in first..=last.min(rows.saturating_sub(1)) {
+            if let Some(id) = pane.listing.at(row) {
+                pane.selection.toggle(id);
             }
         }
     }
@@ -3985,10 +4446,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// two used to be separate copies of the same arithmetic and had already
     /// drifted into two spellings of one clamp, one of which panicked.
     fn thumb(&self) -> Option<(f32, f32)> {
-        let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
-        let (position, height) =
-            sk_ui::thumb(self.pane.scroll.offset(), content, self.layout.body.height)?;
-        Some((self.layout.body.y + position, height))
+        let content = self.panes.focused().listing.rows() as f32 * self.theme.metrics.row_height;
+        let (position, height) = sk_ui::thumb(
+            self.panes.focused().scroll.offset(),
+            content,
+            self.placement.here.body.height,
+        )?;
+        Some((self.placement.here.body.y + position, height))
     }
 
     /// Where in the thumb a press landed, as a fraction of its height.
@@ -3996,26 +4460,26 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let (top, height) = self.thumb()?;
         // A generous grab region: the thumb is eight logical pixels wide and a
         // pointer is not, so the hit area is the right edge of the pane.
-        let inside_x = position.x >= self.layout.body.right() - 20.0;
+        let inside_x = position.x >= self.placement.here.body.right() - 20.0;
         let inside_y = position.y >= top && position.y < top + height;
         (inside_x && inside_y).then_some(position.y - top)
     }
 
     fn drag_thumb(&mut self, position: Point, grab: f32) {
         let Some((_, thumb)) = self.thumb() else { return };
-        let track = self.layout.body.height;
+        let track = self.placement.here.body.height;
         let travel = (track - thumb).max(1.0);
-        let content = self.pane.listing.rows() as f32 * self.theme.metrics.row_height;
+        let content = self.panes.focused().listing.rows() as f32 * self.theme.metrics.row_height;
         let extent = (content - track).max(0.0);
-        let fraction = ((position.y - grab - self.layout.body.y) / travel).clamp(0.0, 1.0);
-        self.pane.scroll.to(fraction * extent);
+        let fraction = ((position.y - grab - self.placement.here.body.y) / travel).clamp(0.0, 1.0);
+        self.panes.focused_mut().scroll.to(fraction * extent);
     }
 
     fn column_at(&self, x: f32) -> Option<SortColumn> {
         for (column, area) in [
-            (SortColumn::Name, self.layout.name),
-            (SortColumn::Size, self.layout.size),
-            (SortColumn::Modified, self.layout.modified),
+            (SortColumn::Name, self.placement.here.name),
+            (SortColumn::Size, self.placement.here.size),
+            (SortColumn::Modified, self.placement.here.modified),
         ] {
             if area.width > 0.0 && x >= area.x && x < area.right() {
                 return Some(column);
@@ -4054,7 +4518,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             fonts,
             cache,
             theme,
-            pane,
+            panes,
             layout,
             frames,
             last,
@@ -4086,6 +4550,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             menu,
             typing_path,
             palette,
+            placement,
             ..
         } = self;
 
@@ -4119,6 +4584,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             path_entry: typing_path.as_ref(),
             palette: palette.as_ref(),
             hint,
+            leaves: &placement.leaves,
+            dividers: &placement.dividers,
+            hovered_divider: placement.hovered_divider,
+            hovered_tab: placement.hovered_tab,
         };
         let now = clock_seconds();
         let mut diagnostics = diagnostics_for(
@@ -4136,16 +4605,21 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
         {
             let mut painter = Painter { list, fonts, cache, theme, scale };
-            view::draw(&mut painter, pane, layout, now, &chrome, &mut diagnostics, hits);
+            view::draw(&mut painter, panes, layout, now, &chrome, &mut diagnostics, hits);
         }
-        // Everything the loop did this turn, up to the submission. The renderer's
-        // own wall time is not usable here because it contains the wait for a
-        // presentation slot, which is the compositor's pacing and not a cost —
-        // so its CPU share is added from `FrameStats` instead.
-        let turn_us = turn.elapsed().as_micros() as u64;
+        self.submit(turn, physical);
+    }
 
-        let background = theme.palette.background;
-        let stats = renderer.draw(list, fonts, background);
+    /// Hands the frame to the GPU and records what the turn cost.
+    ///
+    /// **The clock stops before the submission, not after it.** The renderer's
+    /// own wall time contains the wait for a presentation slot, which is the
+    /// compositor's pacing rather than a cost of ours — so the turn's time is
+    /// taken here and the renderer's CPU share is added from `FrameStats`.
+    fn submit(&mut self, turn: Instant, physical: (u32, u32)) {
+        let turn_us = turn.elapsed().as_micros() as u64;
+        let background = self.theme.palette.background;
+        let stats = self.renderer.draw(&mut self.list, &mut self.fonts, background);
         self.last = stats;
         self.frames.record(turn_us + stats.cpu_us);
 

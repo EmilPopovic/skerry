@@ -104,6 +104,16 @@ pub struct Jobs {
 /// oldest entry is dropped rather than the navigation refused.
 const HISTORY_DEPTH: usize = 128;
 
+/// The next read's number, for the whole process.
+///
+/// Process-wide and not per pane, so a message belongs to exactly one pane and a
+/// message for a pane that has been closed matches none. A counter per pane was
+/// a complete protocol while there was one pane: with four, two of them reach
+/// generation 3 within a second of each other and each takes delivery of the
+/// other's listing, under its own path, with no error anywhere
+/// ([ADR 0010](../../../docs/adr/0010-a-split-tree-of-tab-strips.md)).
+static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Entries a reorder will do on the calling thread.
 ///
 /// Measured: 6,167 entries take 4.3 ms and 200,000 take 272 ms. 8,192 is the
@@ -250,6 +260,12 @@ impl Pane {
         true
     }
 
+    /// Which read this pane is waiting for. Unique across the process.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether Back and Forward have anywhere to go, for a menu or a toolbar.
     #[must_use]
     pub fn can_go(&self) -> (bool, bool) {
@@ -293,7 +309,7 @@ impl Pane {
         self.sort_cancel.cancel();
         self.sort_cancel = Cancel::new();
         self.sorting = false;
-        self.generation += 1;
+        self.generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.loading = true;
         self.names_us = 0;
         self.meta_us = 0;

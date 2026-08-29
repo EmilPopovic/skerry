@@ -23,6 +23,36 @@ use crate::pane::{Jobs, Message, Pane};
 /// deadline is a deadline and not a failure.
 pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(5);
 
+/// The diagnostics a headless frame carries.
+///
+/// Both the benchmark and the capture draw with no window, so both report the
+/// same nine values about the same session — and a second copy of the literal is
+/// a second place for `capabilities` to say something other than `offscreen`.
+/// The renderer is taken rather than the whole `Session`, because the caller is
+/// about to borrow the faces out of it mutably for the painter.
+pub(crate) fn offscreen<'a>(
+    renderer: &'a Renderer,
+    pool: (usize, u64, u64),
+    physical: (u32, u32),
+    frames: &'a mut crate::frames::Frames,
+    last: sk_gpu::FrameStats,
+    runs: usize,
+    scale_120: u32,
+) -> crate::view::Diagnostics<'a> {
+    crate::view::Diagnostics {
+        frames,
+        last,
+        atlas: renderer.atlas_stats(),
+        shaping: (runs, 0, 0),
+        pool,
+        adapter: renderer.adapter(),
+        backend: renderer.backend(),
+        physical,
+        scale_120,
+        capabilities: "offscreen",
+    }
+}
+
 /// A renderer, fonts and a pool, with no window.
 pub(crate) struct Session {
     pub renderer: Renderer,

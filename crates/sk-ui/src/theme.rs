@@ -84,6 +84,8 @@ pub struct Metrics {
     pub path_height: f32,
     /// The column header strip.
     pub header_height: f32,
+    /// One tab in a pane's tab strip, when it has more than one.
+    pub tab_height: f32,
     /// The status strip at the bottom.
     pub status_height: f32,
     /// Space between the pane edge and a row's content.
@@ -134,6 +136,10 @@ impl Default for Metrics {
             row_height: 26.0,
             path_height: 44.0,
             header_height: 28.0,
+            // Taller than the column header and shorter than the path bar: a tab
+            // is aimed at and read, and 30 is the height Firefox, Chrome and
+            // Nautilus all land within two pixels of.
+            tab_height: 30.0,
             status_height: 28.0,
             gutter: 10.0,
             text_size: 13.0,

@@ -885,3 +885,39 @@ The first draft of the fix centred the message in a one-row box inside the panel
 rather than in the panel. Both expressions round to the same baseline, so the
 frame could not tell them apart, and the simpler one stayed. A second way of
 saying the same number is not a safeguard; it is a thing to keep in step.
+
+## The state a test reads has to be the state that can be wrong
+
+The watcher was changed from one directory to a set so that two panes could both
+be live. The scenario written for it split the window, put one pane in a
+subdirectory, created a file in each directory, and asserted the listing changed
+for one and not the other.
+
+It passed. It would also have passed against the old watcher, because every
+assertion in it was about the pane that *had the keyboard* — and the focused
+pane is the one directory the old design watched. The bug it was written for is
+invisible from there by construction.
+
+The assertion that finds it is about the pane that does **not** have the
+keyboard: change its directory, move the focus to it, and count the rows. With
+one watch it is stale — `9 rows, wanted 10`, watched failing against a
+deliberately reverted `retarget_watches`. The pane that cannot be wrong is not
+the pane to look at.
+
+## An invariant that lives in a doc comment is a comment
+
+`menu::place` carried this, written when it was: "**Flipped, never clipped.** A
+menu whose bottom rows are off the window is a menu whose last two entries do not
+exist, and the last two entries of the row menu are Rename and Move to Trash."
+
+The function flips the menu to the other side of the pointer and then clamps it
+into the window. Neither can help when the menu is taller than the window it is
+in, and nothing said so: the clamp silently produced a panel running off the
+bottom edge, with its last rows unreachable. Six new commands took the background
+menu past 520 logical pixels and the golden frame showed it immediately — a frame
+nobody would have thought to take of "the menu, but longer".
+
+The menu scrolls now, with an arrow at whichever end has more. The lesson is not
+about menus: **a rule worth writing at the top of a function is worth a test
+underneath it**, because the prose is what a reader believes and the code is what
+runs. This one was believed for four milestones.

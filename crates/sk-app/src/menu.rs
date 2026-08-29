@@ -34,6 +34,8 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["edit.undo", "edit.redo", "edit.cancel"],
     &["select.all", "view.filter"],
     &["view.hidden", "view.theme", "view.sidebar"],
+    &["tab.new", "tab.close", "tab.reopen"],
+    &["pane.split_beside", "pane.split_below", "pane.close"],
     &["view.path_entry", "file.paste_location", "go.reload"],
     &["view.palette", "help.keys"],
 ];
@@ -61,6 +63,8 @@ pub struct Menu {
     pub items: Vec<Item>,
     /// The row the keyboard or the pointer is on.
     pub active: Option<usize>,
+    /// The first row drawn, for a menu taller than the window it is in.
+    pub scroll: usize,
 }
 
 /// Builds a menu from a table of command identifiers.
@@ -96,7 +100,7 @@ pub fn build<C>(
             first = false;
         }
     }
-    (!items.is_empty()).then_some(Menu { at, items, active: None })
+    (!items.is_empty()).then_some(Menu { at, items, active: None, scroll: 0 })
 }
 
 impl Menu {
@@ -138,6 +142,64 @@ impl Menu {
         changed
     }
 
+    /// The rows that fit in `room` starting at the scroll, and the first's index.
+    ///
+    /// **A menu can be taller than the window.** The background menu is the
+    /// pointer's way to every command that is not a button, so it grows with the
+    /// registry — and at 900×520 it is already taller than the window it opens
+    /// in. `place` flips it rather than clipping it, which cannot help when
+    /// there is no side it fits on.
+    #[must_use]
+    pub fn window(&self, room: f32) -> (usize, &[Item]) {
+        let first = self.scroll.min(self.items.len().saturating_sub(1));
+        let mut used = PAD * 2.0;
+        let mut last = first;
+        for (offset, item) in self.items[first..].iter().enumerate() {
+            // The divider above the first drawn row would be a line under
+            // nothing.
+            let step = STEP + if item.starts_group && offset > 0 { DIVIDER } else { 0.0 };
+            if used + step > room && last > first {
+                break;
+            }
+            used += step;
+            last += 1;
+        }
+        (first, &self.items[first..last.min(self.items.len())])
+    }
+
+    /// Puts the highlighted row inside the window of `room`.
+    pub fn reveal(&mut self, room: f32) {
+        let Some(active) = self.active else { return };
+        if active < self.scroll {
+            self.scroll = active;
+            return;
+        }
+        // Walk the scroll forward until the active row is one of the drawn ones,
+        // which is one step per row rather than arithmetic over a mix of row
+        // heights and divider heights.
+        while !self.window(room).1.is_empty() {
+            let (first, drawn) = self.window(room);
+            if active < first + drawn.len() {
+                return;
+            }
+            self.scroll += 1;
+        }
+    }
+
+    /// Scrolls by a wheel notch. Whether anything moved.
+    pub fn wheel(&mut self, delta: f32, room: f32) -> bool {
+        let was = self.scroll;
+        if delta > 0.0 {
+            self.scroll = self.scroll.saturating_sub(1);
+        } else if delta < 0.0 {
+            let (first, drawn) = self.window(room);
+            if first + drawn.len() < self.items.len() {
+                self.scroll += 1;
+            }
+        }
+        self.scroll != was
+    }
+
     /// The command the highlighted row runs.
     #[must_use]
     pub fn active_id(&self) -> Option<&'static str> {
@@ -145,6 +207,8 @@ impl Menu {
     }
 }
 
+/// How close to the window's edge a menu may come.
+pub const MARGIN: f32 = 4.0;
 /// The vertical space around the rows.
 pub const PAD: f32 = 6.0;
 /// One row.
@@ -158,10 +222,13 @@ pub const SPACING: f32 = 28.0;
 /// The narrowest and widest a menu may be.
 pub const WIDTH: (f32, f32) = (200.0, 460.0);
 
-/// How tall a menu with these rows is.
+/// How tall a menu showing exactly these rows is.
+///
+/// The first row's divider does not count: a line above the top row is a line
+/// under nothing, which is what a scrolled menu would otherwise draw.
 #[must_use]
 pub fn height(items: &[Item]) -> f32 {
-    let dividers = items.iter().filter(|item| item.starts_group).count();
+    let dividers = items.iter().skip(1).filter(|item| item.starts_group).count();
     PAD * 2.0 + items.len() as f32 * STEP + dividers as f32 * DIVIDER
 }
 
@@ -174,7 +241,7 @@ pub fn height(items: &[Item]) -> f32 {
 /// does and therefore the only behaviour that will not surprise.
 #[must_use]
 pub fn place(at: Point, width: f32, height: f32, window: Size) -> Area {
-    let margin = 4.0;
+    let margin = MARGIN;
     let mut x = at.x;
     if x + width > window.width - margin {
         x = at.x - width;
@@ -198,8 +265,8 @@ pub fn place(at: Point, width: f32, height: f32, window: Size) -> Area {
 /// Rename.
 pub fn row_tops(items: &[Item], panel: Area) -> impl Iterator<Item = f32> + '_ {
     let mut y = panel.y + PAD;
-    items.iter().map(move |item| {
-        if item.starts_group {
+    items.iter().enumerate().map(move |(index, item)| {
+        if item.starts_group && index > 0 {
             y += DIVIDER;
         }
         let top = y;
@@ -227,7 +294,7 @@ mod tests {
                 starts_group: false,
             })
             .collect();
-        Menu { at: Point::new(0.0, 0.0), items, active: None }
+        Menu { at: Point::new(0.0, 0.0), items, active: None, scroll: 0 }
     }
 
     /// Undo is dimmed for the whole first minute a person uses the program, and

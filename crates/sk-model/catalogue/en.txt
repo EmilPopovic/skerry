@@ -188,6 +188,15 @@ action.sort_name = Sort by name
 action.sort_size = Sort by size
 action.sort_modified = Sort by date
 action.type_ahead = Jump to a name
+action.new_tab = New tab
+action.close_tab = Close tab
+action.reopen_tab = Reopen closed tab
+action.next_tab = Next tab
+action.previous_tab = Previous tab
+action.split_beside = Split right
+action.split_below = Split down
+action.close_pane = Close pane
+action.next_pane = Next pane
 
 # Chrome.
 chrome.hint = {0} keys
@@ -211,6 +220,7 @@ group.select = Select
 group.view = View
 group.file = File
 group.edit = Edit
+group.pane = Panes
 group.window = Window
 group.help = Help
 

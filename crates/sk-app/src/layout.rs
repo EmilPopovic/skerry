@@ -28,6 +28,19 @@ impl Area {
     pub fn contains(self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.right() && y >= self.y && y < self.bottom()
     }
+
+    /// The smallest rectangle holding both.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Self {
+            x,
+            y,
+            width: self.right().max(other.right()) - x,
+            height: self.bottom().max(other.bottom()) - y,
+        }
+    }
 }
 
 /// Every region of the window.
@@ -46,20 +59,15 @@ pub struct Layout {
     /// it: the address bar spans the window and the navigation pane starts under
     /// it. So the column headers begin where this ends.
     pub sidebar: Area,
-    /// The column header strip.
-    pub header: Area,
-    /// The scrolling list.
-    pub body: Area,
+    /// Everything the pane tree divides between its leaves: below the path
+    /// strip, right of the sidebar, above the status strip.
+    ///
+    /// Where the header, the list and the columns used to be. They are per leaf
+    /// now ([ADR 0010](../adr/0010-a-split-tree-of-tab-strips.md)) and live in
+    /// [`crate::panes::PaneLayout`].
+    pub content: Area,
     /// The status strip.
     pub status: Area,
-    /// The icon box's left edge and width, relative to the window.
-    pub icon: Area,
-    /// The name column.
-    pub name: Area,
-    /// The size column.
-    pub size: Area,
-    /// The modified column.
-    pub modified: Area,
 
     /// Back, forward, parent and reload, at the left of the path strip.
     ///
@@ -91,7 +99,7 @@ pub struct Layout {
 /// because a filename is the only cell whose useful length is unbounded. Below
 /// the width where the name would fall under a hundred logical pixels the
 /// metadata columns give way instead, widest first.
-fn columns(body: Area, metrics: &Metrics) -> (Area, Area, Area, Area) {
+pub(crate) fn columns(body: Area, metrics: &Metrics) -> (Area, Area, Area, Area) {
     let gutter = metrics.gutter;
     let available = body.width - gutter * 2.0;
     let mut size_width = metrics.size_column;
@@ -291,32 +299,19 @@ impl Layout {
         } else {
             Area::default()
         };
-        let content = full - aside.width;
-        let header = Area {
+        let content = Area {
             x: aside.width,
             y: path.bottom(),
-            width: content,
-            height: metrics.header_height,
-        };
-        let body = Area {
-            x: aside.width,
-            y: header.bottom(),
-            width: content,
-            height: (status.y - header.bottom()).max(0.0),
+            width: full - aside.width,
+            height: (status.y - path.bottom()).max(0.0),
         };
 
-        let (icon, name, size_column, modified) = columns(body, metrics);
         Self {
             window: size,
             path,
             sidebar: aside,
-            header,
-            body,
+            content,
             status,
-            icon,
-            name,
-            size: size_column,
-            modified,
             tools,
             buttons,
             drag,
@@ -373,10 +368,11 @@ impl Layout {
             _ => return None,
         })
     }
+}
 
-    /// The display row at logical `y`, or `None` outside the list.
-    #[must_use]
-    pub fn row_at(&self, y: f32, offset: f32, row_height: f32) -> Option<usize> {
+impl crate::panes::PaneLayout {
+    /// The display row at logical `y`, or `None` outside this pane's list.
+    pub(crate) fn row_at(&self, y: f32, offset: f32, row_height: f32) -> Option<usize> {
         if y < self.body.y || y >= self.body.bottom() || row_height <= 0.0 {
             return None;
         }
@@ -391,6 +387,15 @@ mod tests {
     use super::{Button, Frame, Layout, Tool};
     use sk_plat::{Edge, Size};
     use sk_ui::Metrics;
+
+    /// The geometry of a window holding one pane, which is what every test here
+    /// used to be able to read off the `Layout` itself.
+    fn one_leaf(layout: &Layout, metrics: &Metrics) -> crate::panes::PaneLayout {
+        let panes = crate::panes::Panes::new(crate::pane::Pane::new(std::path::PathBuf::from("/")));
+        let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
+        panes.layout(layout.content, metrics, &mut leaves, &mut dividers);
+        leaves.first().copied().unwrap_or_default()
+    }
 
     /// A compositor that offers no minimise must not leave a hole where the
     /// button would have been: the two that exist pack against the right edge,
@@ -441,21 +446,27 @@ mod tests {
         // Below the path strip, down to the status strip, with no gap at either.
         assert!((open.sidebar.y - open.path.bottom()).abs() < f32::EPSILON);
         assert!((open.sidebar.bottom() - open.status.y).abs() < f32::EPSILON);
-        // And the list starts after it, header included.
-        assert!((open.header.x - open.sidebar.right()).abs() < f32::EPSILON);
-        assert!((open.body.x - open.sidebar.right()).abs() < f32::EPSILON);
-        assert!(open.icon.x > open.sidebar.right(), "a row's mark draws under the sidebar");
-        assert!((open.body.right() - 1100.0).abs() < f32::EPSILON);
+        // And the panes start after it. The columns are the tree's now, so the
+        // question this test asks of them is asked through one leaf's layout.
+        assert!((open.content.x - open.sidebar.right()).abs() < f32::EPSILON);
+        assert!((open.content.right() - 1100.0).abs() < f32::EPSILON);
+        let open_pane = one_leaf(&open, &metrics);
+        assert!(open_pane.icon.x > open.sidebar.right(), "a row's mark draws under the sidebar");
+        assert!((open_pane.body.right() - 1100.0).abs() < f32::EPSILON);
 
         let closed = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
         assert!(closed.sidebar.width <= 0.0);
-        assert!(closed.body.x <= f32::EPSILON);
-        assert!(closed.name.x < open.name.x, "the name column did not take the freed width");
+        assert!(closed.content.x <= f32::EPSILON);
+        let closed_pane = one_leaf(&closed, &metrics);
+        assert!(
+            closed_pane.name.x < open_pane.name.x,
+            "the name column did not take the freed width"
+        );
 
         // Narrow enough that the list would be smaller than the sidebar.
         let narrow = Layout::compute_with(Size::new(500.0, 720.0), &metrics, Frame::None, true);
         assert!(narrow.sidebar.width <= 0.0, "the sidebar did not shed");
-        assert!((narrow.body.width - 500.0).abs() < f32::EPSILON);
+        assert!((narrow.content.width - 500.0).abs() < f32::EPSILON);
     }
 
     /// Corners win over sides, or a diagonal drag is impossible: the band is six
@@ -557,16 +568,21 @@ mod tests {
     fn the_regions_tile_the_window_with_no_gap_and_no_overlap() {
         let metrics = Metrics::default();
         let layout = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
-        assert!((layout.path.bottom() - layout.header.y).abs() < f32::EPSILON);
-        assert!((layout.header.bottom() - layout.body.y).abs() < f32::EPSILON);
-        assert!((layout.body.bottom() - layout.status.y).abs() < f32::EPSILON);
+        assert!((layout.path.bottom() - layout.content.y).abs() < f32::EPSILON);
+        assert!((layout.content.bottom() - layout.status.y).abs() < f32::EPSILON);
         assert!((layout.status.bottom() - 720.0).abs() < f32::EPSILON);
+        // And inside the content, the one leaf tiles it in turn.
+        let pane = one_leaf(&layout, &metrics);
+        assert!((pane.header.y - layout.content.y).abs() < f32::EPSILON);
+        assert!((pane.header.bottom() - pane.body.y).abs() < f32::EPSILON);
+        assert!((pane.body.bottom() - layout.content.bottom()).abs() < f32::EPSILON);
     }
 
     #[test]
     fn the_columns_tile_the_row_and_the_name_takes_what_is_left() {
         let metrics = Metrics::default();
-        let layout = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let window = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let layout = one_leaf(&window, &metrics);
         assert!((layout.icon.right() - layout.name.x).abs() < f32::EPSILON);
         assert!((layout.name.right() - layout.size.x).abs() < f32::EPSILON);
         assert!((layout.size.right() - layout.modified.x).abs() < f32::EPSILON);
@@ -577,35 +593,41 @@ mod tests {
     #[test]
     fn a_narrow_window_sheds_metadata_columns_rather_than_the_name() {
         let metrics = Metrics::default();
-        let wide = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let at = |width: f32| {
+            let window =
+                Layout::compute_with(Size::new(width, 720.0), &metrics, Frame::None, false);
+            one_leaf(&window, &metrics)
+        };
+        let wide = at(1100.0);
         assert!(wide.modified.width > 0.0 && wide.size.width > 0.0);
 
-        let medium = Layout::compute_with(Size::new(320.0, 720.0), &metrics, Frame::None, false);
+        let medium = at(320.0);
         assert!(medium.modified.width.abs() < f32::EPSILON, "the widest column goes first");
         assert!(medium.name.width >= 100.0);
 
-        let narrow = Layout::compute_with(Size::new(200.0, 720.0), &metrics, Frame::None, false);
+        let narrow = at(200.0);
         assert!(narrow.size.width.abs() < f32::EPSILON);
         assert!(narrow.name.width > 0.0, "the name never disappears");
     }
 
     #[test]
     fn a_window_shorter_than_its_chrome_still_produces_a_valid_layout() {
-        let layout =
-            Layout::compute_with(Size::new(400.0, 20.0), &Metrics::default(), Frame::None, false);
-        assert!(layout.body.height >= 0.0);
-        assert!(layout.status.y >= layout.header.bottom());
+        let metrics = Metrics::default();
+        let layout = Layout::compute_with(Size::new(400.0, 20.0), &metrics, Frame::None, false);
+        assert!(layout.content.height >= 0.0);
+        assert!(one_leaf(&layout, &metrics).body.height >= 0.0);
     }
 
     #[test]
     fn a_click_maps_to_the_row_under_it_at_any_scroll_offset() {
-        let layout =
-            Layout::compute_with(Size::new(1100.0, 720.0), &Metrics::default(), Frame::None, false);
+        let metrics = Metrics::default();
+        let window = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let layout = one_leaf(&window, &metrics);
         let top = layout.body.y;
         assert_eq!(layout.row_at(top + 1.0, 0.0, 26.0), Some(0));
         assert_eq!(layout.row_at(top + 27.0, 0.0, 26.0), Some(1));
         assert_eq!(layout.row_at(top + 1.0, 260.0, 26.0), Some(10));
-        assert_eq!(layout.row_at(layout.path.y + 1.0, 0.0, 26.0), None, "not in the path bar");
-        assert_eq!(layout.row_at(layout.status.y + 1.0, 0.0, 26.0), None);
+        assert_eq!(layout.row_at(window.path.y + 1.0, 0.0, 26.0), None, "not in the path bar");
+        assert_eq!(layout.row_at(window.status.y + 1.0, 0.0, 26.0), None);
     }
 }

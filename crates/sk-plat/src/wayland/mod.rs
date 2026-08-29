@@ -129,6 +129,8 @@ const fn shape_of(cursor: Cursor) -> wp_cursor_shape_device_v1::Shape {
         Cursor::Hand => Shape::Pointer,
         Cursor::Text => Shape::Text,
         Cursor::Grabbing => Shape::Grabbing,
+        Cursor::Divider { horizontal: true } => Shape::ColResize,
+        Cursor::Divider { horizontal: false } => Shape::RowResize,
         Cursor::Resize(edge) => match edge {
             Edge::Top => Shape::NResize,
             Edge::Bottom => Shape::SResize,

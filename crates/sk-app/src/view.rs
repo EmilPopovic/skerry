@@ -18,6 +18,7 @@ use crate::layout::{Area, Button, Layout, Tool};
 use crate::menu::Menu;
 use crate::palette::Palette;
 use crate::pane::Pane;
+use crate::panes::{Divider, PaneId, PaneLayout, Panes, SplitId};
 use crate::sidebar::{Entry, Mark, Section};
 
 /// Which column a row cache key is for.
@@ -86,6 +87,14 @@ pub struct Chrome<'a> {
     pub palette: Option<&'a Palette>,
     /// The keyboard hint in the corner of the path bar, from the registry.
     pub hint: &'a str,
+    /// Where each leaf of the pane tree is, in layout order.
+    pub leaves: &'a [PaneLayout],
+    /// The dividers between them.
+    pub dividers: &'a [Divider],
+    /// The divider under the pointer, or being dragged.
+    pub hovered_divider: Option<SplitId>,
+    /// The tab under the pointer: which leaf, and which of its tabs.
+    pub hovered_tab: Option<(PaneId, usize)>,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -158,25 +167,41 @@ pub struct Diagnostics<'a> {
 /// Draws one frame.
 pub fn draw(
     painter: &mut Painter<'_>,
-    pane: &Pane,
+    panes: &Panes,
     layout: &Layout,
     now: i64,
     chrome: &Chrome<'_>,
     diagnostics: &mut Diagnostics<'_>,
     hits: &mut Hits,
 ) {
+    let focus = panes.focus();
+    let pane = panes.focused();
     sidebar(painter, pane, layout, chrome, hits);
     path_bar(painter, pane, layout, chrome, hits);
     tool_buttons(painter, layout, chrome);
     window_buttons(painter, layout, chrome);
-    header(painter, pane, layout);
-    body(painter, pane, layout, now, chrome);
+    for leaf in chrome.leaves {
+        let Some(tabs) = panes.leaf(leaf.id) else { continue };
+        let has_keyboard = leaf.id == focus;
+        tab_strip(painter, tabs, leaf, chrome, has_keyboard);
+        header(painter, tabs.showing(), leaf);
+        body(painter, tabs.showing(), leaf, now, chrome, has_keyboard);
+    }
+    // After the panes, so a divider is a line over two edges rather than a gap
+    // between them, and before the status strip, which spans the window.
+    for divider in chrome.dividers {
+        divider_line(painter, *divider, chrome.hovered_divider == Some(divider.id));
+    }
+    // Every leaf drew its own frame; the window's own chrome belongs to the one
+    // with the keyboard, because that is the pane the path bar and the counts
+    // are describing.
+    let here = focused_leaf(chrome, focus);
     status(painter, pane, layout, chrome, diagnostics);
     if chrome.filtering || !pane.filter.is_empty() {
-        find_popup(painter, pane, layout, chrome.filtering);
+        find_popup(painter, pane, here, chrome.filtering);
     }
     if chrome.stats {
-        stats_overlay(painter, pane, layout, diagnostics);
+        stats_overlay(painter, pane, here, diagnostics);
     }
     if let Some(rows) = chrome.keys {
         keys_overlay(painter, layout, rows);
@@ -188,7 +213,7 @@ pub fn draw(
         command_palette(painter, layout, palette, hits);
     }
     if let Some(typed) = chrome.typed {
-        type_ahead(painter, layout, typed);
+        type_ahead(painter, here, typed);
     }
     // Last, so it is over everything: a menu under the statistics overlay is a
     // menu whose rows cannot be read or aimed at.
@@ -500,8 +525,9 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
 
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let widest = menu
-        .items
+    // What fits in the window, which for the background menu is not all of it.
+    let (first, drawn) = menu.window(layout.window.height - crate::menu::MARGIN * 2.0);
+    let widest = drawn
         .iter()
         .map(|item| {
             let name = text_width(painter, &item.name, metrics.text_size, false);
@@ -510,14 +536,19 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
         })
         .fold(0.0f32, f32::max);
     let width = (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1);
-    let area = crate::menu::place(menu.at, width, crate::menu::height(&menu.items), layout.window);
+    let area = crate::menu::place(menu.at, width, crate::menu::height(drawn), layout.window);
     panel(painter, area);
 
+    // One rectangle per row, drawn or not, so a hit is an index into the menu's
+    // own rows: a row that is scrolled out gets an empty rectangle, which
+    // `contains` answers `false` for.
     hits.menu.clear();
-    let tops: Vec<f32> = crate::menu::row_tops(&menu.items, area).collect();
-    for (index, (item, top)) in menu.items.iter().zip(tops).enumerate() {
-        hits.menu.push(Area { x: area.x, y: top, width: area.width, height: STEP });
-        if item.starts_group {
+    hits.menu.resize(menu.items.len(), Area::default());
+    let tops: Vec<f32> = crate::menu::row_tops(drawn, area).collect();
+    for (offset, (item, top)) in drawn.iter().zip(tops).enumerate() {
+        let index = first + offset;
+        hits.menu[index] = Area { x: area.x, y: top, width: area.width, height: STEP };
+        if item.starts_group && offset > 0 {
             let y = top - DIVIDER / 2.0;
             painter.hairline(area.x + INSET, y, area.width - INSET * 2.0, theme.palette.divider);
         }
@@ -539,6 +570,16 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
         line(painter, &item.name, name_style, x, inner - keys_width - SPACING * 0.5, baseline);
         let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
         line(painter, &item.keys, keys_style, x, inner, baseline);
+    }
+    // A menu that has more above or below says so. Without it a scrolled menu
+    // looks like a complete one that is missing commands.
+    let centre = area.x + area.width / 2.0;
+    if first > 0 {
+        painter.triangle(centre - 3.5, area.y + 1.0, 7.0, 4.0, theme.palette.dim, Direction::Up);
+    }
+    if first + drawn.len() < menu.items.len() {
+        let y = area.bottom() - 5.0;
+        painter.triangle(centre - 3.5, y, 7.0, 4.0, theme.palette.dim, Direction::Down);
     }
 }
 
@@ -728,7 +769,7 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
 ///
 /// The count comes with it, because "no matches" and "one match" are the two
 /// answers a filter is asked for and neither is visible in the list itself.
-fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, focused: bool) {
+fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout, focused: bool) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let count = i18n::format(
@@ -791,7 +832,7 @@ const FIND_MARGIN: f32 = 10.0;
 /// The name being typed, drawn over the row it belongs to.
 fn name_field_at(
     painter: &mut Painter<'_>,
-    layout: &Layout,
+    layout: &PaneLayout,
     naming: &Naming,
     top: f32,
     baseline: f32,
@@ -909,7 +950,7 @@ pub const NAME_INSET: f32 = 6.0;
 /// rectangles computed separately are two rectangles that agree until one of
 /// them is edited.
 #[must_use]
-pub fn name_field(layout: &Layout, metrics: &sk_ui::Metrics, row: usize, offset: f32) -> Area {
+pub fn name_field(layout: &PaneLayout, metrics: &sk_ui::Metrics, row: usize, offset: f32) -> Area {
     let top = layout.body.y + row as f32 * metrics.row_height - offset;
     Area {
         x: layout.name.x - 4.0,
@@ -1201,7 +1242,119 @@ fn window_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_
     }
 }
 
-fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
+/// The leaf that has the keyboard, or the first one if the focus named none.
+fn focused_leaf<'a>(chrome: &'a Chrome<'_>, focus: PaneId) -> &'a PaneLayout {
+    chrome
+        .leaves
+        .iter()
+        .find(|leaf| leaf.id == focus)
+        .or_else(|| chrome.leaves.first())
+        .unwrap_or(&EMPTY_LEAF)
+}
+
+/// Stands in for a frame drawn before the tree has been laid out, which is only
+/// the very first one.
+static EMPTY_LEAF: PaneLayout = PaneLayout {
+    id: PaneId::FIRST,
+    area: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    tabs: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    header: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    body: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    icon: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    name: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    size: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    modified: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+};
+
+/// The strip of tabs over one leaf. Nothing at all when the leaf has one tab.
+fn tab_strip(
+    painter: &mut Painter<'_>,
+    tabs: &crate::panes::Tabs,
+    layout: &PaneLayout,
+    chrome: &Chrome<'_>,
+    has_keyboard: bool,
+) {
+    if layout.tabs.height <= 0.0 {
+        return;
+    }
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    fill(painter, layout.tabs, theme.palette.chrome);
+    let clip = painter.rect(layout.tabs.x, layout.tabs.y, layout.tabs.width, layout.tabs.height);
+    painter.list.push_clip(clip);
+    let titles: Vec<&str> = tabs.titles().collect();
+    for (index, area) in crate::panes::tab_areas(layout.tabs, titles.len()).enumerate() {
+        let active = index == tabs.active;
+        let hovered = chrome.hovered_tab == Some((layout.id, index));
+        // The showing tab of the leaf that has the keyboard is the only one drawn
+        // as selected. Two tabs both looking current is the question "where does
+        // typing go" left unanswered.
+        // The showing tab of the leaf with the keyboard is the background;
+        // every other tab is a step off it. `row_background` is the same pair of
+        // tints the list uses, so a current tab and a selected row agree.
+        let background = theme.row_background(active && has_keyboard, active || hovered);
+        let pill = painter.rect(area.x + 2.0, area.y + 3.0, area.width - 4.0, area.height - 3.0);
+        painter.list.rect(pill, background, painter.px(metrics.radius));
+        let colour = if active { theme.palette.text } else { theme.palette.dim };
+        let baseline = painter.baseline(area.y, area.height, metrics.text_size);
+        let close = crate::panes::tab_close(area);
+        let room = close.map_or(area.width - 20.0, |it| it.x - area.x - 16.0);
+        line(
+            painter,
+            titles[index],
+            TextStyle::new(metrics.text_size, colour),
+            area.x + 10.0,
+            room.max(0.0),
+            baseline,
+        );
+        if let Some(close) = close {
+            cross(painter, close, if active { theme.palette.text } else { theme.palette.dim });
+        }
+    }
+    painter.list.pop_clip();
+    painter.hairline(
+        layout.tabs.x,
+        layout.tabs.bottom() - 1.0,
+        layout.tabs.width,
+        theme.palette.divider,
+    );
+}
+
+/// The × on a tab.
+fn cross(painter: &mut Painter<'_>, area: Area, ink: Color) {
+    let inset = 5.0;
+    let thickness = painter.px(1.0).max(1.0).round();
+    let (x, y) = (area.x + inset, area.y + inset);
+    let side = area.width - inset * 2.0;
+    for step in 0..=(side as usize) {
+        let at = step as f32;
+        let dot = painter.rect(x + at, y + at, 1.0, 1.0);
+        painter.list.rect(dot, ink, 0.0);
+        let dot = painter.rect(x + at, y + side - at, 1.0, 1.0);
+        painter.list.rect(dot, ink, 0.0);
+    }
+    let _ = thickness;
+}
+
+/// The line between two panes.
+fn divider_line(painter: &mut Painter<'_>, divider: Divider, hovered: bool) {
+    let theme = *painter.theme;
+    let ink = if hovered { theme.palette.accent } else { theme.palette.divider };
+    match divider.axis {
+        crate::panes::Axis::Beside => {
+            let x = divider.area.x + divider.area.width / 2.0;
+            let rect = painter.rect(x - 0.5, divider.area.y, 1.0, divider.area.height);
+            painter.list.rect(rect, ink, 0.0);
+        }
+        crate::panes::Axis::Below => {
+            let y = divider.area.y + divider.area.height / 2.0;
+            let rect = painter.rect(divider.area.x, y - 0.5, divider.area.width, 1.0);
+            painter.list.rect(rect, ink, 0.0);
+        }
+    }
+}
+
+fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     fill(painter, layout.header, theme.palette.chrome);
@@ -1252,7 +1405,14 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
     }
 }
 
-fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrome: &Chrome<'_>) {
+fn body(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &PaneLayout,
+    now: i64,
+    chrome: &Chrome<'_>,
+    has_keyboard: bool,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let clip = painter.rect(layout.body.x, layout.body.y, layout.body.width, layout.body.height);
@@ -1261,8 +1421,11 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
     let rows = pane.listing.rows();
     let range = visible_rows(pane.scroll.offset(), layout.body.height, metrics.row_height, rows);
     for row in range {
-        let context =
-            RowContext { types: chrome.types, naming: chrome.naming, drop_row: chrome.drop_row };
+        let context = RowContext {
+            types: chrome.types,
+            naming: chrome.naming.filter(|_| has_keyboard),
+            drop_row: chrome.drop_row.filter(|_| has_keyboard),
+        };
         row_at(painter, pane, layout, now, row, context);
     }
 
@@ -1278,7 +1441,7 @@ fn body(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, now: i64, chrom
         line(painter, &message, style, metrics.gutter, width, baseline);
     }
 
-    if let Some((from, to)) = chrome.band {
+    if let Some((from, to)) = chrome.band.filter(|_| has_keyboard) {
         let rect = painter.rect(
             from.x.min(to.x),
             from.y.min(to.y),
@@ -1312,7 +1475,7 @@ struct RowContext<'a> {
 fn row_at(
     painter: &mut Painter<'_>,
     pane: &Pane,
-    layout: &Layout,
+    layout: &PaneLayout,
     now: i64,
     row: usize,
     context: RowContext<'_>,
@@ -1431,7 +1594,7 @@ fn row_at(
 fn metadata_cells(
     painter: &mut Painter<'_>,
     pane: &Pane,
-    layout: &Layout,
+    layout: &PaneLayout,
     now: i64,
     id: sk_model::EntryId,
     baseline: f32,
@@ -1498,7 +1661,7 @@ fn metadata_cells(
     }
 }
 
-fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout) {
+fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
     let content = pane.listing.rows() as f32 * theme.metrics.row_height;
     let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, layout.body.height)
@@ -1561,7 +1724,7 @@ fn status(
     line(painter, &right, style, 0.0, layout.status.width - metrics.gutter, baseline);
 }
 
-fn type_ahead(painter: &mut Painter<'_>, layout: &Layout, typed: &str) {
+fn type_ahead(painter: &mut Painter<'_>, layout: &PaneLayout, typed: &str) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let area = Area {
@@ -1646,7 +1809,7 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
 fn stats_overlay(
     painter: &mut Painter<'_>,
     pane: &Pane,
-    layout: &Layout,
+    layout: &PaneLayout,
     diagnostics: &mut Diagnostics<'_>,
 ) {
     let theme = *painter.theme;
@@ -1788,6 +1951,7 @@ mod tests {
     use crate::frames::Frames;
     use crate::layout::Layout;
     use crate::pane::{Jobs, Pane};
+    use crate::panes::Panes;
     use sk_gpu::{DrawList, FrameStats};
     use sk_plat::Size;
     use sk_text::{Fonts, LayoutCache};
@@ -1803,7 +1967,7 @@ mod tests {
     /// every glyph lands on exactly the same coordinate, and "close enough" is
     /// not a property this test is about.
     fn frame_of(
-        pane: &Pane,
+        panes: &Panes,
         theme: &Theme,
         fonts: &mut Fonts,
         cache: &mut LayoutCache,
@@ -1811,6 +1975,8 @@ mod tests {
         let logical = Size::new(1000.0, 620.0);
         let layout =
             Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, false);
+        let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
+        panes.layout(layout.content, &theme.metrics, &mut leaves, &mut dividers);
         let mut list = DrawList::default();
         list.begin((1250, 775));
         let mut frames = Frames::new();
@@ -1852,13 +2018,17 @@ mod tests {
                 path_entry: None,
                 palette: None,
                 hint: "",
+                leaves: &leaves,
+                dividers: &dividers,
+                hovered_divider: None,
+                hovered_tab: None,
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test
             // is looking for.
             draw(
                 &mut painter,
-                pane,
+                panes,
                 &layout,
                 1_787_000_000,
                 &chrome,
@@ -1940,25 +2110,26 @@ mod tests {
         let theme = Theme::dark();
 
         let mut warm = LayoutCache::new(4096);
-        let mut pane = Pane::new(root.clone());
-        pane.reload(&jobs);
-        settle(&mut pane, &jobs, &updates);
+        let mut panes = Panes::new(Pane::new(root.clone()));
+        panes.focused_mut().reload(&jobs);
+        settle(panes.focused_mut(), &jobs, &updates);
 
         // Draw the parent, which fills the cache with the parent's rows.
-        let parent = frame_of(&pane, &theme, &mut fonts, &mut warm);
+        let parent = frame_of(&panes, &theme, &mut fonts, &mut warm);
         assert!(!parent.is_empty(), "the parent drew no text at all");
 
+        let pane = panes.focused_mut();
         let sub = (0..pane.listing.len())
             .map(|index| sk_model::EntryId(index as u32))
             .find(|id| pane.listing.name(*id) == "sub")
             .expect("sub");
         pane.selection.replace_with(sub);
         assert!(pane.open_focused(&jobs));
-        settle(&mut pane, &jobs, &updates);
+        settle(panes.focused_mut(), &jobs, &updates);
 
-        let with_warm_cache = frame_of(&pane, &theme, &mut fonts, &mut warm);
+        let with_warm_cache = frame_of(&panes, &theme, &mut fonts, &mut warm);
         let mut cold = LayoutCache::new(4096);
-        let with_cold_cache = frame_of(&pane, &theme, &mut fonts, &mut cold);
+        let with_cold_cache = frame_of(&panes, &theme, &mut fonts, &mut cold);
 
         assert_eq!(
             with_warm_cache.len(),

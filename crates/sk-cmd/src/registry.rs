@@ -28,6 +28,12 @@ pub enum Group {
     /// about a file, and because a menu that lists them under File puts them
     /// next to the thing they might be undoing.
     Edit,
+    /// Tabs and splits: the arrangement of panes inside the window.
+    ///
+    /// Not `Window`, which is the window's own three actions, and not `View`,
+    /// which is what one pane shows. A split changes neither — it changes how
+    /// many of them there are.
+    Pane,
     /// The window itself: minimise, maximise, close.
     ///
     /// A group of its own because it is the only one whose commands are not
@@ -48,6 +54,7 @@ impl Group {
             Self::Select => "group.select",
             Self::View => "group.view",
             Self::Edit => "group.edit",
+            Self::Pane => "group.pane",
             Self::Window => "group.window",
             Self::File => "group.file",
             Self::Help => "group.help",

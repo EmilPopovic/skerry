@@ -16,7 +16,7 @@ use sk_app::{App, Bench, Capture, Options};
 /// Separate from `main` because the other two modes are one expression each and
 /// this one is not: a display server going away is not the user closing the
 /// window, and the difference is worth a line on the way out.
-fn window(options: Options) -> Result<bool, sk_app::Problem> {
+fn window(options: &Options) -> Result<bool, sk_app::Problem> {
     App::new(options).map(|mut app| {
         if let Some(failure) = app.run() {
             eprintln!("skerry: the display server went away — {failure}");
@@ -84,7 +84,9 @@ fn main() -> std::process::ExitCode {
                 None => return usage_error("--scale needs a percentage, such as 125"),
             },
             "--help" | "-h" => {
-                println!("{USAGE}");
+                // The answer to `--help`, which is the program's output rather
+                // than a line of its log.
+                println!("{USAGE}"); // skerry-allow: log-prefix — this is the answer
                 return std::process::ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
@@ -125,7 +127,7 @@ fn main() -> std::process::ExitCode {
             sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
         }
         (None, None) => {
-            window(Options { path, dark, stats, own_frame, scale_120: forced_scale, started })
+            window(&Options { path, dark, stats, own_frame, scale_120: forced_scale, started })
         }
     };
 
@@ -136,7 +138,9 @@ fn main() -> std::process::ExitCode {
             // Both halves, to the two places they belong: the message a person
             // can act on, and the chain that explains it to us.
             eprintln!("skerry: {}", problem.message());
-            eprintln!("  {problem}");
+            // The second line of the message above: the debug chain, indented
+            // under the sentence a person can act on.
+            eprintln!("  {problem}"); // skerry-allow: log-prefix — continues the line above
             std::process::ExitCode::FAILURE
         }
     }

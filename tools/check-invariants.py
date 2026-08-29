@@ -75,7 +75,22 @@ def lint_header_check(report: Report) -> None:
 
 def source_check(report: Report) -> None:
     for source in rust_sources("crates", "bin"):
-        for number, line in enumerate(source.read_text().splitlines(), 1):
+        text = source.read_text()
+        lines = text.splitlines()
+        if source.name not in REPORTS:
+            for match in PRINT.finditer(text):
+                # The format string can be on the line after the macro, so the
+                # match is found in the whole file and the line worked out from
+                # where it started.
+                number = text.count("\n", 0, match.start()) + 1
+                if suppressed(lines[number - 1], "log-prefix"):
+                    continue
+                report.fail(
+                    f"{rel(source)}:{number}",
+                    "a print outside a report writes `skerry`, so the tools that read "
+                    "this program's output can tell a log line from a debug line",
+                )
+        for number, line in enumerate(lines, 1):
             for rule, pattern, message in SOURCE_RULES:
                 if pattern.search(line) and not suppressed(line, rule):
                     report.fail(f"{rel(source)}:{number}", message)
@@ -98,6 +113,16 @@ def source_check(report: Report) -> None:
                     "no crate above sk-plat may name a display server — ADR 0009",
                 )
 
+
+# A print that is not a line of the program's own log. Every diagnostic this
+# program writes is prefixed `skerry`, so the tools that read its output can tell
+# them apart — and a print that is not one is a debug line somebody left in. One
+# survived nineteen commits and fired on every scroll event.
+PRINT = re.compile(r'\bdbg!\(|\be?println!\(\s*"(?!skerry)')
+
+# The three files whose *output* is the point: a benchmark's table, a capture's
+# summary, and the state a scenario reads.
+REPORTS = {"bench.rs", "headless.rs"}
 
 # The names of the two backends, as they appear in code rather than in prose: a
 # path, a variant, or the crate itself. Deliberately not the bare words — a
@@ -201,7 +226,8 @@ def run() -> int:
     adr_immutability_check(report)
     if not report.failures:
         report.note(
-            "banned crates, capability flags, crate lints, GPU and backend seams, doc comments, "
+            "banned crates, capability flags, crate lints, GPU and backend seams, log "
+            "prefixes, doc comments, "
             "catalogue keys, ADR immutability"
         )
     return report.finish()

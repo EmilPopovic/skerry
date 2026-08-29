@@ -28,7 +28,7 @@ use crate::frames::Frames;
 use crate::headless::{READ_DEADLINE, Session};
 use crate::layout::{Frame, Layout};
 use crate::pane::Pane;
-use crate::view::{self, Chrome, Diagnostics};
+use crate::view::{self, Chrome};
 
 /// Rows selected in a capture, and which of them carries the cursor.
 const SELECTED: std::ops::Range<usize> = 2..5;
@@ -88,8 +88,8 @@ pub struct Capture {
 /// for the registry to ask — the same trade the navigation buttons' `tools`
 /// makes, for the same reason. Highlighted, because that is the state a pointer
 /// holds a menu in for as long as it is open.
-fn sample_menu(layout: &Layout) -> Option<crate::menu::Menu> {
-    let at = sk_plat::Point::new(layout.body.x + 140.0, layout.body.y + 96.0);
+fn sample_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu> {
+    let at = sk_plat::Point::new(here.body.x + 140.0, here.body.y + 96.0);
     let mut menu =
         crate::menu::build(crate::menu::ON_BACKGROUND, &crate::commands::registry(), at, |id| {
             !matches!(id, "edit.undo" | "edit.redo" | "file.paste" | "file.cut")
@@ -203,6 +203,7 @@ fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
 fn sample_overlays(
     request: &Capture,
     layout: &Layout,
+    here: &crate::panes::PaneLayout,
     pane: &mut Pane,
     jobs: &crate::pane::Jobs,
 ) -> Overlays {
@@ -212,7 +213,7 @@ fn sample_overlays(
         pane.set_filter("im".to_owned(), jobs);
     }
     Overlays {
-        menu: request.menu.then(|| sample_menu(layout)).flatten(),
+        menu: request.menu.then(|| sample_menu(here)).flatten(),
         crumbs: (request.crumbs || request.crumbs_empty)
             .then(|| sample_crumb_menu(layout, request.crumbs_empty)),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
@@ -267,6 +268,71 @@ fn pose(pane: &mut Pane) {
     }
 }
 
+/// Everything a captured frame's chrome borrows.
+///
+/// One value rather than seven arguments, because they are gathered together and
+/// used together, and because the alternative is a function signature nobody can
+/// read.
+struct Sample<'a> {
+    overlays: &'a Overlays,
+    places: &'a [crate::sidebar::Section],
+    types: &'a sk_desktop::MimeDatabase,
+    keys: Option<&'a [(String, String)]>,
+    hint: &'a str,
+    leaves: &'a [crate::panes::PaneLayout],
+    dividers: &'a [crate::panes::Divider],
+}
+
+/// The chrome of the frame this capture was asked for.
+fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
+    Chrome {
+        keys: sample.keys,
+        stats: request.stats,
+        typed: None,
+        band: None,
+        watching: true,
+        notice: None,
+        // The pointer is on a row, so nothing in the frame is hovered
+        // — the hover shapes are covered by the GUI scenarios, which can
+        // actually move a pointer.
+        hovered_button: None,
+        hovered_crumb: None,
+        hovered_separator: None,
+        crumb_menu: sample.overlays.crumbs.as_ref(),
+        hovered_tool: None,
+        places: sample.places,
+        hovered_place: None,
+        drop_row: None,
+        naming: sample.overlays.naming.as_ref(),
+        // What a freshly opened directory looks like: nowhere to go
+        // back to, nowhere forward, a parent and a reload. Hardcoded
+        // because a capture has no history — and it is the state worth
+        // having a golden frame of, since it is the one with two of the
+        // four dimmed.
+        tools: [false, false, true, true],
+        // **The filter is applied; the box only sometimes has the
+        // keyboard.** `--filter --rename` is the state a rename started
+        // from a search is in, and the frame that would catch its panel
+        // going back to accent while the caret is somewhere else.
+        filtering: request.filter && !request.rename,
+        types: Some(sample.types),
+        window: sk_plat::WindowState {
+            activated: true,
+            can_maximize: true,
+            can_minimize: true,
+            ..sk_plat::WindowState::default()
+        },
+        menu: sample.overlays.menu.as_ref(),
+        path_entry: sample.overlays.path_entry.as_ref(),
+        palette: sample.overlays.palette.as_ref(),
+        hint: sample.hint,
+        leaves: sample.leaves,
+        dividers: sample.dividers,
+        hovered_divider: None,
+        hovered_tab: None,
+    }
+}
+
 /// Renders one frame and writes it.
 pub fn run(request: &Capture) -> Result<(), Problem> {
     let mut session = Session::open(request.logical, request.scale_120)?;
@@ -296,6 +362,10 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         Frame::None
     };
     let layout = Layout::compute_with(logical, &theme.metrics, frame, request.sidebar);
+    // One leaf: a capture is a frame of one directory, and the split a golden
+    // frame would need is its own frame rather than a variant of every other.
+    let crate::panes::Single { mut panes, leaves, dividers, here } =
+        crate::panes::single(pane, layout.content, &theme.metrics);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -303,30 +373,36 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().cast_signed());
 
-    let overlays = sample_overlays(request, &layout, &mut pane, &session.jobs);
+    let overlays = sample_overlays(request, &layout, &here, panes.focused_mut(), &session.jobs);
 
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
     // so a capture is never an image with holes in the text.
     let keyboard_hint = crate::commands::hint(&crate::commands::registry());
+    let sample = Sample {
+        overlays: &overlays,
+        places: &places,
+        types: &types,
+        keys: keys_rows.as_deref(),
+        hint: &keyboard_hint,
+        leaves: &leaves,
+        dividers: &dividers,
+    };
     let mut stats = FrameStats::default();
     for pass in 0..MAX_PASSES {
         if pass >= 2 && session.renderer.pending_uploads() == 0 {
             break;
         }
         list.begin(session.physical);
-        let mut diagnostics = Diagnostics {
-            frames: &mut frames,
-            last: stats,
-            atlas: session.renderer.atlas_stats(),
-            shaping: (cache.len(), 0, 0),
-            pool: session.pool_stats(),
-            adapter: session.renderer.adapter(),
-            backend: session.renderer.backend(),
-            physical: session.physical,
-            scale_120: request.scale_120,
-            capabilities: "offscreen",
-        };
+        let mut diagnostics = crate::headless::offscreen(
+            &session.renderer,
+            session.pool_stats(),
+            session.physical,
+            &mut frames,
+            stats,
+            cache.len(),
+            request.scale_120,
+        );
         {
             let mut painter = Painter {
                 list: &mut list,
@@ -335,51 +411,10 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
                 theme: &theme,
                 scale: session.scale,
             };
-            let chrome = Chrome {
-                keys: keys_rows.as_deref(),
-                stats: request.stats,
-                typed: None,
-                band: None,
-                watching: true,
-                notice: None,
-                // The pointer is on a row, so nothing in the frame is hovered
-                // — the hover shapes are covered by the GUI scenarios, which can
-                // actually move a pointer.
-                hovered_button: None,
-                hovered_crumb: None,
-                hovered_separator: None,
-                crumb_menu: overlays.crumbs.as_ref(),
-                hovered_tool: None,
-                places: &places,
-                hovered_place: None,
-                drop_row: None,
-                naming: overlays.naming.as_ref(),
-                // What a freshly opened directory looks like: nowhere to go
-                // back to, nowhere forward, a parent and a reload. Hardcoded
-                // because a capture has no history — and it is the state worth
-                // having a golden frame of, since it is the one with two of the
-                // four dimmed.
-                tools: [false, false, true, true],
-                // **The filter is applied; the box only sometimes has the
-                // keyboard.** `--filter --rename` is the state a rename started
-                // from a search is in, and the frame that would catch its panel
-                // going back to accent while the caret is somewhere else.
-                filtering: request.filter && !request.rename,
-                types: Some(&types),
-                window: sk_plat::WindowState {
-                    activated: true,
-                    can_maximize: true,
-                    can_minimize: true,
-                    ..sk_plat::WindowState::default()
-                },
-                menu: overlays.menu.as_ref(),
-                path_entry: overlays.path_entry.as_ref(),
-                palette: overlays.palette.as_ref(),
-                hint: &keyboard_hint,
-            };
+            let chrome = sample_chrome(request, &sample);
             view::draw(
                 &mut painter,
-                &pane,
+                &panes,
                 &layout,
                 now,
                 &chrome,
@@ -394,7 +429,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         Problem::plain(ProblemKind::NoGpu, "the offscreen target could not be read back")
     })?;
     write(&request.file, session.physical, &pixels)?;
-    report(request, &session, &pane, stats);
+    report(request, &session, panes.focused(), stats);
     Ok(())
 }
 

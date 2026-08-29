@@ -36,6 +36,7 @@ mod layout;
 mod menu;
 mod palette;
 mod pane;
+mod panes;
 mod sidebar;
 mod sizes;
 mod view;

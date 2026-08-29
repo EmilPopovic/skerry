@@ -6,11 +6,13 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 452
-tests, 68 GUI scenarios **on both Wayland and X11**, seventeen golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 463
+tests, 72 GUI scenarios **on both Wayland and X11**, seventeen golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
-under inotify, with folder totals, Back and Forward, a sidebar, a command registry
+under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
+binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md)), a
+command registry
 behind every key, a context menu and a fuzzy palette over the same registry,
 new-folder / rename / **copy / cut / paste / Move to Trash** with one undo stack
 over all of it and a status line that counts what a copy has done, files that open

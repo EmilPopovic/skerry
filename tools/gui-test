@@ -808,7 +808,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 68
+FEWEST_SCENARIOS = 72
 
 
 def scenario(name, fresh: bool = False):
@@ -3315,6 +3315,184 @@ def backspace_in_the_filter(run: Run, fixture: Path) -> None:
     # And Escape is what leaves, still in the same folder.
     run.drive("key escape\nsleep 300\nkey f12\nsleep 150\n")
     expect(run.state(), filtering="false", filter="", path=start["path"])
+
+
+def tab_aim(run: Run, state: dict[str, str], index: int) -> tuple[float, float]:
+    """Where to click the `index`th tab of the focused pane."""
+    entries = [it for it in state.get("tab_aim", "").split(",") if it]
+    if index >= len(entries):
+        raise Failure(f"no tab {index}: {state.get('tab_aim')!r}")
+    x, _, y = entries[index].partition(":")
+    return aim(run, state, float(x), float(y))
+
+
+def divider_aim(run: Run, state: dict[str, str], index: int = 0) -> tuple[float, float]:
+    """Where to grab the `index`th divider between panes."""
+    entries = [it for it in state.get("divider_aim", "").split(",") if it]
+    if index >= len(entries):
+        raise Failure(f"no divider {index}: {state.get('divider_aim')!r}")
+    x, _, y = entries[index].partition(":")
+    return aim(run, state, float(x), float(y))
+
+
+@scenario("tabs-open-switch-and-close")
+def tabs(run: Run, fixture: Path) -> None:
+    """A tab opens on this directory, switches, closes and comes back.
+
+    The strip appears with the second tab and goes away with it: a strip naming
+    the one thing on screen is a row of pixels that says nothing.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 200\n")
+    start = run.state()
+    expect(start, panes="1", tabs="1")
+    if start["tab_aim"]:
+        raise Failure("one tab drew a strip")
+
+    run.drive("key ctrl+t\nsleep 600\nkey f12\nsleep 200\n")
+    two = run.state()
+    expect(two, panes="1", tabs="2", tab="1", path=start["path"])
+    if not two["tab_aim"]:
+        raise Failure("two tabs drew no strip")
+    # The strip costs the list its height rather than overlapping it.
+    if float(two["body_top"]) <= float(start["body_top"]):
+        raise Failure("the strip drew over the list instead of above it")
+
+    # The new tab navigates on its own; the first one stays where it was.
+    run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
+    run.drive(f"text {fixture / 'alpha'}\nkey enter\nsleep 900\nkey f12\nsleep 200\n")
+    moved = run.state()
+    if moved["path"] != str(fixture / "alpha"):
+        raise Failure(f"the tab did not move: {moved['path']}")
+
+    run.drive("key ctrl+tab\nsleep 400\nkey f12\nsleep 200\n")
+    back = run.state()
+    expect(back, tab="0", path=start["path"])
+    run.drive("key ctrl+tab\nsleep 400\nkey f12\nsleep 200\n")
+    if run.state()["path"] != str(fixture / "alpha"):
+        raise Failure("Ctrl+Tab did not come back to the second tab")
+
+    run.drive("key ctrl+w\nsleep 500\nkey f12\nsleep 200\n")
+    closed = run.state()
+    expect(closed, tabs="1", path=start["path"])
+    if closed["tab_aim"]:
+        raise Failure("one tab still drew a strip")
+
+    run.drive("key ctrl+shift+t\nsleep 900\nkey f12\nsleep 200\n")
+    reopened = run.state()
+    expect(reopened, tabs="2")
+    if reopened["path"] != str(fixture / "alpha"):
+        raise Failure(f"the reopened tab is showing {reopened['path']}")
+
+
+@scenario("a-click-picks-a-tab-and-the-cross-closes-it")
+def tab_pointer(run: Run, fixture: Path) -> None:
+    """Every tab action is reachable with a pointer alone."""
+    run.drive("sleep 500\nkey ctrl+t\nsleep 600\nkey f12\nsleep 200\n")
+    state = run.state()
+    expect(state, tabs="2", tab="1")
+
+    first = tab_aim(run, state, 0)
+    run.drive(f"move {first[0]:.1f} {first[1]:.1f}\nsleep 200\nclick\nsleep 400\nkey f12\nsleep 200\n")
+    expect(run.state(), tab="0", tabs="2")
+
+    state = run.state()
+    crosses = [it for it in state.get("tab_cross", "").split(",") if it]
+    if len(crosses) != 2:
+        raise Failure(f"the tabs drew {len(crosses)} crosses, wanted two")
+    x, _, y = crosses[0].partition(":")
+    cross = aim(run, state, float(x), float(y))
+    run.drive(f"move {cross[0]:.1f} {cross[1]:.1f}\nsleep 200\nclick\nsleep 500\nkey f12\nsleep 200\n")
+    expect(run.state(), tabs="1")
+
+
+@scenario("a-split-is-two-panes-that-move-apart")
+def splits(run: Run, fixture: Path) -> None:
+    """F3 splits, F6 moves the keyboard, and the divider moves the boundary.
+
+    The two halves start equal, and a drag of the divider makes one of them
+    wider and the other narrower by the same amount — which is the assertion
+    that a ratio is being applied rather than a rectangle being guessed.
+    """
+    run.drive("sleep 500\nkey f3\nsleep 800\nkey f12\nsleep 200\n")
+    split = run.state()
+    expect(split, panes="2", pane_focus="1")
+    sizes = split["pane_sizes"].split(",")
+    widths = [float(size.split("x")[0]) for size in sizes]
+    if abs(widths[0] - widths[1]) > 2.0:
+        raise Failure(f"the halves are {widths}, wanted equal")
+
+    # The keyboard is on the new half; F6 brings it back to the first.
+    run.drive("key f6\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), pane_focus="0", panes="2")
+
+    where = divider_aim(run, split)
+    run.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), pointer="divider-h")
+
+    # A fixed point well left of the divider, in one press-move-release.
+    # **Not an offset from `name_x`:** that is the *focused* pane's name column,
+    # which after a split is the right-hand half — so the first version of this
+    # aimed to the right of the divider and asserted that it had moved left.
+    target = aim(run, split, 200.0, float(split["body_top"]) + 60.0)
+    run.drive(
+        f"move {where[0]:.1f} {where[1]:.1f}\nsleep 150\npress\nsleep 150\n"
+        f"move {target[0]:.1f} {target[1]:.1f}\nsleep 250\nrelease\nsleep 300\nkey f12\nsleep 200\n"
+    )
+    moved = run.state()
+    after = [float(size.split("x")[0]) for size in moved["pane_sizes"].split(",")]
+    if after[0] >= widths[0] - 20.0:
+        raise Failure(f"the divider did not move: {widths} then {after}")
+    if abs((after[0] + after[1]) - (widths[0] + widths[1])) > 8.0:
+        raise Failure(f"the two halves stopped filling the window: {after}")
+
+    run.drive("key ctrl+f3\nsleep 500\nkey f12\nsleep 200\n")
+    expect(run.state(), panes="1")
+
+
+@scenario("each-pane-watches-its-own-directory", fresh=True)
+def per_pane_watch(run: Run, fixture: Path) -> None:
+    """A change in one pane's directory reaches *that* pane, unfocused or not.
+
+    The reason the watcher holds a set rather than one directory. **The
+    assertion is about the pane that does not have the keyboard**: with a single
+    watch the focused pane is live either way, so a test that only looks at the
+    focused one passes with the old design and proves nothing.
+    """
+    run.drive("sleep 500\nkey f3\nsleep 800\n")
+    # The new half goes into the subdirectory; the first stays here.
+    run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
+    run.drive(f"text {fixture / 'alpha'}\nkey enter\nsleep 900\nkey f12\nsleep 300\n")
+    state = run.state()
+    expect(state, panes="2")
+    if state["pane_paths"] != f"{fixture.name},alpha":
+        raise Failure(f"the two panes are showing {state['pane_paths']!r}")
+    rows_alpha = int(state["rows"])
+
+    run.drive("key f6\nsleep 400\nkey f12\nsleep 200\n")
+    here = run.state()
+    expect(here, pane_focus="0")
+    rows_here = int(here["rows"])
+    run.drive("key f6\nsleep 400\nkey f12\nsleep 200\n")
+    expect(run.state(), pane_focus="1")
+
+    # A file in the directory of the pane that does *not* have the keyboard.
+    # Nothing is pressed: the frame arrives because the watcher woke the loop.
+    (fixture / "arrived.txt").write_text("x")
+    run.drive("sleep 900\nkey f12\nsleep 300\n")
+    expect(run.state(), rows=str(rows_alpha))
+
+    run.drive("key f6\nsleep 500\nkey f12\nsleep 300\n")
+    unfocused = run.state()
+    if int(unfocused["rows"]) != rows_here + 1:
+        raise Failure(
+            f"the unfocused pane is stale: {unfocused['rows']} rows, wanted {rows_here + 1}"
+        )
+
+    # And the other way round, so neither pane is live only by accident.
+    (fixture / "alpha" / "arrived.txt").write_text("x")
+    run.drive("sleep 900\nkey f6\nsleep 500\nkey f12\nsleep 300\n")
+    if int(run.state()["rows"]) != rows_alpha + 1:
+        raise Failure("the other pane did not see its own directory change")
 
 
 @scenario("the-frame-is-at-the-compositors-scale")

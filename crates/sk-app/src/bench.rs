@@ -43,7 +43,7 @@ use crate::headless::Session;
 use crate::layout::Layout;
 use crate::pane::{Message, Pane};
 use crate::sizes::Measurer;
-use crate::view::{self, Chrome, Diagnostics};
+use crate::view::{self, Chrome};
 
 /// How long a turn may block waiting for the read, while the read is running.
 ///
@@ -73,7 +73,7 @@ fn take_delivery(
     measurer: &mut Measurer,
     session: &Session,
     pending: Option<Message>,
-    layout: &Layout,
+    here: &crate::panes::PaneLayout,
     theme: &Theme,
 ) {
     for message in pending.into_iter().chain(session.updates.try_iter()) {
@@ -82,11 +82,67 @@ fn take_delivery(
     measurer.drain();
     let visible = sk_ui::visible_rows(
         pane.scroll.offset(),
-        layout.body.height,
+        here.body.height,
         theme.metrics.row_height,
         pane.listing.rows(),
     );
     measurer.update(pane, visible, &session.jobs);
+}
+
+/// The chrome a trace draws: no overlay, no hover, nothing being typed.
+///
+/// A benchmark measures the frame the program draws when nobody is interacting
+/// with it, so every state that only exists during an interaction is off — and
+/// stating that in one place keeps it from drifting into the loop.
+fn chrome_of<'a>(
+    places: &'a [crate::sidebar::Section],
+    types: &'a sk_desktop::MimeDatabase,
+    hint: &'a str,
+    leaves: &'a [crate::panes::PaneLayout],
+    dividers: &'a [crate::panes::Divider],
+) -> Chrome<'a> {
+    Chrome {
+        keys: None,
+        stats: false,
+        typed: None,
+        band: None,
+        watching: true,
+        notice: None,
+        hovered_button: None,
+        hovered_crumb: None,
+        hovered_separator: None,
+        crumb_menu: None,
+        hovered_tool: None,
+        places,
+        hovered_place: None,
+        drop_row: None,
+        naming: None,
+        tools: [true, true, true, true],
+        filtering: false,
+        types: Some(types),
+        window: sk_plat::WindowState::default(),
+        menu: None,
+        path_entry: None,
+        palette: None,
+        hint,
+        leaves,
+        dividers,
+        hovered_divider: None,
+        hovered_tab: None,
+    }
+}
+
+/// Where the scroll is at `frame`, over a listing with `span` to travel.
+///
+/// A triangle wave down the listing and back, at a speed that is not a whole
+/// number of rows: every frame lands on a different subpixel phase, so the trace
+/// exercises the four subpixel buckets and the layout cache the way a real fling
+/// does rather than re-drawing one aligned frame N times.
+fn scroll_at(frame: u32, span: f32) -> f32 {
+    let span = span.max(1.0);
+    let phase = f32::from(u16::try_from(frame % 512).unwrap_or(0)) / 512.0;
+    let position = if phase < 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
+    position * span + f32::from(u8::try_from(frame % 7).unwrap_or(0)) * 0.37
 }
 
 /// What the trace accumulated, apart from the frame distribution.
@@ -124,16 +180,19 @@ fn fixed(request: &Bench) -> Fixed {
 /// Runs the trace and prints the result.
 pub fn run(request: &Bench) -> Result<(), Problem> {
     let mut session = Session::open(request.logical, request.scale_120)?;
-    let mut pane = Pane::new(request.path.clone());
     let mut measurer = Measurer::new(session.waker.handle());
     let read_started = Instant::now();
-    pane.reload(&session.jobs);
 
     // Everything the trace draws that is not a row, built once. The windowed
     // loop asks the MIME database once per visible row per frame and draws a
     // sidebar that narrows the list, so a trace without either measures a frame
     // the product does not draw.
     let Fixed { types, places, theme, layout, hint } = fixed(request);
+    // One leaf, laid out once: the trace never splits, and the geometry the rows
+    // are drawn into is the same every frame.
+    let crate::panes::Single { mut panes, leaves, dividers, here } =
+        crate::panes::single(Pane::new(request.path.clone()), layout.content, &theme.metrics);
+    panes.focused_mut().reload(&session.jobs);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -145,45 +204,38 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
     let mut trace = Trace::default();
 
     for frame in 0..request.frames {
-        let content = pane.listing.rows() as f32 * theme.metrics.row_height;
-        pane.scroll.set_extent(content, layout.body.height);
-        // A triangle wave down the listing and back, at a speed that is not a
-        // whole number of rows: every frame lands on a different subpixel
-        // phase, so the trace exercises the four subpixel buckets and the
-        // layout cache the way a real fling does rather than re-drawing one
-        // aligned frame N times.
-        let span = (content - layout.body.height).max(1.0);
-        let phase = f32::from(u16::try_from(frame % 512).unwrap_or(0)) / 512.0;
-        let position = if phase < 0.5 { phase * 2.0 } else { (1.0 - phase) * 2.0 };
-        pane.scroll.to(position * span + f32::from(u8::try_from(frame % 7).unwrap_or(0)) * 0.37);
+        let content = panes.focused().listing.rows() as f32 * theme.metrics.row_height;
+        panes.focused_mut().scroll.set_extent(content, here.body.height);
+        let at = scroll_at(frame, content - here.body.height);
+        panes.focused_mut().scroll.to(at);
 
         // While the read is in flight, wait for it the way the window does —
         // blocked, off the clock — so a turn takes delivery of the batch that had
         // actually accumulated. Spinning instead would spread one 2,048-row
         // metadata slice over as many turns as the CPU could take, and report a
         // cheaper frame than the loop will ever have.
-        let pending =
-            if pane.loading { session.updates.recv_timeout(FRAME_INTERVAL).ok() } else { None };
+        let pending = if panes.focused().loading {
+            session.updates.recv_timeout(FRAME_INTERVAL).ok()
+        } else {
+            None
+        };
 
         // The clock covers the whole turn, exactly as `App::run` does.
         let started = Instant::now();
-        take_delivery(&mut pane, &mut measurer, &session, pending, &layout, &theme);
-        let loading = pane.loading;
+        take_delivery(panes.focused_mut(), &mut measurer, &session, pending, &here, &theme);
+        let loading = panes.focused().loading;
         let shaped_before = cache.stats().1;
 
         list.begin(session.physical);
-        let mut diagnostics = Diagnostics {
-            frames: &mut frames,
-            last: stats,
-            atlas: session.renderer.atlas_stats(),
-            shaping: (cache.len(), 0, 0),
-            pool: session.pool_stats(),
-            adapter: session.renderer.adapter(),
-            backend: session.renderer.backend(),
-            physical: session.physical,
-            scale_120: request.scale_120,
-            capabilities: "offscreen",
-        };
+        let mut diagnostics = crate::headless::offscreen(
+            &session.renderer,
+            session.pool_stats(),
+            session.physical,
+            &mut frames,
+            stats,
+            cache.len(),
+            request.scale_120,
+        );
         {
             let mut painter = Painter {
                 list: &mut list,
@@ -192,34 +244,10 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
                 theme: &theme,
                 scale: session.scale,
             };
-            let chrome = Chrome {
-                keys: None,
-                stats: false,
-                typed: None,
-                band: None,
-                watching: true,
-                notice: None,
-                hovered_button: None,
-                hovered_crumb: None,
-                hovered_separator: None,
-                crumb_menu: None,
-                hovered_tool: None,
-                places: &places,
-                hovered_place: None,
-                drop_row: None,
-                naming: None,
-                tools: [true, true, true, true],
-                filtering: false,
-                types: Some(&types),
-                window: sk_plat::WindowState::default(),
-                menu: None,
-                path_entry: None,
-                palette: None,
-                hint: &hint,
-            };
+            let chrome = chrome_of(&places, &types, &hint, &leaves, &dividers);
             view::draw(
                 &mut painter,
-                &pane,
+                &panes,
                 &layout,
                 now,
                 &chrome,
@@ -247,7 +275,7 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
         }
     }
 
-    report(request, &session, &pane, &mut frames, &trace);
+    report(request, &session, panes.focused(), &mut frames, &trace);
     Ok(())
 }
 
