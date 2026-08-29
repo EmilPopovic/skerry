@@ -561,14 +561,22 @@ fn crumb_menu(
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let (first, drawn) = menu.window();
+    let nothing = i18n::lookup("chrome.crumb_empty");
 
-    let widest = drawn
-        .iter()
-        .map(|name| text_width(painter, name, metrics.path_size, false))
-        .fold(0.0_f32, f32::max);
-    let width = (widest + CRUMB_MENU_INSET * 2.0 + CRUMB_MENU_MARK)
+    let widest = if drawn.is_empty() {
+        text_width(painter, nothing, metrics.path_size, false)
+    } else {
+        drawn
+            .iter()
+            .map(|name| text_width(painter, name, metrics.path_size, false))
+            .fold(0.0_f32, f32::max)
+            + CRUMB_MENU_MARK
+    };
+    let width = (widest + CRUMB_MENU_INSET * 2.0)
         .clamp(CRUMB_MENU_WIDTH.0, CRUMB_MENU_WIDTH.1.min(layout.window.width - 16.0));
-    let height = drawn.len() as f32 * CRUMB_MENU_STEP + CRUMB_MENU_PAD * 2.0;
+    // A menu with nothing in it is still one row tall. Sized by its rows alone it
+    // is eight pixels of panel with the message hanging out of both ends.
+    let height = drawn.len().max(1) as f32 * CRUMB_MENU_STEP + CRUMB_MENU_PAD * 2.0;
     let area = Area {
         x: (menu.at - CRUMB_MENU_INSET).clamp(8.0, (layout.window.width - width - 8.0).max(8.0)),
         y: layout.path.bottom(),
@@ -620,7 +628,7 @@ fn crumb_menu(
         let style = TextStyle::new(metrics.path_size, theme.palette.dim);
         line(
             painter,
-            i18n::lookup("chrome.crumb_empty"),
+            nothing,
             style,
             area.x + CRUMB_MENU_INSET,
             area.width - CRUMB_MENU_INSET * 2.0,

@@ -40,6 +40,7 @@ fn main() -> std::process::ExitCode {
     let mut palette = false;
     let mut filter = false;
     let mut crumbs = false;
+    let mut crumbs_empty = false;
     let mut rename = false;
     let mut own_frame = false;
     let mut no_sidebar = false;
@@ -62,6 +63,7 @@ fn main() -> std::process::ExitCode {
             "--palette" => palette = true,
             "--filter" => filter = true,
             "--crumbs" => crumbs = true,
+            "--crumbs-empty" => crumbs_empty = true,
             "--rename" => rename = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
@@ -112,6 +114,7 @@ fn main() -> std::process::ExitCode {
             palette,
             filter,
             crumbs,
+            crumbs_empty,
             rename,
             stats,
             own_frame,
@@ -174,6 +177,7 @@ skerry [OPTIONS] [PATH]
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it
   --crumbs         show a path-bar chevron's sibling menu, for a golden frame
+  --crumbs-empty   show that menu over a folder with no folders in it
   --rename         show a name being typed, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor

@@ -65,6 +65,8 @@ pub struct Capture {
     pub palette: bool,
     /// Whether to draw the sibling menu one of the path bar's chevrons opens.
     pub crumbs: bool,
+    /// Whether to draw that menu over a folder that holds no folders.
+    pub crumbs_empty: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
     pub filter: bool,
     /// Whether to draw a name being typed over a row, with its stem selected.
@@ -183,14 +185,18 @@ fn sample_naming(pane: &mut Pane) -> Option<crate::edit::Naming> {
 /// is the state a person meets, and the only one where the "you are here" mark
 /// is worth a frame at all. A menu anchored at one depth listing another's
 /// children would be a frame that agreed with nothing.
-fn sample_crumb_menu(layout: &Layout) -> crate::crumbs::CrumbMenu {
-    let rows = ["fixture", "rendered", "مستندات"].map(str::to_owned).to_vec();
+fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
+    let rows = if empty {
+        Vec::new()
+    } else {
+        ["fixture", "rendered", "مستندات"].map(str::to_owned).to_vec()
+    };
     crate::crumbs::CrumbMenu::new(
         2,
         std::path::PathBuf::from("/tmp/skerry-golden"),
         layout.path.x + 180.0,
         rows,
-        Some("fixture"),
+        (!empty).then_some("fixture"),
     )
 }
 
@@ -207,7 +213,8 @@ fn sample_overlays(
     }
     Overlays {
         menu: request.menu.then(|| sample_menu(layout)).flatten(),
-        crumbs: request.crumbs.then(|| sample_crumb_menu(layout)),
+        crumbs: (request.crumbs || request.crumbs_empty)
+            .then(|| sample_crumb_menu(layout, request.crumbs_empty)),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
         palette: request.palette.then(sample_palette),
         naming: request.rename.then(|| sample_naming(pane)).flatten(),

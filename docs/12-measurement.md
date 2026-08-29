@@ -862,3 +862,26 @@ It was removed rather than kept "just in case". A guard for a state that cannot
 happen is a guard nothing exercises, and it tells the next reader that the state
 *can* happen — which is worse than the two lines it saves. What replaced it is a
 comment saying why nothing needs clearing.
+
+## A frame of the full case is not a frame of the empty one
+
+The sibling menu has had a golden frame since the day it was written: three rows,
+the mark on the one the path goes through, the panel anchored under its chevron.
+It looked right because it was. The *empty* case — a chevron opened on a folder
+with no folders in it — had no frame at all, and it shipped as eight pixels of
+background with "No folders in here" hanging out of the top and the bottom.
+
+The arithmetic was `rows * STEP + PAD * 2`, which is correct for every menu that
+has rows. With none, a panel sized by its contents is nothing but its own
+padding. Any count that can be zero has that case, and the populated frame cannot
+see it: the two states share no pixels to compare.
+
+Rendering it cost one capture flag and one line in the frame list. Then the new
+reference was **watched failing** against the old code — 30578 samples off,
+worst by 40 levels — because a reference blessed from the fix is a reference that
+has never disagreed with anything.
+
+The first draft of the fix centred the message in a one-row box inside the panel
+rather than in the panel. Both expressions round to the same baseline, so the
+frame could not tell them apart, and the simpler one stayed. A second way of
+saying the same number is not a safeguard; it is a thing to keep in step.
