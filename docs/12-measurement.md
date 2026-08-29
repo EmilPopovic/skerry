@@ -921,3 +921,82 @@ The menu scrolls now, with an arrow at whichever end has more. The lesson is not
 about menus: **a rule worth writing at the top of a function is worth a test
 underneath it**, because the prose is what a reader believes and the code is what
 runs. This one was believed for four milestones.
+
+## Some code can only ever have unit tests, and that decides where it lives
+
+Touchpad gestures have no test harness and never will: neither
+`zwlr_virtual_pointer_manager_v1` nor `XTEST` can synthesise a swipe or a pinch,
+so the 73 GUI scenarios cannot reach a single line of the feature.
+
+That is a reason to put the *decisions* somewhere a unit test can see them. How
+far a swipe travels before it counts, which axis wins when a hand sweeps
+diagonally, and how much of a pinch is one step of zoom all live in
+`sk_plat::input` — the same module the wheel notch and the double-click window
+live in, and for the same reason. What is left in each backend is a `match` on a
+protocol enum that calls them.
+
+Five unit tests cover the policy, and two mutations were watched failing three of
+them: accumulating a swipe's deltas by assignment rather than addition, and
+measuring a pinch's step against where the fingers started rather than against
+the last step. Neither mutation is far-fetched — the second is the obvious first
+draft, and it emits a step per event on a slow pinch and none on a fast one.
+
+The plumbing above is untested and says so. The alternative — policy inside the
+backends, where it would be equally untestable *and* duplicated — is how the two
+display servers come to disagree about what a gesture is.
+
+## A test written against the wrong premise passes for the wrong reason
+
+The Properties panel decides whether to print what a file *occupies* beside what
+it claims. The first rule was "a tenth apart", and the test was written to say
+that a small file in a big block stays quiet.
+
+Both were wrong, and the test caught it in the first run: 4,096 bytes occupying
+4,608 is 12.5% apart, so the rule printed the line the test said it would not.
+The premise was the mistake — a 40-byte file occupies a hundred times what it
+claims, and *no* percentage separates that from a sparse gigabyte.
+
+The rule that works is not a ratio at all: print it when a file occupies **less**
+than it claims, which is sparse or compressed, or more than a block of slack,
+which is reserved space. Both are surprising and both are worth a line; a whole
+number of blocks is neither.
+
+The lesson is not "test first". It is that a test written from the *intent* — a
+small file stays quiet, a sparse file does not — fails against a rule that
+merely sounds right, where a test written from the implementation would have
+agreed with it. Three cases were cheaper than the rule they replaced.
+
+## The filter that hides a failure is the filter you wrote
+
+Two scenario runs in one afternoon reported a failure whose name nobody could
+read. The first was `./tools/gui-test --x11 2>&1 | tail -3`, which printed
+`73 passed, 0 failed` from the *Wayland* half and, from the X11 half, nothing at
+all — the run had refused on a stale `:80` lock and said so in a line beginning
+`fixture:`, which the filter dropped. The second was
+`grep -E "FAIL|passed,"` against a log kept only three lines deep, which reported
+`74 passed, 1 failed` and threw away which one.
+
+Both filters were written to keep the output short while something else was being
+worked on. Both turned a specific failure into an unexplained number, and the
+second cost a full re-run to recover what the first run already knew.
+
+Keep the whole log and grep the file: `./tools/gui-test --x11 > run.log 2>&1`
+then `grep -E "FAIL|passed," run.log`. A pipe discards; a file does not. This is
+the same rule as **silence is not success** one level up — a filter narrow enough
+to be tidy is narrow enough to hide the thing it was watching for.
+
+## A suite is a load test of whatever else is running
+
+The same X11 suite failed twice and passed twice in ten minutes. The two failures
+were `cursor is '', wanted 'alpha'` and a copy whose progress line was already
+`Copied 10 items` — a listing and a copy that had not finished, and one that had
+finished early. Both ran while a `cargo build --release` and a second display
+server were competing for the same cores; both passed alone, and the whole suite
+passed at load average 1.75 with nothing else started.
+
+Nothing was wrong with the code and nothing was wrong with the scenarios. What
+was wrong was running them next to a build, which is the *same* 6× that
+[the machine must be idle](#the-machine-must-be-idle-and-the-load-must-be-recorded)
+prices for benchmarks — and which is easy to forget for a test suite, because a
+test suite is supposed to be a yes or a no rather than a measurement. A scenario
+that waits 300 ms for a directory read is a measurement.

@@ -124,6 +124,8 @@ fn chrome_of<'a>(
         menu: None,
         path_entry: None,
         palette: None,
+        properties: None,
+        openers: None,
         hint,
         leaves,
         dividers,

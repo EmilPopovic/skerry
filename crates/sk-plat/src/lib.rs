@@ -49,7 +49,7 @@ use sk_util::Waker;
 
 pub use clipboard::{Clipboard, Content, Intent, Selection, decode_copied_files, decode_uri};
 pub use drag::{Drag, DragAction};
-pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size};
+pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size, Swipe};
 pub use window::{Capabilities, Cursor, Edge, RawHandles, WindowConfig, WindowState};
 
 /// Which display server to talk to.

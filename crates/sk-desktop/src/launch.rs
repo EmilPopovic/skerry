@@ -107,6 +107,30 @@ impl Launcher {
         command.spawn().map_err(|_| Refused::Failed)
     }
 
+    /// Starts the user's terminal with `at` as its working directory.
+    ///
+    /// **The working directory rather than a flag.** Every emulator spells it
+    /// differently — `--working-directory`, `--workdir`, `-cd`, and konsole
+    /// wants `--workdir` before the profile — and every one of them inherits the
+    /// cwd of the process that spawned it. One mechanism that works everywhere
+    /// beats a table of six that is wrong on the seventh.
+    ///
+    /// **Runs on a job**, for the reason [`Launcher::start`] does.
+    pub fn terminal_in(at: &Path) -> Result<Child, Refused> {
+        let emulator = find_terminal().ok_or(Refused::NoTerminal)?;
+        let mut command = Command::new(emulator);
+        command.current_dir(at).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // SAFETY: as in `start` — `setsid` is async-signal-safe and nothing else
+        // runs between `fork` and `exec`.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        command.spawn().map_err(|_| Refused::Failed)
+    }
+
     /// Takes a child started by [`Launcher::start`], so it is reaped.
     pub fn adopt(&mut self, child: Child) {
         self.running.push(child);

@@ -74,6 +74,37 @@ pub fn probe(path: &Path) -> Device {
     }
 }
 
+/// What the filesystem under `path` is called, where the magic is one we know.
+///
+/// The kernel gives a magic number and nothing else; `/proc/self/mountinfo` has
+/// the name but finding the longest matching mount point is a parse per call.
+/// This is the common dozen, and `None` is an honest answer for the rest — a
+/// Properties panel that says nothing about the filesystem is better than one
+/// that guesses.
+#[must_use]
+pub fn filesystem_name(path: &Path) -> Option<&'static str> {
+    let magic = statfs(path).ok()?.f_type as u64;
+    Some(match magic {
+        0xEF53 => "ext2/3/4",
+        0x5846_5342 => "xfs",
+        0x9123_683E => "btrfs",
+        0x2FC1_2FC1 => "zfs",
+        // Two magics, one filesystem: `SHMEM_SUPER_MAGIC` is what a `tmpfs`
+        // mounted by the kernel reports and `TMPFS_MAGIC` is what `mount` gives.
+        0x0100_1021 | 0x0102_1994 => "tmpfs",
+        0x4D44 => "vfat",
+        0x5346_544E => "ntfs",
+        0x6969 => "nfs",
+        0xFF53_4D42 | 0xFE53_4D42 | 0x517B => "smb",
+        0x6573_5546 => "fuse",
+        0x7371_7368 => "squashfs",
+        0x5F87_2716 => "overlayfs",
+        0x9FA0 => "procfs",
+        0x6265_6572 => "sysfs",
+        _ => return None,
+    })
+}
+
 /// The lane a read on `path` belongs on.
 #[must_use]
 pub fn lane_for(path: &Path) -> Lane {

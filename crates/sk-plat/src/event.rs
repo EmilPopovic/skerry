@@ -229,6 +229,36 @@ pub enum Event {
         /// Where it landed.
         position: Point,
     },
+    /// A touchpad swipe finished, having travelled far enough to mean something.
+    ///
+    /// One event per gesture rather than a stream of deltas: a swipe is a
+    /// discrete intent, and the accumulation and the threshold are the same on
+    /// both display servers because they live in one place.
+    Swiped {
+        /// Which way it went.
+        direction: Swipe,
+        /// How many fingers were on the pad. A three-finger swipe and a
+        /// four-finger swipe are different gestures to a person.
+        fingers: u32,
+    },
+    /// A touchpad pinch passed another step, in or out.
+    ///
+    /// Emitted while the fingers move, because a zoom that arrives when the hand
+    /// lifts is a zoom that cannot be aimed.
+    Pinched {
+        /// Whether the fingers moved apart.
+        out: bool,
+    },
     /// A background job finished and wants the frame loop to look.
     Woken,
+}
+
+/// Which way a swipe went.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(missing_docs, reason = "each variant is the direction of that name")]
+pub enum Swipe {
+    Left,
+    Right,
+    Up,
+    Down,
 }

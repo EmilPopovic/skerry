@@ -147,6 +147,13 @@ FRAMES = [
     # rows alone has no rows here, and the frame is the only thing that would
     # catch the message hanging out of eight pixels of background.
     ("crumb-menu-empty", ["--size", "900x400", "--scale", "125", "--crumbs-empty"]),
+    # The Properties panel: eight label-and-value rows, a title, and the only
+    # frame that would catch a value column running under its own label.
+    ("properties", ["--size", "900x520", "--scale", "125", "--properties"]),
+    # Open With: a title, the type it resolved to under it, and three rows with
+    # the first highlighted — the only frame that would catch the subtitle
+    # drawing over the first row.
+    ("open-with", ["--size", "900x520", "--scale", "125", "--open-with"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

@@ -131,7 +131,11 @@ enum Queued {
     Copy {
         /// Where the copies go.
         into: PathBuf,
+        /// What to do when the name is already taken there.
+        conflict: sk_fs::ops::Conflict,
     },
+    /// Delete for good.
+    Erase,
     /// Move into this directory.
     Move {
         /// Where they end up.
@@ -225,13 +229,40 @@ impl Edits {
         self.queue_all(Queued::Trash, paths, jobs);
     }
 
+    /// Deletes several paths for good, one at a time.
+    ///
+    /// Nothing here asks whether the caller is sure: the confirmation is the
+    /// command's, because it is the command that knows what a person just
+    /// pressed twice.
+    pub fn erase_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
+        self.queue_all(Queued::Erase, paths, jobs);
+    }
+
     /// Copies or moves several paths into `into`, one at a time.
     ///
     /// `moving` is what tells a paste after Cut from a paste after Copy. The same
     /// one-at-a-time policy as [`Edits::trash_all`], for the same reasons, and the
     /// same one undo entry each.
     pub fn paste_all(&mut self, paths: Vec<PathBuf>, into: PathBuf, moving: bool, jobs: &Jobs) {
-        let doing = if moving { Queued::Move { into } } else { Queued::Copy { into } };
+        let doing = if moving {
+            Queued::Move { into }
+        } else {
+            // **A copy renames and a move refuses.** Pasting into the folder you
+            // copied from is the ordinary way to duplicate something, and
+            // refusing it is what every version of this program did until now; a
+            // *move* under a name nobody chose would leave two files and no way
+            // to tell which is which.
+            Queued::Copy { into, conflict: sk_fs::ops::Conflict::Rename }
+        };
+        self.queue_all(doing, paths, jobs);
+    }
+
+    /// Copies each path into the folder it is already in, under a free name.
+    pub fn duplicate_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
+        let Some(into) = paths.first().and_then(|path| path.parent()).map(Path::to_path_buf) else {
+            return;
+        };
+        let doing = Queued::Copy { into, conflict: sk_fs::ops::Conflict::Rename };
         self.queue_all(doing, paths, jobs);
     }
 
@@ -261,6 +292,7 @@ impl Edits {
         let doing = self.doing.clone();
         let verb = match doing {
             Queued::Trash => "verb.trashing",
+            Queued::Erase => "verb.deleting",
             Queued::Copy { .. } => "verb.copying",
             Queued::Move { .. } => "verb.moving",
         };
@@ -294,7 +326,10 @@ impl Edits {
             };
             Outcome::Did(match doing {
                 Queued::Trash => ops::trash(&path),
-                Queued::Copy { into } => ops::copy_into(&path, &into, cancel, &mut watch),
+                Queued::Erase => ops::erase(&path, cancel),
+                Queued::Copy { into, conflict } => {
+                    ops::copy_into(&path, &into, conflict, cancel, &mut watch)
+                }
                 Queued::Move { into } => ops::move_into(&path, &into, cancel, &mut watch),
             })
         });
@@ -335,18 +370,25 @@ impl Edits {
                 // person deleting several files in a row needs it; asking for the
                 // name that has just gone would take the focus ring off again.
                 let subject = match &change {
-                    Change::Trashed { .. } => None,
+                    Change::Trashed { .. } | Change::Erased { .. } => None,
                     kept => Some(kept.subject().to_path_buf()),
                 };
+                // **Never on the undo stack.** There is nothing to walk back,
+                // and an entry that refused would put every earlier change out
+                // of reach — so `Ctrl+Z` after a delete undoes the rename before
+                // it, which is what a person means by it.
+                let recordable = !matches!(change, Change::Erased { .. });
                 // **One gesture is one undo.** A queue of two hundred pastes
                 // used to record two hundred entries, so `Ctrl+Z` after it took
                 // back the last file and left the other hundred and ninety-nine
                 // — an undo that did a two-hundredth of what was asked. The
                 // batch is recorded when the queue drains, below.
-                if self.queued > 1 {
-                    self.batch.push(change);
-                } else {
-                    self.history.record(change);
+                if recordable {
+                    if self.queued > 1 {
+                        self.batch.push(change);
+                    } else {
+                        self.history.record(change);
+                    }
                 }
                 let message = if self.queued > 1 {
                     let done = self.queued - self.queue.len();
@@ -358,6 +400,7 @@ impl Edits {
                     // construction, which is what `i18n` exists to prevent.
                     let key = match self.doing {
                         Queued::Trash => "notice.trashed",
+                        Queued::Erase => "notice.deleted",
                         Queued::Copy { .. } => "notice.copied_in",
                         Queued::Move { .. } => "notice.moved_in",
                     };

@@ -16,7 +16,7 @@
 //!   the next frame arrives because a running walk reported.
 
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use sk_index::{Progress, Sizes};
@@ -103,6 +103,16 @@ impl Measurer {
             any = true;
         }
         any
+    }
+
+    /// The complete total for one folder, if the cache has one.
+    ///
+    /// **Complete only.** A partial walk's number is a lower bound, and a
+    /// Properties panel that showed one would say a folder is 40 MB and then
+    /// 900 MB a second later with nothing to explain the difference. The list's
+    /// size column shows partials on purpose — it is scanning, not reporting.
+    pub fn total(&self, path: &Path) -> Option<u64> {
+        self.sizes.get(path).filter(|it| it.complete).map(|it| it.bytes)
     }
 
     /// Forgets every total, so the next frame measures again.

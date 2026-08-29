@@ -6,18 +6,21 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 463
-tests, 72 GUI scenarios **on both Wayland and X11**, seventeen golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 479
+tests, 77 GUI scenarios **on both Wayland and X11**, nineteen golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md)), a
 command registry
 behind every key, a context menu and a fuzzy palette over the same registry,
-new-folder / rename / **copy / cut / paste / Move to Trash** with one undo stack
-over all of it and a status line that counts what a copy has done, files that open
-in the application the desktop says owns them, and a clipboard that takes files,
-paths, and the text inside a text file. Every command is reachable by keyboard
+new-folder / rename / **copy / cut / paste / duplicate / Move to Trash** with one
+undo stack over all of it — and **delete for good**, which takes two presses and
+is on no stack, because rule 3 calls it "an explicit, differently-shaped action"
+— a status line that counts what a copy has done, files that open in the
+application the desktop says owns them or in **the one you pick**, **Properties**
+and **a terminal here**, and a clipboard that takes files, paths, and the text
+inside a text file. Every command is reachable by keyboard
 alone and by pointer alone, and a test fails the build for one that is not. What
 is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use xkbcommon::xkb;
 
-use crate::event::{Event, KeyEvent, Modifiers, Point};
+use crate::event::{Event, KeyEvent, Modifiers, Point, Swipe};
 
 /// A wheel notch, in logical pixels.
 ///
@@ -36,6 +36,98 @@ pub(crate) const MULTI_CLICK_SLOP: f32 = 5.0;
 /// What a held key does when the server has not said.
 pub(crate) const DEFAULT_REPEAT_DELAY: Duration = Duration::from_millis(600);
 pub(crate) const DEFAULT_REPEAT_INTERVAL: Duration = Duration::from_millis(40);
+
+/// How far a swipe travels before it means anything, in logical pixels.
+///
+/// Far enough that resting three fingers and shifting a little is not a
+/// navigation, short enough that a deliberate flick is one. 96 is four rows of
+/// the list, and it is what a hand on a touchpad crosses in about a fifth of a
+/// second.
+const SWIPE_THRESHOLD: f32 = 96.0;
+
+/// How much a pinch must grow or shrink to be one step of zoom.
+///
+/// A ratio rather than a distance, because a pinch is scale-free: 1.15 is about
+/// a centimetre of finger travel on a typical pad and gives four steps across a
+/// full open-handed pinch.
+const PINCH_STEP: f32 = 1.15;
+
+/// Turns a stream of touchpad deltas into discrete gestures.
+///
+/// **Here rather than in either backend.** Wayland delivers
+/// `zwp_pointer_gestures_v1` and X11 delivers `XInput` 2.4, and the two say the
+/// same things in different units and different phases — but how far a swipe has
+/// to travel to count, and how much of a pinch is one step of zoom, are
+/// decisions. Two copies would agree until one was edited.
+#[derive(Default)]
+pub(crate) struct Gestures {
+    fingers: u32,
+    dx: f32,
+    dy: f32,
+    /// The scale the last step was emitted at, or `None` between pinches.
+    stepped: Option<f32>,
+}
+
+impl Gestures {
+    pub(crate) fn swipe_begin(&mut self, fingers: u32) {
+        self.fingers = fingers;
+        self.dx = 0.0;
+        self.dy = 0.0;
+    }
+
+    pub(crate) fn swipe_update(&mut self, dx: f32, dy: f32) {
+        self.dx += dx;
+        self.dy += dy;
+    }
+
+    /// The gesture, if it went far enough and was not cancelled.
+    ///
+    /// **On the dominant axis only.** A hand sweeping right also drifts down,
+    /// and a swipe that counted as both would navigate and scroll at once.
+    pub(crate) fn swipe_end(&mut self, cancelled: bool) -> Option<(Swipe, u32)> {
+        let (dx, dy, fingers) = (self.dx, self.dy, self.fingers);
+        self.dx = 0.0;
+        self.dy = 0.0;
+        self.fingers = 0;
+        if cancelled {
+            return None;
+        }
+        let direction = if dx.abs() >= dy.abs() {
+            let way = if dx > 0.0 { Swipe::Right } else { Swipe::Left };
+            (dx.abs() >= SWIPE_THRESHOLD).then_some(way)
+        } else {
+            let way = if dy > 0.0 { Swipe::Down } else { Swipe::Up };
+            (dy.abs() >= SWIPE_THRESHOLD).then_some(way)
+        };
+        direction.map(|it| (it, fingers))
+    }
+
+    pub(crate) fn pinch_begin(&mut self) {
+        self.stepped = Some(1.0);
+    }
+
+    /// How many steps of zoom this scale is past the last one, and which way.
+    ///
+    /// A pinch reports an absolute scale against where it started, so the step
+    /// is a ratio against the scale the last step was emitted at — which is what
+    /// makes a slow pinch and a fast one cover the same number of steps.
+    pub(crate) fn pinch_update(&mut self, scale: f32) -> Option<bool> {
+        let last = self.stepped?;
+        if scale >= last * PINCH_STEP {
+            self.stepped = Some(last * PINCH_STEP);
+            return Some(true);
+        }
+        if scale <= last / PINCH_STEP {
+            self.stepped = Some(last / PINCH_STEP);
+            return Some(false);
+        }
+        None
+    }
+
+    pub(crate) fn pinch_end(&mut self) {
+        self.stepped = None;
+    }
+}
 
 /// Counts presses into single, double and triple clicks.
 ///
@@ -180,6 +272,86 @@ pub(crate) fn modifiers_of(state: &xkb::State) -> Modifiers {
 mod tests {
     use super::*;
     use crate::event::{Key, Named};
+
+    /// **No harness can synthesise a touchpad gesture.** Neither
+    /// `zwlr_virtual_pointer_manager_v1` nor `XTEST` has swipe or pinch events,
+    /// so the GUI scenarios cannot reach this and these are the only tests it
+    /// will ever have. What is tested is therefore the whole of the policy: the
+    /// plumbing above it is a `match` on a protocol enum.
+    #[test]
+    fn a_swipe_shorter_than_the_threshold_is_not_a_gesture() {
+        let mut gestures = Gestures::default();
+        gestures.swipe_begin(3);
+        gestures.swipe_update(SWIPE_THRESHOLD - 1.0, 0.0);
+        assert_eq!(gestures.swipe_end(false), None);
+
+        gestures.swipe_begin(3);
+        gestures.swipe_update(SWIPE_THRESHOLD / 2.0, 0.0);
+        gestures.swipe_update(SWIPE_THRESHOLD / 2.0, 0.0);
+        assert_eq!(gestures.swipe_end(false), Some((Swipe::Right, 3)), "the deltas add up");
+    }
+
+    #[test]
+    fn a_cancelled_swipe_is_no_swipe_and_leaves_nothing_behind() {
+        let mut gestures = Gestures::default();
+        gestures.swipe_begin(3);
+        gestures.swipe_update(500.0, 0.0);
+        assert_eq!(gestures.swipe_end(true), None);
+        // And the next gesture starts from zero rather than from 500.
+        gestures.swipe_begin(3);
+        gestures.swipe_update(10.0, 0.0);
+        assert_eq!(gestures.swipe_end(false), None, "the cancelled distance carried over");
+    }
+
+    /// A hand sweeping right also drifts down. A gesture that counted as both
+    /// would navigate and scroll at once.
+    #[test]
+    fn a_swipe_goes_the_way_it_went_furthest() {
+        let mut gestures = Gestures::default();
+        gestures.swipe_begin(3);
+        gestures.swipe_update(-200.0, 60.0);
+        assert_eq!(gestures.swipe_end(false), Some((Swipe::Left, 3)));
+
+        gestures.swipe_begin(4);
+        gestures.swipe_update(40.0, -300.0);
+        assert_eq!(gestures.swipe_end(false), Some((Swipe::Up, 4)), "the finger count is kept");
+    }
+
+    /// A pinch reports an absolute scale, so the step has to be measured against
+    /// the last step and not against where the fingers started — otherwise one
+    /// slow pinch emits a step per event and a fast one emits none.
+    #[test]
+    fn a_pinch_steps_once_per_ratio_however_it_is_delivered() {
+        let coarse = {
+            let mut gestures = Gestures::default();
+            gestures.pinch_begin();
+            (0..1).filter_map(|_| gestures.pinch_update(PINCH_STEP * PINCH_STEP)).count()
+        };
+        let fine = {
+            let mut gestures = Gestures::default();
+            gestures.pinch_begin();
+            // The same total, delivered in twenty updates.
+            let target = PINCH_STEP * PINCH_STEP;
+            (1..=20)
+                .filter_map(|step| {
+                    let at = 1.0 + (target - 1.0) * (step as f32 / 20.0);
+                    gestures.pinch_update(at)
+                })
+                .count()
+        };
+        assert_eq!(fine, 2, "twenty small updates over two steps' worth are two steps");
+        assert_eq!(coarse, 1, "one update cannot emit the steps it skipped");
+    }
+
+    #[test]
+    fn a_pinch_goes_both_ways_and_stops_when_the_fingers_lift() {
+        let mut gestures = Gestures::default();
+        gestures.pinch_begin();
+        assert_eq!(gestures.pinch_update(PINCH_STEP), Some(true));
+        assert_eq!(gestures.pinch_update(1.0), Some(false), "back where it started is a step out");
+        gestures.pinch_end();
+        assert_eq!(gestures.pinch_update(4.0), None, "an update after the end is not a gesture");
+    }
 
     fn event() -> KeyEvent {
         KeyEvent {

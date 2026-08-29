@@ -266,6 +266,77 @@ pub fn copy_into(
     Ok(destination)
 }
 
+/// Copies `source` to exactly `destination`.
+///
+/// The one entry point that does not derive the name from the source, for the
+/// caller that has already chosen one — a duplicate, or a copy into the folder
+/// the original is in.
+///
+/// **Runs on a job.**
+pub fn copy_to(
+    source: &Path,
+    destination: &Path,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(Progress),
+) -> Result<(), Problem> {
+    if let Some(into) = destination.parent()
+        && (into == source || into.starts_with(source))
+    {
+        return Err(Problem::new(
+            ProblemKind::BadName,
+            source.display().to_string(),
+            "a folder cannot be copied into itself",
+        ));
+    }
+    let mut progress = Progress::default();
+    copy_any(source, destination, Options::default(), cancel, &mut progress, watch, 0)
+}
+
+/// A name nothing in `into` is called, from `name`.
+///
+/// `report.pdf` becomes `report (copy).pdf`, then `report (copy 2).pdf`. The
+/// extension is kept because it is what decides how a file opens, and a
+/// `report.pdf (copy)` is a file the desktop no longer knows what to do with.
+///
+/// **`copy` is not translated.** Every other string a person reads goes through
+/// the catalogue; this one becomes a *filename*, and a name that depends on the
+/// locale of the session that made it is a name that sorts differently, scripts
+/// differently and cannot be predicted from another machine.
+///
+/// `None` where a hundred candidates are all taken, which is a directory doing
+/// something stranger than this feature is for.
+///
+/// **Runs on a job**: one `statx` per candidate.
+#[must_use]
+pub fn free_name(into: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStrExt;
+
+    if statat(fs::CWD, into.join(name), AtFlags::SYMLINK_NOFOLLOW).is_err() {
+        return Some(name.to_owned());
+    }
+    // Split on the *last* dot that is not the first character, so `.bashrc` is a
+    // stem and `archive.tar.gz` keeps only `.gz` — which is what a rename field
+    // in this program already does with the same reasoning.
+    let bytes = name.as_bytes();
+    let dot = bytes.iter().rposition(|byte| *byte == b'.').filter(|at| *at > 0);
+    let (stem, extension) = dot.map_or((bytes, &[][..]), |at| (&bytes[..at], &bytes[at..]));
+
+    for attempt in 1..100 {
+        let mut candidate = OsString::from(std::ffi::OsStr::from_bytes(stem));
+        candidate.push(if attempt == 1 {
+            " (copy)".to_owned()
+        } else {
+            format!(" (copy {attempt})")
+        });
+        candidate.push(std::ffi::OsStr::from_bytes(extension));
+        if statat(fs::CWD, into.join(&candidate), AtFlags::SYMLINK_NOFOLLOW).is_err() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Moves `source` into the directory `into`.
 ///
 /// A rename where the filesystems match, and a copy followed by a removal where

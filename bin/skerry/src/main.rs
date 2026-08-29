@@ -26,6 +26,46 @@ fn window(options: &Options) -> Result<bool, sk_app::Problem> {
     })
 }
 
+/// Which overlay a `--capture` is a capture of.
+///
+/// One value rather than nine `let mut`s and nine arms, because they are one
+/// question — and because the tenth is going to be added by somebody who has
+/// not read this function.
+#[derive(Default)]
+struct Overlays {
+    keys: bool,
+    menu: bool,
+    path_entry: bool,
+    palette: bool,
+    filter: bool,
+    crumbs: bool,
+    crumbs_empty: bool,
+    properties: bool,
+    open_with: bool,
+    rename: bool,
+}
+
+impl Overlays {
+    /// Whether `argument` was one of these, and sets it if so.
+    fn take(&mut self, argument: &str) -> bool {
+        let slot = match argument {
+            "--keys" => &mut self.keys,
+            "--menu" => &mut self.menu,
+            "--path-entry" => &mut self.path_entry,
+            "--palette" => &mut self.palette,
+            "--filter" => &mut self.filter,
+            "--crumbs" => &mut self.crumbs,
+            "--crumbs-empty" => &mut self.crumbs_empty,
+            "--properties" => &mut self.properties,
+            "--open-with" => &mut self.open_with,
+            "--rename" => &mut self.rename,
+            _ => return false,
+        };
+        *slot = true;
+        true
+    }
+}
+
 fn main() -> std::process::ExitCode {
     // Taken first, so the cold-start figure includes argument parsing, the
     // allocator waking up, and every dynamic library the loader pulls in.
@@ -34,14 +74,7 @@ fn main() -> std::process::ExitCode {
     let mut path = None;
     let mut dark = true;
     let mut stats = false;
-    let mut keys = false;
-    let mut menu = false;
-    let mut path_entry = false;
-    let mut palette = false;
-    let mut filter = false;
-    let mut crumbs = false;
-    let mut crumbs_empty = false;
-    let mut rename = false;
+    let mut overlays = Overlays::default();
     let mut own_frame = false;
     let mut no_sidebar = false;
     let mut capture = None;
@@ -57,14 +90,6 @@ fn main() -> std::process::ExitCode {
         match argument.as_str() {
             "--light" => dark = false,
             "--stats" => stats = true,
-            "--keys" => keys = true,
-            "--menu" => menu = true,
-            "--path-entry" => path_entry = true,
-            "--palette" => palette = true,
-            "--filter" => filter = true,
-            "--crumbs" => crumbs = true,
-            "--crumbs-empty" => crumbs_empty = true,
-            "--rename" => rename = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
             "--capture" => match arguments.next() {
@@ -89,6 +114,7 @@ fn main() -> std::process::ExitCode {
                 println!("{USAGE}"); // skerry-allow: log-prefix — this is the answer
                 return std::process::ExitCode::SUCCESS;
             }
+            other if overlays.take(other) => {}
             other if other.starts_with('-') => {
                 return usage_error(&format!("unknown option `{other}`"));
             }
@@ -110,14 +136,16 @@ fn main() -> std::process::ExitCode {
             logical,
             scale_120,
             dark,
-            keys,
-            menu,
-            path_entry,
-            palette,
-            filter,
-            crumbs,
-            crumbs_empty,
-            rename,
+            keys: overlays.keys,
+            menu: overlays.menu,
+            path_entry: overlays.path_entry,
+            palette: overlays.palette,
+            filter: overlays.filter,
+            crumbs: overlays.crumbs,
+            crumbs_empty: overlays.crumbs_empty,
+            properties: overlays.properties,
+            open_with: overlays.open_with,
+            rename: overlays.rename,
             stats,
             own_frame,
             sidebar: !no_sidebar,
@@ -182,6 +210,8 @@ skerry [OPTIONS] [PATH]
   --filter         show the find popup, for a golden frame of it
   --crumbs         show a path-bar chevron's sibling menu, for a golden frame
   --crumbs-empty   show that menu over a folder with no folders in it
+  --properties     show the Properties panel, for a golden frame of it
+  --open-with      show the Open With list, for a golden frame of it
   --rename         show a name being typed, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor

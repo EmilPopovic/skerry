@@ -166,6 +166,34 @@ impl Default for Metrics {
     }
 }
 
+impl Metrics {
+    /// The same metrics with the list zoomed by `factor`.
+    ///
+    /// **The list only.** The path bar, the window buttons, the status strip and
+    /// the sidebar keep their sizes: a zoom is about how much of a directory
+    /// fits on a screen, and chrome that grew with it would take the space the
+    /// zoom was asking for. This is what `Ctrl +` does in a browser's page and
+    /// not what it does to its own toolbar.
+    ///
+    /// The columns scale too, because a size in larger text needs more room and
+    /// a name column that did not grow would ellipsize what the zoom was meant
+    /// to make readable.
+    #[must_use]
+    pub fn zoomed(self, factor: f32) -> Self {
+        let scale = |value: f32| (value * factor).round();
+        Self {
+            row_height: scale(self.row_height),
+            text_size: self.text_size * factor,
+            icon_column: scale(self.icon_column),
+            size_column: scale(self.size_column),
+            modified_column: scale(self.modified_column),
+            gutter: scale(self.gutter),
+            radius: self.radius * factor,
+            ..self
+        }
+    }
+}
+
 /// A palette and a set of metrics.
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {

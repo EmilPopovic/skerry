@@ -22,10 +22,11 @@ use crate::layout::Area;
 /// two that change the file last — where a slip costs the most and the pointer
 /// is least likely to be.
 pub const ON_ROW: &[&[&str]] = &[
-    &["go.open"],
+    &["go.open", "file.open_with"],
     &["file.copy", "file.cut", "file.paste"],
     &["file.copy_path", "file.copy_content"],
-    &["file.rename", "file.trash"],
+    &["file.duplicate", "file.rename", "file.trash", "file.delete"],
+    &["file.properties"],
 ];
 
 /// What a secondary click on anything else offers.
@@ -34,9 +35,10 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["edit.undo", "edit.redo", "edit.cancel"],
     &["select.all", "view.filter"],
     &["view.hidden", "view.theme", "view.sidebar"],
+    &["view.zoom_in", "view.zoom_out", "view.zoom_reset"],
     &["tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],
-    &["view.path_entry", "file.paste_location", "go.reload"],
+    &["file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
     &["view.palette", "help.keys"],
 ];
 

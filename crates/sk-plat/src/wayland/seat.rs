@@ -13,6 +13,8 @@
 //! * **Scroll is coalesced per `frame`.** One `wl_pointer.frame` is one user
 //!   gesture step; emitting the axes separately makes a diagonal touchpad swipe
 //!   two events and one of them wrong.
+//! * **A swipe's threshold and a pinch's step are ours**, and they live in
+//!   `crate::input` so the X11 half cannot drift from them.
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
@@ -20,10 +22,13 @@ use std::time::Duration;
 
 use wayland_client::protocol::{wl_keyboard, wl_pointer, wl_seat};
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_protocols::wp::pointer_gestures::zv1::client::{
+    zwp_pointer_gesture_pinch_v1, zwp_pointer_gesture_swipe_v1, zwp_pointer_gestures_v1,
+};
 use xkbcommon::xkb;
 
 use crate::event::{Button, Event, KeyEvent, Modifiers, Point};
-use crate::input::{Clicks, Repeater, WHEEL_NOTCH, modifiers_of};
+use crate::input::{Clicks, Gestures, Repeater, WHEEL_NOTCH, modifiers_of};
 use crate::keys;
 
 use super::State;
@@ -83,6 +88,11 @@ pub struct Seat {
     position: Point,
     scroll: PendingScroll,
     clicks: Clicks,
+    gestures: Gestures,
+    /// Held only so they live as long as the pointer does: the compositor sends
+    /// gesture events to these objects, and dropping them stops the gestures.
+    swipe: Option<zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1>,
+    pinch: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
 
     /// The serial of the last keyboard enter or key event. A selection may only
     /// be set with a serial from a real input event, which is the protocol's way
@@ -111,6 +121,9 @@ impl Seat {
             position: Point::default(),
             scroll: PendingScroll::default(),
             clicks: Clicks::default(),
+            gestures: Gestures::default(),
+            swipe: None,
+            pinch: None,
             keyboard_serial: None,
             button_serial: None,
             enter_serial: None,
@@ -211,7 +224,11 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
                 state.seat.keyboard = Some(seat.get_keyboard(handle, ()));
             }
             if has_pointer && state.seat.pointer.is_none() {
-                state.seat.pointer = Some(seat.get_pointer(handle, ()));
+                let pointer = seat.get_pointer(handle, ());
+                let (swipe, pinch) = dress_gestures(state.gestures.as_ref(), &pointer, handle);
+                state.seat.swipe = swipe;
+                state.seat.pinch = pinch;
+                state.seat.pointer = Some(pointer);
             }
         }
     }
@@ -384,6 +401,78 @@ fn accumulate(into: &mut Point, any: &mut bool, axis: WEnum<wl_pointer::Axis>, a
         _ => return,
     }
     *any = true;
+}
+
+/// Asks the compositor for swipe and pinch objects, where it offers them.
+///
+/// `zwp_pointer_gestures_v1` is unstable and old — mutter, kwin and sway have
+/// all had it for years — but a compositor without it is a compositor where a
+/// touchpad sends scroll and nothing else, which is the documented degradation
+/// rather than a failure.
+pub(super) fn dress_gestures(
+    gestures: Option<&zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pointer: &wl_pointer::WlPointer,
+    handle: &QueueHandle<super::State>,
+) -> (
+    Option<zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1>,
+    Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
+) {
+    let Some(gestures) = gestures else { return (None, None) };
+    (
+        Some(gestures.get_swipe_gesture(pointer, handle, ())),
+        Some(gestures.get_pinch_gesture(pointer, handle, ())),
+    )
+}
+
+impl Dispatch<zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1, ()> for super::State {
+    fn event(
+        state: &mut Self,
+        _: &zwp_pointer_gesture_swipe_v1::ZwpPointerGestureSwipeV1,
+        event: zwp_pointer_gesture_swipe_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_pointer_gesture_swipe_v1::Event::Begin { fingers, .. } => {
+                state.seat.gestures.swipe_begin(fingers);
+            }
+            zwp_pointer_gesture_swipe_v1::Event::Update { dx, dy, .. } => {
+                state.seat.gestures.swipe_update(dx as f32, dy as f32);
+            }
+            zwp_pointer_gesture_swipe_v1::Event::End { cancelled, .. } => {
+                if let Some((direction, fingers)) = state.seat.gestures.swipe_end(cancelled != 0) {
+                    state.events.push_back(Event::Swiped { direction, fingers });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()> for super::State {
+    fn event(
+        state: &mut Self,
+        _: &zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_pointer_gesture_pinch_v1::Event::Begin { .. } => state.seat.gestures.pinch_begin(),
+            // **Rotation is read and dropped.** A file list has nothing to turn,
+            // and a gesture that quietly did something else would be worse than
+            // one that does nothing.
+            zwp_pointer_gesture_pinch_v1::Event::Update { scale, .. } => {
+                if let Some(out) = state.seat.gestures.pinch_update(scale as f32) {
+                    state.events.push_back(Event::Pinched { out });
+                }
+            }
+            zwp_pointer_gesture_pinch_v1::Event::End { .. } => state.seat.gestures.pinch_end(),
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

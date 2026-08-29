@@ -808,7 +808,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 72
+FEWEST_SCENARIOS = 77
 
 
 def scenario(name, fresh: bool = False):
@@ -3493,6 +3493,199 @@ def per_pane_watch(run: Run, fixture: Path) -> None:
     run.drive("sleep 900\nkey f6\nsleep 500\nkey f12\nsleep 300\n")
     if int(run.state()["rows"]) != rows_alpha + 1:
         raise Failure("the other pane did not see its own directory change")
+
+
+@scenario("open-with-lists-what-this-machine-would-open-it-with")
+def open_with(run: Run, fixture: Path) -> None:
+    """`Ctrl+Shift+O` lists the applications, and Enter starts one.
+
+    **Its own XDG data directory**, holding one `.desktop` file and one
+    `mimeapps.list` that points at it. The real list is whatever the machine
+    running this happens to have installed, which is a different list on a
+    developer's laptop and on a runner — so the test installs the answer it is
+    asserting about, and the thing it launches is `true`.
+    """
+    run.close()
+    own_data = run.log.parent / "one-handler"
+    applications = own_data / "applications"
+    applications.mkdir(parents=True, exist_ok=True)
+    (applications / "skerry-probe.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Probe\nExec=true %f\n"
+        "MimeType=text/plain;\n"
+    )
+    (applications / "mimeapps.list").write_text(
+        "[Default Applications]\ntext/plain=skerry-probe.desktop\n"
+        "[Added Associations]\ntext/plain=skerry-probe.desktop\n"
+    )
+    own = Run(
+        run.display,
+        run.log.parent,
+        fixture,
+        [],
+        run.instance,
+        {"XDG_DATA_HOME": str(own_data), "XDG_DATA_DIRS": str(own_data)},
+    )
+    try:
+        own.drive("sleep 600\nkey f12\nsleep 200\n")
+        # Onto a `.txt`, which is the type the installed handler claims.
+        pointing = point_at(own, 3)
+        if not pointing["hover_name"].endswith(".txt"):
+            raise Failure(f"row 3 is {pointing['hover_name']!r}, which is not a document")
+        own.drive("click\nsleep 300\nkey ctrl+shift+o\nsleep 900\nkey f12\nsleep 300\n")
+        listed = own.state()
+        if listed["openers"] != "1":
+            raise Failure(
+                f"the list holds {listed['openers']} rows and says {listed['opener']!r}"
+            )
+        expect(listed, opener="Probe")
+
+        # Enter launches it and closes the list. `true` exits at once, which is
+        # what makes this safe to run inside a test server.
+        own.drive("key enter\nsleep 700\nkey f12\nsleep 300\n")
+        after = own.state()
+        expect(after, openers="0")
+        if "Probe" not in after.get("notice", ""):
+            raise Failure(f"the notice reads {after.get('notice')!r}")
+    finally:
+        own.close()
+
+
+@scenario("properties-says-what-a-file-is", fresh=True)
+def properties(run: Run, fixture: Path) -> None:
+    """`Ctrl+I` reads the facts on a job and shows them; any key dismisses it."""
+    run.drive("sleep 500\nkey down\nsleep 200\nkey ctrl+i\nsleep 800\nkey f12\nsleep 300\n")
+    open_panel = run.state()
+    if not open_panel["properties"]:
+        raise Failure("the panel did not open")
+    facts = dict(
+        pair.split("=", 1) for pair in open_panel["facts"].split("|") if "=" in pair
+    )
+    if facts.get("Kind") not in ("File", "Folder"):
+        raise Failure(f"the panel says the kind is {facts.get('Kind')!r}")
+    if facts.get("Where") != str(fixture):
+        raise Failure(f"the panel says it is in {facts.get('Where')!r}")
+    if "(0" not in facts.get("Permissions", ""):
+        raise Failure(f"the permissions read {facts.get('Permissions')!r}")
+
+    # A statement, not a field: a key dismisses it and does nothing else.
+    before = run.state()["cursor"]
+    run.drive("key down\nsleep 300\nkey f12\nsleep 200\n")
+    after = run.state()
+    if after["properties"]:
+        raise Failure("a key left the panel open")
+    expect(after, cursor=before)
+
+
+@scenario("a-permanent-delete-takes-two-presses", fresh=True)
+def permanent_delete(run: Run, fixture: Path) -> None:
+    """`Shift+Delete` asks, and only the second press inside the window deletes.
+
+    Rule 3 calls permanent deletion "an explicit, differently-shaped action".
+    This is the shape, and the assertion worth making is the *first* half: one
+    press leaves the file exactly where it was.
+    """
+    run.drive("sleep 500\nkey end\nsleep 300\nkey f12\nsleep 200\n")
+    chosen = run.state()["cursor"]
+    if not chosen:
+        raise Failure("nothing is selected to delete")
+    doomed = fixture / chosen
+
+    run.drive("key shift+delete\nsleep 600\nkey f12\nsleep 300\n")
+    asked = run.state()
+    if "again" not in asked.get("notice", ""):
+        raise Failure(f"the first press said {asked.get('notice')!r}")
+    if not doomed.exists():
+        raise Failure("one press deleted it")
+
+    # Anything else takes the question off the screen, and the offer with it.
+    run.drive("key escape\nsleep 200\nkey ctrl+a\nsleep 400\nkey f12\nsleep 200\n")
+    run.drive("key shift+delete\nsleep 600\nkey f12\nsleep 300\n")
+    if not doomed.exists():
+        raise Failure("a press after the offer lapsed deleted it anyway")
+
+    # Two in a row, on the same selection, does.
+    run.drive("key escape\nsleep 200\nkey end\nsleep 400\nkey f12\nsleep 200\n")
+    run.drive("key shift+delete\nsleep 400\nkey shift+delete\nsleep 1000\nkey f12\nsleep 400\n")
+    if doomed.exists():
+        raise Failure(f"two presses left {doomed.name} behind")
+
+    # And it is not on the undo stack: `Ctrl+Z` must not claim to bring it back.
+    run.drive("key ctrl+z\nsleep 800\nkey f12\nsleep 300\n")
+    if doomed.exists():
+        raise Failure("undo brought back a permanent delete")
+
+
+@scenario("duplicate-copies-beside-the-original", fresh=True)
+def duplicate(run: Run, fixture: Path) -> None:
+    """`Ctrl+D` copies under a free name rather than refusing a taken one.
+
+    The same rule pasting into the folder you copied from follows, which is what
+    made the refusal worth removing: a copy renames and a move refuses.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 200\n")
+    start = run.state()
+    rows = int(start["rows"])
+
+    # Onto a file rather than a folder, so the copy is one `copy_file`.
+    run.drive("key end\nsleep 300\nkey f12\nsleep 200\n")
+    chosen = run.state()["cursor"]
+    run.drive("key ctrl+d\nsleep 1200\nkey f12\nsleep 400\n")
+    after = run.state()
+    if int(after["rows"]) != rows + 1:
+        raise Failure(f"{after['rows']} rows, wanted {rows + 1}")
+    stem, _, extension = chosen.partition(".")
+    wanted = f"{stem} (copy)" + (f".{extension}" if extension else "")
+    if not (fixture / wanted).exists():
+        made = sorted(p.name for p in fixture.iterdir())
+        raise Failure(f"no {wanted!r} beside it: {made}")
+
+    # And it is one undo entry, not one per byte.
+    run.drive("key ctrl+z\nsleep 1200\nkey f12\nsleep 400\n")
+    if (fixture / wanted).exists():
+        raise Failure("undo left the copy behind")
+
+
+@scenario("the-list-zooms-and-comes-back-exactly")
+def zoom(run: Run, fixture: Path) -> None:
+    """`Ctrl +` and `Ctrl -` resize the rows; `Ctrl 0` puts them back exactly.
+
+    **Exactly** is the assertion worth making: the steps are a table rather than
+    a repeated multiplication, so eight steps out and eight back is the size it
+    started at and not a pixel off. A factor would drift, and the drift is
+    invisible until somebody measures it.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 200\n")
+    start = run.state()
+    base = float(start["row_h"])
+
+    run.drive("key ctrl+=\nsleep 300\nkey f12\nsleep 200\n")
+    bigger = run.state()
+    if float(bigger["row_h"]) <= base:
+        raise Failure(f"rows are {bigger['row_h']}, wanted taller than {base}")
+    # The list gets fewer rows on screen, which is what a zoom is for.
+    if float(bigger["body_height"]) > float(start["body_height"]) + 1.0:
+        raise Failure("the list grew instead of the rows")
+
+    run.drive("key ctrl+minus\nsleep 300\nkey ctrl+minus\nsleep 300\nkey f12\nsleep 200\n")
+    smaller = run.state()
+    if float(smaller["row_h"]) >= base:
+        raise Failure(f"rows are {smaller['row_h']}, wanted shorter than {base}")
+
+    run.drive("key ctrl+0\nsleep 300\nkey f12\nsleep 200\n")
+    if float(run.state()["row_h"]) != base:
+        raise Failure(f"back at {run.state()['row_h']}, started at {base}")
+
+    # Every step out, then every step back: the ends clamp rather than wrap, and
+    # the round trip lands on the same number it left.
+    run.drive("key ctrl+=\n" * 9 + "sleep 400\nkey f12\nsleep 200\n")
+    largest = float(run.state()["row_h"])
+    run.drive("key ctrl+minus\n" * 9 + "sleep 400\nkey f12\nsleep 200\n")
+    smallest = float(run.state()["row_h"])
+    run.drive("key ctrl+=\n" * 9 + "sleep 400\nkey f12\nsleep 200\n")
+    if float(run.state()["row_h"]) != largest:
+        raise Failure(f"the round trip landed on {run.state()['row_h']}, not {largest}")
+    if smallest >= base or largest <= base:
+        raise Failure(f"the ends are {smallest} and {largest} around {base}")
 
 
 @scenario("the-frame-is-at-the-compositors-scale")

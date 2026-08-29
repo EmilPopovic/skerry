@@ -26,6 +26,7 @@ pub fn registry() -> Registry<App> {
     panes(&mut registry);
     select(&mut registry);
     view(&mut registry);
+    zoom(&mut registry);
     file(&mut registry);
     edit(&mut registry);
     window(&mut registry);
@@ -205,6 +206,52 @@ fn edit(registry: &mut Registry<App>) {
             run: App::start_rename,
         },
         CommandSpec {
+            id: "file.open_with",
+            name: "action.open_with",
+            group: Group::File,
+            keys: &["ctrl+shift+o"],
+            enabled: |app: &App| app.panes.focused().focused().is_some(),
+            run: App::open_with,
+        },
+        CommandSpec {
+            id: "file.properties",
+            name: "action.properties",
+            group: Group::File,
+            // `Ctrl+I` from GNOME and macOS; `Alt+Enter` from Explorer and
+            // Dolphin. Both, because both are somebody's muscle memory.
+            keys: &["ctrl+i", "alt+enter"],
+            enabled: |_| true,
+            run: App::toggle_properties,
+        },
+        CommandSpec {
+            id: "file.terminal",
+            name: "action.terminal",
+            group: Group::File,
+            // What Nautilus, Dolphin and Thunar all use for the same thing.
+            keys: &["ctrl+shift+`", "f4"],
+            enabled: |_| true,
+            run: App::open_terminal,
+        },
+        CommandSpec {
+            id: "file.delete",
+            name: "action.delete",
+            group: Group::File,
+            // What every file manager binds a permanent delete to, and the
+            // second press is what makes it safe to have on a key at all.
+            keys: &["shift+delete"],
+            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
+            run: App::delete_selection,
+        },
+        CommandSpec {
+            id: "file.duplicate",
+            name: "action.duplicate",
+            group: Group::File,
+            // What every file manager with a Duplicate binds it to.
+            keys: &["ctrl+d"],
+            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
+            run: App::duplicate_selection,
+        },
+        CommandSpec {
             id: "file.trash",
             name: "action.trash",
             group: Group::File,
@@ -356,6 +403,44 @@ fn panes(registry: &mut Registry<App>) {
             keys: &["f6"],
             enabled: |app: &App| app.panes.leaf_count() > 1,
             run: App::next_pane,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// How big the rows are.
+///
+/// Its own function rather than three more rows in `view`, because a zoom is a
+/// question about the list's size and not about what it shows — and because the
+/// pointer, the touchpad and the keyboard all arrive at these three.
+fn zoom(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "view.zoom_in",
+            name: "action.zoom_in",
+            group: Group::View,
+            // Both, because a keyboard without a numeric pad has `Ctrl +` on a
+            // shifted key and every browser accepts `Ctrl =` for it.
+            keys: &["ctrl+=", "ctrl+plus"],
+            enabled: |app: &App| app.can_zoom(1),
+            run: App::zoom_in,
+        },
+        CommandSpec {
+            id: "view.zoom_out",
+            name: "action.zoom_out",
+            group: Group::View,
+            keys: &["ctrl+minus"],
+            enabled: |app: &App| app.can_zoom(-1),
+            run: App::zoom_out,
+        },
+        CommandSpec {
+            id: "view.zoom_reset",
+            name: "action.zoom_reset",
+            group: Group::View,
+            keys: &["ctrl+0"],
+            enabled: |app: &App| app.zoomed(),
+            run: App::zoom_reset,
         },
     ] {
         registry.add(spec);

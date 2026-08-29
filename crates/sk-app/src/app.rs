@@ -81,6 +81,15 @@ struct FilesDrag {
 /// Without it, every click in empty space flickers a one-pixel band.
 const BAND_SLOP: f32 = 3.0;
 
+/// The zoom steps, as factors on the list's metrics.
+///
+/// A table rather than a multiplier, so every step is a size somebody chose, and
+/// so that stepping out and back lands exactly where it started rather than a
+/// pixel off — which is what repeated multiplication does.
+const ZOOM: [f32; 7] = [0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 1.75];
+/// Which of them is 1.0.
+const ZOOM_DEFAULT: usize = 2;
+
 /// How to start.
 pub struct Options {
     /// The directory to open.
@@ -132,6 +141,7 @@ fn describe(window: &Window) -> String {
         ("keyboard", found.keyboard),
         ("pointer", found.pointer),
         ("cursor-shape", found.cursor_shape),
+        ("gestures", found.gestures),
         ("clipboard", found.clipboard),
         ("primary", found.primary_selection),
     ]
@@ -437,6 +447,10 @@ struct Replies {
     launched_rx: Receiver<Launched>,
     siblings_tx: std::sync::mpsc::Sender<Siblings>,
     siblings_rx: Receiver<Siblings>,
+    facts_tx: std::sync::mpsc::Sender<sk_fs::facts::Facts>,
+    facts_rx: Receiver<sk_fs::facts::Facts>,
+    openers_tx: std::sync::mpsc::Sender<crate::openers::Openers>,
+    openers_rx: Receiver<crate::openers::Openers>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -458,6 +472,8 @@ impl Replies {
         let (content_tx, content_rx) = mpsc::channel();
         let (launched_tx, launched_rx) = mpsc::channel();
         let (siblings_tx, siblings_rx) = mpsc::channel();
+        let (facts_tx, facts_rx) = mpsc::channel();
+        let (openers_tx, openers_rx) = mpsc::channel();
         Self {
             paste_tx,
             paste_rx,
@@ -467,6 +483,10 @@ impl Replies {
             launched_rx,
             siblings_tx,
             siblings_rx,
+            facts_tx,
+            facts_rx,
+            openers_tx,
+            openers_rx,
         }
     }
 }
@@ -574,6 +594,11 @@ pub struct App {
     crumb_pending: Option<usize>,
     /// The navigation button under the pointer.
     hovered_tool: Option<crate::layout::Tool>,
+    /// How far the list is zoomed, as a step on [`ZOOM`].
+    ///
+    /// A step rather than a factor, so `Ctrl +` and a pinch land on the same
+    /// sizes and a round trip out and back is exactly where it started.
+    zoom: usize,
     /// Where the last layout put the panes, and what the pointer is on.
     ///
     /// Copies rather than lookups, for the same reason `layout` is a field: a
@@ -601,6 +626,18 @@ pub struct App {
     typing_path: Option<crate::field::Field>,
     /// The command palette, while it is open.
     palette: Option<crate::palette::Palette>,
+    /// The Properties panel, while it is open.
+    properties: Option<crate::properties::Properties>,
+    /// The Open With list, while it is open.
+    openers: Option<crate::openers::Openers>,
+    /// What a second `Shift+Delete` would delete for good, and when the first
+    /// one was pressed.
+    ///
+    /// Rule 3 says permanent deletion is "an explicit, differently-shaped
+    /// action". This is the shape: the first press arms and says what it would
+    /// do, the second does it, and anything else at all disarms. It expires with
+    /// the notice that describes it, so the offer never outlives the sentence.
+    arming: Option<(Vec<PathBuf>, Instant)>,
     /// Whether the paths on the clipboard were cut rather than copied.
     ///
     /// Cleared by a copy and by a paste, so a second paste after a cut copies
@@ -691,6 +728,7 @@ impl App {
             ..WindowConfig::default()
         })?;
         let window_us = window_started.elapsed().as_micros();
+        report_globals(&window);
         let background = Background::start(options.path.clone())?;
         let drawing = open_drawing(&window)?;
         Ok(Self::assemble(options, window, window_us, background, drawing))
@@ -702,6 +740,10 @@ impl App {
     /// in an order that matters — the window first, so its socket is connected
     /// while the directory is being read — and assembling them is a different
     /// question from acquiring them.
+    // Almost all of it is one struct literal with one call site, and the fields
+    // are the state — splitting it would be two functions that each hold half an
+    // `App` and one that cannot be read without the other.
+    #[expect(clippy::too_many_lines, reason = "a struct literal with one call site")]
     fn assemble(
         options: &Options,
         window: Window,
@@ -727,10 +769,11 @@ impl App {
         let logical = window.logical();
         let scale_120 = window.scale_120();
         let capabilities = describe(&window);
-        report_globals(&window);
-        let measurer = Measurer::new(waker.handle());
-        let edits = crate::edit::Edits::new(waker.handle());
-        let now = Instant::now();
+        let (measurer, edits, now) = (
+            Measurer::new(waker.handle()),
+            crate::edit::Edits::new(waker.handle()),
+            Instant::now(),
+        );
         let mut app = Self {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
@@ -758,6 +801,7 @@ impl App {
             mounts_owed: false,
             watching: true,
             capabilities,
+            zoom: ZOOM_DEFAULT,
             placement: crate::panes::Placement::default(),
             measurer,
             sidebar,
@@ -780,6 +824,9 @@ impl App {
             hint: String::new(),
             typing_path: None,
             palette: None,
+            properties: None,
+            openers: None,
+            arming: None,
             cutting: false,
             menu: None,
             menu_wanted: None,
@@ -856,6 +903,8 @@ impl App {
             self.drain_paste();
             self.drain_content();
             self.drain_launches();
+            self.drain_facts();
+            self.drain_openers();
             if self.edits.drain_progress() {
                 self.dirty = true;
             }
@@ -1183,11 +1232,15 @@ impl App {
                 Button::Secondary if *pressed => self.open_menu(*position),
                 _ => {}
             },
-            Event::Scroll { delta, precise, .. } => {
+            Event::Scroll { delta, precise, mods } => {
                 // The palette takes the wheel while it is open. Without this the
                 // twelfth result of fifty is unreachable by pointer alone, and
                 // the listing scrolls behind a panel covering it.
-                if let Some(palette) = self.palette.as_mut() {
+                if mods.ctrl && self.palette.is_none() && self.menu.is_none() {
+                    // What `Ctrl` and a wheel do in every list and every
+                    // browser, and the pointer's half of what a pinch does.
+                    self.zoom_by(if delta.y < 0.0 { 1 } else { -1 });
+                } else if let Some(palette) = self.palette.as_mut() {
                     palette.wheel(delta.y);
                 } else if self.menu.is_some() {
                     // A menu taller than the window scrolls; one that fits does
@@ -1201,7 +1254,26 @@ impl App {
                 }
                 self.dirty = true;
             }
-            Event::KeyUp(_) | Event::Woken => {}
+            // **Three fingers, not two.** Two-finger movement on a touchpad is
+            // scroll and arrives as `Scroll`; a compositor that also reported it
+            // as a swipe would navigate while the list moved.
+            Event::Swiped { direction, fingers } if *fingers >= 3 => {
+                let command = match direction {
+                    sk_plat::Swipe::Left => "go.back",
+                    sk_plat::Swipe::Right => "go.forward",
+                    sk_plat::Swipe::Up => "go.parent",
+                    sk_plat::Swipe::Down => "go.open",
+                };
+                if let Some(id) = commands.find(command)
+                    && commands.enabled(id, self)
+                {
+                    commands.run(id, self);
+                }
+            }
+            Event::Pinched { out } => {
+                self.zoom_by(if *out { 1 } else { -1 });
+            }
+            Event::Swiped { .. } | Event::KeyUp(_) | Event::Woken => {}
         }
         self.settle_menu(commands);
     }
@@ -1228,6 +1300,27 @@ impl App {
         // has no use for.
         if self.menu.is_some() && self.menu_key(event, commands) {
             return;
+        }
+        // The Open With list takes the keyboard while it is up: arrows move,
+        // Enter launches, and anything else closes it — the same contract the
+        // context menu has, and for the same reason.
+        if self.openers.is_some() && self.openers_key(event, commands) {
+            return;
+        }
+        // The Properties panel is a statement, not a field: any key dismisses
+        // it, and dismisses only. The diagnostic report passes through for the
+        // reason it passes through an open menu — it is the only way the harness
+        // can see the panel at all.
+        if self.properties.is_some() {
+            let diagnostic = commands
+                .resolve(event, Scope::Global)
+                .and_then(|id| commands.describe(id))
+                .is_some_and(|command| command.id == "help.dump");
+            if !diagnostic {
+                self.properties = None;
+                self.dirty = true;
+                return;
+            }
         }
         // Before the palette and before the list: a sibling menu is the most
         // specific thing on screen while it is open, and an arrow that moved the
@@ -1920,6 +2013,49 @@ impl App {
         self.edits.rename(naming.path, naming.field.text, &self.jobs);
     }
 
+    /// Copies everything selected into the folder it is already in.
+    pub(crate) fn duplicate_selection(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        self.edits.duplicate_all(paths, &self.jobs);
+    }
+
+    /// Deletes what is selected for good, on the second press.
+    ///
+    /// The first press arms and says how many and where; the second, inside the
+    /// window the notice is up for, does it. Every other command disarms, which
+    /// is what makes this an action a person cannot arrive at by accident.
+    pub(crate) fn delete_selection(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let message = match paths.as_slice() {
+            [one] => sk_model::i18n::format(
+                "confirm.delete_one",
+                &[&one.file_name().unwrap_or_default().to_string_lossy()],
+            ),
+            many => sk_model::i18n::format("confirm.delete_many", &[&many.len()]),
+        };
+        // **The offer lasts exactly as long as the sentence describing it.**
+        // Not a timer of its own: anything that replaces the notice — a copy
+        // finishing, a paste refusing, the four seconds running out — takes the
+        // question off the screen, and an offer nobody can see is an offer
+        // nobody agreed to.
+        let armed = self.arming.take().is_some_and(|(armed, _)| armed == paths)
+            && self.notice.as_ref().is_some_and(|(showing, _)| *showing == message);
+        if armed {
+            self.step_off_the_selection(&paths);
+            self.edits.erase_all(paths, &self.jobs);
+            return;
+        }
+        self.notice = Some((message, Instant::now()));
+        self.arming = Some((paths, Instant::now()));
+        self.dirty = true;
+    }
+
     /// Moves what is selected to the trash.
     pub(crate) fn trash_selection(&mut self) {
         let paths = self.selected_paths();
@@ -1970,6 +2106,61 @@ impl App {
     /// Does the most recently undone change again.
     pub(crate) fn redo(&mut self) {
         self.edits.redo(&self.jobs);
+    }
+
+    /// Whether the list can be zoomed that way at all.
+    pub(crate) fn can_zoom(&self, steps: isize) -> bool {
+        let Ok(from) = isize::try_from(self.zoom) else { return false };
+        let next = from.saturating_add(steps);
+        next >= 0 && usize::try_from(next).is_ok_and(|next| next < ZOOM.len())
+    }
+
+    /// Whether the list is at anything other than its default size.
+    pub(crate) fn zoomed(&self) -> bool {
+        self.zoom != ZOOM_DEFAULT
+    }
+
+    /// Makes the list bigger or smaller by one step. Whether it moved.
+    pub(crate) fn zoom_by(&mut self, steps: isize) -> bool {
+        let Ok(from) = isize::try_from(self.zoom) else { return false };
+        let Ok(next) = usize::try_from(from.saturating_add(steps)) else { return false };
+        let next = next.min(ZOOM.len() - 1);
+        if next == self.zoom {
+            return false;
+        }
+        self.zoom = next;
+        self.apply_zoom();
+        true
+    }
+
+    pub(crate) fn zoom_in(&mut self) {
+        self.zoom_by(1);
+    }
+
+    pub(crate) fn zoom_out(&mut self) {
+        self.zoom_by(-1);
+    }
+
+    pub(crate) fn zoom_reset(&mut self) {
+        if self.zoom != ZOOM_DEFAULT {
+            self.zoom = ZOOM_DEFAULT;
+            self.apply_zoom();
+        }
+    }
+
+    /// Rebuilds the metrics and everything measured from them.
+    ///
+    /// The theme is rebuilt from scratch rather than scaled again, because
+    /// scaling an already-scaled value drifts: eight steps out and eight back
+    /// left the rows a pixel taller than they started.
+    fn apply_zoom(&mut self) {
+        let base = if self.theme.dark { Theme::dark() } else { Theme::light() };
+        self.theme.metrics = base.metrics.zoomed(ZOOM[self.zoom]);
+        self.relayout();
+        // The layout cache needs no clearing: every key carries the pixel size
+        // it was shaped at, so a zoom misses on every run and the old ones age
+        // out with the next generation.
+        self.dirty = true;
     }
 
     /// Opens a tab on the directory this one is showing.
@@ -2595,6 +2786,213 @@ impl App {
         });
     }
 
+    /// Asks which application should open the focused file.
+    ///
+    /// The list is what this machine's `mimeapps.list` and `.desktop` files say,
+    /// so it is read on a job — resolving the type opens the file when the name
+    /// says nothing, and resolving handlers reads every XDG data directory.
+    pub(crate) fn open_with(&mut self) {
+        if self.openers.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        let Some(path) = self.selected_paths().into_iter().next() else { return };
+        let Some(desktop) = self.desktop.clone() else { return };
+        let sender = self.replies.openers_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            let mime = desktop.mime.of(&path, false);
+            let rows = desktop.apps.handlers_for(&mime);
+            let list = crate::openers::Openers::new(path, mime, rows);
+            if sender.send(list).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// One key to the Open With list. Returns whether it was consumed.
+    fn openers_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.openers = None,
+            Key::Named(Named::Down) if bare => {
+                if let Some(list) = self.openers.as_mut() {
+                    list.step(1);
+                }
+            }
+            Key::Named(Named::Up) if bare => {
+                if let Some(list) = self.openers.as_mut() {
+                    list.step(-1);
+                }
+            }
+            Key::Named(Named::Enter) => self.follow_openers(),
+            _ => {
+                // The diagnostic report passes through, for the reason it passes
+                // through an open menu: it is the only way the harness sees this.
+                let diagnostic = commands
+                    .resolve(event, Scope::Global)
+                    .and_then(|id| commands.describe(id))
+                    .is_some_and(|command| command.id == "help.dump");
+                if diagnostic {
+                    return false;
+                }
+                self.openers = None;
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// A press while the Open With list is up. Whether it was taken.
+    fn press_in_the_openers(&mut self, position: Point) -> bool {
+        if self.openers.is_none() {
+            return false;
+        }
+        let row = self.hits.openers.iter().position(|area| area.contains(position.x, position.y));
+        // A press anywhere but a row closes it and does nothing else, which is
+        // the rule every overlay here follows.
+        let Some(offset) = row else {
+            self.openers = None;
+            self.dirty = true;
+            return true;
+        };
+        if let Some(list) = self.openers.as_mut() {
+            list.hover(offset);
+        }
+        self.follow_openers();
+        true
+    }
+
+    /// Takes delivery of the Open With list.
+    fn drain_openers(&mut self) {
+        let Ok(list) = self.replies.openers_rx.try_recv() else { return };
+        if list.rows.is_empty() {
+            self.notice =
+                Some((sk_model::i18n::format("error.no_handler", &[&list.mime]), Instant::now()));
+            self.dirty = true;
+            return;
+        }
+        self.openers = Some(list);
+        self.dirty = true;
+    }
+
+    /// Launches the highlighted application and closes the list.
+    fn follow_openers(&mut self) {
+        let Some(list) = self.openers.take() else { return };
+        self.dirty = true;
+        let Some(entry) = list.chosen().cloned() else { return };
+        let path = list.path.clone();
+        let sender = self.replies.launched_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            let launched = match Launcher::start(&entry, std::slice::from_ref(&path)) {
+                Ok(child) => Launched {
+                    notice: sk_model::i18n::format("notice.opening", &[&entry.name]),
+                    child: Some(child),
+                },
+                Err(sk_desktop::launch::Refused::NoTerminal) => Launched {
+                    notice: sk_model::i18n::format("error.no_terminal", &[&entry.name]),
+                    child: None,
+                },
+                Err(_) => Launched {
+                    notice: sk_model::i18n::format("error.launch_failed", &[&entry.name]),
+                    child: None,
+                },
+            };
+            if sender.send(launched).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Opens the Properties panel over what is selected.
+    ///
+    /// A second press closes it, like every other overlay here. The facts are
+    /// read on a job — `statx` on a hung mount is exactly what rule 1 exists for
+    /// — so the panel appears with its title and fills in.
+    pub(crate) fn toggle_properties(&mut self) {
+        if self.properties.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        let paths = self.selected_paths();
+        let paths = if paths.is_empty() {
+            // Nothing selected means the folder being shown, which is what every
+            // file manager's Properties does with an empty selection.
+            vec![self.panes.focused().path.clone()]
+        } else {
+            paths
+        };
+        for path in &paths {
+            let sender = self.replies.facts_tx.clone();
+            let wake = self.waker.handle();
+            let path = path.clone();
+            self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+                let Some(facts) = sk_fs::facts::describe(&path) else { return };
+                if sender.send(facts).is_ok() {
+                    wake.wake();
+                }
+            });
+        }
+        self.properties = Some(crate::properties::Properties::new(paths));
+        self.dirty = true;
+    }
+
+    /// Takes delivery of what a path turned out to be.
+    fn drain_facts(&mut self) {
+        while let Ok(facts) = self.replies.facts_rx.try_recv() {
+            // A panel that has been closed, or a second one opened over the
+            // first: the answer belongs to neither.
+            let Some(panel) = self.properties.as_mut() else { continue };
+            if !panel.paths.contains(&facts.path) {
+                continue;
+            }
+            panel.facts.push(facts);
+            self.dirty = true;
+        }
+        // A folder's real size is the measurer's answer, which it already has for
+        // every folder on screen — so a panel over one asks the cache rather than
+        // starting a second walk.
+        if let Some(panel) = self.properties.as_mut()
+            && panel.total.is_none()
+            && let Some(facts) = panel.only()
+            && facts.kind == sk_fs::facts::Kind::Directory
+            && let Some(bytes) = self.measurer.total(&facts.path)
+        {
+            panel.total = Some(bytes);
+            self.dirty = true;
+        }
+    }
+
+    /// Opens the user's terminal in the folder this pane is showing.
+    ///
+    /// [11-non-goals.md](../../../docs/11-non-goals.md) declines an embedded
+    /// terminal and names this as what covers the actual need — so it is one
+    /// command, and it honours whatever `$TERMINAL` says.
+    pub(crate) fn open_terminal(&mut self) {
+        let at = self.panes.focused().path.clone();
+        let sender = self.replies.launched_tx.clone();
+        let wake = self.waker.handle();
+        // A job for the same reason a launch is: `spawn` is `fork` plus `exec`
+        // and the parent blocks on the child's exec-status pipe.
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            let launched = match Launcher::terminal_in(&at) {
+                Ok(child) => Launched {
+                    notice: sk_model::i18n::lookup("notice.terminal").to_owned(),
+                    child: Some(child),
+                },
+                Err(_) => Launched {
+                    notice: sk_model::i18n::lookup("error.no_terminal_at_all").to_owned(),
+                    child: None,
+                },
+            };
+            if sender.send(launched).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
     /// Starts renaming the row a just-finished operation asked for.
     ///
     /// A folder is made and then named, and there is a directory read between the
@@ -3155,6 +3553,32 @@ tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} divider_aim={divider_
         )
     }
 
+    /// What the two panels are showing: the Properties title and its rows as
+    /// `label=value` pairs, and the Open With list's length and highlight.
+    ///
+    /// Enough for a scenario to assert about either without depending on what
+    /// this machine happens to have installed or on where the panel drew.
+    fn overlay_report(&self) -> (String, String, usize, String) {
+        let facts = self.properties.as_ref().map_or_else(String::new, |panel| {
+            panel
+                .rows(clock_seconds())
+                .iter()
+                .map(|row| format!("{}={}", row.label, row.value))
+                .collect::<Vec<_>>()
+                .join("|")
+        });
+        let properties =
+            self.properties.as_ref().map_or_else(String::new, crate::properties::Properties::title);
+        let openers = self.openers.as_ref().map_or(0, |list| list.rows.len());
+        let opener = self
+            .openers
+            .as_ref()
+            .and_then(|list| list.chosen())
+            .map(|entry| entry.name.clone())
+            .unwrap_or_default();
+        (properties, facts, openers, opener)
+    }
+
     fn chrome_state(&mut self) -> String {
         let frame = if self.window.needs_own_frame() { "own" } else { "server" };
         let frame_hover = match self.hovered_button {
@@ -3197,6 +3621,7 @@ tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} divider_aim={divider_
         let box_of = crate::view::path_field(&self.layout, &self.theme.metrics);
         let path_field =
             format!("{:.1},{:.1},{:.1},{:.1}", box_of.x, box_of.y, box_of.width, box_of.height);
+        let (properties, facts, openers, opener) = self.overlay_report();
         let panes_report = self.panes_report();
         let menu_report = self.menu_report();
         let palette_report = self.palette_report();
@@ -3219,6 +3644,7 @@ separators={separators} separator_hover={separator_hover} separator_aim={separat
 crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={crumb_menu_active:?} \
 crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
+properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
 tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
@@ -3271,6 +3697,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.pointer = position;
         if self.palette.is_some() {
             self.palette_press(position, commands);
+            return;
+        }
+        if self.properties.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        if self.press_in_the_openers(position) {
             return;
         }
         if self.press_in_the_crumb_menu(position) {
@@ -4550,6 +4983,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             menu,
             typing_path,
             palette,
+            properties,
+            openers,
             placement,
             ..
         } = self;
@@ -4583,6 +5018,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             menu: menu.as_ref(),
             path_entry: typing_path.as_ref(),
             palette: palette.as_ref(),
+            properties: properties.as_ref(),
+            openers: openers.as_ref(),
             hint,
             leaves: &placement.leaves,
             dividers: &placement.dividers,

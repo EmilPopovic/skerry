@@ -99,6 +99,15 @@ pub struct Capabilities {
     /// resolved; false means the core cursor font is in use, which is a set of
     /// bitmaps from 1987 and worth knowing about when a screenshot looks wrong.
     pub cursor_shape: bool,
+    /// Whether touchpad swipe and pinch gestures arrive.
+    ///
+    /// `zwp_pointer_gestures_v1` on Wayland. **Always false on X11**, where the
+    /// equivalent is `XInput` 2.4's gesture events — which need the whole `XInput`
+    /// event pipeline, and this backend reads core events. Reported rather than
+    /// worked around: a person on X11 gets scroll and no pinch, and that is a
+    /// thing to be able to read off one line of a bug report rather than to
+    /// discover.
+    pub gestures: bool,
     /// The clipboard: `wl_data_device_manager`, or an X11 server, which has
     /// always had selections.
     pub clipboard: bool,

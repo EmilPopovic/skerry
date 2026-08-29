@@ -16,6 +16,7 @@
 
 pub mod copy;
 pub mod device;
+pub mod facts;
 pub mod mounts;
 pub mod ops;
 pub mod scan;

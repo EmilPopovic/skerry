@@ -1244,6 +1244,11 @@ fn probe(connection: &XCBConnection, root: xproto::Window, atoms: &Atoms) -> Cap
         keyboard: false,
         pointer: true,
         cursor_shape: false,
+        // XInput 2.4 has gesture events and this backend reads core ones, so a
+        // touchpad here sends scroll and nothing else. Reported rather than
+        // pretended: ADR 0007's whole point is that a capability is probed and
+        // said out loud.
+        gestures: false,
         clipboard: true,
         primary_selection: true,
         render_device: None,

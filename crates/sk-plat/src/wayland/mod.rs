@@ -42,6 +42,7 @@ use wayland_protocols::wp::fractional_scale::v1::client::{
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
 };
+use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v1;
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_manager_v1;
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
 use wayland_protocols::xdg::decoration::zv1::client::{
@@ -187,6 +188,12 @@ struct State {
     /// a capability rather than worked around: the fallback is an `XCursor` theme
     /// parser and a shm buffer, and that is a library.
     cursor: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    /// The compositor's touchpad gesture manager, where it has one.
+    ///
+    /// Held rather than consumed at open, because a seat can gain a pointer
+    /// after the window is up — a docked laptop, a mouse plugged in — and the
+    /// swipe and pinch objects are made from the pointer.
+    gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
     /// What the pointer was last told to be, so it is told only on a change.
     shape: Cursor,
     /// Selection writes the peer has not finished reading.
@@ -248,6 +255,48 @@ impl State {
     }
 }
 
+/// Every global this window asks the compositor for, bound once.
+///
+/// A struct rather than eleven `let`s in `open`, because the *version ranges*
+/// are the interesting part and they belong together: each is a pair of numbers
+/// this program has been tested against, and a compositor advertising something
+/// newer is bound at the version we know.
+struct Globals {
+    compositor: wl_compositor::WlCompositor,
+    wm_base: xdg_wm_base::XdgWmBase,
+    wl_seat: wl_seat::WlSeat,
+    viewporter: Option<wp_viewporter::WpViewporter>,
+    fractional: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
+    decorations: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    data_manager: Option<wl_data_device_manager::WlDataDeviceManager>,
+    primary_manager:
+        Option<zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1>,
+    dmabuf: Option<(
+        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
+    )>,
+    cursor_shapes: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+}
+
+impl Globals {
+    fn bind(globals: &GlobalList, handle: &QueueHandle<State>) -> Result<Self, Problem> {
+        Ok(Self {
+            compositor: bind(globals, handle, 1..=6).ok_or_else(|| missing("wl_compositor"))?,
+            wm_base: bind(globals, handle, 1..=6).ok_or_else(|| missing("xdg_wm_base"))?,
+            wl_seat: bind(globals, handle, 5..=9).ok_or_else(|| missing("wl_seat"))?,
+            viewporter: bind(globals, handle, 1..=1),
+            fractional: bind(globals, handle, 1..=1),
+            decorations: bind(globals, handle, 1..=1),
+            data_manager: bind(globals, handle, 3..=3),
+            primary_manager: bind(globals, handle, 1..=1),
+            dmabuf: ask_which_gpu(globals, handle),
+            cursor_shapes: bind(globals, handle, 1..=2),
+            gestures: bind(globals, handle, 1..=3),
+        })
+    }
+}
+
 impl Window {
     /// Connects to the compositor and maps a window.
     pub fn open(config: &WindowConfig) -> Result<Self, Problem> {
@@ -266,26 +315,19 @@ impl Window {
             .map(|global| (global.interface, global.version))
             .collect();
 
-        let compositor: wl_compositor::WlCompositor =
-            bind(&globals, &handle, 1..=6).ok_or_else(|| missing("wl_compositor"))?;
-        let wm_base: xdg_wm_base::XdgWmBase =
-            bind(&globals, &handle, 1..=6).ok_or_else(|| missing("xdg_wm_base"))?;
-        let wl_seat: wl_seat::WlSeat =
-            bind(&globals, &handle, 5..=9).ok_or_else(|| missing("wl_seat"))?;
-        let viewporter: Option<wp_viewporter::WpViewporter> = bind(&globals, &handle, 1..=1);
-        let fractional: Option<wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1> =
-            bind(&globals, &handle, 1..=1);
-        let decorations: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1> =
-            bind(&globals, &handle, 1..=1);
-        let data_manager: Option<wl_data_device_manager::WlDataDeviceManager> =
-            bind(&globals, &handle, 3..=3);
-        let primary_manager: Option<
-            zwp_primary_selection_device_manager_v1::ZwpPrimarySelectionDeviceManagerV1,
-        > = bind(&globals, &handle, 1..=1);
-        let dmabuf = ask_which_gpu(&globals, &handle);
-
-        let cursor_shapes: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1> =
-            bind(&globals, &handle, 1..=2);
+        let Globals {
+            compositor,
+            wm_base,
+            wl_seat,
+            viewporter,
+            fractional,
+            decorations,
+            data_manager,
+            primary_manager,
+            dmabuf,
+            cursor_shapes,
+            gestures,
+        } = Globals::bind(&globals, &handle)?;
         let clipboard =
             clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
         let surface = compositor.create_surface(&handle, ());
@@ -310,6 +352,7 @@ impl Window {
             keyboard: false,
             pointer: false,
             cursor_shape: cursor_shapes.is_some(),
+            gestures: gestures.is_some(),
             clipboard: data_manager.is_some(),
             primary_selection: primary_manager.is_some(),
             render_device: None,
@@ -328,6 +371,7 @@ impl Window {
             primary_manager,
             clipboard,
             cursor: None,
+            gestures,
             shape: Cursor::Arrow,
             transfers: Vec::new(),
             pending_offer: None,
@@ -1016,6 +1060,7 @@ ignore_events!(
     wl_buffer::WlBuffer,
     wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
     wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+    zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
     zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     wl_compositor::WlCompositor,
     wl_output::WlOutput,

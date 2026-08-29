@@ -85,6 +85,10 @@ pub struct Chrome<'a> {
     pub path_entry: Option<&'a Field>,
     /// The command palette, while it is open.
     pub palette: Option<&'a Palette>,
+    /// The Properties panel, while it is open.
+    pub properties: Option<&'a crate::properties::Properties>,
+    /// The Open With list, while it is open.
+    pub openers: Option<&'a crate::openers::Openers>,
     /// The keyboard hint in the corner of the path bar, from the registry.
     pub hint: &'a str,
     /// Where each leaf of the pane tree is, in layout order.
@@ -132,6 +136,8 @@ pub struct Hits {
     /// click reports is an offset from the palette's scroll rather than an index
     /// into the whole result list.
     pub palette: Vec<Area>,
+    /// The same, for the Open With list's drawn rows.
+    pub openers: Vec<Area>,
     /// The palette's query field, so a click into it can place the caret.
     pub palette_field: Option<Area>,
 }
@@ -211,6 +217,12 @@ pub fn draw(
     }
     if let Some(palette) = chrome.palette {
         command_palette(painter, layout, palette, hits);
+    }
+    if let Some(panel) = chrome.properties {
+        properties(painter, layout, panel, now);
+    }
+    if let Some(list) = chrome.openers {
+        open_with(painter, layout, list, hits);
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, here, typed);
@@ -537,7 +549,7 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
         .fold(0.0f32, f32::max);
     let width = (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1);
     let area = crate::menu::place(menu.at, width, crate::menu::height(drawn), layout.window);
-    panel(painter, area);
+    panel_shape(painter, area);
 
     // One rectangle per row, drawn or not, so a hit is an index into the menu's
     // own rows: a row that is scrolled out gets an empty rectangle, which
@@ -624,7 +636,7 @@ fn crumb_menu(
         width,
         height,
     };
-    panel(painter, area);
+    panel_shape(painter, area);
 
     hits.crumb_menu.clear();
     for (offset, name) in drawn.iter().enumerate() {
@@ -689,6 +701,156 @@ const CRUMB_MENU_MARK: f32 = 16.0;
 /// How wide the menu may be, whatever its widest name is.
 const CRUMB_MENU_WIDTH: (f32, f32) = (160.0, 420.0);
 
+/// The Properties panel: a title, and a label-and-value row per fact.
+///
+/// Centred, because it is a statement rather than a thing to aim at — nothing in
+/// it is clickable, and a panel anchored to a row would move when the row did.
+fn properties(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    panel: &crate::properties::Properties,
+    now: i64,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let rows = panel.rows(now);
+    let title = panel.title();
+
+    let mut widest = text_width(painter, &title, metrics.path_size, true);
+    for row in &rows {
+        let label = text_width(painter, &row.label, metrics.text_size, false);
+        let value = text_width(painter, &row.value, metrics.text_size, false);
+        widest = widest.max(label + PROPERTIES_GAP + value);
+    }
+    let width = (widest + PROPERTIES_INSET * 2.0)
+        .clamp(PROPERTIES_WIDTH.0.min(layout.window.width), PROPERTIES_WIDTH.1);
+    let height = PROPERTIES_TITLE + rows.len() as f32 * PROPERTIES_STEP + PROPERTIES_INSET;
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: ((layout.window.height - height) / 2.0).max(8.0),
+        width,
+        height,
+    };
+    panel_shape(painter, area);
+
+    let baseline = painter.baseline(area.y + 4.0, PROPERTIES_TITLE, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
+    line(
+        painter,
+        &title,
+        style,
+        area.x + PROPERTIES_INSET,
+        area.width - PROPERTIES_INSET * 2.0,
+        baseline,
+    );
+    painter.hairline(
+        area.x + PROPERTIES_INSET,
+        area.y + PROPERTIES_TITLE - 1.0,
+        area.width - PROPERTIES_INSET * 2.0,
+        theme.palette.divider,
+    );
+
+    for (index, row) in rows.iter().enumerate() {
+        let top = area.y + PROPERTIES_TITLE + index as f32 * PROPERTIES_STEP;
+        let baseline = painter.baseline(top, PROPERTIES_STEP, metrics.text_size);
+        let label = TextStyle::new(metrics.text_size, theme.palette.dim);
+        let column = (area.width - PROPERTIES_INSET * 2.0) * 0.38;
+        line(painter, &row.label, label, area.x + PROPERTIES_INSET, column, baseline);
+        let value = TextStyle::new(metrics.text_size, theme.palette.text);
+        line(
+            painter,
+            &row.value,
+            value,
+            area.x + PROPERTIES_INSET + column + PROPERTIES_GAP,
+            area.width - PROPERTIES_INSET * 2.0 - column - PROPERTIES_GAP,
+            baseline,
+        );
+    }
+}
+
+/// Open With: the applications this machine says can open the file.
+///
+/// Centred like the Properties panel and for the same reason — it is about the
+/// file rather than about a place on screen — and with the type it resolved to
+/// under the title, because "why are these the choices" is the question a person
+/// asks when the list surprises them.
+fn open_with(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    list: &crate::openers::Openers,
+    hits: &mut Hits,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let (first, drawn) = list.window();
+    let title = crate::panes::title_of(&list.path).to_owned();
+
+    let mut widest = text_width(painter, &title, metrics.path_size, true);
+    widest = widest.max(text_width(painter, &list.mime, metrics.header_size, false));
+    for entry in drawn {
+        widest = widest.max(text_width(painter, &entry.name, metrics.text_size, false));
+    }
+    let width = (widest + PROPERTIES_INSET * 2.0)
+        .clamp(PROPERTIES_WIDTH.0.min(layout.window.width), PROPERTIES_WIDTH.1);
+    let height = OPENERS_TITLE + drawn.len() as f32 * OPENERS_STEP + PROPERTIES_INSET;
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: ((layout.window.height - height) / 2.0).max(8.0),
+        width,
+        height,
+    };
+    panel_shape(painter, area);
+
+    let baseline = painter.baseline(area.y + 4.0, PROPERTIES_TITLE - 12.0, metrics.path_size);
+    let inner = area.width - PROPERTIES_INSET * 2.0;
+    let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
+    line(painter, &title, style, area.x + PROPERTIES_INSET, inner, baseline);
+    let under = painter.baseline(area.y + PROPERTIES_TITLE - 14.0, 16.0, metrics.header_size);
+    let subtitle = TextStyle::new(metrics.header_size, theme.palette.dim);
+    line(painter, &list.mime, subtitle, area.x + PROPERTIES_INSET, inner, under);
+    painter.hairline(
+        area.x + PROPERTIES_INSET,
+        area.y + OPENERS_TITLE - 1.0,
+        inner,
+        theme.palette.divider,
+    );
+
+    hits.openers.clear();
+    for (offset, entry) in drawn.iter().enumerate() {
+        let top = area.y + OPENERS_TITLE + offset as f32 * OPENERS_STEP;
+        hits.openers.push(Area { x: area.x, y: top, width: area.width, height: OPENERS_STEP });
+        let highlighted = list.active == first + offset;
+        if highlighted {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, OPENERS_STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let colour = if highlighted { theme.palette.selected_text } else { theme.palette.text };
+        let baseline = painter.baseline(top, OPENERS_STEP, metrics.text_size);
+        line(
+            painter,
+            &entry.name,
+            TextStyle::new(metrics.text_size, colour),
+            area.x + PROPERTIES_INSET,
+            inner,
+            baseline,
+        );
+    }
+}
+
+/// The title and subtitle together, and one application row.
+const OPENERS_TITLE: f32 = 54.0;
+const OPENERS_STEP: f32 = 28.0;
+
+/// The title strip's height, one row, the inset, and the least space between a
+/// label and its value.
+const PROPERTIES_TITLE: f32 = 38.0;
+const PROPERTIES_STEP: f32 = 24.0;
+const PROPERTIES_INSET: f32 = 16.0;
+const PROPERTIES_GAP: f32 = 24.0;
+/// How wide the panel may be. A path is the longest value in it and a narrow
+/// panel would ellipsize exactly the one thing somebody opened it to read.
+const PROPERTIES_WIDTH: (f32, f32) = (360.0, 640.0);
+
 fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette, hits: &mut Hits) {
     use crate::palette::{FIELD, INSET, SPACING, STEP, TOP, VISIBLE, WIDTH};
 
@@ -703,7 +865,7 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
         width,
         height,
     };
-    panel(painter, area);
+    panel_shape(painter, area);
 
     let field_area = Area { x: area.x, y: area.y, width: area.width, height: FIELD };
     hits.palette_field = Some(field_area);
@@ -787,7 +949,7 @@ fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout, focus
         width,
         height: FIND_HEIGHT,
     };
-    panel(painter, area);
+    panel_shape(painter, area);
     // An accent outline rather than a tinted strip somewhere else: the border is
     // on the thing that has the keyboard, which is what makes it a mode marker
     // rather than a decoration. Dim once the keyboard has gone elsewhere and the
@@ -1733,7 +1895,7 @@ fn type_ahead(painter: &mut Painter<'_>, layout: &PaneLayout, typed: &str) {
         width: 220.0,
         height: 40.0,
     };
-    panel(painter, area);
+    panel_shape(painter, area);
     let baseline = painter.baseline(area.y, area.height, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
     line(painter, typed, style, area.x + 16.0, area.width - 32.0, baseline);
@@ -1785,7 +1947,7 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
         width,
         height,
     };
-    panel(painter, area);
+    panel_shape(painter, area);
 
     let baseline = painter.baseline(area.y + 14.0, 24.0, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
@@ -1888,7 +2050,7 @@ fn stats_overlay(
     let height = rows.len() as f32 * step + 46.0;
     let area =
         Area { x: layout.body.right() - width - 16.0, y: layout.body.y + 16.0, width, height };
-    panel(painter, area);
+    panel_shape(painter, area);
 
     let baseline = painter.baseline(area.y + 10.0, 22.0, metrics.text_size);
     let title = TextStyle::new(metrics.text_size, theme.palette.text).bold();
@@ -1912,7 +2074,7 @@ fn stats_overlay(
 /// The shadow is three concentric translucent rectangles rather than a blur: a
 /// real Gaussian would be a second pipeline and a render target, and at this
 /// radius three steps are indistinguishable from one. Four quads for an overlay.
-fn panel(painter: &mut Painter<'_>, area: Area) {
+fn panel_shape(painter: &mut Painter<'_>, area: Area) {
     let theme = *painter.theme;
     let radius = painter.px(10.0);
     for (spread, alpha) in [(10.0, 18u8), (6.0, 22), (3.0, 26)] {
@@ -2017,6 +2179,8 @@ mod tests {
                 menu: None,
                 path_entry: None,
                 palette: None,
+                properties: None,
+                openers: None,
                 hint: "",
                 leaves: &leaves,
                 dividers: &dividers,

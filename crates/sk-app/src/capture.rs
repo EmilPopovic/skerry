@@ -65,6 +65,10 @@ pub struct Capture {
     pub palette: bool,
     /// Whether to draw the sibling menu one of the path bar's chevrons opens.
     pub crumbs: bool,
+    /// Whether to draw the Properties panel.
+    pub properties: bool,
+    /// Whether to draw the Open With list.
+    pub open_with: bool,
     /// Whether to draw that menu over a folder that holds no folders.
     pub crumbs_empty: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
@@ -145,6 +149,8 @@ struct Overlays {
     path_entry: Option<crate::field::Field>,
     palette: Option<crate::palette::Palette>,
     naming: Option<crate::edit::Naming>,
+    properties: Option<crate::properties::Properties>,
+    openers: Option<crate::openers::Openers>,
 }
 
 /// A rename in progress over the row whose name has two dots in it.
@@ -200,6 +206,66 @@ fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
     )
 }
 
+/// The Properties panel over one file, with every fact stated.
+///
+/// **Stated and not read.** A capture that ran `statx` on the fixture would put
+/// this machine's uid, this machine's filesystem and this machine's block size
+/// into a reference image, and the frame would differ on every other machine —
+/// which is the same trade `sample_menu` makes with its dimming, for the same
+/// reason.
+fn sample_properties() -> crate::properties::Properties {
+    let mut panel = crate::properties::Properties::new(vec![std::path::PathBuf::from(
+        "/tmp/skerry-golden/fixture/archive.tar.gz",
+    )]);
+    panel.facts.push(sk_fs::facts::Facts {
+        path: std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
+        size: 12_582_912,
+        on_disk: 12_587_008,
+        mode: 0o644,
+        modified: FIXED_MTIME,
+        accessed: FIXED_MTIME,
+        created: Some(FIXED_MTIME),
+        uid: 1000,
+        gid: 1000,
+        links: 1,
+        kind: sk_fs::facts::Kind::File,
+        target: None,
+        filesystem: Some("ext2/3/4"),
+    });
+    panel
+}
+
+/// The Open With list, over a type three applications claim.
+///
+/// **Stated, like every other sample here.** The real list is whatever
+/// `mimeapps.list` says on the machine running the capture, which is a different
+/// list on every machine and a different reference image on each.
+fn sample_openers() -> crate::openers::Openers {
+    let entry = |name: &str, binary: &str| sk_desktop::DesktopEntry {
+        id: format!("{binary}.desktop"),
+        path: std::path::PathBuf::from("/usr/share/applications"),
+        name: name.to_owned(),
+        exec: format!("{binary} %f"),
+        terminal: false,
+        mime_types: vec!["application/gzip".to_owned()],
+        no_display: false,
+        try_exec: None,
+    };
+    crate::openers::Openers::new(
+        std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
+        "application/gzip".to_owned(),
+        vec![
+            entry("Archive Manager", "org.gnome.FileRoller"),
+            entry("Ark", "org.kde.ark"),
+            entry("Text Editor", "org.gnome.TextEditor"),
+        ],
+    )
+}
+
+/// The instant the fixture's files are stamped with, which `tools/golden` sets
+/// and this states so the panel's three dates are the same in every run.
+const FIXED_MTIME: i64 = 981_158_400;
+
 fn sample_overlays(
     request: &Capture,
     layout: &Layout,
@@ -219,6 +285,8 @@ fn sample_overlays(
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
         palette: request.palette.then(sample_palette),
         naming: request.rename.then(|| sample_naming(pane)).flatten(),
+        properties: request.properties.then(sample_properties),
+        openers: request.open_with.then(sample_openers),
     }
 }
 
@@ -325,6 +393,8 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         menu: sample.overlays.menu.as_ref(),
         path_entry: sample.overlays.path_entry.as_ref(),
         palette: sample.overlays.palette.as_ref(),
+        properties: sample.overlays.properties.as_ref(),
+        openers: sample.overlays.openers.as_ref(),
         hint: sample.hint,
         leaves: sample.leaves,
         dividers: sample.dividers,

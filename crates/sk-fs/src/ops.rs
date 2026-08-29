@@ -57,6 +57,18 @@ pub enum Change {
         /// What the copy is called.
         destination: PathBuf,
     },
+    /// Something deleted for good.
+    ///
+    /// **The one change with no way back**, which is why
+    /// [03-principles.md](../../../docs/03-principles.md) rule 3 calls permanent
+    /// deletion "an explicit, differently-shaped action" rather than an
+    /// exception to itself. It is not put on the undo stack at all: an entry
+    /// that refused would make everything under it unreachable, and `Ctrl+Z`
+    /// after a delete should take back the rename before it.
+    Erased {
+        /// What is gone.
+        path: PathBuf,
+    },
     /// Something moved into the trash, with both files the specification puts
     /// there so the undo can take both away.
     Trashed {
@@ -83,7 +95,10 @@ impl Change {
             Self::Created { path } => path,
             Self::Renamed { to, .. } => to,
             Self::Copied { destination, .. } => destination,
-            Self::Trashed { original, .. } => original,
+            // Both are gone, so the cursor goes where they were: the listing
+            // finds nothing there and leaves it on the neighbour, which is the
+            // row a person deleting several in a row needs it on.
+            Self::Trashed { original, .. } | Self::Erased { path: original } => original,
         }
     }
 
@@ -100,7 +115,9 @@ impl Change {
             // The *first* one, because a batch is undone backwards and the first
             // change is the last to be put back.
             Self::Batch(changes) => changes.first().and_then(Change::origin),
-            Self::Created { .. } => None,
+            // Nothing to point at: undoing a `Created` removes the folder, and
+            // an `Erased` is not undone at all.
+            Self::Created { .. } | Self::Erased { .. } => None,
             Self::Renamed { from, .. } => Some(from),
             // A copy's source never moved, so an undo leaves the cursor on it.
             Self::Copied { source, .. } => Some(source),
@@ -198,6 +215,7 @@ pub fn trash(path: &Path) -> Result<Change, Problem> {
 pub fn copy_into(
     source: &Path,
     into: &Path,
+    conflict: Conflict,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
@@ -208,6 +226,23 @@ pub fn copy_into(
             "no name to copy it under",
         ));
     };
+    // **A copy into the folder it came from is the ordinary case**, not an
+    // error: it is what Duplicate is, and what pasting into the folder you
+    // copied from means. Under a free name, chosen here on the job — a `statx`
+    // per candidate is not something the frame loop may do.
+    if conflict == Conflict::Rename
+        && let Some(free) = crate::copy::free_name(into, name)
+        && free != name
+    {
+        let destination = into.join(&free);
+        return match crate::copy::copy_to(source, &destination, cancel, watch) {
+            Ok(()) => Ok(Change::Copied { source: source.to_path_buf(), destination }),
+            Err(_) if cancel.is_cancelled() && destination.exists() => {
+                Ok(Change::Copied { source: source.to_path_buf(), destination })
+            }
+            Err(problem) => Err(problem),
+        };
+    }
     let destination = into.join(name);
     let mut progress = crate::copy::Progress::default();
     match crate::copy::copy_into(
@@ -228,6 +263,31 @@ pub fn copy_into(
         }
         Err(problem) => Err(problem),
     }
+}
+
+/// What a copy does when the name it wants is taken.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Conflict {
+    /// Refuse, which is what every other mutation here does with a taken name.
+    #[default]
+    Refuse,
+    /// Copy under a free name beside it: `report.pdf` becomes
+    /// `report (copy).pdf`, then `report (copy 2).pdf`.
+    ///
+    /// **Only ever for a copy.** A move that quietly renamed would leave a
+    /// person with two files under names neither of them chose, and no way to
+    /// tell which is which — so a move with a taken name is refused and said out
+    /// loud.
+    Rename,
+}
+
+/// Deletes `path` and everything under it, for good.
+///
+/// **Runs on a job**, and there is nothing to undo afterwards. The caller is
+/// responsible for having asked.
+pub fn erase(path: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
+    crate::copy::remove_tree(path, cancel)?;
+    Ok(Change::Erased { path: path.to_path_buf() })
 }
 
 /// Moves `source` into the directory `into`.
@@ -263,6 +323,14 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         // state somebody can look at and act on, where carrying on past an
         // error would keep changing a filesystem that has already surprised us.
         Change::Batch(changes) => changes.iter().rev().try_for_each(revert),
+        // **Never reached through the undo stack**, which does not hold these —
+        // but `revert` is public and the compiler asks, and an answer that
+        // pretended to succeed would be worse than one that says no.
+        Change::Erased { path } => Err(Problem::new(
+            ProblemKind::Unreadable,
+            path.display().to_string(),
+            "a permanent delete cannot be undone",
+        )),
         // `rmdir`, not a recursive remove: if something has been put in it since,
         // this fails with `ENOTEMPTY` and the undo refuses. An undo that deletes
         // files somebody added is not an undo.
@@ -319,20 +387,26 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             };
             rename(from, name)
         }
+        // **To the recorded destination, not to one derived from the source.**
+        // A copy into the folder its original is in lands under a free name, and
+        // re-deriving would send the redo at the taken one — which fails, and
+        // would have failed silently differently once the free name changed.
         Change::Copied { source, destination } => {
-            let Some(into) = destination.parent() else {
-                return Err(Problem::new(
-                    ProblemKind::BadName,
-                    destination.display().to_string(),
-                    "no parent",
-                ));
-            };
-            copy_into(source, into, &sk_util::Cancel::new(), &mut |_| {})
+            crate::copy::copy_to(source, destination, &sk_util::Cancel::new(), &mut |_| {})?;
+            Ok(Change::Copied { source: source.clone(), destination: destination.clone() })
         }
         // Re-trashed from scratch rather than by moving the same bytes back into
         // the same slot: the slot may have been taken, and `trash` is the thing
         // that knows how to claim one.
         Change::Trashed { original, .. } => trash(original),
+        // Never reached: a permanent delete is not recorded, so there is nothing
+        // to redo. The compiler asks, and an answer that deleted something again
+        // would be an answer to a question nobody asked.
+        Change::Erased { path } => Err(Problem::new(
+            ProblemKind::Unreadable,
+            path.display().to_string(),
+            "a permanent delete cannot be done again",
+        )),
     }
 }
 
@@ -460,7 +534,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{
-        Change, apply, copy_into, create_directory, encode_path, move_into, rename, revert, trash,
+        Change, Conflict, apply, copy_into, create_directory, encode_path, move_into, rename,
+        revert, trash,
     };
     use sk_model::ProblemKind;
     use std::path::{Path, PathBuf};
@@ -482,8 +557,14 @@ mod tests {
         std::fs::create_dir(&into).unwrap();
         std::fs::write(from.join("folder/inside.txt"), b"contents").unwrap();
 
-        let change = copy_into(&from.join("folder"), &into, &sk_util::Cancel::new(), &mut |_| {})
-            .expect("copied");
+        let change = copy_into(
+            &from.join("folder"),
+            &into,
+            Conflict::Refuse,
+            &sk_util::Cancel::new(),
+            &mut |_| {},
+        )
+        .expect("copied");
         let landed = into.join("folder");
         assert_eq!(change.subject(), landed);
         assert!(landed.join("inside.txt").is_file());
@@ -506,7 +587,9 @@ mod tests {
         let into = root.join("into");
         std::fs::write(&from, b"x").unwrap();
         std::fs::create_dir(&into).unwrap();
-        let change = copy_into(&from, &into, &sk_util::Cancel::new(), &mut |_| {}).expect("copied");
+        let change =
+            copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+                .expect("copied");
         assert_eq!(change.origin(), Some(from.as_path()));
     }
 
@@ -540,7 +623,8 @@ mod tests {
         std::fs::write(into.join("one.txt"), b"old").unwrap();
 
         let refused =
-            copy_into(&from, &into, &sk_util::Cancel::new(), &mut |_| {}).expect_err("refused");
+            copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+                .expect_err("refused");
         assert_eq!(refused.kind(), ProblemKind::NameTaken);
         assert_eq!(std::fs::read(into.join("one.txt")).unwrap(), b"old");
     }
