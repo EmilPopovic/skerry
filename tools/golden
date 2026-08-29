@@ -158,6 +158,10 @@ FRAMES = [
     # caret, underlined, and is not part of the name yet. The only frame that
     # would catch the rule drawing through the glyphs instead of under them.
     ("composing", ["--size", "900x400", "--scale", "125", "--composing"]),
+    # Two panes stacked, the lower one with two tabs. The only frame that sees a
+    # second column header halfway down the window — where a rule drawn from the
+    # window's left edge rather than the header's own cuts through the sidebar.
+    ("split", ["--size", "900x620", "--scale", "125", "--split"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so
     # `--own-frame` tells it; without this the title bar, the three buttons and

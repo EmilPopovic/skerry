@@ -853,6 +853,9 @@ fn open_with(
     }
 }
 
+/// How much smaller a tab's shape is than the space it is given, at each edge.
+const TAB_INSET: f32 = 3.0;
+
 /// The title and subtitle together, and one application row.
 const OPENERS_TITLE: f32 = 54.0;
 const OPENERS_STEP: f32 = 28.0;
@@ -1508,17 +1511,24 @@ fn tab_strip(
     for (index, area) in crate::panes::tab_areas(layout.tabs, titles.len()).enumerate() {
         let active = index == tabs.active;
         let hovered = chrome.hovered_tab == Some((layout.id, index));
-        // The showing tab of the leaf that has the keyboard is the only one drawn
-        // as selected. Two tabs both looking current is the question "where does
-        // typing go" left unanswered.
-        // The showing tab of the leaf with the keyboard is the background;
-        // every other tab is a step off it. `row_background` is the same pair of
-        // tints the list uses, so a current tab and a selected row agree.
+        // The showing tab of the leaf with the keyboard is the background; every
+        // other tab is a step off it. `row_background` is the same pair of tints
+        // the list uses, so a current tab and a selected row agree.
         let background = theme.row_background(active && has_keyboard, active || hovered);
-        let pill = painter.rect(area.x + 2.0, area.y + 3.0, area.width - 4.0, area.height - 3.0);
+        // **Inset by the same amount top and bottom**, and the text centred in
+        // the shape rather than in the strip: with three pixels off the top and
+        // none off the bottom, every tab's label sat a pixel and a half above
+        // the middle of its own pill.
+        let shape = Area {
+            x: area.x + 2.0,
+            y: area.y + TAB_INSET,
+            width: area.width - 4.0,
+            height: area.height - TAB_INSET * 2.0,
+        };
+        let pill = painter.rect(shape.x, shape.y, shape.width, shape.height);
         painter.list.rect(pill, background, painter.px(metrics.radius));
         let colour = if active { theme.palette.text } else { theme.palette.dim };
-        let baseline = painter.baseline(area.y, area.height, metrics.text_size);
+        let baseline = painter.baseline(shape.y, shape.height, metrics.text_size);
         let close = crate::panes::tab_close(area);
         let room = close.map_or(area.width - 20.0, |it| it.x - area.x - 16.0);
         line(
@@ -1596,7 +1606,16 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     fill(painter, layout.header, theme.palette.chrome);
-    painter.hairline(0.0, layout.header.bottom() - 1.0, layout.header.width, theme.palette.divider);
+    // **From the header's own left edge, not the window's.** At `0.0` this ran
+    // under the sidebar, which looked like a deliberate rule while there was one
+    // pane at the top of the window — and became a line through the middle of
+    // the sidebar the moment a split put a second header halfway down.
+    painter.hairline(
+        layout.header.x,
+        layout.header.bottom() - 1.0,
+        layout.header.width,
+        theme.palette.divider,
+    );
 
     let baseline = painter.baseline(layout.header.y, layout.header.height, metrics.header_size);
     let columns: [(SortColumn, Area, Align, f32); 3] = [

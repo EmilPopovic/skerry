@@ -43,6 +43,7 @@ struct Overlays {
     properties: bool,
     open_with: bool,
     composing: bool,
+    split: bool,
     rename: bool,
 }
 
@@ -60,6 +61,7 @@ impl Overlays {
             "--properties" => &mut self.properties,
             "--open-with" => &mut self.open_with,
             "--composing" => &mut self.composing,
+            "--split" => &mut self.split,
             "--rename" => &mut self.rename,
             _ => return false,
         };
@@ -148,6 +150,7 @@ fn main() -> std::process::ExitCode {
             properties: overlays.properties,
             open_with: overlays.open_with,
             composing: overlays.composing,
+            split: overlays.split,
             rename: overlays.rename,
             stats,
             own_frame,
@@ -216,6 +219,7 @@ skerry [OPTIONS] [PATH]
   --properties     show the Properties panel, for a golden frame of it
   --open-with      show the Open With list, for a golden frame of it
   --composing      show a rename with an input method composing in it
+  --split          split the window, for a golden frame of two panes
   --rename         show a name being typed, for a golden frame of it
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor

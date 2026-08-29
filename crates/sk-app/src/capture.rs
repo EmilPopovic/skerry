@@ -71,6 +71,8 @@ pub struct Capture {
     pub open_with: bool,
     /// Whether to draw the rename field with an input method composing in it.
     pub composing: bool,
+    /// Whether to split the window, with two tabs in the lower half.
+    pub split: bool,
     /// Whether to draw that menu over a folder that holds no folders.
     pub crumbs_empty: bool,
     /// Whether to draw the find popup, with a query narrowing the list.
@@ -206,6 +208,24 @@ fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
         rows,
         (!empty).then_some("fixture"),
     )
+}
+
+/// Splits the sample tree, and puts a second tab in the new half.
+///
+/// The second and third panes read the same directory: a capture's frame has to
+/// be the same on every machine, and a second directory would be a second thing
+/// for the fixture to guarantee.
+fn split_the_sample(panes: &mut crate::panes::Panes, session: &Session, request: &Capture) {
+    let another = || {
+        let (mut pane, _) = session.read_fully(&request.path);
+        pane.selection.set_cursor(pane.listing.at(0));
+        settle_folder_totals(&mut pane, session);
+        pane
+    };
+    let id = panes.focus();
+    panes.split_with(id, crate::panes::Axis::Below, false, another());
+    let into = panes.focus();
+    panes.put_tab(into, 1, another());
 }
 
 /// The Properties panel over one file, with every fact stated.
@@ -446,10 +466,19 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         Frame::None
     };
     let layout = Layout::compute_with(logical, &theme.metrics, frame, request.sidebar);
-    // One leaf: a capture is a frame of one directory, and the split a golden
-    // frame would need is its own frame rather than a variant of every other.
-    let crate::panes::Single { mut panes, leaves, dividers, here } =
+    // One leaf: a capture is a frame of one directory, and a split is its own
+    // frame rather than a variant of every other.
+    let crate::panes::Single { mut panes, mut leaves, mut dividers, mut here } =
         crate::panes::single(pane, layout.content, &theme.metrics);
+    if request.split {
+        // **Stacked, and two tabs in the lower half.** A `Below` split is the
+        // arrangement that puts a second column header halfway down the window,
+        // which is where a rule drawn from the window's left edge instead of the
+        // header's own crosses the sidebar — a line nothing else would catch.
+        split_the_sample(&mut panes, &session, request);
+        panes.layout(layout.content, &theme.metrics, &mut leaves, &mut dividers);
+        here = leaves.first().copied().unwrap_or_default();
+    }
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
