@@ -412,6 +412,8 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         dividers: sample.dividers,
         hovered_divider: None,
         hovered_tab: None,
+        hovered_plus: false,
+        tab_drop: None,
     }
 }
 

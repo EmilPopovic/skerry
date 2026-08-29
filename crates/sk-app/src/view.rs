@@ -99,6 +99,10 @@ pub struct Chrome<'a> {
     pub hovered_divider: Option<SplitId>,
     /// The tab under the pointer: which leaf, and which of its tabs.
     pub hovered_tab: Option<(PaneId, usize)>,
+    /// Whether the pointer is on the `+` of the leaf it is in.
+    pub hovered_plus: bool,
+    /// Where a tab being dragged would land, while one is.
+    pub tab_drop: Option<crate::panes::Drop>,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -197,6 +201,18 @@ pub fn draw(
     // between them, and before the status strip, which spans the window.
     for divider in chrome.dividers {
         divider_line(painter, *divider, chrome.hovered_divider == Some(divider.id));
+    }
+    // Where a dragged tab would land, over everything it would land on.
+    if let Some(drop) = chrome.tab_drop
+        && let Some(leaf) = chrome.leaves.iter().find(|leaf| leaf.id == drop.leaf())
+    {
+        let count = panes.leaf(leaf.id).map_or(0, |tabs| tabs.panes.len());
+        let area = drop.overlay(leaf, count);
+        let theme = *painter.theme;
+        let shape = painter.rect(area.x, area.y, area.width, area.height);
+        painter.list.rect(shape, theme.palette.accent.with_alpha(70), painter.px(4.0));
+        let ring = painter.px(1.0).round().max(1.0);
+        painter.list.stroke(shape, theme.palette.accent, painter.px(4.0), ring);
     }
     // Every leaf drew its own frame; the window's own chrome belongs to the one
     // with the keyboard, because that is the pane the path bar and the counts
@@ -1517,6 +1533,22 @@ fn tab_strip(
             cross(painter, close, if active { theme.palette.text } else { theme.palette.dim });
         }
     }
+    // The `+`, after the tabs and inside the same clip: a strip full of tabs
+    // shrinks them rather than pushing it off the end.
+    let plus = crate::panes::tab_plus(layout.tabs, titles.len());
+    if chrome.hovered_plus && chrome.hovered_tab.is_none_or(|(id, _)| id != layout.id) {
+        let pill = painter.rect(plus.x + 3.0, plus.y + 4.0, plus.width - 6.0, plus.height - 8.0);
+        painter.list.rect(pill, theme.palette.hover, painter.px(metrics.radius));
+    }
+    let ink = if has_keyboard { theme.palette.text } else { theme.palette.dim };
+    let centre = (plus.x + plus.width / 2.0, plus.y + plus.height / 2.0);
+    let arm = 9.0;
+    let thickness = painter.px(1.0).max(1.0).round();
+    let across = painter.rect(centre.0 - arm / 2.0, centre.1, arm, 0.0);
+    painter.list.rect(sk_gpu::Rect::new(across.x, across.y, across.width, thickness), ink, 0.0);
+    let down = painter.rect(centre.0, centre.1 - arm / 2.0, 0.0, arm);
+    painter.list.rect(sk_gpu::Rect::new(down.x, down.y, thickness, down.height), ink, 0.0);
+
     painter.list.pop_clip();
     painter.hairline(
         layout.tabs.x,
@@ -2230,6 +2262,8 @@ mod tests {
                 dividers: &dividers,
                 hovered_divider: None,
                 hovered_tab: None,
+                hovered_plus: false,
+                tab_drop: None,
             };
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test

@@ -1061,3 +1061,26 @@ at 125%, and which is the trap
 The peer is a hundred and fifty lines. The rule is not "write a peer for every
 protocol" — it is that **a protocol whose other end never speaks cannot be tested
 by exercising this end**, and either a peer exists or the code ships as a hope.
+
+## A count is not an identity, and a test that counts cannot see a swap
+
+`Panes::close_leaf` removes the focused pane. Its test split three ways, closed
+twice, asserted the count went 3 → 2 → 1, and asserted the last one refuses. It
+passed from the day it was written, and the function **kept the leaf it was asked
+to remove and closed its sibling** — because `collapse` named its branches
+`keep_second` and set the flag the wrong way round.
+
+Closing either of two leaves leaves one. Nothing a count can say tells them
+apart, so the assertion was true of the bug and of the fix alike. It surfaced two
+commits later, from a different direction: a tab dragged out of a leaf left the
+*emptied* leaf standing and deleted the one with the files in it, and the new
+test failed with `left: 1, right: 2` — a leaf that should have had two tabs and
+had one.
+
+The test now names the leaf: `let going = panes.focus()` before, and
+`panes.leaves().all(|leaf| leaf.id != going)` after. Three lines, and watched
+failing against the original inversion.
+
+**Where a value has an identity, assert about the identity.** A count, a length
+and a `is_some()` are all the same trap: they are true of the right answer and of
+the wrong one that happens to be the same size.

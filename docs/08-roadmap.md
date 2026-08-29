@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 485 tests, 78 GUI scenarios on two display servers and twenty-one golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 490 tests, 80 GUI scenarios on two display servers and twenty-one golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -166,7 +166,7 @@ measured the negotiated action reported zero times and `dnd_finished` delivered 
 some peers and not others, and deleting an original on a confirmation that may
 never arrive is how a drag loses somebody's files.
 
-**The 78 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The 80 GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are
@@ -216,13 +216,16 @@ Per-folder view settings with subtree inheritance. Full session persistence.
 measurable and rising: `App` held one `Pane` and named it 129 times, and every
 feature added before the tree added more.
 [ADR 0010](adr/0010-a-split-tree-of-tab-strips.md) decides the shape — a binary
-split tree whose leaves are tab strips — and what exists is the tree, the tab
-strip, the divider drag, `Ctrl+T` / `Ctrl+W` / `Ctrl+Shift+T` / `Ctrl+Tab`,
-`F3` / `Shift+F3` / `Ctrl+F3` / `F6`, and a watcher that watches every visible
-pane rather than one directory. **Still owed here:** drag-to-rearrange with snap
-overlays, middle-click to split, the view modes, per-folder settings, and session
-persistence — the tree serializes to a recursive four-line form, which is what
-ADR 0010 chose the shape for, but nothing writes it yet.
+split tree whose leaves are tab strips — and what exists is the tree, a tab strip
+that is always there with a `+` at the end of its tabs, the divider drag,
+**drag-to-rearrange with snap overlays** — a tab dragged to a pane's edge splits
+it and dragged into a strip joins it, with the landing place shaded before the
+button comes up — `Ctrl+T` / `Ctrl+W` / `Ctrl+Shift+T` / `Ctrl+Tab`, `F3` /
+`Shift+F3` / `Ctrl+F3` / `F6`, and a watcher that watches every visible pane
+rather than one directory. **Still owed here:** middle-click to split, the view
+modes, per-folder settings, and session persistence — the tree serializes to a
+recursive four-line form, which is what ADR 0010 chose the shape for, but nothing
+writes it yet.
 
 ### M3 · 5 wk — Operations and undo
 Copy, move, rename, create, trash, permanent delete on the Spike E engine, behind a queue

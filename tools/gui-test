@@ -751,6 +751,23 @@ def differing_pixels(left: "object", right: "object") -> int:
     return sum(sum(band.histogram()[1:]) for band in difference.split())
 
 
+def listed(run: Run, tries: int = 30) -> dict[str, str]:
+    """Waits for a directory read to land, and returns the state once it has.
+
+    **A `sleep` before the first key is a guess about how long a read takes**,
+    and one that is right on an idle machine is wrong on a busy one: a `Down`
+    pressed before the rows exist moves a cursor that is not there, and the
+    failure reads as `cursor is ''` two assertions later. Polling the state the
+    window already reports costs nothing and cannot be wrong.
+    """
+    for _ in range(tries):
+        run.drive("key f12\nsleep 120\n")
+        state = run.state()
+        if state.get("loading") == "false" and int(state.get("rows", "0")) > 0:
+            return state
+    raise Failure("the listing never arrived")
+
+
 def expect(state: dict[str, str], **wanted) -> None:
     for key, value in wanted.items():
         actual = state.get(key)
@@ -808,7 +825,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 78
+FEWEST_SCENARIOS = 80
 
 
 def scenario(name, fresh: bool = False):
@@ -839,8 +856,8 @@ def keyboard_cursor(run: Run, fixture: Path) -> None:
 
 @scenario("keyboard-navigate")
 def keyboard_navigate(run: Run, fixture: Path) -> None:
+    listed(run)
     run.drive(
-        "sleep 400\n"
         "key down\n"          # alpha
         "key enter\n"         # into it
         "sleep 600\n"
@@ -850,7 +867,7 @@ def keyboard_navigate(run: Run, fixture: Path) -> None:
         "key f12\n"
         "sleep 200\n"
     )
-    inside, outside = run.states()[:2]
+    inside, outside = run.states()[-2:]
     expect(inside, path=str(fixture / "alpha"), rows="2")
     expect(outside, path=str(fixture), cursor="alpha")
 
@@ -3002,13 +3019,21 @@ def progress_and_cancel(run: Run, fixture: Path) -> None:
     # end of it. The first one here lands around 240 ms and the rest follow every
     # 60 ms; `edit.cancel` is disabled when nothing is running, so the ones that
     # fall outside the window do nothing at all.
-    stops = "".join("key ctrl+.\nsleep 60\n" for _ in range(6))
-    run.drive(f"key ctrl+v\nsleep 200\nkey f12\nsleep 40\n{stops}sleep 1500\nkey f12\nsleep 200\n")
-    during, stopped = run.states()[-2:]
-    if "opying" not in during["progress"]:
+    #
+    # **Sampled throughout rather than once.** One `f12` at a chosen moment is
+    # the same bet as one `ctrl+.` at a chosen moment, and it was lost the same
+    # way: on a loaded machine the earlier steps ran late and the single sample
+    # landed after the copy had finished, reporting an empty progress line and
+    # `Copied 10 items`. Looking and stopping alternate, so both cover the whole
+    # window instead of one instant in it.
+    watch = "".join("key f12\nsleep 30\nkey ctrl+.\nsleep 40\n" for _ in range(8))
+    run.drive(f"key ctrl+v\nsleep 120\n{watch}sleep 1500\nkey f12\nsleep 200\n")
+    during = next((it for it in run.states() if "opying" in it.get("progress", "")), None)
+    stopped = run.state()
+    if during is None:
         raise Failure(
-            f"during a copy the progress line says {during['progress']!r} "
-            f"and the notice says {during['notice']!r}"
+            "no sample caught the copy running; the last says the progress line is "
+            f"{stopped['progress']!r} and the notice is {stopped['notice']!r}"
         )
     if "Stopped" not in stopped["notice"]:
         raise Failure(f"after stopping, the status line says {stopped['notice']!r}")
@@ -3339,23 +3364,23 @@ def divider_aim(run: Run, state: dict[str, str], index: int = 0) -> tuple[float,
 def tabs(run: Run, fixture: Path) -> None:
     """A tab opens on this directory, switches, closes and comes back.
 
-    The strip appears with the second tab and goes away with it: a strip naming
-    the one thing on screen is a row of pixels that says nothing.
+    **The strip is there for one tab too**, so opening a second does not shift
+    the list under the pointer — which is the assertion below that a strip
+    appearing on demand would fail.
     """
     run.drive("sleep 500\nkey f12\nsleep 200\n")
     start = run.state()
     expect(start, panes="1", tabs="1")
-    if start["tab_aim"]:
-        raise Failure("one tab drew a strip")
+    if not start["tab_aim"]:
+        raise Failure("one tab drew no strip")
 
     run.drive("key ctrl+t\nsleep 600\nkey f12\nsleep 200\n")
     two = run.state()
     expect(two, panes="1", tabs="2", tab="1", path=start["path"])
-    if not two["tab_aim"]:
-        raise Failure("two tabs drew no strip")
-    # The strip costs the list its height rather than overlapping it.
-    if float(two["body_top"]) <= float(start["body_top"]):
-        raise Failure("the strip drew over the list instead of above it")
+    if float(two["body_top"]) != float(start["body_top"]):
+        raise Failure(
+            f"the list moved when a tab opened: {start['body_top']} then {two['body_top']}"
+        )
 
     # The new tab navigates on its own; the first one stays where it was.
     run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
@@ -3374,8 +3399,8 @@ def tabs(run: Run, fixture: Path) -> None:
     run.drive("key ctrl+w\nsleep 500\nkey f12\nsleep 200\n")
     closed = run.state()
     expect(closed, tabs="1", path=start["path"])
-    if closed["tab_aim"]:
-        raise Failure("one tab still drew a strip")
+    if float(closed["body_top"]) != float(start["body_top"]):
+        raise Failure("the list moved when a tab closed")
 
     run.drive("key ctrl+shift+t\nsleep 900\nkey f12\nsleep 200\n")
     reopened = run.state()
@@ -3403,6 +3428,83 @@ def tab_pointer(run: Run, fixture: Path) -> None:
     cross = aim(run, state, float(x), float(y))
     run.drive(f"move {cross[0]:.1f} {cross[1]:.1f}\nsleep 200\nclick\nsleep 500\nkey f12\nsleep 200\n")
     expect(run.state(), tabs="1")
+
+
+def plus_aim(run: Run, state: dict[str, str]) -> tuple[float, float]:
+    """Where to click the `+` at the end of the focused pane's tabs."""
+    x, _, y = state.get("plus_aim", "").partition(":")
+    if not x:
+        raise Failure("the window reported no plus")
+    return aim(run, state, float(x), float(y))
+
+
+@scenario("the-plus-opens-a-tab")
+def plus(run: Run, fixture: Path) -> None:
+    """The one control that opens a tab, reachable before there are any.
+
+    A strip that appeared with the second tab hid it until somebody had already
+    opened one by other means, which is why the strip is always there.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 200\n")
+    start = run.state()
+    expect(start, tabs="1")
+    where = plus_aim(run, start)
+    run.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 250\nclick\nsleep 700\nkey f12\nsleep 300\n")
+    after = run.state()
+    expect(after, tabs="2", path=start["path"])
+    # And it follows the tabs rather than the window's edge, so it is still
+    # beside the last one.
+    if float(after["plus_aim"].split(":")[0]) <= float(start["plus_aim"].split(":")[0]):
+        raise Failure("the plus did not move along with the tabs")
+
+
+@scenario("dragging-a-tab-splits-the-window")
+def drag_a_tab(run: Run, fixture: Path) -> None:
+    """A tab dragged to the edge of a pane splits it; dragged back, it rejoins.
+
+    The five zones are unit-tested in `panes.rs`; what this covers is the whole
+    gesture — the press that becomes a drag, the overlay, and a drop that moves
+    the pane rather than the tab it came from.
+    """
+    run.drive("sleep 500\nkey ctrl+t\nsleep 700\nkey f12\nsleep 300\n")
+    two = run.state()
+    expect(two, tabs="2", panes="1")
+
+    # The second tab, dragged to the right edge of the pane it is in.
+    tab = tab_aim(run, two, 1)
+    body_top = float(two["body_top"])
+    height = float(two["logical"].split("x")[1])
+    width = float(two["logical"].split("x")[0])
+    edge = aim(run, two, width * 0.95, body_top + (height - body_top) * 0.5)
+    run.drive(
+        f"move {tab[0]:.1f} {tab[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        f"move {edge[0]:.1f} {edge[1]:.1f}\nsleep 350\nkey f12\nsleep 200\n"
+    )
+    # The overlay says where it would land before the button comes up.
+    if run.state()["tab_drop"] != "split":
+        raise Failure(f"the overlay says {run.state()['tab_drop']!r}")
+    run.drive("release\nsleep 800\nkey f12\nsleep 400\n")
+
+    split = run.state()
+    expect(split, panes="2", tabs="1")
+    sizes = [float(size.split("x")[0]) for size in split["pane_sizes"].split(",")]
+    if abs(sizes[0] - sizes[1]) > 2.0:
+        raise Failure(f"the halves are {sizes}")
+    if split["pane_focus"] != "1":
+        raise Failure("the keyboard did not follow the tab into its new pane")
+
+    # Dragged back into the other pane's strip, the split collapses again.
+    back = run.state()
+    tab = tab_aim(run, back, 0)
+    strips = [it for it in back["strip_aim"].split(",") if it]
+    x, _, y = strips[0].partition(":")
+    into = aim(run, back, float(x) + 30.0, float(y))
+    run.drive(
+        f"move {tab[0]:.1f} {tab[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        f"move {into[0]:.1f} {into[1]:.1f}\nsleep 300\nrelease\nsleep 900\nkey f12\nsleep 400\n"
+    )
+    joined = run.state()
+    expect(joined, panes="1", tabs="2")
 
 
 @scenario("a-split-is-two-panes-that-move-apart")

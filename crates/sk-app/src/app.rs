@@ -631,6 +631,11 @@ pub struct App {
     properties: Option<crate::properties::Properties>,
     /// The Open With list, while it is open.
     openers: Option<crate::openers::Openers>,
+    /// A press on a tab that has not moved far enough to be a drag: which leaf,
+    /// which tab, and where the press was.
+    tab_press: Option<(crate::panes::PaneId, usize, Point)>,
+    /// Whether that press has become a drag.
+    tab_dragging: bool,
     /// What a second `Shift+Delete` would delete for good, and when the first
     /// one was pressed.
     ///
@@ -827,6 +832,8 @@ impl App {
             palette: None,
             properties: None,
             openers: None,
+            tab_press: None,
+            tab_dragging: false,
             arming: None,
             cutting: false,
             menu: None,
@@ -2339,6 +2346,12 @@ impl App {
             self.panes.focus_on(id);
             self.settle_panes();
         }
+        if self.plus_at(position) {
+            if let Some(command) = commands.find("tab.new") {
+                commands.run(command, self);
+            }
+            return true;
+        }
         let Some((index, closing)) = self.tab_at(position) else { return false };
         if closing {
             // Through the registry, like every other pointer route: the cross
@@ -2349,10 +2362,97 @@ impl App {
             if let Some(command) = commands.find("tab.close") {
                 commands.run(command, self);
             }
-        } else if self.panes.show_tab(id, index) {
-            self.settle_panes();
+        } else {
+            if self.panes.show_tab(id, index) {
+                self.settle_panes();
+            }
+            // A press on a tab may still become a drag. Remembered rather than
+            // started: a click is never perfectly still, and a hand on a
+            // touchpad moves a pixel while the button is down.
+            self.tab_press = Some((id, index, position));
         }
         true
+    }
+
+    /// Moves a tab drag along, if one is in flight. Whether it took the pointer.
+    ///
+    /// **The overlay moves, not the tab.** A floating copy of a tab under the
+    /// pointer is a second thing to draw and a second thing to get wrong, and
+    /// where it would *land* is what a person is reading anyway.
+    fn drag_a_tab(&mut self, position: Point) -> bool {
+        let Some((_, _, from)) = self.tab_press else { return false };
+        let moved = (position.x - from.x).abs().max((position.y - from.y).abs());
+        if !self.tab_dragging && moved <= DRAG_THRESHOLD {
+            return false;
+        }
+        self.tab_dragging = true;
+        let drop = self.tab_drop_at(position);
+        if self.placement.tab_drop != drop {
+            self.placement.tab_drop = drop;
+            self.dirty = true;
+        }
+        self.point(sk_plat::Cursor::Grabbing);
+        true
+    }
+
+    /// Whether `position` is on the `+` at the end of a leaf's tabs.
+    fn plus_at(&self, position: Point) -> bool {
+        let Some(leaf) = self.leaf_layout_at(position) else { return false };
+        let Some(count) = self.panes.leaf(leaf.id).map(|tabs| tabs.panes.len()) else {
+            return false;
+        };
+        crate::panes::tab_plus(leaf.tabs, count).contains(position.x, position.y)
+    }
+
+    /// The layout of the leaf `position` is inside.
+    fn leaf_layout_at(&self, position: Point) -> Option<crate::panes::PaneLayout> {
+        self.placement
+            .leaves
+            .iter()
+            .find(|leaf| leaf.area.contains(position.x, position.y))
+            .copied()
+    }
+
+    /// Where a tab being dragged would land, if one is being dragged.
+    fn tab_drop_at(&self, position: Point) -> Option<crate::panes::Drop> {
+        let leaf = self.leaf_layout_at(position)?;
+        let count = self.panes.leaf(leaf.id).map_or(0, |tabs| tabs.panes.len());
+        Some(crate::panes::Drop::at(&leaf, count, position))
+    }
+
+    /// Finishes a tab drag: moves the tab where the overlay said it would go.
+    fn drop_the_tab(&mut self, position: Point) {
+        let Some((from, index, _)) = self.tab_press.take() else { return };
+        let Some(drop) = self.tab_drop_at(position) else { return };
+        // Dropping a tab back where it came from: the strip it is already in, at
+        // the place it already occupies. Nothing to do, and doing it anyway
+        // would move the keyboard and re-read a directory for a click.
+        if drop == crate::panes::Drop::Strip(from, index)
+            || drop == crate::panes::Drop::Strip(from, index + 1)
+        {
+            self.dirty = true;
+            return;
+        }
+        // A leaf of one tab cannot be split with itself: taking the tab out
+        // closes the leaf the split was going to happen to.
+        let alone = self.panes.leaf(from).is_some_and(|tabs| tabs.panes.len() == 1);
+        if alone && drop.leaf() == from {
+            self.dirty = true;
+            return;
+        }
+        let Some(pane) = self.panes.take_tab(from, index) else { return };
+        match drop {
+            crate::panes::Drop::Strip(id, at) => {
+                // The index is from before the tab was taken out, so a move to
+                // the right within one strip is one place further left now.
+                let at = if id == from && at > index { at - 1 } else { at };
+                self.panes.put_tab(id, at, pane);
+            }
+            crate::panes::Drop::Split(id, axis, before) => {
+                self.panes.split_with(id, axis, before, pane);
+            }
+        }
+        self.settle_panes();
     }
 
     /// The divider whose grab band covers `position`.
@@ -3566,11 +3666,11 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             .map(|pane| crate::panes::title_of(&pane.path).to_owned())
             .collect::<Vec<_>>()
             .join(",");
-        // A leaf with one tab draws no strip, so it offers nothing to aim at:
-        // the rectangles exist and are zero pixels tall, and an aim at one is an
-        // aim at nothing.
         let strip = self.placement.here.tabs;
-        let count = if strip.height > 0.0 { leaf.panes.len() } else { 0 };
+        let count = leaf.panes.len();
+        let plus = crate::panes::tab_plus(strip, count);
+        let plus_aim =
+            format!("{:.0}:{:.0}", plus.x + plus.width / 2.0, plus.y + plus.height / 2.0);
         let tab_aim = crate::panes::tab_areas(strip, count)
             .map(|area| format!("{:.0}:{:.0}", area.x + 20.0, area.y + area.height / 2.0))
             .collect::<Vec<_>>()
@@ -3582,6 +3682,13 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             })
             .collect::<Vec<_>>()
             .join(",");
+        // What the overlay is saying while a tab is being dragged, so a
+        // scenario can read the promise before it tests the result.
+        let tab_drop = match self.placement.tab_drop {
+            None => "none",
+            Some(crate::panes::Drop::Strip(..)) => "strip",
+            Some(crate::panes::Drop::Split(..)) => "split",
+        };
         let divider_aim = self
             .placement
             .dividers
@@ -3595,6 +3702,18 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             })
             .collect::<Vec<_>>()
             .join(",");
+        // One point in each leaf's strip, in layout order, so a scenario can aim
+        // at a pane that does not have the keyboard — which `tab_aim` cannot,
+        // because it answers about the focused one.
+        let strip_aim = self
+            .placement
+            .leaves
+            .iter()
+            .map(|leaf| {
+                format!("{:.0}:{:.0}", leaf.tabs.x + 8.0, leaf.tabs.y + leaf.tabs.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         let widths = self
             .placement
             .leaves
@@ -3604,7 +3723,8 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             .join(",");
         format!(
             "panes={} pane_focus={order} pane_sizes={widths:?} pane_paths={paths:?} \
-tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} divider_aim={divider_aim:?}",
+tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} plus_aim={plus_aim:?} \
+tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?}",
             self.placement.leaves.len(),
             leaf.panes.len(),
             leaf.active,
@@ -4097,6 +4217,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     }
 
     fn release(&mut self) {
+        if std::mem::take(&mut self.tab_dragging) {
+            let at = self.pointer;
+            self.placement.tab_drop = None;
+            self.drop_the_tab(at);
+        }
+        self.tab_press = None;
         // Both, not either: `||` short-circuits, so a release that ended a band
         // left a thumb grab behind. They cannot both be set today, which makes
         // this the kind of latent bug that becomes a stuck scrollbar the first
@@ -4860,6 +4986,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.sidebar.hover = place;
             self.dirty = true;
         }
+        if self.drag_a_tab(position) {
+            return;
+        }
         // A divider being dragged owns the pointer until the button comes up.
         if let Some(id) = self.placement.dragging {
             self.drag_the_divider(id, position);
@@ -4873,6 +5002,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let tab = self.leaf_at(position).zip(self.tab_at(position)).map(|(id, (at, _))| (id, at));
         if self.placement.hovered_tab != tab {
             self.placement.hovered_tab = tab;
+            self.dirty = true;
+        }
+        let plus = self.plus_at(position);
+        if self.placement.hovered_plus != plus {
+            self.placement.hovered_plus = plus;
             self.dirty = true;
         }
         let cursor = self.cursor_at(position, commands);
@@ -5087,6 +5221,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             dividers: &placement.dividers,
             hovered_divider: placement.hovered_divider,
             hovered_tab: placement.hovered_tab,
+            hovered_plus: placement.hovered_plus,
+            tab_drop: placement.tab_drop,
         };
         let now = clock_seconds();
         let mut diagnostics = diagnostics_for(

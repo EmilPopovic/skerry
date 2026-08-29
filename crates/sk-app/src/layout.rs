@@ -571,9 +571,11 @@ mod tests {
         assert!((layout.path.bottom() - layout.content.y).abs() < f32::EPSILON);
         assert!((layout.content.bottom() - layout.status.y).abs() < f32::EPSILON);
         assert!((layout.status.bottom() - 720.0).abs() < f32::EPSILON);
-        // And inside the content, the one leaf tiles it in turn.
+        // And inside the content, the one leaf tiles it in turn: the tab strip
+        // first, then the column header, then the list.
         let pane = one_leaf(&layout, &metrics);
-        assert!((pane.header.y - layout.content.y).abs() < f32::EPSILON);
+        assert!((pane.tabs.y - layout.content.y).abs() < f32::EPSILON);
+        assert!((pane.tabs.bottom() - pane.header.y).abs() < f32::EPSILON);
         assert!((pane.header.bottom() - pane.body.y).abs() < f32::EPSILON);
         assert!((pane.body.bottom() - layout.content.bottom()).abs() < f32::EPSILON);
     }

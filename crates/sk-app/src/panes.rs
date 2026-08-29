@@ -321,6 +321,65 @@ impl Panes {
         true
     }
 
+    /// Takes one tab out of a leaf, closing the leaf if it was the last.
+    ///
+    /// `None` when it was the last tab of the last leaf: a window with no pane
+    /// in it is not a window, and a drag that emptied the tree would have
+    /// nowhere to put what it was carrying.
+    pub(crate) fn take_tab(&mut self, id: PaneId, index: usize) -> Option<Pane> {
+        let single = self.leaf_count() == 1;
+        let leaf = self.leaf_mut(id)?;
+        if index >= leaf.panes.len() {
+            return None;
+        }
+        if leaf.panes.len() == 1 {
+            if single {
+                return None;
+            }
+            let taken = leaf.panes.remove(index);
+            // The leaf is empty now, so it goes — with the focus moved off it
+            // first, because `close_leaf` closes the focused one.
+            self.focus = id;
+            self.close_leaf();
+            return Some(taken);
+        }
+        let taken = leaf.panes.remove(index);
+        leaf.active = leaf.active.min(leaf.panes.len() - 1);
+        Some(taken)
+    }
+
+    /// Puts a tab into a leaf's strip at `index`, and shows it.
+    pub(crate) fn put_tab(&mut self, id: PaneId, index: usize, pane: Pane) {
+        let Some(leaf) = self.leaf_mut(id) else { return };
+        let at = index.min(leaf.panes.len());
+        leaf.panes.insert(at, pane);
+        leaf.active = at;
+        self.focus = id;
+    }
+
+    /// Splits `id` and puts `pane` in the new half, before or after it.
+    ///
+    /// `before` is what makes a drop on the *left* of a pane land on the left:
+    /// the new leaf becomes the split's first child rather than its second.
+    pub(crate) fn split_with(&mut self, id: PaneId, axis: Axis, before: bool, pane: Pane) {
+        let leaf_id = PaneId(self.mint());
+        let split_id = SplitId(self.mint());
+        let fresh = Node::Leaf(Tabs { id: leaf_id, panes: vec![pane], active: 0 });
+        replace_leaf(&mut self.root, id, move |old| {
+            let (first, second) = if before {
+                (Box::new(fresh), Box::new(old))
+            } else {
+                (Box::new(old), Box::new(fresh))
+            };
+            Node::Split { id: split_id, axis, ratio: 0.5, first, second }
+        });
+        self.focus = leaf_id;
+    }
+
+    fn leaf_mut(&mut self, id: PaneId) -> Option<&mut Tabs> {
+        self.leaves_mut().find(|leaf| leaf.id == id)
+    }
+
     /// Splits the focused leaf, and puts the keyboard on the new half.
     pub(crate) fn split(&mut self, axis: Axis, jobs: &Jobs) {
         let path = self.focused().path.clone();
@@ -454,6 +513,11 @@ pub(crate) struct Placement {
     pub(crate) hovered_divider: Option<SplitId>,
     /// The divider being dragged, while one is.
     pub(crate) dragging: Option<SplitId>,
+    /// Where a tab being dragged would land, while one is being dragged. The
+    /// frame shades it, and the release performs exactly it.
+    pub(crate) tab_drop: Option<Drop>,
+    /// Whether the pointer is over the `+` of the leaf it is in.
+    pub(crate) hovered_plus: bool,
 }
 
 /// One leaf filling `content`: what a capture and a benchmark have.
@@ -482,10 +546,11 @@ pub(crate) fn single(pane: Pane, content: Area, metrics: &Metrics) -> Single {
 /// tab's width is a function of the strip and the count, not of the shaped text,
 /// so the two answers cannot drift and no rectangle has to be remembered.
 pub(crate) fn tab_areas(strip: Area, count: usize) -> impl Iterator<Item = Area> {
+    let room = (strip.width - PLUS).max(0.0);
     let each = if count == 0 {
         0.0
     } else {
-        (strip.width / count as f32).clamp(TAB_WIDTH.0.min(strip.width), TAB_WIDTH.1)
+        (room / count as f32).clamp(TAB_WIDTH.0.min(room), TAB_WIDTH.1)
     };
     (0..count).map(move |index| Area {
         x: strip.x + index as f32 * each,
@@ -493,6 +558,106 @@ pub(crate) fn tab_areas(strip: Area, count: usize) -> impl Iterator<Item = Area>
         width: each,
         height: strip.height,
     })
+}
+
+/// Where a tab being dragged would land.
+///
+/// The five zones every editor with drag-to-split uses: the four edges make a
+/// split and the middle joins the strip. A drop is described rather than done,
+/// so the same value draws the overlay and performs the move — two answers to
+/// "where would this go" is how the highlight and the result disagree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Drop {
+    /// Into this leaf's strip, at this index.
+    Strip(PaneId, usize),
+    /// Splitting this leaf, with the tab in the new half.
+    Split(PaneId, Axis, bool),
+}
+
+/// How far into a pane an edge zone reaches.
+///
+/// A quarter: wide enough to aim at without care, narrow enough that the middle
+/// half of a pane is unambiguously "join this one".
+const EDGE: f32 = 0.25;
+
+impl Drop {
+    /// What dropping at `at` over `leaf` would do.
+    pub(crate) fn at(leaf: &PaneLayout, tabs: usize, at: sk_plat::Point) -> Self {
+        let point = (at.x, at.y);
+        if leaf.tabs.contains(point.0, point.1) {
+            let index = tab_areas(leaf.tabs, tabs)
+                .position(|tab| point.0 < tab.x + tab.width / 2.0)
+                .unwrap_or(tabs);
+            return Self::Strip(leaf.id, index);
+        }
+        let across = (point.0 - leaf.area.x) / leaf.area.width.max(1.0);
+        let down = (point.1 - leaf.area.y) / leaf.area.height.max(1.0);
+        // The nearest edge wins, and the middle is a join. Compared as fractions
+        // so a tall narrow pane and a short wide one behave the same.
+        let nearest = [
+            (across, Self::Split(leaf.id, Axis::Beside, true)),
+            (1.0 - across, Self::Split(leaf.id, Axis::Beside, false)),
+            (down, Self::Split(leaf.id, Axis::Below, true)),
+            (1.0 - down, Self::Split(leaf.id, Axis::Below, false)),
+        ]
+        .into_iter()
+        .min_by(|left, right| left.0.total_cmp(&right.0));
+        match nearest {
+            Some((distance, split)) if distance < EDGE => split,
+            _ => Self::Strip(leaf.id, tabs),
+        }
+    }
+
+    /// Which leaf the drop is on.
+    pub(crate) fn leaf(self) -> PaneId {
+        match self {
+            Self::Strip(id, _) | Self::Split(id, _, _) => id,
+        }
+    }
+
+    /// The rectangle to shade while the drag is in flight.
+    pub(crate) fn overlay(self, leaf: &PaneLayout, tabs: usize) -> crate::layout::Area {
+        match self {
+            Self::Strip(_, index) => {
+                // A bar at the seam the tab would land in, rather than the whole
+                // strip: "between these two" is the question a person is asking.
+                let width = 3.0;
+                let x = tab_areas(leaf.tabs, tabs)
+                    .nth(index)
+                    .map_or_else(|| tab_plus(leaf.tabs, tabs).x, |tab| tab.x);
+                crate::layout::Area { x: x - width / 2.0, width, ..leaf.tabs }
+            }
+            Self::Split(_, Axis::Beside, before) => {
+                let half = leaf.area.width / 2.0;
+                let x = if before { leaf.area.x } else { leaf.area.x + half };
+                crate::layout::Area { x, width: half, ..leaf.area }
+            }
+            Self::Split(_, Axis::Below, before) => {
+                let half = leaf.area.height / 2.0;
+                let y = if before { leaf.area.y } else { leaf.area.y + half };
+                crate::layout::Area { y, height: half, ..leaf.area }
+            }
+        }
+    }
+}
+
+/// How much of the strip the `+` takes, at its right end.
+const PLUS: f32 = 30.0;
+
+/// The button that opens a tab, at the end of the tabs rather than the end of
+/// the strip.
+///
+/// Beside the last tab is where every browser puts it and where the eye goes
+/// after reading the tabs; pinned to the far right it would be a button whose
+/// distance from the tabs grows with the window.
+pub(crate) fn tab_plus(strip: Area, count: usize) -> Area {
+    let after = tab_areas(strip, count).last().map_or(strip.x, Area::right);
+    Area {
+        x: after.min(strip.right() - PLUS),
+        y: strip.y,
+        width: PLUS.min(strip.width),
+        height: strip.height,
+    }
 }
 
 /// The close cross on one tab, or `None` where the tab is too narrow for it.
@@ -556,11 +721,10 @@ fn divide(area: Area, axis: Axis, ratio: f32) -> (Area, Area, Area) {
 }
 
 fn leaf_layout(tabs: &Tabs, area: Area, metrics: &Metrics) -> PaneLayout {
-    let strip = if tabs.panes.len() > 1 {
-        Area { height: metrics.tab_height, ..area }
-    } else {
-        Area { height: 0.0, ..area }
-    };
+    // **Always, even for one tab.** A strip that appears with the second tab is
+    // a strip whose arrival shifts the list under the pointer, and it hides the
+    // one control that opens a tab at all until somebody has already opened one.
+    let strip = Area { height: metrics.tab_height.min(area.height), ..area };
     let header = Area { y: strip.bottom(), height: metrics.header_height, ..area };
     let body =
         Area { y: header.bottom(), height: (area.bottom() - header.bottom()).max(0.0), ..area };
@@ -604,19 +768,23 @@ fn replace_leaf(node: &mut Node, id: PaneId, make: impl FnOnce(Node) -> Node) {
 /// sibling turned out to be.
 fn collapse(node: &mut Node, id: PaneId) -> Option<PaneId> {
     let Node::Split { first, second, .. } = node else { return None };
-    let side = if matches!(first.as_ref(), Node::Leaf(tabs) if tabs.id == id) {
-        Some(false)
-    } else if matches!(second.as_ref(), Node::Leaf(tabs) if tabs.id == id) {
+    // **The one that is *not* the target is the one that survives**, which is
+    // the whole of this function and was written backwards: it kept the leaf it
+    // was asked to remove, and `Ctrl+F3` closed the pane beside the focused one.
+    // A test that counted leaves could not tell — closing either leaves two.
+    let keep_second = if matches!(first.as_ref(), Node::Leaf(tabs) if tabs.id == id) {
         Some(true)
+    } else if matches!(second.as_ref(), Node::Leaf(tabs) if tabs.id == id) {
+        Some(false)
     } else {
         None
     };
-    match side {
+    match keep_second {
         Some(keep_second) => {
-            let (kept, _) = if keep_second {
-                (std::mem::replace(second.as_mut(), placeholder()), ())
+            let kept = if keep_second {
+                std::mem::replace(second.as_mut(), placeholder())
             } else {
-                (std::mem::replace(first.as_mut(), placeholder()), ())
+                std::mem::replace(first.as_mut(), placeholder())
             };
             *node = kept;
             Some(first_id(node))
@@ -685,10 +853,17 @@ mod tests {
         panes.split(Axis::Beside, &jobs);
         panes.split(Axis::Below, &jobs);
         assert_eq!(panes.leaf_count(), 3);
+        // **Which one closes, not just how many are left.** Counting alone
+        // passes whichever leaf goes, and this closed the sibling of the
+        // focused one for two commits.
+        let going = panes.focus();
         assert!(panes.close_leaf());
         assert_eq!(panes.leaf_count(), 2);
+        assert!(panes.leaves().all(|leaf| leaf.id != going), "the wrong leaf closed");
+        let going = panes.focus();
         assert!(panes.close_leaf());
         assert_eq!(panes.leaf_count(), 1);
+        assert!(panes.leaves().all(|leaf| leaf.id != going), "the wrong leaf closed");
         assert!(!panes.close_leaf(), "the last leaf was closed");
     }
 
@@ -755,20 +930,133 @@ mod tests {
         assert!((leaves[0].area.width - leaves[1].area.width).abs() < 2.0, "a half is not half");
     }
 
+    /// The strip is there for one tab as well, so opening a second does not
+    /// shift the list under the pointer — and so the `+` exists before anybody
+    /// has opened a tab.
     #[test]
-    fn a_single_tab_shows_no_strip_and_a_second_one_does() {
+    fn one_tab_still_has_a_strip_and_a_plus_beside_it() {
         let (mut panes, _waker, jobs, _updates) = tree();
         let (leaves, _) = geometry(&panes);
-        assert!(leaves[0].tabs.height <= 0.0, "one tab drew a strip");
-        assert!((leaves[0].header.y - leaves[0].area.y).abs() < f32::EPSILON);
-        panes.open_tab(PathBuf::from("/usr"), &jobs);
-        let (leaves, _) = geometry(&panes);
-        assert!(leaves[0].tabs.height > 0.0, "two tabs drew no strip");
+        let strip = leaves[0].tabs;
+        assert!(strip.height > 0.0, "one tab drew no strip");
         assert!(
-            (leaves[0].header.y - leaves[0].tabs.bottom()).abs() < f32::EPSILON,
+            (leaves[0].header.y - strip.bottom()).abs() < f32::EPSILON,
             "the header is not under the strip"
         );
         assert!(leaves[0].body.bottom() <= leaves[0].area.bottom());
+
+        // The `+` follows the last tab rather than the window's edge, and never
+        // overlaps it.
+        let one = super::tab_areas(strip, 1).next().expect("a tab");
+        let plus = super::tab_plus(strip, 1);
+        assert!(plus.x >= one.right() - 0.5, "the plus sits on the tab");
+        assert!(plus.right() <= strip.right() + 0.5, "the plus is off the strip");
+
+        panes.open_tab(PathBuf::from("/usr"), &jobs);
+        let (after, _) = geometry(&panes);
+        assert!(
+            (after[0].body.y - leaves[0].body.y).abs() < f32::EPSILON,
+            "a second tab moved the list"
+        );
+        let two = super::tab_areas(after[0].tabs, 2).last().expect("a tab");
+        assert!(super::tab_plus(after[0].tabs, 2).x >= two.right() - 0.5);
+    }
+
+    /// Enough tabs to fill the strip: the `+` stays on it rather than being
+    /// pushed off the right edge by the tabs it belongs to.
+    #[test]
+    fn the_plus_stays_on_the_strip_however_many_tabs_there_are() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        for index in 0..30 {
+            panes.open_tab(PathBuf::from(format!("/tmp/{index}")), &jobs);
+        }
+        let (leaves, _) = geometry(&panes);
+        let strip = leaves[0].tabs;
+        let plus = super::tab_plus(strip, 31);
+        assert!(plus.right() <= strip.right() + 0.5, "the plus ran off the strip");
+        assert!(plus.width > 0.0);
+    }
+
+    /// The five zones a tab can be dropped in, from the middle out.
+    #[test]
+    fn the_edges_of_a_pane_split_it_and_the_middle_joins_it() {
+        use super::{Axis, Drop};
+        let (panes, _waker, _jobs, _updates) = tree();
+        let (leaves, _) = geometry(&panes);
+        let leaf = leaves[0];
+        let at = |across: f32, down: f32| {
+            sk_plat::Point::new(
+                leaf.area.x + leaf.area.width * across,
+                leaf.area.y + leaf.area.height * down,
+            )
+        };
+        let id = leaf.id;
+        assert_eq!(Drop::at(&leaf, 1, at(0.05, 0.5)), Drop::Split(id, Axis::Beside, true));
+        assert_eq!(Drop::at(&leaf, 1, at(0.95, 0.5)), Drop::Split(id, Axis::Beside, false));
+        assert_eq!(Drop::at(&leaf, 1, at(0.5, 0.95)), Drop::Split(id, Axis::Below, false));
+        // The middle is a join, not a split, however far down it is.
+        assert_eq!(Drop::at(&leaf, 1, at(0.5, 0.5)), Drop::Strip(id, 1));
+        // A corner belongs to whichever edge is nearer, and never to both.
+        assert_eq!(Drop::at(&leaf, 1, at(0.02, 0.10)), Drop::Split(id, Axis::Beside, true));
+    }
+
+    /// A drop on the strip goes *between* two tabs, by which half of a tab the
+    /// pointer is on — not onto the tab it happens to be over, which would make
+    /// the last position unreachable.
+    #[test]
+    fn a_drop_on_the_strip_lands_between_two_tabs() {
+        use super::{Drop, tab_areas};
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.open_tab(PathBuf::from("/usr"), &jobs);
+        panes.open_tab(PathBuf::from("/etc"), &jobs);
+        let (leaves, _) = geometry(&panes);
+        let leaf = leaves[0];
+        let tabs: Vec<_> = tab_areas(leaf.tabs, 3).collect();
+        let on = |area: Area, part: f32| {
+            sk_plat::Point::new(area.x + area.width * part, area.y + area.height / 2.0)
+        };
+        assert_eq!(Drop::at(&leaf, 3, on(tabs[0], 0.2)), Drop::Strip(leaf.id, 0));
+        assert_eq!(Drop::at(&leaf, 3, on(tabs[0], 0.8)), Drop::Strip(leaf.id, 1));
+        assert_eq!(Drop::at(&leaf, 3, on(tabs[2], 0.8)), Drop::Strip(leaf.id, 3), "the end");
+    }
+
+    /// The overlay is what the drop *would* do, so the two cannot disagree.
+    #[test]
+    fn the_overlay_covers_the_half_the_split_would_take() {
+        use super::{Axis, Drop};
+        let (panes, _waker, _jobs, _updates) = tree();
+        let (leaves, _) = geometry(&panes);
+        let leaf = leaves[0];
+        let left = Drop::Split(leaf.id, Axis::Beside, true).overlay(&leaf, 1);
+        assert!((left.x - leaf.area.x).abs() < f32::EPSILON);
+        assert!((left.width - leaf.area.width / 2.0).abs() < 0.5);
+        let below = Drop::Split(leaf.id, Axis::Below, false).overlay(&leaf, 1);
+        assert!((below.bottom() - leaf.area.bottom()).abs() < 0.5);
+        assert!(below.y > leaf.area.y, "the lower half started at the top");
+        // A strip drop is a seam, not a block: it must not cover the tabs.
+        let seam = Drop::Strip(leaf.id, 0).overlay(&leaf, 1);
+        assert!(seam.width < 8.0, "the seam is {} wide", seam.width);
+    }
+
+    /// Moving the only tab of a leaf takes the leaf with it, and the last tab of
+    /// the last leaf cannot be taken at all — a window with no pane is not one.
+    #[test]
+    fn taking_the_last_tab_of_a_leaf_closes_the_leaf() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.split(Axis::Beside, &jobs);
+        let second = panes.focus();
+        assert_eq!(panes.leaf_count(), 2);
+        let taken = panes.take_tab(second, 0).expect("a tab");
+        assert_eq!(panes.leaf_count(), 1, "the emptied leaf stayed");
+        let first = panes.focus();
+        assert_ne!(first, second, "the emptied leaf is the one that survived");
+        panes.put_tab(first, 0, taken);
+        assert_eq!(panes.focused_leaf().panes.len(), 2);
+
+        // And the very last one refuses.
+        let only = panes.focus();
+        assert!(panes.take_tab(only, 0).is_some());
+        assert!(panes.take_tab(only, 0).is_none(), "the last tab was taken");
     }
 
     #[test]

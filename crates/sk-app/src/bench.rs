@@ -131,6 +131,8 @@ fn chrome_of<'a>(
         dividers,
         hovered_divider: None,
         hovered_tab: None,
+        hovered_plus: false,
+        tab_drop: None,
     }
 }
 
