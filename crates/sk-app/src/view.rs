@@ -66,6 +66,8 @@ pub struct Chrome<'a> {
     /// The pane whose whole list would take a drop, ringed rather than a row
     /// highlighted, because the target is the directory it is showing.
     pub drop_pane: Option<PaneId>,
+    /// What a drag of files is carrying, while one is over this window.
+    pub carrying: Option<&'a Carrying>,
     /// The subtree search, while it is open.
     pub search: Option<&'a crate::search::Search>,
     /// The name-taken question, while one is open.
@@ -292,6 +294,12 @@ pub fn draw(
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, here, typed);
+    }
+    // Over every panel, because it is attached to the pointer and the pointer is
+    // over whatever it is over — a card that slid under a panel would look like
+    // the drag had been dropped.
+    if let Some(carrying) = chrome.carrying {
+        drag_card(painter, layout, carrying);
     }
     // Last, so it is over everything: a menu under the statistics overlay is a
     // menu whose rows cannot be read or aimed at.
@@ -1220,6 +1228,86 @@ fn search_panel(
 
 /// The summary line between the field and the results.
 const SEARCH_SUMMARY: f32 = 22.0;
+
+/// What a drag of files is carrying, for the card under the pointer.
+pub struct Carrying {
+    /// Where the pointer is, in logical pixels.
+    pub at: Point,
+    /// The first file's name.
+    pub name: String,
+    /// How many there are.
+    pub count: usize,
+    /// Whether the first one is a folder, so the card draws the right icon.
+    pub directory: bool,
+}
+
+/// The card that follows the pointer while files are being carried.
+///
+/// **Drawn here rather than handed to the display server.** Wayland's drag icon
+/// is a second `wl_surface` with its own buffer and its own scale to keep right,
+/// and X11's is a cursor; neither can show a name, and the two would look
+/// different. This is one card, in the real renderer, at the real scale, with
+/// the real font — and the case it is for is a drop into the other half of a
+/// split, which never leaves this window.
+///
+/// Offset down and to the right of the hotspot, the way every drag image is:
+/// under the pointer it would cover the row the drop is about to land on.
+fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let badge = (carrying.count > 1).then(|| format!("+{}", carrying.count - 1));
+    let badge_width =
+        badge.as_ref().map_or(0.0, |it| text_width(painter, it, metrics.header_size, true) + 10.0);
+    let name_width = text_width(painter, &carrying.name, metrics.text_size, false);
+    let width = (CARD_ICON + CARD_INSET * 3.0 + name_width + badge_width).clamp(64.0, CARD_WIDEST);
+    let area = Area {
+        // Clamped inside the window: a card that runs off the right edge is a
+        // card with the name cut off at exactly the moment it is being read.
+        x: (carrying.at.x + CARD_OFFSET).min(layout.window.width - width - 4.0).max(4.0),
+        y: (carrying.at.y + CARD_OFFSET).min(layout.window.height - CARD_HEIGHT - 4.0).max(4.0),
+        width,
+        height: CARD_HEIGHT,
+    };
+    // The panel's own shadow and fill, so a card over the list reads as being
+    // above it rather than painted on it — and an accent ring, because it is
+    // attached to the pointer and everything else with one is a target.
+    panel_shape(painter, area);
+    let shape = painter.rect(area.x, area.y, area.width, area.height);
+    let ring = painter.px(1.0).round().max(1.0);
+    painter.list.stroke(shape, theme.palette.accent, painter.px(10.0), ring);
+
+    let icon = painter.rect(
+        area.x + CARD_INSET,
+        area.y + (CARD_HEIGHT - CARD_ICON) / 2.0,
+        CARD_ICON,
+        CARD_ICON,
+    );
+    let colour =
+        if carrying.directory { theme.palette.kinds.folder } else { theme.palette.kinds.unknown };
+    if carrying.directory {
+        painter.folder(icon, colour);
+    } else {
+        painter.file(icon, colour);
+    }
+
+    let baseline = painter.baseline(area.y, CARD_HEIGHT, metrics.text_size);
+    let x = area.x + CARD_INSET * 2.0 + CARD_ICON;
+    let room = area.width - (x - area.x) - CARD_INSET - badge_width;
+    let style = TextStyle::new(metrics.text_size, theme.palette.text);
+    line(painter, &carrying.name, style, x, room, baseline);
+    if let Some(badge) = badge {
+        let style = TextStyle::new(metrics.header_size, theme.palette.dim).right();
+        line(painter, &badge, style, x, area.width - (x - area.x) - CARD_INSET, baseline);
+    }
+}
+
+/// The card: how far from the hotspot, how tall, its icon, its padding, and the
+/// widest it goes before a long name is elided.
+const CARD_OFFSET: f32 = 14.0;
+const CARD_HEIGHT: f32 = 28.0;
+const CARD_ICON: f32 = 16.0;
+const CARD_INSET: f32 = 8.0;
+const CARD_WIDEST: f32 = 320.0;
 
 /// The filter, as a panel over the top-right of the list.
 ///
@@ -2560,6 +2648,7 @@ mod tests {
                 hovered_place: None,
                 drop_row: None,
                 drop_pane: None,
+                carrying: None,
                 search: None,
                 clash: None,
                 answering: 0,

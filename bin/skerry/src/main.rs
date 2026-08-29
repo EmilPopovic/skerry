@@ -38,6 +38,7 @@ struct Overlays {
     row_menu: bool,
     clash: bool,
     search: bool,
+    carrying: bool,
     path_entry: bool,
     palette: bool,
     filter: bool,
@@ -59,6 +60,7 @@ impl Overlays {
             "--menu-row" => &mut self.row_menu,
             "--clash" => &mut self.clash,
             "--search" => &mut self.search,
+            "--carrying" => &mut self.carrying,
             "--path-entry" => &mut self.path_entry,
             "--palette" => &mut self.palette,
             "--filter" => &mut self.filter,
@@ -104,6 +106,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         row_menu: overlays.row_menu,
         clash: overlays.clash,
         search: overlays.search,
+        carrying: overlays.carrying,
         path_entry: overlays.path_entry,
         palette: overlays.palette,
         filter: overlays.filter,
@@ -260,6 +263,7 @@ skerry [OPTIONS] [PATH]
   --menu-row       show the menu a secondary click on a row opens
   --clash          show the panel that asks about a name already taken
   --search         show the search over everything under this folder
+  --carrying       show the card that follows a drag of files
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it

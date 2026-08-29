@@ -654,14 +654,13 @@ impl Window {
 
     /// Starts a drag carrying `content`. Whether it began.
     pub fn start_drag(&mut self, content: Content, actions: &[crate::DragAction]) -> bool {
-        let started = self.xdnd.start(
-            &self.connection,
-            &self.atoms,
-            self.id,
-            self.time,
-            content.clone(),
-            actions,
-        );
+        let grab = xdnd::Grab {
+            window: self.id,
+            time: self.time,
+            cursor: self.cursors.resolve(&self.connection, crate::Cursor::Dragging),
+        };
+        let started =
+            self.xdnd.start(&self.connection, &self.atoms, &grab, content.clone(), actions);
         // The bytes are served by the selection machinery, which is what carries
         // an `INCR` — and a directory's worth of URIs is one.
         if started {

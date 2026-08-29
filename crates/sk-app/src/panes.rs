@@ -494,7 +494,7 @@ impl Panes {
         self.focus = leaf_id;
     }
 
-    fn leaf_mut(&mut self, id: PaneId) -> Option<&mut Tabs> {
+    pub(crate) fn leaf_mut(&mut self, id: PaneId) -> Option<&mut Tabs> {
         self.leaves_mut().find(|leaf| leaf.id == id)
     }
 

@@ -27,6 +27,7 @@ const CORE_ARROW: u16 = 68; // XC_left_ptr
 const CORE_HAND: u16 = 58; // XC_hand2
 const CORE_TEXT: u16 = 152; // XC_xterm
 const CORE_GRABBING: u16 = 52; // XC_fleur
+const CORE_DRAGGING: u16 = 92; // XC_plus, the core font's nearest thing to a drop cursor
 const CORE_TOP: u16 = 138; // XC_top_side
 const CORE_BOTTOM: u16 = 16; // XC_bottom_side
 const CORE_LEFT: u16 = 70; // XC_left_side
@@ -146,6 +147,7 @@ const fn core_glyph(cursor: Cursor) -> u16 {
         Cursor::Hand => CORE_HAND,
         Cursor::Text => CORE_TEXT,
         Cursor::Grabbing => CORE_GRABBING,
+        Cursor::Dragging => CORE_DRAGGING,
         Cursor::Divider { horizontal: true } => CORE_H_DOUBLE_ARROW,
         Cursor::Divider { horizontal: false } => CORE_V_DOUBLE_ARROW,
         Cursor::Resize(edge) => match edge {
@@ -190,7 +192,8 @@ mod tests {
     }
 
     fn every_cursor() -> Vec<Cursor> {
-        let mut all = vec![Cursor::Arrow, Cursor::Hand, Cursor::Text, Cursor::Grabbing];
+        let mut all =
+            vec![Cursor::Arrow, Cursor::Hand, Cursor::Text, Cursor::Grabbing, Cursor::Dragging];
         for edge in [
             Edge::Top,
             Edge::Bottom,

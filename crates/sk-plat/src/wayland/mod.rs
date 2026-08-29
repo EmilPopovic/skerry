@@ -135,6 +135,12 @@ const fn shape_of(cursor: Cursor) -> wp_cursor_shape_device_v1::Shape {
         Cursor::Hand => Shape::Pointer,
         Cursor::Text => Shape::Text,
         Cursor::Grabbing => Shape::Grabbing,
+        // **`Move`, and the compositor may well override it.** A Wayland drag is
+        // the compositor's to draw once `start_drag` is accepted, so this is the
+        // shape for the moments a drag is being carried without one — and the
+        // card the window draws under the pointer is what a person actually
+        // reads. See `crates/sk-app/src/view.rs`.
+        Cursor::Dragging => Shape::Move,
         Cursor::Divider { horizontal: true } => Shape::ColResize,
         Cursor::Divider { horizontal: false } => Shape::RowResize,
         Cursor::Resize(edge) => match edge {

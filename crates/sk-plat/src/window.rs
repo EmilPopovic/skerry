@@ -209,6 +209,13 @@ pub enum Cursor {
     },
     /// Dragging something that follows the pointer.
     Grabbing,
+    /// Carrying files that a drop would put somewhere.
+    ///
+    /// Not [`Cursor::Grabbing`]: that is a thing being moved *within* the window
+    /// — a divider, a scrollbar thumb — and this is a payload looking for a
+    /// destination. Every theme has drawn them differently since before the CSS
+    /// names, which is the reason they are two shapes here.
+    Dragging,
 }
 
 impl Cursor {
@@ -224,6 +231,7 @@ impl Cursor {
             Self::Hand => &["pointer", "hand2", "hand1"],
             Self::Text => &["text", "xterm", "ibeam"],
             Self::Grabbing => &["grabbing", "closedhand", "hand2"],
+            Self::Dragging => &["dnd-move", "move", "copy", "dnd-copy", "grabbing"],
             Self::Divider { horizontal: true } => &["col-resize", "sb_h_double_arrow", "e-resize"],
             Self::Divider { horizontal: false } => &["row-resize", "sb_v_double_arrow", "s-resize"],
             Self::Resize(edge) => edge.theme_names(),

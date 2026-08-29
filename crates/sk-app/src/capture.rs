@@ -65,6 +65,8 @@ pub struct Capture {
     pub clash: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
+    /// Whether to draw the card that follows a drag of files.
+    pub carrying: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
@@ -253,6 +255,7 @@ struct Overlays {
     openers: Option<crate::openers::Openers>,
     clash: Option<crate::edit::Clash>,
     search: Option<crate::search::Search>,
+    carrying: Option<crate::view::Carrying>,
 }
 
 /// A rename in progress over the row whose name has two dots in it.
@@ -419,6 +422,14 @@ fn sample_overlays(
         openers: request.open_with.then(sample_openers),
         clash: request.clash.then(|| sample_clash(&request.path)),
         search: request.search.then(|| sample_search(&request.path)),
+        // Stated, because a capture has no pointer: the card follows one, and
+        // this puts it where a pointer resting over the list would be.
+        carrying: request.carrying.then(|| crate::view::Carrying {
+            at: sk_plat::Point::new(here.name.x + 90.0, here.body.y + 96.0),
+            name: "quarterly-report.pdf".to_owned(),
+            count: 3,
+            directory: false,
+        }),
     }
 }
 
@@ -531,6 +542,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
+        carrying: sample.overlays.carrying.as_ref(),
         search: sample.overlays.search.as_ref(),
         clash: sample.overlays.clash.as_ref(),
         hint: sample.hint,

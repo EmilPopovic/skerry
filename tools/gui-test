@@ -877,7 +877,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 89
+FEWEST_SCENARIOS = 91
 
 
 def scenario(name, fresh: bool = False):
@@ -2375,6 +2375,85 @@ def subtree_search(run: Run, fixture: Path) -> None:
     listed(run)
     if run.state()["path"] != here["path"]:
         raise Failure("Back did not return to the folder the search started from")
+
+
+@scenario("a-drag-held-over-a-folder-opens-it", fresh=True)
+def spring_loaded(run: Run, fixture: Path) -> None:
+    """Rest a drag on a folder and the pane goes into it, so the drop can be deep.
+
+    The gesture this exists for cannot let go on the way: dropping a file three
+    folders down otherwise means opening two of them first, which means putting
+    the file down and picking it up again. What is asserted is the whole of it —
+    the folder opens *while the button is still down*, and the drop then lands in
+    the folder that opened.
+    """
+    listed(run)
+    # `alpha` holds `nested`, so there is somewhere to spring *to*.
+    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+    chosen = run.state()
+    expect(chosen, cursor="file-1.txt")
+    held = point_at(run, int(chosen["cursor_row"]))
+    onto = point_at(run, 0)
+    if onto["hover_name"] != "alpha":
+        raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
+
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    over_alpha = aim(run, held, name_x(held), row_y(held, 0))
+    # Pressed, walked onto the folder, and then held still — the holding is the
+    # thing under test, so it is a sleep on purpose rather than a poll.
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        + creep(from_point, over_alpha)
+        + "sleep 300\nkey f12\nsleep 200\n"
+    )
+    carrying = run.state()
+    expect(carrying, dragging="true", carrying="file-1.txt")
+    if carrying["path"] != str(fixture):
+        raise Failure("the pane sprang before the drag had rested at all")
+
+    # Past the nine hundred milliseconds, without moving.
+    run.drive("sleep 1200\nkey f12\nsleep 250\n")
+    sprung = run.state()
+    if sprung["path"] != str(fixture / "alpha"):
+        raise Failure(f"resting on the folder did not open it: {sprung['path']!r}")
+    expect(sprung, dragging="true", carrying="file-1.txt")
+
+    # And the drop lands where the spring went, not where the drag started.
+    run.drive("release\nsleep 1500\nkey f12\nsleep 300\n")
+    if not (fixture / "alpha" / "file-1.txt").is_file():
+        raise Failure("the drop did not land in the folder that opened")
+    if (fixture / "file-1.txt").exists():
+        raise Failure("the original is still there, so the drop copied rather than moved")
+    expect(run.state(), dragging="false", carrying="")
+
+
+@scenario("passing-over-a-folder-does-not-open-it", fresh=True)
+def no_spring_in_passing(run: Run, fixture: Path) -> None:
+    """The other half of the rule, and the dangerous direction.
+
+    A folder that opened while the pointer was merely crossing it would move the
+    target out from under a gesture already in flight, and the drop would land
+    somewhere nobody chose. The timer restarts every time the target changes.
+    """
+    listed(run)
+    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+    chosen = run.state()
+    held = point_at(run, int(chosen["cursor_row"]))
+    start = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    over = [aim(run, held, name_x(held), row_y(held, row)) for row in (0, 1, 2)]
+
+    # Three folders crossed, each for well under the nine hundred milliseconds,
+    # and back again — total time over folders far more than the threshold.
+    script = f"move {start[0]:.1f} {start[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+    walk = [start, *over, *reversed(over)]
+    for a, b in zip(walk, walk[1:]):
+        script += creep(a, b, steps=3) + "sleep 120\n"
+    run.drive(script + "key f12\nsleep 200\n")
+    passing = run.state()
+    expect(passing, dragging="true")
+    if passing["path"] != str(fixture):
+        raise Failure(f"a folder opened while the pointer was crossing it: {passing['path']!r}")
+    run.drive("release\nsleep 800\n")
 
 
 PEER = ROOT / "tools" / "gtk-drag-peer"

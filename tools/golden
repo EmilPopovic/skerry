@@ -127,6 +127,10 @@ FRAMES = [
     # folder it is in beside it, over a summary that says the walk is still
     # going. The only frame whose rows are not one directory's.
     ("search", ["--size", "900x520", "--scale", "125", "--search"]),
+    # What a drag of files carries, drawn under the pointer. The only frame with
+    # something attached to a position rather than to a rectangle of the layout,
+    # and the only one that would catch the card sliding under a panel.
+    ("carrying", ["--size", "900x520", "--scale", "125", "--carrying"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.

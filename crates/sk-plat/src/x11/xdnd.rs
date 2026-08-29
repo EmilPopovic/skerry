@@ -91,6 +91,20 @@ pub(super) struct Xdnd {
     outgoing: Option<Outgoing>,
 }
 
+/// What a drag needs from the window starting it, at the moment it starts.
+///
+/// Three values rather than three parameters because they are one thing — the
+/// grab this gesture runs under — and because the eighth argument is where a
+/// call site stops being readable.
+pub(super) struct Grab {
+    pub(super) window: xproto::Window,
+    pub(super) time: xproto::Timestamp,
+    /// The pointer image for the whole gesture. X11 has no drag icon and no
+    /// protocol for one, so the grab's cursor is the only thing that says a drag
+    /// is in flight at all.
+    pub(super) cursor: xproto::Cursor,
+}
+
 impl Xdnd {
     /// Declares this window able to receive drags.
     ///
@@ -260,11 +274,11 @@ impl Xdnd {
         &mut self,
         connection: &impl Connection,
         atoms: &Atoms,
-        window: xproto::Window,
-        time: xproto::Timestamp,
+        grab: &Grab,
         content: Content,
         actions: &[DragAction],
     ) -> bool {
+        let Grab { window, time, cursor } = *grab;
         if self.outgoing.is_some() {
             return false;
         }
@@ -297,7 +311,12 @@ impl Xdnd {
                 xproto::GrabMode::ASYNC,
                 xproto::GrabMode::ASYNC,
                 x11rb::NONE,
-                x11rb::NONE,
+                // **The grab's cursor is the drag's cursor.** X11 has no drag
+                // icon and no protocol for one; the shape a person sees for the
+                // whole gesture is whatever the grab was taken with, and
+                // `x11rb::NONE` here left it as the arrow it was before the
+                // button went down.
+                cursor,
                 time,
             )
             .ok()

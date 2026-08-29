@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Eleven crates, 513
-tests, 89 GUI scenarios **on both Wayland and X11**, twenty-four golden frames, every
+tests, 91 GUI scenarios **on both Wayland and X11**, twenty-five golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -22,7 +22,8 @@ application the desktop says owns them or in **the one you pick**, **Properties*
 and **a terminal here**, a clipboard that takes files, paths, and the text
 inside a text file, and text from **a real input method** — dead keys and
 Compose on both servers, `text-input-v3` on Wayland. Files drag between the halves
-of a split; a taken name **stops the queue and asks**, and Replace trashes what it
+of a split, with a card under the pointer saying what is held and a folder
+held over for nine hundred milliseconds opening to be dropped into; a taken name **stops the queue and asks**, and Replace trashes what it
 replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and can
 be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
 result at **0.7 ms over 817,288 entries**; and the window **comes back the way it was

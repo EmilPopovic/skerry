@@ -93,7 +93,46 @@ struct FilesDrag {
     /// no folder row. The whole list is ringed, because the target is the
     /// directory the pane is showing rather than anything drawn in it.
     into_pane: Option<crate::panes::PaneId>,
+    /// The folder row the pointer has been resting on, and since when.
+    ///
+    /// Held still for long enough, the pane opens it — which is what makes it
+    /// possible to drop three folders deep in a gesture that cannot let go on the
+    /// way. Reset every time the target changes, so passing over a folder on the
+    /// way to another one does not open it.
+    resting: Option<(crate::panes::PaneId, PathBuf, Instant)>,
+    /// Where the pointer was when a folder last sprang open.
+    ///
+    /// **A spring needs a fresh aim.** Opening a folder puts a different listing
+    /// under a pointer that has not moved, and whatever is now beneath it is
+    /// something nobody pointed at — so without this, holding still descends one
+    /// level every nine hundred milliseconds and the drop lands wherever the
+    /// hand happened to stop. Measured: a file aimed at `alpha` ended up in
+    /// `alpha/nested`.
+    sprung_at: Option<Point>,
 }
+
+/// Whether the pointer is still where a spring left it.
+///
+/// **A distance, not an equality.** A compositor re-sends a position that has
+/// not changed with sub-pixel differences, so `==` on two `f32` pairs said the
+/// pointer had moved when a hand had been perfectly still — and the second
+/// spring fired anyway. The same four logical pixels a press uses to tell a
+/// click from a drag, for the same reason: a hand on a touchpad is never
+/// exactly still.
+fn still_there(sprung_at: Option<Point>, position: Point) -> bool {
+    sprung_at.is_some_and(|at| {
+        (position.x - at.x).abs().max((position.y - at.y).abs()) <= DRAG_THRESHOLD
+    })
+}
+
+/// How long a drag must rest on a folder before the pane opens it.
+///
+/// **Nine hundred milliseconds**, which is the long end of what other file
+/// managers use — GNOME's is around a second and macOS's is adjustable from
+/// about half of one. Short is the dangerous direction here: a folder that opens
+/// while the pointer is merely crossing it moves the target out from under a
+/// gesture already in flight, and the drop then lands somewhere nobody chose.
+const SPRING: Duration = Duration::from_millis(900);
 
 /// How far the pointer must travel before a press becomes a rubber band.
 ///
@@ -1089,6 +1128,10 @@ impl App {
                 .then(|| REFRESH_FLOOR.saturating_sub(self.refreshed.elapsed())),
             self.mounts_owed.then(|| REFRESH_FLOOR.saturating_sub(self.remounted.elapsed())),
             self.notice.as_ref().map(|(_, at)| NOTICE_WINDOW.saturating_sub(at.elapsed())),
+            // A drag resting on a folder owes a wake-up, or the folder opens only
+            // when the pointer next moves — which is the one thing a person who
+            // is holding still is not doing.
+            self.spring_due(),
         ];
         deadlines.into_iter().flatten().min()
     }
@@ -1250,6 +1293,7 @@ impl App {
     }
 
     fn advance(&mut self) {
+        self.spring_open();
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -3432,6 +3476,34 @@ impl App {
         self.dirty = true;
     }
 
+    /// A drag of files: where it would land, and what it is carrying.
+    ///
+    /// **Which pane as well as which row.** A scenario dragging between two
+    /// panes cannot tell "the right pane's row 2" from "the left pane's row 2",
+    /// and that is the whole thing it is asserting about.
+    fn drag_report(&self) -> String {
+        let row = self.drop_row().map_or(-1, |(_, row)| i64::try_from(row).unwrap_or(-1));
+        let leaf = self
+            .drop_row()
+            .map(|(id, _)| id)
+            .or_else(|| self.drop_pane())
+            .and_then(|id| self.placement.leaves.iter().position(|leaf| leaf.id == id))
+            .map_or(-1, |at| i64::try_from(at).unwrap_or(-1));
+        let carrying = self
+            .files_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .and_then(|drag| drag.paths.first())
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!(
+            "drop_row={row} drop_leaf={leaf} drop_whole={} dragging={} carrying={carrying:?}",
+            i32::from(self.drop_pane().is_some()),
+            self.files_drag.as_ref().is_some_and(|drag| drag.active),
+        )
+    }
+
     /// The subtree search, which changes no listing while it is open and is
     /// otherwise invisible from outside: how many results, and which one is on.
     fn search_report(&self) -> String {
@@ -3971,17 +4043,7 @@ search_active={active:?}",
         let cursor_row =
             self.panes.focused().cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let progress = self.edits.progress_line().unwrap_or_default();
-        // Which pane as well as which row: a scenario dragging between two panes
-        // cannot tell "the right pane's row 2" from "the left pane's row 2", and
-        // that is the whole thing it is asserting about.
-        let drop_row = self.drop_row().map_or(-1, |(_, row)| i64::try_from(row).unwrap_or(-1));
-        let drop_leaf = self
-            .drop_row()
-            .map(|(id, _)| id)
-            .or_else(|| self.drop_pane())
-            .and_then(|id| self.placement.leaves.iter().position(|leaf| leaf.id == id))
-            .map_or(-1, |at| i64::try_from(at).unwrap_or(-1));
-        let drop_whole = i32::from(self.drop_pane().is_some());
+        let drag = self.drag_report();
         // The open question, which is the one overlay a scenario cannot see any
         // other way: it draws no row, changes no listing, and the whole point of
         // it is that nothing has happened yet.
@@ -4005,7 +4067,6 @@ search_active={active:?}",
         // The counted total, and whether the count reached the end — which is
         // the whole condition on there being an ETA at all.
         let (total, total_done) = self.edits.counted();
-        let dragging = self.files_drag.as_ref().is_some_and(|drag| drag.active);
         // The display server's own view, which is not the same question: one is
         // "this window is carrying something", the other is "the server has a
         // drag over this surface".
@@ -4031,8 +4092,7 @@ undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
 asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
 for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
 theme={theme} zoom={zoom} sidebar_open={sidebar_open} {search} \
-filtering={} filter={:?} drop_row={drop_row} drop_leaf={drop_leaf} drop_whole={drop_whole} \
-dragging={dragging} \
+filtering={} filter={:?} {drag} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
 refused={refused:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",
@@ -4336,6 +4396,7 @@ tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} pane_bod
             sk_plat::Cursor::Hand => "hand".to_owned(),
             sk_plat::Cursor::Text => "text".to_owned(),
             sk_plat::Cursor::Grabbing => "grabbing".to_owned(),
+            sk_plat::Cursor::Dragging => "dragging".to_owned(),
             sk_plat::Cursor::Resize(edge) => format!("resize-{edge:?}").to_lowercase(),
             sk_plat::Cursor::Divider { horizontal: true } => "divider-h".to_owned(),
             sk_plat::Cursor::Divider { horizontal: false } => "divider-v".to_owned(),
@@ -4583,6 +4644,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             let _ = self.window.start_drag(content, &actions);
         }
         let Some(drag) = &mut self.files_drag else { return };
+        // **Nothing is recomputed while the pointer sits where a spring left
+        // it.** Opening a folder puts a different listing under a pointer that
+        // has not moved: the row beneath it is one the listing moved there, and
+        // treating it as a target means both springing into it and *dropping*
+        // into it. Measured — a file aimed at `alpha` landed in `alpha/nested`,
+        // and suppressing only the spring left the drop doing it anyway. What
+        // the spring already set stands until a hand moves.
+        if still_there(drag.sprung_at, position) {
+            return;
+        }
+        drag.sprung_at = None;
         let (row, onto) = match target {
             Some((leaf, row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
                 (Some((leaf, row)), Some(path))
@@ -4599,10 +4671,65 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             onto.is_none().then(|| over.filter(|id| Some(*id) != drag.origin)).flatten();
         if drag.row != row || drag.onto != onto || drag.into_pane != into_pane {
             drag.row = row;
-            drag.onto = onto;
+            drag.onto.clone_from(&onto);
             drag.into_pane = into_pane;
             self.dirty = true;
         }
+        // **Restarted whenever the target changes**, so passing over four folders
+        // on the way to a fifth opens none of them. Only a folder row springs: a
+        // pane's own directory is already open, and there is nothing to enter.
+        let resting = match (row, onto) {
+            (Some((leaf, _)), Some(path)) => Some((leaf, path)),
+            _ => None,
+        };
+        match (&drag.resting, resting) {
+            (Some((_, held, _)), Some((_, path))) if *held == path => {}
+            (_, Some((leaf, path))) => drag.resting = Some((leaf, path, Instant::now())),
+            (_, None) => drag.resting = None,
+        }
+    }
+
+    /// Opens a folder the drag has been resting on, if it has rested long enough.
+    ///
+    /// **The origin is forgotten with it.** A pane that has sprung is no longer
+    /// showing the directory the files came from, so the rule that stops a drop
+    /// landing where the files already are no longer applies to it — and without
+    /// this, springing inside the pane you started in leaves a pane that takes no
+    /// drop at all.
+    fn spring_open(&mut self) {
+        let Some(drag) = self.files_drag.as_ref() else { return };
+        if !drag.active {
+            return;
+        }
+        let Some((leaf, path, since)) = drag.resting.clone() else { return };
+        if since.elapsed() < SPRING {
+            return;
+        }
+        let Some(tabs) = self.panes.leaf_mut(leaf) else { return };
+        tabs.showing_mut().open(path, &self.jobs);
+        let Some(drag) = self.files_drag.as_mut() else { return };
+        drag.resting = None;
+        // The row that was the target has gone with the listing it was in, and
+        // **the pane that opened is the target now** — set here rather than left
+        // to the next motion, because the gesture this exists for is one where
+        // the pointer is deliberately not moving. Without it a release straight
+        // after a spring found no target at all and collapsed into a click.
+        drag.row = None;
+        drag.onto = None;
+        drag.into_pane = Some(leaf);
+        drag.sprung_at = Some(self.pointer);
+        if drag.origin == Some(leaf) {
+            drag.origin = None;
+        }
+        self.settle_panes();
+        self.dirty = true;
+    }
+
+    /// How long until a resting drag opens the folder it is over.
+    fn spring_due(&self) -> Option<Duration> {
+        let drag = self.files_drag.as_ref().filter(|drag| drag.active)?;
+        let (_, _, since) = drag.resting.as_ref()?;
+        Some(SPRING.saturating_sub(since.elapsed()))
     }
 
     /// The pane whose list is under `position`, whichever pane has the keyboard.
@@ -4658,6 +4785,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 onto: None,
                 row: None,
                 into_pane: None,
+                resting: None,
+                sprung_at: None,
             });
         }
         self.drag_files_to(position);
@@ -4828,6 +4957,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 onto: None,
                 row: None,
                 into_pane: None,
+                resting: None,
+                sprung_at: None,
             });
         }
     }
@@ -4865,6 +4996,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// only by trying it, and the first thing a person tries is dragging the
     /// edge of a window.
     fn cursor_at(&self, position: Point, commands: &Registry<Self>) -> sk_plat::Cursor {
+        // **Before everything, including the resize band.** While files are
+        // being carried the pointer is a payload looking for a destination, and
+        // every other shape would be an answer to a question nobody is asking —
+        // the window's edge does not resize while a hand is full.
+        if self.files_drag.as_ref().is_some_and(|drag| drag.active) {
+            return sk_plat::Cursor::Dragging;
+        }
         if self.thumb_grab.is_some() {
             return sk_plat::Cursor::Grabbing;
         }
@@ -5781,6 +5919,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             typed,
             band,
             files_drag,
+            pointer,
             adapter,
             backend,
             scale_120,
@@ -5813,6 +5952,20 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let rows = show_keys.then(|| crate::commands::overlay_rows(commands));
         let progress = edits.progress_line();
         let dropping = files_drag.as_ref().filter(|drag| drag.active);
+        // Only for a drag this window started: a peer's carries paths we have
+        // not read and names we would have to invent.
+        let carrying = dropping.filter(|drag| !drag.paths.is_empty()).map(|drag| {
+            let first = drag.paths.first();
+            crate::view::Carrying {
+                at: *pointer,
+                name: first
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                count: drag.paths.len(),
+                directory: first.is_some_and(|path| path.is_dir()),
+            }
+        });
         let chrome = Chrome {
             keys: rows.as_deref(),
             stats: *show_stats,
@@ -5832,6 +5985,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_place: sidebar.hover,
             drop_row: dropping.and_then(|drag| drag.row),
             drop_pane: dropping.and_then(|drag| drag.into_pane),
+            carrying: carrying.as_ref(),
             search: search.as_ref(),
             clash: edits.clash.as_ref(),
             answering: edits.answering,
