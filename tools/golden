@@ -109,10 +109,15 @@ FRAMES = [
     # thing it shows. The keyboard overlay covers "an overlay draws correctly"
     # and its content comes from the command registry, which does not vary.
     # The context menu, which is the whole of the pointer's way into the command
-    # registry: eleven rows, three of them dimmed, four dividers and a
-    # highlight. Its width is the width of its widest shaped row, so this is
-    # also the only frame that would catch that measurement drifting.
+    # registry. Its width is the width of its widest shaped row, so this is also
+    # the only frame that would catch that measurement drifting — and the
+    # background menu is taller than the window it is in, which makes it the only
+    # frame of a scrolled menu and of the arrow that says there is more.
     ("context-menu", ["--size", "900x520", "--scale", "125", "--menu"]),
+    # The other menu, which is a different table: what a secondary click on a
+    # row offers, over a folder. Two menus and one of them had no frame at all,
+    # which is how a row added to it could change nothing anyone could see.
+    ("context-menu-row", ["--size", "900x520", "--scale", "125", "--menu-row"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.

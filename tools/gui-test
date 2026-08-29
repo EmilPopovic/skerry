@@ -825,7 +825,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 80
+FEWEST_SCENARIOS = 82
 
 
 def scenario(name, fresh: bool = False):
@@ -3407,6 +3407,116 @@ def tabs(run: Run, fixture: Path) -> None:
     expect(reopened, tabs="2")
     if reopened["path"] != str(fixture / "alpha"):
         raise Failure(f"the reopened tab is showing {reopened['path']}")
+
+
+@scenario("open-in-a-new-tab-from-the-menu")
+def open_in_a_new_tab(run: Run, fixture: Path) -> None:
+    """A folder's menu puts it in a tab and leaves the view where it was.
+
+    That is the whole point of the command — three folders queued up without
+    going to any of them — so what this asserts is where the view *stayed*, and
+    then that three of them arrive in the order they were listed in. Both routes
+    are covered because they have different targets: the pointer's is the row
+    under it, and the keyboard's is the selection.
+    """
+    listed(run)
+    start = run.state()
+    expect(start, tabs="1")
+
+    onto = point_at(run, 0)
+    if onto["hover_name"] != "alpha":
+        raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
+    run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+    opened = run.state()
+    if "go.open_new_tab" in opened["menu_dim"]:
+        raise Failure("Open in a new tab is dimmed over a folder")
+    aimed = menu_aim(run, opened, "go.open_new_tab")
+    run.drive(
+        f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n"
+    )
+    behind = run.state()
+    expect(behind, menu="0", tabs="2", tab="0", path=start["path"])
+
+    run.drive("key ctrl+tab\nsleep 500\n")
+    if listed(run)["path"] != str(fixture / "alpha"):
+        raise Failure(f"the new tab is showing {run.state()['path']}")
+    run.drive("key ctrl+w\nsleep 500\n")
+    listed(run)
+
+    # A file has nothing to open in a tab, and the row says so rather than
+    # vanishing: the menu is the same shape every time it opens.
+    onto = point_at(run, 3)
+    if not onto["hover_name"].startswith("file-"):
+        raise Failure(f"row 3 is {onto['hover_name']!r}, wanted a file")
+    run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+    if "go.open_new_tab" not in run.state()["menu_dim"]:
+        raise Failure("Open in a new tab is offered over a file")
+    run.drive("key escape\nsleep 300\n")
+
+    # Three folders at once. Inserted at a fixed point rather than a walking one,
+    # they arrived in the strip backwards.
+    run.drive("key home\nsleep 200\nkey shift+down\nkey shift+down\nsleep 250\nkey f12\nsleep 200\n")
+    three = run.state()
+    expect(three, selected="3", tabs="1")
+    run.drive("key ctrl+enter\nsleep 900\nkey f12\nsleep 300\n")
+    expect(run.state(), tabs="4", tab="0", path=start["path"])
+    for folder in ("alpha", "beta", "gamma"):
+        run.drive("key ctrl+tab\nsleep 500\n")
+        if listed(run)["path"] != str(fixture / folder):
+            raise Failure(f"the tabs are out of order: wanted {folder}, got {run.state()['path']}")
+
+
+@scenario("open-a-folder-into-a-pane-beside-and-below")
+def open_into_a_pane(run: Run, fixture: Path) -> None:
+    """Open right and Open down make a pane on the folder, and stay put.
+
+    The alternative these replace is Open in a new tab followed by dragging the
+    tab to an edge, which is two gestures for one intention. What matters here
+    is the same thing the tab scenario asserts — where the keyboard *stayed* —
+    plus that the new pane is the second one, not the first.
+    """
+    listed(run)
+    start = run.state()
+    expect(start, panes="1")
+
+    onto = point_at(run, 0)
+    if onto["hover_name"] != "alpha":
+        raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
+    run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+    opened = run.state()
+    if "go.open_beside" in opened["menu_dim"]:
+        raise Failure("Open right is dimmed over a folder")
+    aimed = menu_aim(run, opened, "go.open_beside")
+    run.drive(
+        f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n"
+    )
+    beside = run.state()
+    expect(beside, menu="0", panes="2", pane_focus="0", tabs="1", path=start["path"])
+    if beside["pane_paths"] != f"{Path(start['path']).name},alpha":
+        raise Failure(f"the panes are showing {beside['pane_paths']!r}")
+    # Beside, not below: the two halves share the width and keep the height.
+    whole = float(start["pane_sizes"].split("x")[0])
+    first, second = (size.split("x") for size in beside["pane_sizes"].split(","))
+    if first[1] != second[1] or float(first[0]) > whole * 0.6:
+        raise Failure(f"{beside['pane_sizes']} is not two halves of {whole:.0f} wide")
+
+    # And the keyboard's route to the other axis, from the pane it stayed in.
+    run.drive("key ctrl+shift+enter\nsleep 900\nkey f12\nsleep 300\n")
+    below = run.state()
+    expect(below, panes="3", pane_focus="0", path=start["path"])
+    first, second = (size.split("x") for size in below["pane_sizes"].split(",")[:2])
+    if first[0] != second[0]:
+        raise Failure(f"the second split is not horizontal: {below['pane_sizes']}")
+
+    # A file has no pane to open, and the row says so.
+    onto = point_at(run, 3)
+    if not onto["hover_name"].startswith("file-"):
+        raise Failure(f"row 3 is {onto['hover_name']!r}, wanted a file")
+    run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+    dimmed = run.state()["menu_dim"]
+    for command in ("go.open_beside", "go.open_below"):
+        if command not in dimmed:
+            raise Failure(f"{command} is offered over a file: {dimmed!r}")
 
 
 @scenario("a-tab-answers-a-click-a-double-click-and-its-cross")

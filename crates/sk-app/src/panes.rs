@@ -250,11 +250,40 @@ impl Panes {
 
     /// Opens a tab in the focused leaf and shows it.
     pub(crate) fn open_tab(&mut self, path: PathBuf, jobs: &Jobs) {
+        let at = self.focused_leaf().active + 1;
+        self.insert_tab(path, at, jobs);
+        self.focused_leaf_mut().active = at;
+    }
+
+    /// Opens tabs beside the showing one, in the order given, and stays on it.
+    ///
+    /// Staying is what every browser and both of the desktop's file managers do
+    /// with "open in a new tab": the command exists to put a directory somewhere
+    /// *without* going there, and one that took the view would be `Enter` with a
+    /// tab left behind. The strip is always drawn, so the new tabs are visible
+    /// where a hidden strip would have made this look like nothing happened.
+    ///
+    /// The insertion point walks. Three of them at a fixed `active + 1` arrive
+    /// in the strip backwards, which is what the test that named the order
+    /// caught and an assertion about the count would not have.
+    pub(crate) fn open_tabs_behind(
+        &mut self,
+        paths: impl IntoIterator<Item = PathBuf>,
+        jobs: &Jobs,
+    ) {
+        let first = self.focused_leaf().active + 1;
+        for (offset, path) in paths.into_iter().enumerate() {
+            self.insert_tab(path, first + offset, jobs);
+        }
+    }
+
+    /// Puts a tab at `at` in the focused leaf and starts its read.
+    fn insert_tab(&mut self, path: PathBuf, at: usize, jobs: &Jobs) {
         let mut pane = Pane::new(path);
         pane.reload(jobs);
         let leaf = self.focused_leaf_mut();
-        leaf.panes.insert(leaf.active + 1, pane);
-        leaf.active += 1;
+        let at = at.min(leaf.panes.len());
+        leaf.panes.insert(at, pane);
     }
 
     /// Closes the showing tab. `false` when it was the last tab of the last leaf.
@@ -397,6 +426,24 @@ impl Panes {
             second: Box::new(fresh),
         });
         self.focus = leaf_id;
+    }
+
+    /// Splits the focused leaf, puts `path` in the new half, and stays put.
+    ///
+    /// **The keyboard does not follow**, for the reason it does not follow a tab
+    /// opened behind: the command exists to put a directory *beside* what is
+    /// being done, and the new pane is on screen either way. [`Panes::split`] —
+    /// the `F3` one — does move, because there the new half shows the same
+    /// directory and staying would look like nothing had happened.
+    ///
+    /// `split_with` focuses what it makes, which is right for a tab dragged out
+    /// of a strip and wrong here, so the focus is put back.
+    pub(crate) fn open_split(&mut self, path: PathBuf, axis: Axis, jobs: &Jobs) {
+        let focus = self.focus;
+        let mut pane = Pane::new(path);
+        pane.reload(jobs);
+        self.split_with(focus, axis, false, pane);
+        self.focus = focus;
     }
 
     /// Closes the focused leaf and every tab in it. `false` when it is the last.
@@ -812,7 +859,7 @@ mod tests {
     use crate::layout::Area;
     use crate::pane::{Jobs, Pane};
     use sk_util::{Pool, Waker};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
 
     /// A pool nothing is ever asked of: these tests exercise the tree, and a
@@ -878,6 +925,35 @@ mod tests {
         assert!(panes.can_reopen());
         assert!(panes.reopen(&jobs));
         assert_eq!(panes.focused().path, PathBuf::from("/usr"));
+    }
+
+    /// The whole point of "open in a new tab": three folders queued up and the
+    /// view still on the folder they were queued from.
+    #[test]
+    fn tabs_opened_behind_stack_up_in_order_and_leave_the_view_alone() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.open_tabs_behind(["/usr", "/etc", "/var"].map(PathBuf::from), &jobs);
+        assert_eq!(panes.focused().path, PathBuf::from("/tmp"), "a tab took the view");
+        let strip: Vec<&Path> =
+            panes.focused_leaf().panes.iter().map(|pane| pane.path.as_path()).collect();
+        assert_eq!(
+            strip,
+            [Path::new("/tmp"), Path::new("/usr"), Path::new("/etc"), Path::new("/var")]
+        );
+    }
+
+    /// The other half of the same promise: a pane beside this one, and the
+    /// keyboard still in the pane it was asked from.
+    #[test]
+    fn a_folder_opened_into_a_pane_lands_beside_the_one_that_asked() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        let asked_from = panes.focus();
+        panes.open_split(PathBuf::from("/usr"), Axis::Beside, &jobs);
+        assert_eq!(panes.leaf_count(), 2);
+        assert_eq!(panes.focus(), asked_from, "the keyboard followed the new pane");
+        assert_eq!(panes.focused().path, PathBuf::from("/tmp"));
+        let shown: Vec<&Path> = panes.visible().map(|pane| pane.path.as_path()).collect();
+        assert_eq!(shown, [Path::new("/tmp"), Path::new("/usr")], "the new pane is not second");
     }
 
     #[test]

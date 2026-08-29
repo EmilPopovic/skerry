@@ -47,6 +47,38 @@ fn navigate(registry: &mut Registry<App>) {
             run: App::open_focused,
         },
         CommandSpec {
+            id: "go.open_new_tab",
+            name: "action.open_new_tab",
+            group: Group::Navigate,
+            // `Ctrl Enter` because it is Open with a modifier, which is the
+            // shape a browser gave every "…but in a tab" ten years ago. Not the
+            // middle click that does this in Nautilus: that button is owed to
+            // splitting, and one of the two has to be second.
+            keys: &["ctrl+enter"],
+            enabled: App::focused_is_a_directory,
+            run: App::open_in_new_tab,
+        },
+        CommandSpec {
+            id: "go.open_beside",
+            name: "action.open_beside",
+            group: Group::Navigate,
+            // The family reads as one: `Enter` opens, and the modifier says
+            // where. `Ctrl` is the tab, `Shift` is the pane, and both together
+            // is the other axis — the same pairing `F3` and `Shift F3` already
+            // use for a split of the directory already showing.
+            keys: &["shift+enter"],
+            enabled: App::focused_is_a_directory,
+            run: App::open_beside,
+        },
+        CommandSpec {
+            id: "go.open_below",
+            name: "action.open_below",
+            group: Group::Navigate,
+            keys: &["ctrl+shift+enter"],
+            enabled: App::focused_is_a_directory,
+            run: App::open_below,
+        },
+        CommandSpec {
             id: "go.parent",
             name: "action.parent",
             group: Group::Navigate,

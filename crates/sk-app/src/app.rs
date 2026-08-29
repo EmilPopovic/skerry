@@ -2597,6 +2597,85 @@ impl App {
         self.dirty = true;
     }
 
+    /// Opens every selected directory in a tab, and stays where it is.
+    ///
+    /// **Enabled on the focused entry, run over the whole selection.** Whether
+    /// any of two hundred thousand selected entries is a directory is a walk of
+    /// the selection, and `enabled` runs every frame — so the question asked
+    /// sixty times a second is the O(1) one, about the entry `Enter` would open.
+    /// Directories sort first, so the topmost selected entry is a directory
+    /// whenever one is selected at all, and the two answers differ only for a
+    /// selection made with `Ctrl` from the bottom up. It differs by doing more
+    /// than the row promised, never less.
+    pub(crate) fn open_in_new_tab(&mut self) {
+        let paths = self.selected_directories();
+        if paths.is_empty() {
+            return;
+        }
+        self.panes.open_tabs_behind(paths, &self.jobs);
+        self.settle_panes();
+    }
+
+    /// Opens the focused directory in a new pane beside this one.
+    pub(crate) fn open_beside(&mut self) {
+        self.open_in_a_pane(crate::panes::Axis::Beside);
+    }
+
+    /// And below it.
+    pub(crate) fn open_below(&mut self) {
+        self.open_in_a_pane(crate::panes::Axis::Below);
+    }
+
+    /// **One pane, and not one per selected directory.** Three tabs are a queue
+    /// and three panes are a shattered window, so this takes the entry `Enter`
+    /// would open and nothing else — which is also what makes it agree exactly
+    /// with the `enabled` that dims it.
+    fn open_in_a_pane(&mut self, axis: crate::panes::Axis) {
+        let Some(path) = self.focused_directory() else { return };
+        self.panes.open_split(path, axis, &self.jobs);
+        self.settle_panes();
+    }
+
+    /// Whether the entry `Enter` would open is a directory.
+    #[must_use]
+    pub(crate) fn focused_is_a_directory(&self) -> bool {
+        let pane = self.panes.focused();
+        pane.focused().is_some_and(|id| pane.listing.flags(id).has(sk_model::Flags::DIR))
+    }
+
+    /// That entry's path, when it is a directory.
+    ///
+    /// Kept apart from the predicate above rather than written as
+    /// `focused_directory().is_some()`, because the predicate is a command's
+    /// `enabled` and runs every frame: joining a path sixty times a second to
+    /// answer a yes-or-no question is an allocation per frame for nothing.
+    fn focused_directory(&self) -> Option<PathBuf> {
+        let pane = self.panes.focused();
+        let id = pane.focused()?;
+        pane.listing
+            .flags(id)
+            .has(sk_model::Flags::DIR)
+            .then(|| pane.path.join(pane.listing.name(id)))
+    }
+
+    /// The selected directories in list order, or the focused one when nothing
+    /// is selected.
+    fn selected_directories(&self) -> Vec<PathBuf> {
+        let pane = self.panes.focused();
+        let is_directory = |id| pane.listing.flags(id).has(sk_model::Flags::DIR);
+        let mut paths: Vec<PathBuf> = pane
+            .selection
+            .in_order(pane.listing.order())
+            .filter(|id| is_directory(*id))
+            .map(|id| pane.path.join(pane.listing.name(id)))
+            .collect();
+        if let Some(id) = pane.focused().filter(|_| paths.is_empty()).filter(|id| is_directory(*id))
+        {
+            paths.push(pane.path.join(pane.listing.name(id)));
+        }
+        paths
+    }
+
     /// Opens the focused entry: a directory in this window, a file in whatever
     /// the desktop says owns it.
     pub(crate) fn open_focused(&mut self) {
@@ -4599,8 +4678,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // **Not over the sidebar.** Every action on the background menu is about
         // the directory the list is showing, and a sidebar row is a different
         // directory — a menu offering New folder over `Downloads` would make it
-        // somewhere else. What a place's own menu should offer is Open in a new
-        // tab and Pin, and neither is a command yet.
+        // somewhere else. What a place's own menu should offer is that place in
+        // a new tab and Pin, and a command that runs against `&mut App` cannot
+        // be told which place: it needs a target, which the registry has no
+        // shape for yet.
         if self.layout.sidebar.contains(position.x, position.y) {
             return;
         }

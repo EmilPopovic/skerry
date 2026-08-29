@@ -59,6 +59,8 @@ pub struct Capture {
     pub stats: bool,
     /// Whether to draw the context menu.
     pub menu: bool,
+    /// Whether to draw the menu a secondary click on a row opens instead.
+    pub row_menu: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
@@ -105,6 +107,36 @@ fn sample_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu> {
     menu.step(true);
     menu.step(true);
     Some(menu)
+}
+
+/// The menu a secondary click on a row opens, over a folder.
+///
+/// **Over a folder, not a file.** Open and Open in a new tab are the two rows
+/// whose enabling depends on what the pointer is over, and a frame taken over a
+/// file would show them both dimmed and prove nothing about either. Paste is
+/// dimmed because nothing has been copied and Copy the text because a folder has
+/// none — a fresh window with the pointer on a folder, which is the state this
+/// menu is most often opened in.
+fn sample_row_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu> {
+    let at = sk_plat::Point::new(here.name.x + 60.0, here.body.y + 40.0);
+    let mut menu =
+        crate::menu::build(crate::menu::ON_ROW, &crate::commands::registry(), at, |id| {
+            !matches!(id, "file.paste" | "file.copy_content")
+        })?;
+    menu.step(true);
+    Some(menu)
+}
+
+/// Whichever of the two context menus was asked for.
+fn sample_context_menu(
+    request: &Capture,
+    here: &crate::panes::PaneLayout,
+) -> Option<crate::menu::Menu> {
+    match (request.menu, request.row_menu) {
+        (_, true) => sample_row_menu(here),
+        (true, false) => sample_menu(here),
+        (false, false) => None,
+    }
 }
 
 /// The palette with a query in it, narrowed but not to one row.
@@ -301,7 +333,7 @@ fn sample_overlays(
         pane.set_filter("im".to_owned(), jobs);
     }
     Overlays {
-        menu: request.menu.then(|| sample_menu(here)).flatten(),
+        menu: sample_context_menu(request, here),
         crumbs: (request.crumbs || request.crumbs_empty)
             .then(|| sample_crumb_menu(layout, request.crumbs_empty)),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),

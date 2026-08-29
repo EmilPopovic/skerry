@@ -22,7 +22,7 @@ use crate::layout::Area;
 /// two that change the file last — where a slip costs the most and the pointer
 /// is least likely to be.
 pub const ON_ROW: &[&[&str]] = &[
-    &["go.open", "file.open_with"],
+    &["go.open", "go.open_new_tab", "go.open_beside", "go.open_below", "file.open_with"],
     &["file.copy", "file.cut", "file.paste"],
     &["file.copy_path", "file.copy_content"],
     &["file.duplicate", "file.rename", "file.trash", "file.delete"],

@@ -35,6 +35,7 @@ fn window(options: &Options) -> Result<bool, sk_app::Problem> {
 struct Overlays {
     keys: bool,
     menu: bool,
+    row_menu: bool,
     path_entry: bool,
     palette: bool,
     filter: bool,
@@ -53,6 +54,7 @@ impl Overlays {
         let slot = match argument {
             "--keys" => &mut self.keys,
             "--menu" => &mut self.menu,
+            "--menu-row" => &mut self.row_menu,
             "--path-entry" => &mut self.path_entry,
             "--palette" => &mut self.palette,
             "--filter" => &mut self.filter,
@@ -142,6 +144,7 @@ fn main() -> std::process::ExitCode {
             dark,
             keys: overlays.keys,
             menu: overlays.menu,
+            row_menu: overlays.row_menu,
             path_entry: overlays.path_entry,
             palette: overlays.palette,
             filter: overlays.filter,
@@ -211,6 +214,7 @@ skerry [OPTIONS] [PATH]
   --stats          show the frame statistics overlay
   --keys           show the keyboard overlay
   --menu           show the context menu, for a golden frame of it
+  --menu-row       show the menu a secondary click on a row opens
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it
