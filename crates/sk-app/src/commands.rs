@@ -764,6 +764,15 @@ const POINTER_EXEMPT: &[(&str, &str)] = &[
     ("tab.next", "a pointer switches tabs by clicking the one it wants"),
     ("tab.previous", "a pointer switches tabs by clicking the one it wants"),
     ("pane.next", "a pointer moves the keyboard by clicking in the pane"),
+    // **Off the background menu, and not because the menu was long.** `Ctrl` with
+    // the wheel and a two-finger pinch both zoom the list, which is what every
+    // list and every browser does with them — so these three were the only rows
+    // on that menu duplicating a gesture a pointer already has. Taking them off
+    // is three rows and a divider back on a menu that is taller than a 720-pixel
+    // window and scrolls, where the last rows are the hardest to reach.
+    ("view.zoom_in", "a pointer zooms with Ctrl and the wheel, or a pinch"),
+    ("view.zoom_out", "a pointer zooms with Ctrl and the wheel, or a pinch"),
+    ("view.zoom_reset", "a pointer zooms with Ctrl and the wheel, or a pinch"),
     ("help.dump", "a diagnostic for a bug report, not an action on a file"),
     ("help.stats", "a diagnostic for a bug report, not an action on a file"),
     // A field's own four. A pointer selects text by dragging in the field, which

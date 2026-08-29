@@ -538,6 +538,17 @@ class X11Server(Server):
 SERVER: Server = WaylandServer()
 
 
+# Where a window under test keeps its session, set once the work directory
+# exists.
+#
+# **Every child, not only the scenarios that care.** The window writes its layout
+# on a two-second floor whether anybody asked it to or not, so without this the
+# suite overwrites the developer's own `~/.local/state/skerry/session` with a
+# fixture path in `/tmp` — measured, and the file was there. A test that changes
+# the machine it runs on is a test nobody should run twice.
+STATE = ""
+
+
 def with_server(extra: dict | None = None) -> dict:
     """The environment for a child, with the current server's variables in it.
 
@@ -546,7 +557,11 @@ def with_server(extra: dict | None = None) -> dict:
     X11 is how a test passes because of a variable's precedence rather than
     because the code works.
     """
-    environment = dict(os.environ, **SERVER.environment(), **(extra or {}))
+    ours = {"XDG_STATE_HOME": STATE} if STATE else {}
+    # Merged with a literal, not `dict(**a, **b)`: that form *raises* on a key
+    # given twice rather than letting the later one win, and the session scenario
+    # passes an `XDG_STATE_HOME` of its own over the default above.
+    environment = {**os.environ, **ours, **SERVER.environment(), **(extra or {})}
     return {name: value for name, value in environment.items() if value != ""}
 
 
@@ -783,6 +798,28 @@ def listed(run: Run, tries: int = 30) -> dict[str, str]:
     raise Failure("the listing never arrived")
 
 
+def until(run: Run, tries: int = 40, **wanted) -> dict[str, str]:
+    """Waits for the window to report what is wanted, and returns that state.
+
+    **A `sleep` long enough on an idle machine is too short on a busy one**, and
+    the failure reads as an assertion about a value rather than as a wait that ran
+    out: `keyboard-navigate` failed with `cursor is ''` in a full sweep and passed
+    on its own, because coming out of a folder re-reads the parent and the cursor
+    is restored when the *names* land — which took longer than the 600 ms that
+    test had guessed. Polling the state the window already reports costs nothing
+    and cannot be wrong. The generalisation of `listed`.
+    """
+    state: dict[str, str] = {}
+    for _ in range(tries):
+        run.drive("key f12\nsleep 120\n")
+        state = run.state()
+        if all(str(state.get(key)) == str(value) for key, value in wanted.items()):
+            return state
+    missed = {key: (value, state.get(key)) for key, value in wanted.items()
+              if str(state.get(key)) != str(value)}
+    raise Failure(f"never reached {missed} (wanted, then last seen)")
+
+
 def expect(state: dict[str, str], **wanted) -> None:
     for key, value in wanted.items():
         actual = state.get(key)
@@ -872,19 +909,15 @@ def keyboard_cursor(run: Run, fixture: Path) -> None:
 @scenario("keyboard-navigate")
 def keyboard_navigate(run: Run, fixture: Path) -> None:
     listed(run)
-    run.drive(
-        "key down\n"          # alpha
-        "key enter\n"         # into it
-        "sleep 600\n"
-        "key f12\n"
-        "key backspace\n"     # and back out
-        "sleep 600\n"
-        "key f12\n"
-        "sleep 200\n"
-    )
-    inside, outside = run.states()[-2:]
-    expect(inside, path=str(fixture / "alpha"), rows="2")
-    expect(outside, path=str(fixture), cursor="alpha")
+    run.drive("key down\nkey enter\n")
+    # Both, not the path alone: the path changes when the navigation is *asked
+    # for* and the rows arrive when the read lands, so waiting on the path is
+    # waiting for the wrong half.
+    until(run, path=str(fixture / "alpha"), rows="2")
+    run.drive("key backspace\n")
+    # The cursor is put back on the folder you came out of when the *names* land,
+    # so that is the thing to wait for rather than the path.
+    until(run, path=str(fixture), cursor="alpha")
 
 
 @scenario("keyboard-back-forward")
@@ -1486,12 +1519,32 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
     The window reports the middle of every open row, so a test aims by command
     identifier and never by arithmetic over the menu's own constants — which it
     would have to copy, and which would then be a second copy to keep right.
+
+    **Scrolls to it if it is not drawn.** The background menu is taller than a
+    720-pixel window and scrolls, and only the drawn rows report a rectangle. A
+    helper that gave up on the first look made every menu scenario depend on the
+    menu's *length*: adding two commands pushed the palette below the fold and
+    `palette-by-pointer` failed — on X11, where the window is 720 tall, and not on
+    Wayland, where it is not. Scrolling here is also the only thing that covers a
+    scrolled menu being clickable at all.
     """
-    for entry in state.get("menu_aim", "").split(","):
-        name, _, point = entry.partition("@")
-        if name == command:
+    for attempt in range(8):
+        for entry in state.get("menu_aim", "").split(","):
+            name, _, point = entry.partition("@")
+            if name == command:
+                x, _, y = point.partition(":")
+                return aim(run, state, float(x), float(y))
+        if attempt == 0:
+            # The pointer has to be over the menu for the wheel to reach it.
+            first = state.get("menu_aim", "").split(",")[0]
+            _, _, point = first.partition("@")
             x, _, y = point.partition(":")
-            return aim(run, state, float(x), float(y))
+            if not x:
+                break
+            over = aim(run, state, float(x), float(y))
+            run.drive(f"move {over[0]:.1f} {over[1]:.1f}\nsleep 120\n")
+        run.drive("scroll -3\nsleep 150\nkey f12\nsleep 150\n")
+        state = run.state()
     raise Failure(f"{command} is not on the open menu: {state.get('menu_aim')!r}")
 
 
@@ -1563,9 +1616,12 @@ def palette_by_pointer(run: Run, fixture: Path) -> None:
         "key f12\nsleep 150\n"
     )
     menu = run.state()
-    if "view.palette" not in menu["menu_aim"]:
-        raise Failure(f"the background menu has no palette row: {menu['menu_aim']}")
-
+    if int(menu["menu"]) < 9:
+        raise Failure(f"the background menu opened {menu['menu']} rows")
+    # **Not checked against the drawn rows first.** The background menu is taller
+    # than this window and scrolls, so `menu_aim` is what knows how to reach a row
+    # that is not drawn — and a pre-check here made this scenario fail whenever
+    # the menu grew, which it did the day two commands were added to it.
     at = menu_aim(run, menu, "view.palette")
     run.drive(f"move {at[0]:.1f} {at[1]:.1f}\nsleep 150\nclick\nsleep 400\nkey f12\nsleep 150\n")
     opened = run.state()
@@ -3059,23 +3115,25 @@ def breadcrumb_navigation(run: Run, fixture: Path) -> None:
     breadcrumb is the shaped width of a directory name and is known nowhere
     else. This walks two levels down and clicks its way back up one.
     """
-    run.drive("sleep 400\nkey f12\nsleep 200\n")
-    # Into `alpha`, then into `nested`, so there is a parent worth clicking.
-    run.drive("key down\nkey enter\nsleep 500\nkey f12\nsleep 200\n")
-    state = run.state()
-    expect(state, path=str(fixture / "alpha"))
+    listed(run)
+    # Into `alpha`, so there is a parent worth clicking.
+    run.drive("key down\nkey enter\n")
+    state = until(run, path=str(fixture / "alpha"), rows="2")
     deep = int(state["crumbs"])
     if deep < 3:
         raise Failure(f"only {deep} path components under {state['path']}")
 
+    # **The hover check and the click go in one script.** Every `drive` call is a
+    # fresh process, so splitting them leaves a gap of a process spawn in which a
+    # late resize can re-flow the breadcrumbs — and then the click lands on the
+    # crumb *beside* the one the hover just confirmed, which is what a full sweep
+    # under load produced: it went to the grandparent.
     x, y = aim(run, state, float(state["parent_crumb_x"]), float(state["body_top"]) / 4.0)
-    run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 200\n")
-    hovered = run.state()["crumb_hover"]
+    run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 150\nclick\nsleep 200\n")
+    hovered = run.states()[-1]["crumb_hover"]
     if hovered != str(deep - 2):
         raise Failure(f"the parent component reads as crumb {hovered}, wanted {deep - 2}")
-
-    run.drive("click\nsleep 600\nkey f12\nsleep 200\n")
-    expect(run.state(), path=str(fixture))
+    until(run, path=str(fixture))
 
 
 @scenario("own-frame-close-button")
@@ -4575,6 +4633,8 @@ def main(argv: list[str]) -> int:
         kind = "Xvfb" if x11 else "nested compositor"
         print(f"{kind} on {display} at scale {scale}")
         fixture = make_fixture(work)
+        global STATE
+        STATE = str(work / "state")
 
         for name, function in SCENARIOS.items():
             if wanted and not any(needle in name for needle in wanted):

@@ -35,7 +35,6 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["edit.undo", "edit.redo", "edit.pause", "edit.cancel"],
     &["select.all", "view.filter", "go.search"],
     &["view.hidden", "view.theme", "view.sidebar"],
-    &["view.zoom_in", "view.zoom_out", "view.zoom_reset"],
     &["tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],
     &["file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
