@@ -4651,10 +4651,24 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // into it. Measured — a file aimed at `alpha` landed in `alpha/nested`,
         // and suppressing only the spring left the drop doing it anyway. What
         // the spring already set stands until a hand moves.
-        if still_there(drag.sprung_at, position) {
+        let resting_where_it_sprang = still_there(drag.sprung_at, position);
+        if !resting_where_it_sprang {
+            drag.sprung_at = None;
+        }
+        let carrying = !drag.paths.is_empty();
+        // **The card is drawn at the pointer, so a pointer that has moved is a
+        // frame that is out of date** — whether or not what it is over changed.
+        // This used to be marked only when the *target* changed, which is a card
+        // that jumps from one folder row to the next instead of following the
+        // hand. Before the spring's early return, because that return is taken
+        // for movements up to the click threshold and four pixels is visible.
+        if carrying {
+            self.dirty = true;
+        }
+        if resting_where_it_sprang {
             return;
         }
-        drag.sprung_at = None;
+        let Some(drag) = &mut self.files_drag else { return };
         let (row, onto) = match target {
             Some((leaf, row, path)) if !drag.paths.iter().any(|held| path.starts_with(held)) => {
                 (Some((leaf, row)), Some(path))

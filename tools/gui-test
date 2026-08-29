@@ -877,7 +877,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 91
+FEWEST_SCENARIOS = 92
 
 
 def scenario(name, fresh: bool = False):
@@ -2454,6 +2454,55 @@ def no_spring_in_passing(run: Run, fixture: Path) -> None:
     if passing["path"] != str(fixture):
         raise Failure(f"a folder opened while the pointer was crossing it: {passing['path']!r}")
     run.drive("release\nsleep 800\n")
+
+
+@scenario("the-carried-card-follows-the-pointer", fresh=True)
+def the_card_follows(run: Run, fixture: Path) -> None:
+    """Every motion redraws while files are carried, not only a target change.
+
+    The card is drawn at the pointer, so a frame marked dirty only when the
+    *target* changes is a card that jumps from one folder row to the next
+    instead of following the hand — which is what it did.
+
+    **Counted in frames, because that is the difference.** Nothing else can see
+    it: the pointer's position is reported whether a frame was drawn or not, and
+    a golden frame cannot hold motion. So this moves over ground whose target
+    never changes, with no `F12` inside the burst to draw frames of its own, and
+    counts what the window drew.
+    """
+    del fixture
+    listed(run)
+    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
+    chosen = run.state()
+    held = point_at(run, int(chosen["cursor_row"]))
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    # Empty space low in the pane the drag started in: no folder row under it,
+    # and its own pane takes no drop — so nothing about the target changes as the
+    # pointer moves around down there.
+    body = [float(part) for part in held["pane_body"].split(",")[0].split(":")]
+    low = aim(run, held, body[0] + body[2] / 2.0, body[1] + body[3] - 30.0)
+    lower = aim(run, held, body[0] + body[2] / 2.0 - 60.0, body[1] + body[3] - 12.0)
+
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        + creep(from_point, low)
+        + "sleep 300\nkey f12\nsleep 200\n"
+    )
+    before = run.state()
+    expect(before, dragging="true", carrying="file-1.txt", drop_row="-1", drop_whole="0")
+    drawn = int(before["frames"])
+
+    run.drive(creep(low, lower, steps=8) + creep(lower, low, steps=8) + "key f12\nsleep 250\n")
+    after = run.state()
+    # The target is the same as it was, which is what makes the count mean
+    # something: no frame here was asked for by anything changing.
+    expect(after, dragging="true", drop_row="-1", drop_whole="0")
+    moved = int(after["frames"]) - drawn
+    # Sixteen motions. Half of that is well clear of the one or two frames the
+    # `F12` itself draws, which is all this counted before the card followed.
+    if moved < 8:
+        raise Failure(f"sixteen motions drew {moved} frames, so the card is not following")
+    run.drive("release\nsleep 600\n")
 
 
 PEER = ROOT / "tools" / "gtk-drag-peer"
