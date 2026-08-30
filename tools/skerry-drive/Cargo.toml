@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+publish.workspace = true
 
 # Level 5: a binary. Test tooling — not part of the product's dependency graph,
 # which `tools/dep-budget.py` measures by walking `skerry` and nothing else.

@@ -230,6 +230,61 @@ jobs:
       - name: tools/check
         run: ./tools/check
 
+  supply:
+    # **The two rows of docs/07-dependencies.md that had no gate.** Licences and
+    # advisories both named `cargo-deny` as their tool and nothing ran it, so
+    # "permissive only, rejected at the gate" was rejected at no gate at all.
+    #
+    # `tools/check` runs the offline half of this where a person has the tool
+    # installed. Here the whole of it runs, `advisories` included, because that
+    # check fetches the RustSec database and this is where a network is a given.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/.cargo/bin/cargo-deny
+          key: supply-${{ env.RUST }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          restore-keys: supply-${{ env.RUST }}-
+      - name: cargo-deny
+        run: |
+          command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
+          cargo deny --workspace check
+
+  no-c-toolchain:
+    # **The evidence behind "C toolchain required for `skerry`: no".** That row
+    # said "clean-container build in CI", which cannot be what proves it: `rustc`
+    # drives linking through `cc` on Linux, so an image with no compiler fails at
+    # the link step and says nothing about whether a dependency compiled C.
+    #
+    # `tools/no-cc` asks the question that can be answered — the `cc` crate
+    # honours `$CC` and `rustc`'s linker does not — and a person can run the same
+    # script. It needs a cold target directory, so it gets no cache: a warm one
+    # re-runs no build scripts, which is a gate that passes by not looking.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+      - name: Nothing in the graph compiles C
+        run: ./tools/no-cc
+
   msrv:
     # `rust-version = "1.90"` is a promise to anyone whose distribution is a
     # release or two behind. A `check` is enough to keep it: what breaks an MSRV

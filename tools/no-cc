@@ -1,0 +1,44 @@
+#!/bin/sh
+# "C toolchain required for `skerry`: no" — the gate behind that row of
+# docs/07-dependencies.md, and question 6 of the six every dependency answers.
+#
+# **A container cannot prove this and this can.** The obvious version — build in
+# an image with no compiler — cannot even link: on Linux `rustc` drives linking
+# through `cc`, so an image without one produces a failure about the linker and
+# says nothing about whether a dependency compiled any C. What separates the two
+# is that the `cc` crate honours `$CC` and `rustc`'s linker does not. So `$CC`
+# points at something that fails and says why, and `cargo check` is used rather
+# than `cargo build` because a check compiles every build script and links
+# nothing at all.
+#
+# `CARGO_TARGET_DIR` is a fresh directory on purpose: a warm one does not re-run
+# a single build script, and a gate over build scripts that does not run them is
+# a gate that passes by not looking.
+#
+# The answer today is no, and it is contingent rather than structural:
+# `wayland-backend` compiles two C shims when its `log` feature is on, and
+# `sk-plat` takes `client_system,dlopen` without it. That is precisely the kind
+# of thing that changes under somebody enabling a feature for an unrelated
+# reason, which is why it is a gate and not a paragraph.
+set -eu
+cd "$(dirname "$0")/.."
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+cat > "$work/refuse-to-compile-c" <<'REFUSAL'
+#!/bin/sh
+echo "no-cc: a build script tried to compile C: $*" >&2
+exit 1
+REFUSAL
+chmod +x "$work/refuse-to-compile-c"
+
+echo "  .. no C toolchain: cargo check with \$CC refusing, in a cold target dir"
+if CC="$work/refuse-to-compile-c" CXX="$work/refuse-to-compile-c" \
+   CARGO_TARGET_DIR="$work/target" \
+   cargo check --workspace --all-targets --quiet; then
+    echo "  ok  no C toolchain: nothing in the graph compiled any"
+else
+    echo "  FAIL  no C toolchain: see the refusal above for which build script did"
+    exit 1
+fi

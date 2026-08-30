@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # Read by tools/check-layering.py. A crate may depend on lower levels only.
 [package.metadata.skerry]

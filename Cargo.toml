@@ -21,6 +21,12 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
+# **Not libraries for anybody else.** These twelve are one application divided
+# into levels, and the division is `docs/04-architecture.md`'s rather than an
+# offer. Stated because `cargo-deny`'s wildcard check has to know: a crate that
+# might be published may not name a dependency by path, so without this every
+# `{ workspace = true }` in the tree reads as `version = "*"`.
+publish = false
 
 [workspace.dependencies]
 sk-util = { path = "crates/sk-util" }

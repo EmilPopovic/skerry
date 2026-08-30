@@ -9,6 +9,17 @@ for check in check-links check-layering dep-budget check-invariants; do
     python3 "tools/$check.py" || status=1
 done
 
+# The supply chain: licences, wildcards and where a crate came from. Skipped
+# rather than failed where the tool is absent, the same bargain `tools/golden`
+# makes with Pillow — a gate a person cannot run is one they will stop running.
+# `advisories` is deliberately not here: it fetches the RustSec database over
+# the network, and the `supply` job in CI is where the network is a given.
+if command -v cargo-deny >/dev/null 2>&1; then
+    cargo deny --workspace check licenses bans sources || status=1
+else
+    echo "  skip  cargo-deny: not installed (cargo install cargo-deny)"
+fi
+
 if [ -f Cargo.toml ]; then
     cargo fmt --all --check || status=1
     cargo clippy --workspace --all-targets -- -D warnings || status=1

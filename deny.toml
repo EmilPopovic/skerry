@@ -1,0 +1,58 @@
+# What `cargo deny` refuses.
+#
+# Two rows of docs/07-dependencies.md name this file as their enforcement:
+# licences must be permissive, and no dependency may be a known-vulnerable
+# version. Until this existed both rows were claims with nothing behind them.
+#
+# Run by `tools/check` where `cargo-deny` is installed, and by the `supply` job
+# in .github/workflows/check.yml where it always is. The local run deliberately
+# leaves out `advisories`: that check fetches the RustSec database over the
+# network, and a gate that needs the internet is a gate that fails on a train.
+
+[graph]
+# Every feature, so a licence cannot arrive through one nothing enables today.
+all-features = true
+
+[licenses]
+version = 2
+# Measured, not aspirational: this is exactly the set the tree resolves to
+# today, and a crate arriving with anything else is a decision rather than an
+# accident. `Unicode-3.0` is here because `(MIT OR Apache-2.0) AND Unicode-3.0`
+# is an `AND` — allowing the left half is not enough.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# **Owned by `tools/dep-budget.py`, not here.** That tool already fails a build
+# on a duplicate version and already knows which duplicates live inside the GPU
+# stack and are not ours to resolve. Two tools with two answers to the same
+# question is how a gate starts being argued with instead of fixed.
+multiple-versions = "allow"
+# A `version = "*"` dependency is a dependency on whatever was published this
+# morning, which is the opposite of the pinned lockfile every other gate assumes.
+wildcards = "deny"
+# **Except a path.** The twelve crates in this workspace are declared
+# `{ workspace = true }` and carry no version, which is a wildcard by the letter
+# and is a directory on this disk in fact. Without this the gate's first run
+# failed on `sk-app` and `sk-util`, which is not the failure it exists for.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+version = 2
+# A yanked version is one its own author withdrew, which is a weaker signal than
+# an advisory and still one nobody should ship on.
+yanked = "deny"

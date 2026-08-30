@@ -174,10 +174,25 @@ commit raises the ratchet to the number it measures.
 | Transitive crates, main binary excluding the GPU stack | **27**, ratcheted at the measured value | `cargo tree` in `tools/dep-budget.py`; excludes workspace members and proc-macro crates |
 | Transitive crates, main binary total | **120** | same — the GPU stack dominates; if it exceeds this, [ADR 0003](adr/0003-wgpu-first-backend.md)'s revisit trigger fires |
 | Duplicate versions of any crate | **0** | `cargo tree --duplicates` |
-| C toolchain required for `skerry` | **no** | Clean-container build in CI |
+| C toolchain required for `skerry` | **no** | `tools/no-cc`, and the `no-c-toolchain` job |
 | Licences | Permissive only; copyleft rejected at the gate | `cargo-deny` |
 | Advisories | No known-vulnerable versions | `cargo-deny` |
 | New dependency | Requires a row in this file in the same commit | Review checklist, plus a CI diff check on `Cargo.lock` |
+
+**The C-toolchain row does not say "clean-container build" any more, because a
+container cannot answer it.** `rustc` drives linking through `cc` on Linux, so an
+image with no compiler fails at the link step and says nothing about whether a
+dependency *compiled* anything. What separates the two is that the `cc` crate
+honours `$CC` and `rustc`'s linker does not, so `tools/no-cc` points `$CC` at
+something that refuses and runs `cargo check` — no linking at all — in a cold
+target directory, because a warm one re-runs no build scripts and a gate over
+build scripts that does not run them passes by not looking.
+
+The answer today is no, and it is **contingent rather than structural**:
+`wayland-backend` compiles two C shims when its `log` feature is on, and `sk-plat`
+takes `client_system,dlopen` without it. That is exactly the kind of thing that
+changes under somebody enabling a feature for an unrelated reason, which is why
+it is a gate and not a paragraph.
 
 The budgets are deliberately tight enough to hurt occasionally. That is the mechanism: a
 dependency that is worth breaking a budget for is worth an ADR, and one that is not gets
