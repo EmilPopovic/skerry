@@ -7,12 +7,14 @@
 //! folder you have to open to understand, and a file manager that cannot find a
 //! file is a reason to open a terminal.
 //!
-//! Still M4's and still absent: the **persistent index** that [ADR
-//! 0008](../../../docs/adr/0008-persistent-index-is-required.md) made mandatory,
-//! which is what makes a search over the *whole filesystem* answerable at all;
-//! the **flattened view**, meaning results as a listing that can be selected,
-//! copied and dragged in place rather than navigated to; extension facets; and
-//! ignore rules.
+//! The **persistent index** that [ADR
+//! 0008](../../../docs/adr/0008-persistent-index-is-required.md) made mandatory
+//! is here too, in [`store`], with its format settled by [ADR
+//! 0012](../../../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md) —
+//! which is what makes a search over a *whole home directory* answerable rather
+//! than only a subtree.
+//!
+//! Still M4's and still absent: extension facets, and ignore rules.
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 // `missing_docs` and `clippy::pedantic` are warned workspace-wide from the lint
@@ -21,6 +23,8 @@
 
 pub mod find;
 pub mod size;
+pub mod store;
 
 pub use find::{Found, Hit, find};
 pub use size::{Progress, Sizes, measure};
+pub use store::Index;

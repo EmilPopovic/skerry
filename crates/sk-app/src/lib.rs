@@ -31,6 +31,7 @@ mod edit;
 mod field;
 mod frames;
 mod headless;
+mod indexing;
 mod keys;
 mod layout;
 mod menu;

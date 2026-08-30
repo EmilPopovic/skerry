@@ -660,6 +660,39 @@ SERVER: Server = WaylandServer()
 # fixture path in `/tmp` — measured, and the file was there. A test that changes
 # the machine it runs on is a test nobody should run twice.
 STATE = ""
+# The index's home, kept inside the suite's own directory.
+#
+# **Not the runner's `~/.cache`.** A scenario that builds an index writes fifty
+# bytes an entry somewhere, and a harness that writes into the machine it is
+# testing on is one whose failures outlive it.
+CACHE = ""
+
+
+def build_binaries() -> str:
+    """Builds what the scenarios drive. The error, if it would not build.
+
+    **The harness builds rather than guessing whether it needs to.** It used to
+    only check that `target/release/skerry` *existed*, which is not the same as
+    it being current: a source edit that had not been rebuilt was tested as
+    though it were never made. Measured, that cost an afternoon — two new chords
+    resolved correctly in the registry's own unit test and did nothing in the
+    window, through four rounds of diagnosis, because the binary predated the
+    fix.
+
+    The first attempt at a fix compared mtimes, and mtimes are the wrong
+    instrument: `cargo` fingerprints content, so a manifest touched by a
+    formatter is newer than a binary that is perfectly current, and the guard
+    condemned a tree it should have passed. `cargo build` already knows the
+    answer and a no-op one costs about a fifth of a second, so ask it.
+    """
+    done = subprocess.run(
+        ["cargo", "build", "--release", "--bin", "skerry", "--bin", "skerry-drive"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    return "" if done.returncode == 0 else done.stderr.strip()[-2000:]
 
 
 def with_server(extra: dict | None = None) -> dict:
@@ -670,7 +703,11 @@ def with_server(extra: dict | None = None) -> dict:
     X11 is how a test passes because of a variable's precedence rather than
     because the code works.
     """
-    ours = {"XDG_STATE_HOME": STATE} if STATE else {}
+    ours = {}
+    if STATE:
+        ours["XDG_STATE_HOME"] = STATE
+    if CACHE:
+        ours["XDG_CACHE_HOME"] = CACHE
     # Merged with a literal, not `dict(**a, **b)`: that form *raises* on a key
     # given twice rather than letting the later one win, and the session scenario
     # passes an `XDG_STATE_HOME` of its own over the default above.
@@ -1072,6 +1109,24 @@ def until(run: Run, **wanted) -> dict[str, str]:
     raise Failure(f"never reached {missed} (wanted, then last seen)")
 
 
+def holds(run: Run, check, what: str) -> dict[str, str]:
+    """Waits until the window reports a state `check` accepts.
+
+    [`until`] compares fields to values, which cannot say *more than zero* — and
+    a wait for `indexing=0` is satisfied before the build it is waiting for has
+    started, which is a wait that always passes and never waits.
+    """
+    state: dict[str, str] = {}
+    deadline = time.time() + WAITING
+    while time.time() < deadline:
+        fresh = run.answered()
+        if fresh is not None:
+            state = fresh
+            if check(state):
+                return state
+    raise Failure(f"never {what}; last seen {state}")
+
+
 def expect(state: dict[str, str], **wanted) -> None:
     for key, value in wanted.items():
         actual = state.get(key)
@@ -1190,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 97
+FEWEST_SCENARIOS = 98
 
 
 def scenario(name, fresh: bool = False):
@@ -2767,6 +2822,60 @@ def no_spring_in_passing(run: Run, fixture: Path) -> None:
     run.drive("release\nsleep 800\n")
 
 
+@scenario("an-index-answers-what-the-walk-answers", fresh=True)
+def index_and_walk_agree(run: Run, fixture: Path) -> None:
+    """The same search, walked and indexed, gives the same rows.
+
+    **This is [ADR 0008](../docs/adr/0008-persistent-index-is-required.md)'s
+    third constraint as a test.** The index is an accelerator for a walk that
+    still works, and a missing one is a performance event rather than a
+    correctness one — so the interesting assertion is not that the index is fast,
+    which no scenario on a fixture this size could show, but that the two paths
+    are *indistinguishable in their answer*. If they ever disagree, the one a
+    person gets depends on whether they happened to build an index.
+
+    It also covers the freshness policy [ADR
+    0012](../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md) chose: a
+    file deleted after the build must not come back as a result, because every
+    hit is `statx`ed between the scan and the screen.
+    """
+    (fixture / "alpha" / "nested" / "buried-treasure.txt").write_text("here")
+    (fixture / "beta" / "treasure-map.txt").write_text("there")
+    listed(run)
+
+    def hunt(word: str) -> dict[str, str]:
+        run.drive(f"key ctrl+shift+f\nsleep 200\ntext {word}\n")
+        state = until(run, searching="true", search_done="true")
+        run.drive("key escape\n")
+        until(run, searching="false")
+        return state
+
+    # No index yet, so this is the walk. `index=-1` is *no index loaded*, which
+    # is what the fresh fixture must start as — a stale one from another scenario
+    # would make the comparison below a comparison of an index with itself.
+    expect(run.state(), index="-1")
+    walked = hunt("treasure")
+    expect(walked, search_hits="2", search_indexed="false")
+
+    # Build one, and the search over the same folder is now over the index.
+    run.drive("key ctrl+shift+i\n")
+    holds(run, lambda it: int(it["index"]) > 0, "built an index")
+    indexed = hunt("treasure")
+    expect(indexed, search_hits=walked["search_hits"], search_indexed="true")
+
+    # A file deleted since the build is verified away rather than reported.
+    (fixture / "beta" / "treasure-map.txt").unlink()
+    after = hunt("treasure")
+    expect(after, search_hits="1", search_indexed="true")
+
+    # And the index can be deleted, which ADR 0008 requires because the file is a
+    # list of everything a person has.
+    run.drive("key ctrl+alt+i\n")
+    expect(until(run, index="-1"), index="-1")
+    # Back to the walk, and back to finding what is actually there.
+    expect(hunt("treasure"), search_hits="1", search_indexed="false")
+
+
 @scenario("search-results-are-rows-that-can-be-acted-on", fresh=True)
 def flattened_results(run: Run, fixture: Path) -> None:
     """`Ctrl+Enter` puts the results in the pane, and then they are just rows.
@@ -3988,8 +4097,14 @@ def copy_and_paste(run: Run, fixture: Path) -> None:
     inside = until(run, path=str(fixture / "target"), loading="false")
     expect(inside, rows="0")
     run.drive("key ctrl+v\n")
-    settled(run)
-    pasted = run.state()
+    # **Waited on the row, not on the queue.** `settled` asks whether anything is
+    # in flight, and in the moment after the keystroke the answer is *not yet* —
+    # the paste has been asked for and has not started, which reads exactly like
+    # one that has already finished. Measured: one X11 run in three reported zero
+    # rows, and it became visible only when a five-second stall came out of every
+    # drive and stopped hiding the gap.
+    until(run, rows="1")
+    pasted = settled(run)
     if int(pasted["rows"]) != 1:
         raise Failure(f"after pasting, the folder holds {pasted['rows']} rows")
     expect(pasted, cursor="file-1.txt", undo="true")
@@ -5404,10 +5519,15 @@ def main(argv: list[str]) -> int:
         elif argument.startswith("--suite-timeout="):
             SUITE_BUDGET = float(argument.removeprefix("--suite-timeout="))
 
+    # Built here, not assumed. See `build_binaries` for the afternoon this cost.
+    if broken := build_binaries():
+        print(f"the workspace would not build:\n{broken}")
+        return 2
     for binary in (SKERRY, DRIVE):
         if not binary.is_file():
             print(f"missing {binary}; run `cargo build --release` first")
             return 2
+
 
     # A needle that names nothing used to select nothing and exit 0, so a renamed
     # scenario left every invocation that asked for it by name green while running
@@ -5434,8 +5554,9 @@ def main(argv: list[str]) -> int:
         kind = "Xvfb" if x11 else "nested compositor"
         print(f"{kind} on {display} at scale {scale}")
         fixture = make_fixture(work)
-        global STATE
+        global STATE, CACHE
         STATE = str(work / "state")
+        CACHE = str(work / "cache")
 
         started = time.time()
         for name, function in SCENARIOS.items():

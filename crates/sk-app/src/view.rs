@@ -3059,7 +3059,8 @@ mod tests {
         let root = fixture();
         let waker = Waker::new().expect("eventfd");
         let (sender, updates) = mpsc::channel();
-        let jobs = Jobs { pool: Pool::with_width(4), wake: waker.handle(), sender };
+        let jobs =
+            Jobs { pool: std::sync::Arc::new(Pool::with_width(4)), wake: waker.handle(), sender };
         let theme = Theme::dark();
 
         let mut warm = LayoutCache::new(4096);

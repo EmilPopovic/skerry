@@ -84,7 +84,7 @@ impl Session {
             Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
         })?;
         let (sender, updates) = mpsc::channel();
-        let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
+        let jobs = Jobs { pool: std::sync::Arc::new(Pool::new()), wake: waker.handle(), sender };
         Ok(Self {
             renderer,
             fonts,

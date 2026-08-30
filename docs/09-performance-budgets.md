@@ -58,6 +58,8 @@ the same renderer and the same glyph atlas the window uses.
 | Scroll a large listing | < 8 ms/frame | p99 **0.342–0.417 ms**; **0 of 899 frames over 8 ms** at 100%, 125% and 200% at 200,000. At **973,759**: 1 run in 5 breaches, worst frame **16.4 ms** | met at 200,000; **missed at 1M**, see below |
 | Sort a large listing | < 120 ms at 1M | **166.0 ms** median of 5 at 973,759, on a job — down from 1,460 ms | **missed** by 1.4×, see below |
 | First search result | < 50 ms | **0.7 ms** median of 7 over 817,288 entries, **2.9 ms** over 563,605 | met by 17×, and see below for what it does not say |
+| Repeat search over an index | < 50 ms | **6.99 ms** median of 3 over 563,605 entries, against **639.9 ms** to walk the same tree for the same complete answer | met by 7×, and it is the *complete* answer rather than the first result |
+| Load an index | < 250 ms at 1M | **31.7 ms** warm, median of 3 at 563,605 — 45 bytes an entry | met warm; **cold is unmeasured here**, and [Spike F](../spikes/f-index-and-search/README.md) measured 195 ms cold at 1M on a Pi 5 |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window, on **both** display servers. On X11 the frame loop was traced across a three-second idle window and made **zero syscalls** | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
 | RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |
@@ -271,6 +273,45 @@ one every 64 ms, so the first result could not have arrived inside 50 ms however
 fast the walk ran — the measurement would have been of the throttle. The first
 match now goes out at once and the interval takes over after it.
 
+### What the index measured
+
+**Method.** `SKERRY_INDEX_TREE=/usr cargo test -p sk-index --release measure_an_index
+-- --ignored --nocapture`, the measurement that lives beside the code so the
+numbers below can be reproduced rather than believed. `/usr` on this machine is
+**563,605 entries**. Three runs, warm page cache, on a 24-thread Ryzen AI 9
+HX 370 with 60 GB — the *favourable* machine, and [Spike
+F](../spikes/f-index-and-search/README.md) measured the laptop-to-Pi factor at
+**2.6× to 12×**, so every figure here should be read with that range in mind
+rather than a single multiplier.
+
+| | median of 3 | spread |
+| --- | --- | --- |
+| Build, walking the tree | 652.1 ms | 651.8–659.5 |
+| Save | 31.5 ms | one run |
+| Load, warm | 31.7 ms | 30.7–32.5 |
+| **Scan for a query** | **6.99 ms** | 6.36–7.15 |
+| **The walk it replaces, complete** | **639.9 ms** | 639.8–673.6 |
+| On disk | 25.3 MB | 44.9 bytes an entry |
+
+**The comparison that matters is the last two rows, and it is 92×.** Not first
+result against first result — the walk already streams its first match in under a
+millisecond, and [the section above](#what-first-search-result-measures-and-what-it-does-not)
+is about how little that says. This is the *complete* answer, which is what an
+as-you-type keystroke needs before the next one arrives: 639.9 ms of walking, or
+6.99 ms of scanning an index that was loaded once for 31.7 ms.
+
+44.9 bytes an entry against Spike F's predicted 50 is the same format measured on
+a different tree, and it is the figure for the privacy conversation [ADR
+0008](adr/0008-persistent-index-is-required.md) asked for: a million files is
+about 45 MB on the user's disk.
+
+**Three things this does not say.** It is warm, so it is not the row's cold
+target. It is one tree on one machine. And the build is 652 ms for half a million
+entries, which is the cost a person pays deliberately and once — [ADR
+0012](adr/0012-a-flat-index-file-per-root-rebuilt-whole.md) rebuilds whole and
+has no incremental path, so a tree that changes constantly is a tree this does
+not help.
+
 ### The two numbers that were wrong before they were right
 
 Both are recorded because each was a *measurement* that read as a success.
@@ -482,7 +523,7 @@ budget row is only meaningful alongside it. The speedup is 3.4–3.7× on four c
 and 8× on twenty-four — far below core count either way, because a scan over a
 28 MB arena is memory-bandwidth bound.
 
-### A row to add once `sk-index` exists
+### A row to add once `sk-index` exists — **added**
 
 | Measure | Target | Hard fail | Method |
 | --- | --- | --- | --- |
@@ -491,6 +532,13 @@ and 8× on twenty-four — far below core count either way, because a scan over 
 An earlier revision of this section proposed 100 ms, taken from the laptop's
 48 ms. The Pi measures 195 ms. The number above is set from the slow machine,
 which is the only way a budget row means anything.
+
+The row is now in the table at the top, and the index it describes is built:
+[`sk_index::store`](../crates/sk-index/src/store.rs), under [ADR
+0012](adr/0012-a-flat-index-file-per-root-rebuilt-whole.md). The product's own
+numbers are in [what the index measured](#what-the-index-measured); the cold
+figure is still the spike's, because nothing in the product evicts a page cache
+to take one.
 
 ### On extrapolating between machines
 

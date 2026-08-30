@@ -412,6 +412,20 @@ def main(argv: list[str]) -> int:
     wanted = [a for a in argv[1:] if not a.startswith("--")]
     bless = "--bless" in argv
 
+    # **Built, not assumed.** This renders with `target/release/skerry` and used
+    # only to check that the file existed, which is not the same as it being
+    # current. Measured: a one-line catalogue edit was blessed into two reference
+    # frames from a binary that predated it, and the gate went green on the old
+    # string and red on the next run — a reference blessed from stale code is a
+    # test that asserts the wrong thing for as long as nobody looks.
+    # `tools/gui-test` had the same hole; see its `build_binaries`.
+    built = subprocess.run(
+        ["cargo", "build", "--release", "--bin", "skerry"],
+        cwd=ROOT, capture_output=True, text=True, timeout=600,
+    )
+    if built.returncode != 0:
+        print(f"the workspace would not build:\n{built.stderr.strip()[-2000:]}")
+        return 2
     if not SKERRY.is_file():
         print(f"missing {SKERRY}; run `cargo build --release` first")
         return 2

@@ -90,7 +90,12 @@ pub struct View {
 /// What a pane needs in order to start a read.
 pub struct Jobs {
     /// The one pool.
-    pub pool: Pool,
+    ///
+    /// **Shared, so a job can put work on it.** The index's scan is sharded
+    /// across the pool from inside a job that is already running on it — see
+    /// [`sk_index::store::search`] for why that cannot deadlock — and a job
+    /// cannot borrow a field of the `App` it outlives.
+    pub pool: std::sync::Arc<Pool>,
     /// How a finished job wakes the frame loop.
     pub wake: WakeHandle,
     /// Where updates go.
@@ -876,7 +881,11 @@ mod tests {
         fn new() -> Self {
             let waker = Waker::new().expect("eventfd");
             let (sender, updates) = mpsc::channel();
-            let jobs = Jobs { pool: Pool::with_width(4), wake: waker.handle(), sender };
+            let jobs = Jobs {
+                pool: std::sync::Arc::new(Pool::with_width(4)),
+                wake: waker.handle(),
+                sender,
+            };
             Self { jobs, updates, _waker: waker }
         }
 

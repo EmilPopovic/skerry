@@ -251,8 +251,13 @@ search.running = {0} so far, {1} looked at…
 search.done = {0} found in {1} entries
 search.capped = the first {0}, of {1} entries — narrow the search
 search.none = Nothing under here is called that
+search.indexed = {0} found in {1} indexed entries · indexed {2}
+search.indexed_capped = the first {0}, of {1} indexed entries · indexed {2}
+index.building = Indexing… {0} entries so far
 action.search = Find a file
 action.search_results = Show all results in this pane
+action.index_build = Index this folder
+action.index_forget = Delete this folder's index
 
 # Properties.
 properties.items = {0} items

@@ -332,7 +332,7 @@ impl Background {
             Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
         })?;
         let (sender, updates) = mpsc::channel();
-        let jobs = Jobs { pool: Pool::new(), wake: waker.handle(), sender };
+        let jobs = Jobs { pool: std::sync::Arc::new(Pool::new()), wake: waker.handle(), sender };
         let mut pane = Pane::new(path);
         pane.reload(&jobs);
 
@@ -570,6 +570,9 @@ struct Replies {
     /// A search report, and the query it is an answer to.
     found_tx: std::sync::mpsc::Sender<(String, sk_index::Found)>,
     found_rx: Receiver<(String, sk_index::Found)>,
+    /// What a job loading or building an index has to say.
+    index_tx: std::sync::mpsc::Sender<crate::indexing::Note>,
+    index_rx: Receiver<crate::indexing::Note>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -593,6 +596,7 @@ impl Replies {
         let (siblings_tx, siblings_rx) = mpsc::channel();
         let (facts_tx, facts_rx) = mpsc::channel();
         let (found_tx, found_rx) = mpsc::channel();
+        let (index_tx, index_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
         Self {
             paste_tx,
@@ -609,6 +613,8 @@ impl Replies {
             openers_rx,
             found_tx,
             found_rx,
+            index_tx,
+            index_rx,
         }
     }
 }
@@ -707,6 +713,16 @@ pub struct App {
     hovered_crumb: Option<usize>,
     /// The last command a chord resolved to and could not run.
     refused: Option<&'static str>,
+    /// The last key the window was given, as the registry sees it.
+    ///
+    /// **Because "nothing happened" has two causes and they look identical.** A
+    /// chord that resolves to nothing and a chord that never arrived both leave
+    /// no notice, no job and no frame worth looking at; `refused` covers only the
+    /// third case, where a command was found and declined to run. Measured: two
+    /// chords on `i` were unreachable in a window while resolving correctly in
+    /// the registry's own test, and there was no way to tell which half was
+    /// wrong.
+    last_key: String,
     /// The breadcrumb separator under the pointer.
     hovered_separator: Option<usize>,
     /// The sibling menu a separator opened, once its directory has been read.
@@ -755,6 +771,8 @@ pub struct App {
     palette: Option<crate::palette::Palette>,
     /// The subtree search, while it is open.
     search: Option<crate::search::Search>,
+    /// The persistent index this window has loaded, and any build in flight.
+    indexes: crate::indexing::Indexes,
     /// The Properties panel, while it is open.
     properties: Option<crate::properties::Properties>,
     /// The Open With list, while it is open.
@@ -1034,6 +1052,7 @@ impl App {
             hovered_button: None,
             hovered_crumb: None,
             refused: None,
+            last_key: String::new(),
             hovered_separator: None,
             crumb_menu: None,
             crumb_pending: None,
@@ -1044,6 +1063,7 @@ impl App {
             typing_path: None,
             palette: None,
             search: None,
+            indexes: crate::indexing::Indexes::default(),
             properties: None,
             openers: None,
             tab_press: None,
@@ -1130,6 +1150,7 @@ impl App {
             self.drain_facts();
             self.drain_openers();
             self.drain_found();
+            self.drain_index();
             if self.edits.drain_progress() {
                 self.dirty = true;
             }
@@ -1665,6 +1686,14 @@ impl App {
         if self.filtering && self.filter_key(event) {
             return;
         }
+        self.last_key = format!(
+            "{}{}{}{}{:?}",
+            if event.mods.ctrl { "ctrl+" } else { "" },
+            if event.mods.alt { "alt+" } else { "" },
+            if event.mods.shift { "shift+" } else { "" },
+            if event.mods.logo { "super+" } else { "" },
+            event.key
+        );
         if let Some(command) = commands.resolve(event, Scope::Global) {
             // A disabled command consumes its key and does nothing, which is the
             // same thing a dimmed menu item does. Falling through to type-ahead
@@ -3704,7 +3733,11 @@ search_active={active:?}",
             return;
         }
         self.claim_keyboard(Claim::Search);
-        self.search = Some(crate::search::Search::new(self.panes.focused().path.clone()));
+        let root = self.panes.focused().path.clone();
+        // Asked for here rather than on the first keystroke, so the read is over
+        // by the time anybody has typed enough to search for.
+        self.want_index(&root);
+        self.search = Some(crate::search::Search::new(root));
         self.dirty = true;
     }
 
@@ -3743,14 +3776,123 @@ search_active={active:?}",
         let sender = self.replies.found_tx.clone();
         let wake = self.waker.handle();
         let lane = self.panes.focused().lane();
+        // **The index if there is one, the walk if there is not.** ADR 0008's
+        // third constraint is that a missing index is a performance event and
+        // never a correctness one, so these two arms answer the same question
+        // and the caller cannot tell which ran.
+        let held = self.indexes.covering(&root).map(std::sync::Arc::clone);
+        let pool = std::sync::Arc::clone(&self.jobs.pool);
+        // Recorded now rather than on the reply, because the summary has to say
+        // which of the two answered and a `Found` cannot: the whole point of ADR
+        // 0008's third constraint is that the two are indistinguishable.
+        if let Some(search) = self.search.as_mut() {
+            search.indexed = held.as_ref().map(|it| it.built());
+        }
         self.jobs.pool.spawn(lane, cancel, move |cancel| {
-            sk_index::find(&root, &query, cancel, &mut |found| {
+            let mut say = |found: &sk_index::Found| {
                 if sender.send((query.clone(), found.clone())).is_ok() {
                     wake.wake();
                 }
-            });
+            };
+            match held {
+                Some(index) => {
+                    let found = sk_index::store::search(&index, &query, &pool, cancel);
+                    say(&found);
+                }
+                None => sk_index::find(&root, &query, cancel, &mut say),
+            }
         });
         self.dirty = true;
+    }
+
+    /// Asks for the index covering `root`, unless it has already been asked for.
+    ///
+    /// **On a job, because it is a fifty-megabyte read.** Once per root rather
+    /// than once per keystroke: the loaded index is what every search of that
+    /// folder then scans, and re-reading it per character would be the walk this
+    /// feature exists to replace, with extra steps.
+    fn want_index(&mut self, root: &std::path::Path) {
+        if self.indexes.covering(root).is_some() || self.indexes.asked_about(root) {
+            return;
+        }
+        self.indexes.asking(root);
+        let sender = self.replies.index_tx.clone();
+        let wake = self.waker.handle();
+        let root = root.to_path_buf();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let held = sk_index::store::load(&root).map(std::sync::Arc::new);
+            if sender.send(crate::indexing::Note::Loaded(held)).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Builds an index for the folder being shown, and saves it.
+    ///
+    /// [ADR 0012](../../../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)
+    /// is that nothing builds one on its own: a background indexer is a second
+    /// lifecycle and the design most likely to be blamed for a machine feeling
+    /// slow, so this is a thing a person asks for and can stop.
+    pub(crate) fn build_index(&mut self) {
+        let root = self.panes.focused().path.clone();
+        let cancel = sk_util::Cancel::new();
+        self.indexes.begins(&root, cancel.clone());
+        let sender = self.replies.index_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, cancel, move |cancel| {
+            let mut said = |count: usize| {
+                if sender.send(crate::indexing::Note::Counting(count)).is_ok() {
+                    wake.wake();
+                }
+            };
+            let built = sk_index::store::build(&root, cancel, &mut said);
+            // Saved before it is delivered, so the window that asked for it and
+            // the next window to open the folder get the same answer.
+            let held = built.map(|index| {
+                let _ = sk_index::store::save(&index);
+                std::sync::Arc::new(index)
+            });
+            if sender.send(crate::indexing::Note::Built(held)).is_ok() {
+                wake.wake();
+            }
+        });
+        self.dirty = true;
+    }
+
+    /// Deletes the index for the folder being shown.
+    ///
+    /// ADR 0008 asks for "a way to turn it off and delete it", and a filename
+    /// index is a list of everything a person has. This is the delete half; not
+    /// building one is the other.
+    pub(crate) fn forget_index(&mut self) {
+        let root = self.panes.focused().path.clone();
+        self.indexes.stop();
+        self.indexes.drop_for(&root);
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let _ = sk_index::store::forget(&root);
+        });
+        self.dirty = true;
+    }
+
+    /// Whether an index build is running.
+    #[must_use]
+    pub(crate) fn indexing(&self) -> bool {
+        self.indexes.building().is_some()
+    }
+
+    /// Whether the folder being shown has an index loaded.
+    #[must_use]
+    pub(crate) fn indexed(&self) -> bool {
+        self.indexes.covering(&self.panes.focused().path).is_some()
+    }
+
+    /// Takes delivery of index reports.
+    fn drain_index(&mut self) {
+        while let Ok(note) = self.replies.index_rx.try_recv() {
+            if self.indexes.arrived(note) {
+                self.dirty = true;
+            }
+        }
     }
 
     /// Takes delivery of search reports.
@@ -4283,10 +4425,21 @@ search_active={active:?}",
         // from a key that was never delivered at all.
         let typed = self.typed.clone();
         let refused = self.refused.unwrap_or_default();
+        let last_key = self.last_key.clone();
         // The query a pane is showing results for, empty when it is showing a
         // directory. Reported because from outside the two look identical: rows
         // are rows, which is the point.
         let results = self.panes.focused().results.clone().unwrap_or_default();
+        // Whether this folder has an index and how big it is, because from
+        // outside an indexed search and a walk are deliberately identical — which
+        // is ADR 0008's third constraint and therefore the thing a test has to be
+        // able to see in order to assert that both answer the same.
+        let index = self
+            .indexes
+            .covering(&self.panes.focused().path)
+            .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
+        let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
+        let searched_index = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
         // How many the delete-for-good question is asking about, and which button
         // it is on. `0` when it is not up, which is not the same as asking about
         // nothing — the panel never opens on an empty selection.
@@ -4295,7 +4448,8 @@ search_active={active:?}",
         let drag_in = self.window.dragging().is_some();
         let drag_out = self.window.dragging_out();
         format!(
-            "path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
+            "index={index} indexing={indexing} search_indexed={searched_index} \
+path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
@@ -4307,7 +4461,7 @@ for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done
 theme={theme} zoom={zoom} sidebar_open={sidebar_open} {search} \
 filtering={} filter={:?} {drag} \
 drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
-refused={refused:?} \
+refused={refused:?} last_key={last_key:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",
             self.panes.focused().path,
             self.panes.focused().listing.rows(),
@@ -6267,12 +6421,20 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             properties,
             openers,
             placement,
+            indexes,
             ..
         } = self;
 
         // Built only when the overlay is up, which is why it may allocate.
         let rows = show_keys.then(|| crate::commands::overlay_rows(commands));
-        let progress = edits.progress_line();
+        // An index build has a count and no total — the total is what the walk is
+        // going to find out — so it takes the sentence and not the bar. A climbing
+        // count is honest; a bar that guesses at a denominator is the indeterminate
+        // spinner [rule 7](../../../docs/03-principles.md) refuses.
+        let indexing = indexes.building().map(|(_, count)| {
+            sk_model::i18n::format("index.building", &[&sk_ui::format::grouped(count)])
+        });
+        let progress = edits.progress_line().or(indexing);
         let doomed: Option<(Vec<String>, usize, bool)> = erasing.as_ref().map(|asking| {
             let names = asking
                 .paths

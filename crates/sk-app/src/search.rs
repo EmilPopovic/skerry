@@ -25,6 +25,13 @@ use sk_index::find::Found;
 
 use crate::field::Field;
 
+/// Seconds since the epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |it| i64::try_from(it.as_secs()).unwrap_or(0))
+}
+
 /// How many results are drawn before the list scrolls.
 pub(crate) const VISIBLE: usize = 12;
 
@@ -47,6 +54,15 @@ pub(crate) struct Search {
     pub(crate) scroll: usize,
     /// The token for the walk in flight, so a new query stops the old one.
     pub(crate) cancel: sk_util::Cancel,
+    /// When the index this search is scanning was built, if it is scanning one.
+    ///
+    /// **The freshness policy's whole user interface.** [ADR
+    /// 0012](../../../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)
+    /// verifies every hit before it is drawn, so a file deleted since the build
+    /// cannot appear — but one *created* since it cannot be found, and no check
+    /// fixes that. Saying how old the index is, is what makes that honest rather
+    /// than mysterious.
+    pub(crate) indexed: Option<i64>,
 }
 
 impl Search {
@@ -81,6 +97,7 @@ impl Search {
             active: 0,
             scroll: 0,
             cancel: sk_util::Cancel::new(),
+            indexed: None,
         }
     }
 
@@ -146,6 +163,12 @@ impl Search {
         if self.asked.is_empty() {
             return sk_model::i18n::lookup("search.type").to_owned();
         }
+        let scanned = sk_ui::format::grouped(self.found.scanned as usize);
+        if let Some(built) = self.indexed.filter(|_| self.found.complete) {
+            let key = if self.found.capped { "search.indexed_capped" } else { "search.indexed" };
+            let when = sk_ui::format::modified(built, now());
+            return sk_model::i18n::format(key, &[&self.found.hits.len(), &scanned, &when]);
+        }
         let key = if self.found.capped {
             "search.capped"
         } else if self.found.complete {
@@ -153,10 +176,7 @@ impl Search {
         } else {
             "search.running"
         };
-        sk_model::i18n::format(
-            key,
-            &[&self.found.hits.len(), &sk_ui::format::grouped(self.found.scanned as usize)],
-        )
+        sk_model::i18n::format(key, &[&self.found.hits.len(), &scanned])
     }
 }
 

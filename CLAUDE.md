@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 516
-tests, 97 GUI scenarios **on both Wayland and X11**, twenty-eight golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 529
+tests, 98 GUI scenarios **on both Wayland and X11**, twenty-eight golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -29,7 +29,11 @@ to be dropped into; a taken name **stops the queue and asks**, and Replace trash
 replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and can
 be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
 result at **0.7 ms over 817,288 entries**, and `Ctrl+Enter` puts every result
-into the pane as rows that can be selected, dragged and trashed where they are; and the window **comes back the way it was
+into the pane as rows that can be selected, dragged and trashed where they are;
+a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
+after which the same complete search costs **6.99 ms instead of 639.9 ms** over
+563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and
+never on its own; and the window **comes back the way it was
 left** after `kill -9`
 ([ADR 0011](docs/adr/0011-one-plain-text-state-file-written-atomically.md)).
 Every command is reachable by keyboard

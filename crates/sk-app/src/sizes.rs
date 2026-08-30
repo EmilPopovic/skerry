@@ -160,7 +160,11 @@ mod tests {
             let waker = Waker::new().expect("eventfd");
             let (sender, updates) = mpsc::channel();
             let measurer = Measurer::new(waker.handle());
-            let jobs = Jobs { pool: Pool::with_width(4), wake: waker.handle(), sender };
+            let jobs = Jobs {
+                pool: std::sync::Arc::new(Pool::with_width(4)),
+                wake: waker.handle(),
+                sender,
+            };
             (Self { jobs, updates, _waker: waker }, measurer)
         }
 

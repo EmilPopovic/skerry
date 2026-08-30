@@ -116,7 +116,10 @@ fn sample_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu> {
     let at = sk_plat::Point::new(here.body.x + 140.0, here.body.y + 96.0);
     let mut menu =
         crate::menu::build(crate::menu::ON_BACKGROUND, &crate::commands::registry(), at, |id| {
-            !matches!(id, "edit.undo" | "edit.redo" | "file.paste" | "file.cut")
+            // `index.forget` among them: a fresh window has no index, so a
+            // frame that drew that row bright would be a frame of a state this
+            // menu is never opened in.
+            !matches!(id, "edit.undo" | "edit.redo" | "file.paste" | "file.cut" | "index.forget")
         })?;
     menu.step(true);
     menu.step(true);

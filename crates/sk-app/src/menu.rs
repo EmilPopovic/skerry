@@ -33,7 +33,7 @@ pub const ON_ROW: &[&[&str]] = &[
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],
     &["edit.undo", "edit.redo", "edit.pause", "edit.cancel"],
-    &["select.all", "view.filter", "go.search"],
+    &["select.all", "view.filter", "go.search", "index.build", "index.forget"],
     &["view.hidden", "view.theme", "view.sidebar"],
     &["tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],

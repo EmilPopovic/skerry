@@ -1211,15 +1211,27 @@ Three changes, and the third is the general one:
 
 **Taking a stall out breaks whatever was leaning on it.** Five seconds per
 scenario is not a delay anybody chose, but it was a delay everything ran with,
-and `a-paste-takes-what-another-application-copied` had grown into it: the
+and two scenarios had grown into it.
+
+`copy-and-paste-a-file` is the plainer of the two and the more general lesson. It
+pressed `Ctrl+V` and then called `settled`, which waits for `busy` and `loading`
+to be false — and in the moment after a keystroke the honest answer to *is
+anything in flight* is **not yet**, which is the same answer as *not any more*.
+The wait returned before the paste had started, one X11 run in three, and
+reported an empty folder. **A wait for quiet is not a wait for an event**: the
+fix is to wait for the row the paste is supposed to produce, which is also the
+thing being asserted.
+
+`a-paste-takes-what-another-application-copied` is the subtler one: the
 scenario makes a folder in a directory the window is *already* listing, so the
 row arrives by inotify rather than in the first read, and the stall was what gave
 the watch time to fire before type-ahead went looking for the row. It failed the
 moment the stall went, on the first assertion after the folder — which is the
 right place for it to fail and eleven months later than it should have. It waits
-for the row count to move now, and takes 1.5 s instead of 30. Expect one of these
-for every hidden wait removed, and treat each as the defect it always was rather
-than as a regression in the change that exposed it.
+for the row count to move now, and takes 1.5 s instead of 30.
+
+Expect one of these for every hidden wait removed, and treat each as the defect
+it always was rather than as a regression in the change that exposed it.
 
 Two wrong turns on the way, both worth recording.
 

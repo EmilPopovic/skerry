@@ -113,6 +113,28 @@ fn navigate(registry: &mut Registry<App>) {
             run: App::go_home,
         },
         CommandSpec {
+            id: "index.build",
+            name: "action.index_build",
+            group: Group::Navigate,
+            // The pair sits on one letter on purpose: `Shift` builds the index
+            // and `Alt` removes it, so finding either teaches the other. `Ctrl+I`
+            // is already Properties, which is why neither is the bare chord.
+            keys: &["ctrl+shift+i"],
+            enabled: |app: &App| !app.indexing(),
+            run: App::build_index,
+        },
+        CommandSpec {
+            id: "index.forget",
+            name: "action.index_forget",
+            group: Group::Navigate,
+            keys: &["ctrl+alt+i"],
+            // Dimmed rather than hidden where there is nothing to delete, so the
+            // menu is the same shape every time it opens — and so that a person
+            // looking for "where is my index" finds the row that removes it.
+            enabled: |app: &App| app.indexed() || app.indexing(),
+            run: App::forget_index,
+        },
+        CommandSpec {
             id: "go.search",
             name: "action.search",
             group: Group::Navigate,
@@ -933,6 +955,35 @@ mod tests {
         let registry = registry();
         assert!(registry.problems().is_empty(), "{:?}", registry.problems());
         assert!(registry.len() >= 20, "only {} commands", registry.len());
+    }
+
+    /// The two index chords reach the two index commands, in the listing.
+    ///
+    /// **Both were unreachable when they were written**, because they were added
+    /// to the `Scope::Field` block at the end of the file rather than the global
+    /// one — a mistake that is invisible in the registry's own consistency
+    /// checks, invisible in the palette, which runs a command by its id, and
+    /// visible only by pressing the key in a window. This asserts the scope.
+    #[test]
+    fn the_index_chords_reach_their_commands_outside_a_field() {
+        use sk_plat::{Key, KeyEvent, Modifiers};
+        let registry = registry();
+        let press = |key: char, shift: bool, alt: bool| KeyEvent {
+            key: Key::Character(key),
+            text: None,
+            mods: Modifiers { ctrl: true, shift, alt, logo: false },
+            repeat: false,
+        };
+        let named = |event: &KeyEvent| {
+            registry
+                .resolve(event, sk_cmd::Scope::Global)
+                .and_then(|id| registry.describe(id))
+                .map(|it| it.id)
+        };
+        assert_eq!(named(&press('I', true, false)), Some("index.build"));
+        assert_eq!(named(&press('i', false, true)), Some("index.forget"));
+        // And the bare chord is still Properties, which is what they sit beside.
+        assert_eq!(named(&press('i', false, false)), Some("file.properties"));
     }
 
     #[test]
