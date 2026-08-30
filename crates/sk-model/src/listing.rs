@@ -125,6 +125,19 @@ pub struct Listing {
     /// lookup per comparison is the access pattern
     /// [docs/12-measurement.md](../../../docs/12-measurement.md) says costs 30×.
     recursive: Vec<u64>,
+    /// Which directory each entry is in, for a listing whose rows are not one
+    /// directory's.
+    ///
+    /// **Empty for a directory read, which is nearly every listing.** A pane
+    /// showing a folder knows the one directory behind every row and pays
+    /// nothing for this; a pane showing search results across a subtree cannot,
+    /// and one index per entry into [`Self::homes`] is what lets the two be the
+    /// same `Listing` — which is what [rule 8](../../../docs/03-principles.md)
+    /// asks for: the same selection, the same filter, the same everything, in
+    /// every view.
+    home: Vec<u32>,
+    /// The directories [`Self::home`] indexes, each stored once.
+    homes: Vec<std::path::PathBuf>,
     /// The rows a view walks, in display order.
     order: Vec<EntryId>,
     /// Entries still waiting for `statx`, counted rather than searched for.
@@ -196,6 +209,8 @@ impl Listing {
             mtime: Vec::with_capacity(capacity),
             flags: Vec::with_capacity(capacity),
             recursive: Vec::new(),
+            home: Vec::new(),
+            homes: Vec::new(),
             order: Vec::with_capacity(capacity),
             pending: 0,
         }
@@ -216,6 +231,41 @@ impl Listing {
         self.order.push(id);
         self.pending += 1;
         id
+    }
+
+    /// Appends an entry that lives somewhere other than one directory.
+    ///
+    /// For a listing gathered from a whole subtree. `directory` is stored once
+    /// however many entries name it, because a search over a deep tree finds
+    /// many files in the same folder and a `PathBuf` per row is the listing's
+    /// dominant cost repeated.
+    pub fn push_from(&mut self, directory: &std::path::Path, name: &str, flags: Flags) -> EntryId {
+        let home = self.homes.iter().position(|known| known == directory).unwrap_or_else(|| {
+            self.homes.push(directory.to_path_buf());
+            self.homes.len() - 1
+        });
+        let id = self.push(name, flags);
+        // Filled lazily and to the full length, so an entry pushed by `push`
+        // before this is ever called still indexes something.
+        self.home.resize(self.name.len(), 0);
+        self.home[id.index()] = u32::try_from(home).unwrap_or(0);
+        id
+    }
+
+    /// The directory an entry is in, for a listing that spans several.
+    ///
+    /// `None` when every row came from one directory, which is what a pane
+    /// showing a folder has — and the caller already knows which one.
+    #[must_use]
+    pub fn home(&self, id: EntryId) -> Option<&std::path::Path> {
+        let at = *self.home.get(id.index())?;
+        self.homes.get(at as usize).map(std::path::PathBuf::as_path)
+    }
+
+    /// Whether these rows came from more than one directory.
+    #[must_use]
+    pub fn is_flattened(&self) -> bool {
+        !self.homes.is_empty()
     }
 
     /// Records how big a directory is, counting everything under it.
@@ -477,6 +527,36 @@ const PREFIX_MAX: usize = 9;
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    /// The whole of what makes a flattened view possible: rows that remember
+    /// which directory they came from, in the same `Listing` a directory read
+    /// produces.
+    ///
+    /// **Empty for a directory read, and it has to be.** Nearly every listing in
+    /// the program is one directory's; if this cost four bytes an entry there,
+    /// a million-row directory would pay 4 MB for a column it never reads.
+    #[test]
+    fn a_flattened_listing_remembers_where_each_row_came_from() {
+        let mut plain = Listing::with_capacity(2);
+        plain.push("one.txt", Flags::NONE);
+        assert!(!plain.is_flattened());
+        assert_eq!(plain.home(EntryId(0)), None, "a directory read pays for a home column");
+
+        let mut results = Listing::with_capacity(3);
+        let a = results.push_from(std::path::Path::new("/tmp/alpha"), "same-name.txt", Flags::NONE);
+        let b = results.push_from(std::path::Path::new("/tmp/beta"), "same-name.txt", Flags::NONE);
+        // The same directory twice: stored once, because a search over a deep
+        // tree finds many files in one folder.
+        let c = results.push_from(std::path::Path::new("/tmp/alpha"), "other.txt", Flags::NONE);
+        assert!(results.is_flattened());
+        assert_eq!(results.home(a), Some(std::path::Path::new("/tmp/alpha")));
+        assert_eq!(results.home(b), Some(std::path::Path::new("/tmp/beta")));
+        assert_eq!(results.home(c), Some(std::path::Path::new("/tmp/alpha")));
+        // Two rows with the same name are two different files, which is the case
+        // a list of names alone cannot represent at all.
+        assert_eq!(results.name(a), results.name(b));
+        assert_ne!(results.home(a), results.home(b));
+    }
 
     use super::{EntryId, Flags, Listing};
     use crate::collate::natural_cmp;

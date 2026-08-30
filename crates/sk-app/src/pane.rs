@@ -143,6 +143,15 @@ pub struct Pane {
     pub show_hidden: bool,
     /// Whether a read is still running.
     pub loading: bool,
+    /// The query whose results this pane is showing instead of a directory.
+    ///
+    /// **A pane showing results is not showing `path`.** It keeps `path` as the
+    /// root the search ran under — Back still works, the breadcrumbs still say
+    /// where you were — but every row comes from somewhere under it, and a
+    /// refresh must not replace them with that one directory's contents. Which is
+    /// what a change notification would do four times a second while a copy is
+    /// running underneath.
+    pub results: Option<String>,
     /// Why the last read failed, if it did.
     pub problem: Option<Problem>,
     /// The display row under the pointer.
@@ -213,6 +222,7 @@ impl Pane {
             filter: String::new(),
             show_hidden: false,
             loading: false,
+            results: None,
             problem: None,
             hover: None,
             names_us: 0,
@@ -303,11 +313,36 @@ impl Pane {
         self.reload(jobs);
     }
 
+    /// Shows the results of a search instead of a directory's contents.
+    ///
+    /// The rows keep the directory each came from, so everything the pane can do
+    /// to a file — select it, copy it, drag it, put it in the trash — works on a
+    /// result exactly as it works on a row of a folder, which is what
+    /// [rule 8](../../../docs/03-principles.md) asks for and what a results list
+    /// that could only be *navigated to* could not give.
+    pub fn show_results(&mut self, query: String, listing: Listing) {
+        // The read that is still running has nothing to land in any more: a
+        // reply from it would replace these rows with the root directory's.
+        self.cancel.cancel();
+        self.cancel = Cancel::new();
+        self.generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.loading = false;
+        self.problem = None;
+        self.results = Some(query);
+        self.listing = listing;
+        self.listing.reorder(self.sort, self.show_hidden, &self.filter);
+        self.selection.clear();
+        self.selection.set_cursor(self.listing.at(0));
+        self.scroll.want(0.0);
+    }
+
     /// Re-reads the current path.
     ///
     /// The previous read is cancelled first, and its generation is retired, so
     /// two reads of the same directory cannot interleave into one listing.
     pub fn reload(&mut self, jobs: &Jobs) {
+        // Whatever this pane was showing, it is about to show a directory.
+        self.results = None;
         self.cancel.cancel();
         self.cancel = Cancel::new();
         // A sort of the listing that is being replaced has nothing to order.
@@ -428,6 +463,13 @@ impl Pane {
     /// a file appearing must not move the cursor or scroll the view, because the
     /// person may be reading a row at the time. The cursor is restored by name.
     pub fn refresh(&mut self, jobs: &Jobs) {
+        // **Results are not re-read.** They came from a walk over a subtree, not
+        // from this one directory, and a notification about a file inside it
+        // would otherwise replace every row with that directory's contents — four
+        // times a second while anything is writing underneath.
+        if self.results.is_some() {
+            return;
+        }
         // **A name already asked for wins over the cursor's own.** It used to be
         // the other way round, and an operation then landed the cursor nowhere:
         // a rename asks for the new name and refreshes, the cursor was still on
@@ -739,9 +781,23 @@ impl Pane {
         if !self.listing.flags(id).has(Flags::DIR) {
             return false;
         }
-        let child = self.path.join(self.listing.name(id));
+        let child = self.path_of(id);
         self.open(child, jobs);
         true
+    }
+
+    /// Where an entry of this pane's listing actually is.
+    ///
+    /// **The one place that joins a name to a directory.** A pane showing a
+    /// folder has one directory behind every row, and `self.path.join(name)` was
+    /// written out at ten call sites on that assumption — which is exactly the
+    /// assumption a flattened view breaks, and ten places is ten chances for one
+    /// of them to keep it. Results from a subtree search carry their own home
+    /// per entry; a directory listing has none and falls back to the pane's.
+    #[must_use]
+    pub(crate) fn path_of(&self, id: sk_model::EntryId) -> PathBuf {
+        let name = self.listing.name(id);
+        self.listing.home(id).map_or_else(|| self.path.join(name), |home| home.join(name))
     }
 
     /// Carries the selection across a re-read, by name.

@@ -63,7 +63,7 @@ impl Measurer {
             if !pane.listing.flags(id).has(Flags::DIR) {
                 continue;
             }
-            let path = pane.path.join(pane.listing.name(id));
+            let path = pane.path_of(id);
             if let Some(progress) = self.sizes.get(&path) {
                 pane.listing.set_recursive_size(
                     id,

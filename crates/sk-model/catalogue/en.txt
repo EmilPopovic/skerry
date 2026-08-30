@@ -243,6 +243,7 @@ search.done = {0} found in {1} entries
 search.capped = the first {0}, of {1} entries — narrow the search
 search.none = Nothing under here is called that
 action.search = Find a file
+action.search_results = Show all results in this pane
 
 # Properties.
 properties.items = {0} items

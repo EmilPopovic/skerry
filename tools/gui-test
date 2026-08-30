@@ -1115,7 +1115,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 94
+FEWEST_SCENARIOS = 95
 
 
 def scenario(name, fresh: bool = False):
@@ -2686,6 +2686,60 @@ def no_spring_in_passing(run: Run, fixture: Path) -> None:
     if passing["path"] != str(fixture):
         raise Failure(f"a folder opened while the pointer was crossing it: {passing['path']!r}")
     run.drive("release\nsleep 800\n")
+
+
+@scenario("search-results-are-rows-that-can-be-acted-on", fresh=True)
+def flattened_results(run: Run, fixture: Path) -> None:
+    """`Ctrl+Enter` puts the results in the pane, and then they are just rows.
+
+    **This is [rule 8] with something behind it.** Results used to be navigable
+    and nothing else: to trash a file the search found, a person went to its
+    folder and started again. Once the results *are* the listing, every command
+    in the registry works on them with no second implementation — and the proof
+    is doing something destructive to one and finding it gone from the folder it
+    actually lived in, which is not the folder the pane is showing.
+
+    Two files of the same name in different folders is the case a list of names
+    could not represent at all, so both are here.
+
+    [rule 8]: docs/03-principles.md
+    """
+    (fixture / "alpha" / "needle.txt").write_text("in alpha")
+    (fixture / "beta" / "needle.txt").write_text("in beta")
+    listed(run)
+    root = run.state()["path"]
+
+    run.drive("key ctrl+shift+f\n")
+    until(run, searching="true")
+    run.drive("text needle\n")
+    found = until(run, search_hits="2", search_done="true")
+    expect(found, results="")
+
+    run.drive("key ctrl+enter\n")
+    flat = until(run, results="needle", searching="false")
+    # The pane is showing two files from two different folders while its own path
+    # is still the root, which is the whole shape of a flattened view.
+    expect(flat, rows="2", path=root)
+
+    # Trash the first one. Which folder it was in is the listing's business, not
+    # the pane's, and getting that wrong would delete the wrong file — or nothing.
+    run.drive("key home\n")
+    on_first = until(run, cursor="needle.txt", selected="1")
+    del on_first
+    run.drive("key delete\n")
+    settled(run)
+    gone = [p for p in (fixture / "alpha", fixture / "beta") if not (p / "needle.txt").exists()]
+    if len(gone) != 1:
+        raise Failure(f"trashing one result removed {len(gone)} of the two files")
+
+    # And `Ctrl+Z` puts it back where it came from, not where the pane is.
+    run.drive("key ctrl+z\n")
+    settled(run)
+    for folder in ("alpha", "beta"):
+        if not (fixture / folder / "needle.txt").is_file():
+            raise Failure(f"undo did not restore {folder}/needle.txt")
+    if (fixture / "needle.txt").exists():
+        raise Failure("undo put the file in the pane's directory instead of its own")
 
 
 @scenario("a-drag-held-on-a-tab-switches-to-it", fresh=True)

@@ -735,6 +735,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("view.menu", "the secondary pointer button"));
     reach.push(("select.none", "a click on empty space"));
     reach.push(("go.home", "the sidebar's Home row"));
+    reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on the path strip beside the breadcrumbs"));
     reach.push(("tab.close", "the cross on a tab, or a double click on it"));
     for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND] {
@@ -864,6 +865,26 @@ fn field(registry: &mut Registry<App>) {
             keys: &["ctrl+shift+z", "ctrl+y"],
             enabled: App::in_a_field,
             run: App::redo_text,
+        },
+        CommandSpec {
+            id: "go.search_results",
+            name: "action.search_results",
+            group: Group::Navigate,
+            // **In the field scope, because that is where it happens.** Inside
+            // the search `Enter` goes to one result and this takes all of them;
+            // globally `Ctrl+Enter` already opens the selected folders in tabs,
+            // and the registry's own test refuses two meanings for one chord.
+            // The search box is a field, so the narrower scope is both true and
+            // free — and `enabled` keeps it dark in the rename and path fields,
+            // where there are no results to show.
+            //
+            // Registered rather than handled privately by the search, because
+            // [rule 2](../../docs/03-principles.md) says every action is one
+            // entry in one registry — which is also what puts it in the palette,
+            // and the palette is how a pointer reaches it.
+            keys: &["ctrl+enter"],
+            enabled: App::search_has_results,
+            run: App::flatten_search,
         },
         CommandSpec {
             id: "field.paste",

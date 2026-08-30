@@ -2878,10 +2878,7 @@ impl App {
     fn focused_directory(&self) -> Option<PathBuf> {
         let pane = self.panes.focused();
         let id = pane.focused()?;
-        pane.listing
-            .flags(id)
-            .has(sk_model::Flags::DIR)
-            .then(|| pane.path.join(pane.listing.name(id)))
+        pane.listing.flags(id).has(sk_model::Flags::DIR).then(|| pane.path_of(id))
     }
 
     /// The selected directories in list order, or the focused one when nothing
@@ -2893,11 +2890,11 @@ impl App {
             .selection
             .in_order(pane.listing.order())
             .filter(|id| is_directory(*id))
-            .map(|id| pane.path.join(pane.listing.name(id)))
+            .map(|id| pane.path_of(id))
             .collect();
         if let Some(id) = pane.focused().filter(|_| paths.is_empty()).filter(|id| is_directory(*id))
         {
-            paths.push(pane.path.join(pane.listing.name(id)));
+            paths.push(pane.path_of(id));
         }
         paths
     }
@@ -2909,7 +2906,7 @@ impl App {
             return;
         }
         let Some(id) = self.panes.focused().focused() else { return };
-        let path = self.panes.focused().path.join(self.panes.focused().listing.name(id));
+        let path = self.panes.focused().path_of(id);
         self.launch(path);
     }
 
@@ -3221,10 +3218,10 @@ impl App {
             .focused()
             .selection
             .in_order(listing.order())
-            .map(|id| self.panes.focused().path.join(listing.name(id)))
+            .map(|id| self.panes.focused().path_of(id))
             .collect();
         if let Some(id) = self.panes.focused().focused().filter(|_| paths.is_empty()) {
-            paths.push(self.panes.focused().path.join(listing.name(id)));
+            paths.push(self.panes.focused().path_of(id));
         }
         paths
     }
@@ -3616,6 +3613,30 @@ search_active={active:?}",
         }
     }
 
+    /// Whether a search has found anything to put in the pane.
+    #[must_use]
+    pub(crate) fn search_has_results(&self) -> bool {
+        self.search.as_ref().is_some_and(|search| !search.found.hits.is_empty())
+    }
+
+    /// Puts every result into the pane as rows.
+    ///
+    /// **The other half of what a search is for.** [`Self::follow_search`] is for
+    /// one that was a way of getting somewhere; this is for one that was a way of
+    /// finding a *set* of files — and once they are rows, every command in the
+    /// registry already works on them, because a result carries the directory it
+    /// came from and `Pane::path_of` is the only thing that ever needed to know.
+    pub(crate) fn flatten_search(&mut self) {
+        let Some(search) = self.search.as_ref() else { return };
+        if search.found.hits.is_empty() {
+            return;
+        }
+        let (query, listing) = (search.query.text.clone(), search.listing());
+        self.close_search();
+        self.panes.focused_mut().show_results(query, listing);
+        self.settle_panes();
+    }
+
     /// Goes to the highlighted result: its folder, with the cursor on it.
     fn follow_search(&mut self) {
         let Some(hit) = self.search.as_ref().and_then(crate::search::Search::chosen) else {
@@ -3645,6 +3666,10 @@ search_active={active:?}",
             Key::Named(Named::Escape) => self.close_search(),
             Key::Named(Named::Down) if bare => self.step_search(1),
             Key::Named(Named::Up) if bare => self.step_search(-1),
+            // The registry holds this too, in the field scope. Both routes run
+            // the same function: a chord the search answers itself and a palette
+            // row that runs a command must not be two implementations.
+            Key::Named(Named::Enter) if event.mods.ctrl => self.flatten_search(),
             Key::Named(Named::Enter) => self.follow_search(),
             _ => {
                 let diagnostic = commands
@@ -3678,6 +3703,10 @@ search_active={active:?}",
     fn press_in_the_search(&mut self, position: Point) -> bool {
         if self.search.is_none() {
             return false;
+        }
+        if self.hits.search_all.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.flatten_search();
+            return true;
         }
         if let Some(offset) =
             self.hits.search.iter().position(|a| a.contains(position.x, position.y))
@@ -4104,10 +4133,14 @@ search_active={active:?}",
         // from a key that was never delivered at all.
         let typed = self.typed.clone();
         let refused = self.refused.unwrap_or_default();
+        // The query a pane is showing results for, empty when it is showing a
+        // directory. Reported because from outside the two look identical: rows
+        // are rows, which is the point.
+        let results = self.panes.focused().results.clone().unwrap_or_default();
         let drag_in = self.window.dragging().is_some();
         let drag_out = self.window.dragging_out();
         format!(
-            "path={:?} rows={} hidden={} sort={:?} descending={} \
+            "path={:?} results={results:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
@@ -4852,7 +4885,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if !pane.listing.flags(id).has(sk_model::Flags::DIR) {
             return None;
         }
-        Some((leaf.id, row, pane.path.join(pane.listing.name(id))))
+        Some((leaf.id, row, pane.path_of(id)))
     }
 
     /// Follows a drag over this window, whoever started it.

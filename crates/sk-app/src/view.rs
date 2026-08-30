@@ -166,6 +166,8 @@ pub struct Hits {
     pub search: Vec<Area>,
     /// The search's query field, so a click into it can place the caret.
     pub search_field: Option<Area>,
+    /// The label that puts every result into the pane, while there are results.
+    pub search_all: Option<Area>,
     /// One rectangle per answer to an open name-taken question, in panel order.
     pub answers: Vec<Area>,
     /// Its "for the rest of them" toggle, when there is a rest.
@@ -1186,7 +1188,27 @@ fn search_panel(
 
     let dim = TextStyle::new(metrics.header_size, theme.palette.dim);
     let head = painter.baseline(area.y + FIELD, SEARCH_SUMMARY, metrics.header_size);
-    let inner = area.width - INSET * 2.0;
+    let mut inner = area.width - INSET * 2.0;
+    // **The pointer's way to the same command the keyboard reaches with
+    // `Ctrl+Enter`.** At the right end of the line that already says how many
+    // results there are, because that is the sentence it answers: "all 47 of
+    // them, here". Only where there is something to show — a label offering to
+    // do nothing is worse than no label.
+    hits.search_all = None;
+    if !search.found.hits.is_empty() {
+        let label = i18n::lookup("action.search_results");
+        let width = text_width(painter, label, metrics.header_size, false).min(inner / 2.0);
+        let button = Area {
+            x: area.right() - INSET - width,
+            y: area.y + FIELD,
+            width,
+            height: SEARCH_SUMMARY,
+        };
+        let accent = TextStyle::new(metrics.header_size, theme.palette.accent);
+        line(painter, label, accent, button.x, width, head);
+        hits.search_all = Some(button);
+        inner -= width + INSET;
+    }
     line(painter, &search.summary(), dim, area.x + INSET, inner, head);
 
     hits.search.clear();

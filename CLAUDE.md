@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 514
-tests, 94 GUI scenarios **on both Wayland and X11**, twenty-six golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 516
+tests, 95 GUI scenarios **on both Wayland and X11**, twenty-six golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -27,7 +27,8 @@ is held and a folder — or a tab — held over for nine hundred milliseconds op
 to be dropped into; a taken name **stops the queue and asks**, and Replace trashes what it
 replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and can
 be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
-result at **0.7 ms over 817,288 entries**; and the window **comes back the way it was
+result at **0.7 ms over 817,288 entries**, and `Ctrl+Enter` puts every result
+into the pane as rows that can be selected, dragged and trashed where they are; and the window **comes back the way it was
 left** after `kill -9`
 ([ADR 0011](docs/adr/0011-one-plain-text-state-file-written-atomically.md)).
 Every command is reachable by keyboard

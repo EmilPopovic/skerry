@@ -6,11 +6,14 @@
 //! results in other folders. Two things that both start with typing and are not
 //! the same thing, so they are two surfaces.
 //!
-//! **Not a flattened view either**, which is M4's and is a bigger change: the
-//! results here are navigated to, not acted on in place. `Enter` takes the pane
-//! to the file's folder and puts the cursor on it, which is one keystroke from
-//! everything the program can do to a file — and the honest version of what can
-//! be built on a `Listing` that a directory read owns.
+//! **`Enter` navigates and `Ctrl+Enter` flattens.** The first takes the pane to
+//! the file's folder and puts the cursor on it, which is what a person wants when
+//! the search was a way of getting somewhere. The second puts every result *into*
+//! the pane as rows, which is what they want when the search was a way of finding
+//! a set of files to do something to — and rows are rows, so selecting, copying,
+//! dragging and trashing them all work with no second implementation. That is
+//! [rule 8](../../../docs/03-principles.md): the same selection semantics, the
+//! same path model and the same filter grammar in every view.
 //!
 //! The matching rule is [`sk_model::contains_folded`], the find popup's, because
 //! [rule 8](../../../docs/03-principles.md) says the filter grammar is the same
@@ -47,6 +50,28 @@ pub(crate) struct Search {
 }
 
 impl Search {
+    /// Every result as a listing the pane can show.
+    ///
+    /// Each row carries the directory it came from, which is the whole of what
+    /// makes this a listing rather than a list: `Pane::path_of` then answers for
+    /// a result exactly as it answers for a row of a folder, and nothing above it
+    /// has to know which it is looking at.
+    ///
+    /// Sizes and times come from the walk, so no row is `META_PENDING` and no
+    /// second `statx` pass is dispatched for entries somebody has already stated.
+    pub(crate) fn listing(&self) -> sk_model::Listing {
+        let mut listing = sk_model::Listing::with_capacity(self.found.hits.len());
+        for hit in &self.found.hits {
+            let (Some(parent), Some(name)) = (hit.path.parent(), hit.path.file_name()) else {
+                continue;
+            };
+            let flags = if hit.directory { sk_model::Flags::DIR } else { sk_model::Flags::NONE };
+            let id = listing.push_from(parent, &name.to_string_lossy(), flags);
+            listing.set_meta(id, hit.size, hit.modified, sk_model::Flags::NONE);
+        }
+        listing
+    }
+
     pub(crate) fn new(root: PathBuf) -> Self {
         Self {
             root,
