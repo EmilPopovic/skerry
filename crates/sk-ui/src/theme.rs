@@ -49,6 +49,14 @@ pub struct Palette {
     /// The close button under the pointer, which is the one destructive thing
     /// in the frame and says so.
     pub close_hover: Color,
+    /// The one action that cannot be undone.
+    ///
+    /// **Exactly one thing in this program is irreversible** — deleting for good,
+    /// which [rule 3](../../../docs/03-principles.md) leaves off the undo stack
+    /// on purpose — and until this existed it was drawn in the same grey as a row
+    /// count. Reserved for that: a colour that appears on ordinary operations is
+    /// a colour that stops meaning anything.
+    pub danger: Color,
     /// One hue per broad kind of file, for the mark at the head of a row.
     ///
     /// **Hue, not shape.** An icon per MIME type is an icon theme, which is a
@@ -225,6 +233,7 @@ impl Theme {
                 heading: Color::hex(0x7c8698),
                 button_hover: Color::hex(0xffffff).with_alpha(28),
                 close_hover: Color::hex(0xe5484d),
+                danger: Color::hex(0xe5484d),
                 kinds: Kinds {
                     folder: Color::hex(0x64a8f5),
                     image: Color::hex(0x4fbfa8),
@@ -261,6 +270,7 @@ impl Theme {
                 heading: Color::hex(0x767d8b),
                 button_hover: Color::hex(0x000000).with_alpha(22),
                 close_hover: Color::hex(0xd93a3f),
+                danger: Color::hex(0xd93a3f),
                 kinds: Kinds {
                     folder: Color::hex(0x2f7fd6),
                     image: Color::hex(0x18866f),

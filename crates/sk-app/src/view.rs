@@ -76,12 +76,18 @@ pub struct Chrome<'a> {
     pub search: Option<&'a crate::search::Search>,
     /// The name-taken question, while one is open.
     pub clash: Option<&'a crate::edit::Clash>,
+    /// What a permanent deletion is asking about: the names it would erase, how
+    /// many there are in total, and whether the keyboard is on Delete.
+    pub erasing: Option<(&'a [String], usize, bool)>,
     /// Which answer it is on.
     pub answering: usize,
     /// Whether the answer would cover the rest of the queue.
     pub for_the_rest: bool,
     /// How far along a running operation is, once that is knowable.
     pub progress: Option<f32>,
+    /// Whether that operation is on the pause latch, so the button can say
+    /// *Resume* rather than offering to pause something already paused.
+    pub paused: bool,
     /// The breadcrumb separator under the pointer.
     pub hovered_separator: Option<usize>,
     /// The sibling menu a separator has opened, while one is open.
@@ -174,6 +180,21 @@ pub struct Hits {
     pub for_the_rest: Option<Area>,
     /// The palette's query field, so a click into it can place the caret.
     pub palette_field: Option<Area>,
+    /// The two buttons of the delete-for-good question, while it is up.
+    pub erase_cancel: Option<Area>,
+    pub erase_delete: Option<Area>,
+    /// Pause and Cancel in the status strip, while an operation is running.
+    pub pause: Option<Area>,
+    pub cancel: Option<Area>,
+    /// Every panel drawn this frame, in draw order.
+    ///
+    /// **What the pointer cannot see through.** A panel over the list used to
+    /// leave the row beneath it hovering — the highlight tracked the pointer
+    /// across a question it was supposed to be reading. Recorded by
+    /// [`panel_shape`] rather than by each panel, so a panel added later cannot
+    /// forget; a card that *follows* the pointer uses [`floating_shape`] and is
+    /// deliberately not here, because a drag has to see the rows under it.
+    pub panels: Vec<Area>,
 }
 
 /// Numbers for the statistics overlay and the status line.
@@ -216,6 +237,7 @@ pub fn draw(
 ) {
     let focus = panes.focus();
     let pane = panes.focused();
+    hits.panels.clear();
     sidebar(painter, pane, layout, chrome, hits);
     path_bar(painter, pane, layout, chrome, hits);
     tool_buttons(painter, layout, chrome);
@@ -261,15 +283,15 @@ pub fn draw(
     // with the keyboard, because that is the pane the path bar and the counts
     // are describing.
     let here = focused_leaf(chrome, focus);
-    status(painter, pane, layout, chrome, diagnostics);
+    status(painter, pane, layout, chrome, diagnostics, hits);
     if chrome.filtering || !pane.filter.is_empty() {
-        find_popup(painter, pane, here, chrome.filtering);
+        find_popup(painter, pane, here, chrome.filtering, hits);
     }
     if chrome.stats {
-        stats_overlay(painter, pane, here, diagnostics);
+        stats_overlay(hits, painter, pane, here, diagnostics);
     }
     if let Some(rows) = chrome.keys {
-        keys_overlay(painter, layout, rows);
+        keys_overlay(painter, layout, rows, hits);
     }
     if let Some(menu) = chrome.crumb_menu {
         crumb_menu(painter, layout, menu, hits);
@@ -284,7 +306,7 @@ pub fn draw(
         hits.search_field = None;
     }
     if let Some(panel) = chrome.properties {
-        properties(painter, layout, panel, now);
+        properties(hits, painter, layout, panel, now);
     }
     if let Some(list) = chrome.openers {
         open_with(painter, layout, list, hits);
@@ -297,6 +319,15 @@ pub fn draw(
     } else {
         hits.answers.clear();
         hits.for_the_rest = None;
+    }
+    // The same place, for the same reason: a question with no dismissal must be
+    // the thing on top. The two cannot be open at once — one is a queue asking
+    // about a name, the other is a queue that has not started.
+    if let Some((names, total, on_delete)) = chrome.erasing {
+        erase_panel(painter, layout, names, total, on_delete, hits);
+    } else {
+        hits.erase_cancel = None;
+        hits.erase_delete = None;
     }
     if let Some(typed) = chrome.typed {
         type_ahead(painter, here, typed);
@@ -629,7 +660,7 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
         .fold(0.0f32, f32::max);
     let width = (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1);
     let area = crate::menu::place(menu.at, width, crate::menu::height(drawn), layout.window);
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     // One rectangle per row, drawn or not, so a hit is an index into the menu's
     // own rows: a row that is scrolled out gets an empty rectangle, which
@@ -716,7 +747,7 @@ fn crumb_menu(
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     hits.crumb_menu.clear();
     for (offset, name) in drawn.iter().enumerate() {
@@ -786,6 +817,7 @@ const CRUMB_MENU_WIDTH: (f32, f32) = (160.0, 420.0);
 /// Centred, because it is a statement rather than a thing to aim at — nothing in
 /// it is clickable, and a panel anchored to a row would move when the row did.
 fn properties(
+    hits: &mut Hits,
     painter: &mut Painter<'_>,
     layout: &Layout,
     panel: &crate::properties::Properties,
@@ -811,7 +843,7 @@ fn properties(
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     let baseline = painter.baseline(area.y + 4.0, PROPERTIES_TITLE, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
@@ -879,7 +911,7 @@ fn open_with(
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     let baseline = painter.baseline(area.y + 4.0, PROPERTIES_TITLE - 12.0, metrics.path_size);
     let inner = area.width - PROPERTIES_INSET * 2.0;
@@ -923,6 +955,138 @@ fn open_with(
 /// answered about two identical strings. It can be answered about 4 MB from this
 /// morning against 12 MB from last year, which is what the two columns are for
 /// and why the facts are gathered on the job that found the clash.
+/// The question a permanent deletion asks, and the only one in the program that
+/// cannot be taken back by `Ctrl+Z`.
+///
+/// **Shaped like the name-taken question, because it is the same kind of thing:**
+/// a decision with the facts in front of it and two real targets. It used to be a
+/// sentence in the status strip, in the dim grey a row count is drawn in, armed
+/// for exactly as long as that sentence happened to stay up.
+///
+/// **One left edge and no list of one.** The first version indented the names
+/// eight pixels past the title and the warning, and then listed the single file
+/// the title had just named — a panel with three left edges and a line that said
+/// nothing. It is as wide as its widest line now, within bounds, rather than a
+/// fixed 420 that left a short filename swimming.
+fn erase_panel(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    names: &[String],
+    total: usize,
+    on_delete: bool,
+    hits: &mut Hits,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let title = if total == 1 {
+        i18n::format("erase.title_one", &[&names.first().cloned().unwrap_or_default()])
+    } else {
+        i18n::format("erase.title_many", &[&total])
+    };
+    let warning = i18n::lookup("erase.forever");
+    // A single file is named by the title and listing it again says nothing.
+    let listed: &[String] = if total == 1 { &[] } else { names };
+    // Only where something *is* left out. With one file the title has named it
+    // and `listed` is empty on purpose, which the arithmetic alone read as one
+    // name unlisted — a panel saying "and 1 more" about the file in its title.
+    let more = (!listed.is_empty() && total > listed.len())
+        .then(|| i18n::format("erase.and_more", &[&(total - listed.len())]));
+
+    let mut widest = text_width(painter, &title, metrics.path_size, false).max(text_width(
+        painter,
+        warning,
+        metrics.text_size,
+        false,
+    ));
+    for line_text in listed.iter().chain(more.iter()) {
+        widest = widest.max(text_width(painter, line_text, metrics.text_size, false));
+    }
+    let buttons = ERASE_BUTTON.0 * 2.0 + ERASE_GAP;
+    let width = (widest.max(buttons) + ERASE_PAD * 2.0)
+        .clamp(ERASE_WIDTH.0, ERASE_WIDTH.1.min(layout.window.width - 16.0));
+
+    let body = (listed.len() + usize::from(more.is_some())) as f32 * ERASE_LINE;
+    // Half a pad between the list and the warning, and none where there is no
+    // list: the colour says the warning is different, and the gap agrees without
+    // opening a hole in a panel that has nothing above it.
+    let apart = if listed.is_empty() { 0.0 } else { ERASE_GAP };
+    let height = ERASE_PAD
+        + ERASE_TITLE
+        + body
+        + apart
+        + ERASE_LINE
+        + ERASE_PAD
+        + ERASE_BUTTON.1
+        + ERASE_PAD;
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: ((layout.window.height - height) / 2.0).max(8.0),
+        width,
+        height,
+    };
+    panel_shape(painter, area, hits);
+    // One left edge for everything, and one right edge for the buttons.
+    let left = area.x + ERASE_PAD;
+    let inner = area.width - ERASE_PAD * 2.0;
+
+    let mut top = area.y + ERASE_PAD;
+    let baseline = painter.baseline(top, ERASE_TITLE, metrics.path_size);
+    line(
+        painter,
+        &title,
+        TextStyle::new(metrics.path_size, theme.palette.text),
+        left,
+        inner,
+        baseline,
+    );
+    top += ERASE_TITLE;
+
+    let dim = TextStyle::new(metrics.text_size, theme.palette.dim);
+    for line_text in listed.iter().chain(more.iter()) {
+        let baseline = painter.baseline(top, ERASE_LINE, metrics.text_size);
+        line(painter, line_text, dim, left, inner, baseline);
+        top += ERASE_LINE;
+    }
+
+    // **In the danger colour, and stated rather than implied.** Everything else
+    // this program does to a file is on the undo stack; this is the sentence
+    // that says this one is not.
+    top += apart;
+    let baseline = painter.baseline(top, ERASE_LINE, metrics.text_size);
+    line(
+        painter,
+        warning,
+        TextStyle::new(metrics.text_size, theme.palette.danger),
+        left,
+        inner,
+        baseline,
+    );
+    top += ERASE_LINE + ERASE_PAD;
+
+    let (w, h) = ERASE_BUTTON;
+    let delete = Area { x: area.right() - ERASE_PAD - w, y: top, width: w, height: h };
+    let cancel = Area { x: delete.x - w - ERASE_GAP, y: top, width: w, height: h };
+    for (button, label, is_delete) in
+        [(cancel, "erase.cancel", false), (delete, "erase.delete", true)]
+    {
+        let shape = painter.rect(button.x, button.y, button.width, button.height);
+        let fill_colour = if is_delete { theme.palette.danger } else { theme.palette.chrome };
+        painter.list.rect(shape, fill_colour, painter.px(metrics.radius));
+        if is_delete == on_delete {
+            let ring = painter.px(2.0).round().max(1.0);
+            painter.list.stroke(shape, theme.palette.accent, painter.px(metrics.radius), ring);
+        }
+        let ink = if is_delete { theme.palette.selected_text } else { theme.palette.text };
+        let baseline = painter.baseline(button.y, button.height, metrics.text_size);
+        let label = i18n::lookup(label);
+        let text = text_width(painter, label, metrics.text_size, false);
+        let x = button.x + (button.width - text).max(0.0) / 2.0;
+        line(painter, label, TextStyle::new(metrics.text_size, ink), x, button.width, baseline);
+    }
+    hits.erase_cancel = Some(cancel);
+    hits.erase_delete = Some(delete);
+}
+
 fn clash_panel(
     painter: &mut Painter<'_>,
     layout: &Layout,
@@ -956,7 +1120,7 @@ fn clash_panel(
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
     let inner = area.width - PROPERTIES_INSET * 2.0;
     let left = area.x + PROPERTIES_INSET;
 
@@ -1057,6 +1221,22 @@ fn clash_files(
 
 /// The question panel: its title strip, its two-column comparison, one answer
 /// row, and how wide it is before the window narrows it.
+/// How many of the doomed names the question lists before it stops.
+///
+/// Six, and then "and N more". A question a person has to scroll is a question
+/// they stop reading, and the count in the title is the number that matters.
+pub(crate) const ERASE_NAMES: usize = 6;
+/// The narrowest and widest the question is drawn, before it takes the width of
+/// its own longest line.
+const ERASE_WIDTH: (f32, f32) = (300.0, 520.0);
+const ERASE_BUTTON: (f32, f32) = (92.0, 30.0);
+/// One inset, used on all four sides and between the two buttons, so the panel
+/// has one left edge and one rhythm rather than three of each.
+const ERASE_PAD: f32 = 18.0;
+const ERASE_GAP: f32 = 10.0;
+const ERASE_TITLE: f32 = 34.0;
+const ERASE_LINE: f32 = 24.0;
+
 const CLASH_TITLE: f32 = 54.0;
 const CLASH_FACTS: f32 = 52.0;
 const CLASH_STEP: f32 = 26.0;
@@ -1093,7 +1273,7 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     let field_area = Area { x: area.x, y: area.y, width: area.width, height: FIELD };
     hits.palette_field = Some(field_area);
@@ -1172,7 +1352,7 @@ fn search_panel(
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     let field_area = Area { x: area.x, y: area.y, width: area.width, height: FIELD };
     hits.search_field = Some(field_area);
@@ -1297,7 +1477,7 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     // The panel's own shadow and fill, so a card over the list reads as being
     // above it rather than painted on it — and an accent ring, because it is
     // attached to the pointer and everything else with one is a target.
-    panel_shape(painter, area);
+    floating_shape(painter, area);
     let shape = painter.rect(area.x, area.y, area.width, area.height);
     let ring = painter.px(1.0).round().max(1.0);
     painter.list.stroke(shape, theme.palette.accent, painter.px(10.0), ring);
@@ -1349,7 +1529,13 @@ const CARD_WIDEST: f32 = 320.0;
 ///
 /// The count comes with it, because "no matches" and "one match" are the two
 /// answers a filter is asked for and neither is visible in the list itself.
-fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout, focused: bool) {
+fn find_popup(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &PaneLayout,
+    focused: bool,
+    hits: &mut Hits,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let count = i18n::format(
@@ -1367,7 +1553,7 @@ fn find_popup(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout, focus
         width,
         height: FIND_HEIGHT,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
     // An accent outline rather than a tinted strip somewhere else: the border is
     // on the thing that has the keyboard, which is what makes it a mode marker
     // rather than a decoration. Dim once the keyboard has gone elsewhere and the
@@ -2352,6 +2538,7 @@ fn status(
     layout: &Layout,
     chrome: &Chrome<'_>,
     diagnostics: &mut Diagnostics<'_>,
+    hits: &mut Hits,
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -2359,11 +2546,31 @@ fn status(
     painter.hairline(0.0, layout.status.y, layout.status.width, theme.palette.divider);
     // **A determinate bar, or none at all** — rule 7 forbids the indeterminate
     // kind, and until something had counted the total there was nothing honest
-    // to draw. On the divider rather than beside the text: it is the full width
-    // of the window, so a glance reads it without finding it first.
+    // to draw.
+    //
+    // **The strip is the bar.** It used to be two logical pixels on the divider,
+    // which is honest and invisible: rule 7 also says a long operation stays
+    // *visible*, and a copy with a counted ETA behind it was spending two pixels
+    // saying so. Filling the strip's own background costs no layout, no new
+    // surface and no second place for the fraction to be wrong — it is the same
+    // number, drawn at the size of the thing it is about.
     if let Some(fraction) = chrome.progress {
-        let bar = painter.rect(0.0, layout.status.y, layout.status.width * fraction, 2.0);
-        painter.list.rect(bar, theme.palette.accent, 0.0);
+        let filled = painter.rect(
+            layout.status.x,
+            layout.status.y,
+            layout.status.width * fraction,
+            layout.status.height,
+        );
+        painter.list.rect(filled, theme.palette.accent.with_alpha(56), 0.0);
+        // A hard edge at the head of the fill, so the boundary is readable at a
+        // glance rather than a gradient nobody can locate.
+        let edge = painter.rect(
+            layout.status.x + layout.status.width * fraction,
+            layout.status.y,
+            1.0,
+            layout.status.height,
+        );
+        painter.list.rect(edge, theme.palette.accent, 0.0);
     }
     let size = metrics.header_size;
     let baseline = painter.baseline(layout.status.y, layout.status.height, size);
@@ -2388,7 +2595,10 @@ fn status(
         i18n::format("status.counts.none", &[&format::grouped(rows)])
     };
     let left = if chrome.watching { left } else { i18n::format("status.unwatched", &[&left]) };
-    let style = TextStyle::new(size, theme.palette.dim);
+    // Full strength while something is running. The dim grey is right for a row
+    // count that is always there and wrong for a sentence about work in flight.
+    let ink = if chrome.progress.is_some() { theme.palette.text } else { theme.palette.dim };
+    let style = TextStyle::new(size, ink);
     line(painter, &left, style, metrics.gutter, layout.status.width * 0.6, baseline);
 
     // The frame cost, always visible and always honest: our own work, with the
@@ -2401,7 +2611,39 @@ fn status(
     // Its own baseline: the left half changes size when the filter is open and
     // this half does not, and two strings on one strip have to sit on one line.
     let baseline = painter.baseline(layout.status.y, layout.status.height, metrics.header_size);
-    line(painter, &right, style, 0.0, layout.status.width - metrics.gutter, baseline);
+    // **Pause and Cancel, where the operation is.** Both were already on the
+    // background menu, which satisfies the rule and not the person: somebody
+    // watching a copy should not have to open a menu to stop it. Only while
+    // there is something to stop, so the strip gains no permanent furniture.
+    hits.pause = None;
+    hits.cancel = None;
+    let mut right_edge = layout.status.width - metrics.gutter;
+    if chrome.progress.is_some() {
+        for (label, paused_label, is_cancel) in
+            [("status.cancel", "status.cancel", true), ("status.pause", "status.resume", false)]
+        {
+            let key = if !is_cancel && chrome.paused { paused_label } else { label };
+            let text = i18n::lookup(key);
+            let width = text_width(painter, text, metrics.header_size, false) + 12.0;
+            let button = Area {
+                x: right_edge - width,
+                y: layout.status.y,
+                width,
+                height: layout.status.height,
+            };
+            let ink = if is_cancel { theme.palette.danger } else { theme.palette.accent };
+            let centre = button.x + (button.width - (width - 12.0)) / 2.0;
+            line(painter, text, TextStyle::new(metrics.header_size, ink), centre, width, baseline);
+            if is_cancel {
+                hits.cancel = Some(button);
+            } else {
+                hits.pause = Some(button);
+            }
+            right_edge -= width + 8.0;
+        }
+        right_edge -= metrics.gutter;
+    }
+    line(painter, &right, style, 0.0, right_edge, baseline);
 }
 
 fn type_ahead(painter: &mut Painter<'_>, layout: &PaneLayout, typed: &str) {
@@ -2413,7 +2655,7 @@ fn type_ahead(painter: &mut Painter<'_>, layout: &PaneLayout, typed: &str) {
         width: 220.0,
         height: 40.0,
     };
-    panel_shape(painter, area);
+    floating_shape(painter, area);
     let baseline = painter.baseline(area.y, area.height, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
     line(painter, typed, style, area.x + 16.0, area.width - 32.0, baseline);
@@ -2452,7 +2694,12 @@ fn keys_shape(count: usize, available: f32) -> (usize, usize, f32) {
     (columns, per_column, fits.min(MAX_KEY_STEP).max(MIN_KEY_STEP.min(fits)))
 }
 
-fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, String)]) {
+fn keys_overlay(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    entries: &[(String, String)],
+    hits: &mut Hits,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let available = (layout.window.height - 16.0 - KEY_CHROME).max(KEY_CHROME);
@@ -2465,7 +2712,7 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
         width,
         height,
     };
-    panel_shape(painter, area);
+    panel_shape(painter, area, hits);
 
     let baseline = painter.baseline(area.y + 14.0, 24.0, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
@@ -2487,6 +2734,9 @@ fn keys_overlay(painter: &mut Painter<'_>, layout: &Layout, entries: &[(String, 
 }
 
 fn stats_overlay(
+    // Named apart from the shaping cache's own `hits`, which this function
+    // destructures a few lines down.
+    areas: &mut Hits,
     painter: &mut Painter<'_>,
     pane: &Pane,
     layout: &PaneLayout,
@@ -2568,7 +2818,7 @@ fn stats_overlay(
     let height = rows.len() as f32 * step + 46.0;
     let area =
         Area { x: layout.body.right() - width - 16.0, y: layout.body.y + 16.0, width, height };
-    panel_shape(painter, area);
+    panel_shape(painter, area, areas);
 
     let baseline = painter.baseline(area.y + 10.0, 22.0, metrics.text_size);
     let title = TextStyle::new(metrics.text_size, theme.palette.text).bold();
@@ -2592,7 +2842,16 @@ fn stats_overlay(
 /// The shadow is three concentric translucent rectangles rather than a blur: a
 /// real Gaussian would be a second pipeline and a render target, and at this
 /// radius three steps are indistinguishable from one. Four quads for an overlay.
-fn panel_shape(painter: &mut Painter<'_>, area: Area) {
+/// A panel's shadow and its ground, and a note that the pointer cannot see
+/// through it.
+fn panel_shape(painter: &mut Painter<'_>, area: Area, hits: &mut Hits) {
+    hits.panels.push(area);
+    floating_shape(painter, area);
+}
+
+/// The same shape, for something that follows the pointer rather than blocking
+/// it: the drag card, and the type-ahead buffer that is gone in a second.
+fn floating_shape(painter: &mut Painter<'_>, area: Area) {
     let theme = *painter.theme;
     let radius = painter.px(10.0);
     for (spread, alpha) in [(10.0, 18u8), (6.0, 22), (3.0, 26)] {
@@ -2694,9 +2953,11 @@ mod tests {
                 carrying: None,
                 search: None,
                 clash: None,
+                erasing: None,
                 answering: 0,
                 for_the_rest: false,
                 progress: None,
+                paused: false,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,

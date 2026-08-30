@@ -54,6 +54,19 @@ PATIENCE = 20.0
 # operation: anything that waits on a *job* polls instead.
 A_FRAME = 5.0
 
+# How long a poller keeps asking before it calls the wait a failure.
+#
+# **A clock, not a count.** These loops used to run a fixed forty times, which
+# was a duration only by accident: each try took as long as a `drive` took, so
+# removing a five-second stall from every drive quietly cut the wait from minutes
+# to six seconds and `a-paste-takes-what-another-application-copied` began
+# failing at 5.8 s — an assertion that had never been given time to be true. A
+# wait measured in tries changes length whenever anything under it gets faster.
+WAITING = 30.0
+# Operations get longer than reads do: a copy is bytes, and the ceiling has to
+# clear the largest fixture rather than the median one.
+WORKING = 90.0
+
 # The longest one scenario may take, and the longest a whole sweep may take.
 #
 # **Both are ceilings rather than expectations.** A scenario that hangs used to
@@ -680,6 +693,8 @@ class Run:
     ):
         self.instance = instance
         self.work = work
+        # How many `F12` answers have been asked for. `state` waits for them.
+        self.owed = 0
         self.log = work / "app.log"
         self.err = work / "app.err"
         environment = with_server(environment or {})
@@ -706,14 +721,13 @@ class Run:
         raise Failure("the window never drew a first frame")
 
     def drive(self, script: str, answering: bool = True) -> None:
-        """Sends a script, and waits for the answers it asked for.
+        """Sends a script, and counts the answers it asked for.
 
         `answering=False` where a *silent* window is the expected outcome —
         `Peer.yield_focus` drives an `F12` precisely to find out whether the
-        keyboard came back, so waiting for the answer there is waiting out the
-        question.
+        keyboard came back, so an answer that never comes is one of the results
+        there rather than a failure.
         """
-        before = self.reported()
         done = subprocess.run(
             [str(DRIVE), SERVER.driver_flag()],
             input=script,
@@ -725,14 +739,28 @@ class Run:
         if done.returncode != 0:
             raise Failure(f"the driver refused the script: {done.stderr.strip()}")
         if answering:
-            self.wait_for_reports(before + script.count("key f12"))
+            # **Recorded, not waited on here.** A ceiling short enough to be worth
+            # having is one a cold window misses — the first drive of a scenario
+            # asks while the compositor is still mapping — and a `drive` that
+            # raised on it failed six scenarios that had never once been wrong.
+            # `state` is where the answer is *used*, so that is where the wait
+            # belongs, and there it costs time rather than a verdict.
+            self.owed += script.count("key f12")
 
     def reported(self) -> int:
-        """How many state lines the window has printed so far."""
-        return self.log.read_text().count("\nskerry-state ")
+        """How many state lines the window has printed so far.
 
-    def wait_for_reports(self, wanted: int) -> None:
-        """Waits for the window to answer every `F12` the script asked for.
+        Counted the same way `states` parses them. Counting `"\nskerry-state "`
+        instead misses a first line that *is* one, and a count permanently one
+        short is a `state` that waits out its patience on every call.
+        """
+        return sum(
+            1 for line in self.log.read_text().splitlines()
+            if line.startswith("skerry-state ")
+        )
+
+    def reports_reached(self, wanted: int, patience: float = A_FRAME) -> bool:
+        """Waits for the window to answer every `F12` asked for. Whether it did.
 
         **The sleep after an `F12` is a guess and this is the fact.** A script
         ends `key f12\nsleep 200` because the answer is printed a frame later,
@@ -752,13 +780,39 @@ class Run:
         directory read or a copy belongs in `listed`, `until` and `settled`, which
         poll: they can ask again, and this can only sit still.
         """
-        deadline = time.time() + A_FRAME
+        deadline = time.time() + patience
         while self.reported() < wanted and time.time() < deadline:
             if self.process.poll() is not None:
                 # A window on its way out owes nothing: `clean-close` and the
                 # last-tab scenarios both drive a window that is meant to end.
-                return
+                return True
             time.sleep(0.05)
+        return self.reported() >= wanted
+
+    def answered(self, settle: int = 120) -> dict[str, str] | None:
+        """Drives one `F12` and returns the answer **to that `F12`**, or nothing.
+
+        **A stale line reads exactly like a fresh one.** `reports_reached` waits
+        a frame and then gives up quietly — deliberately, because a drive that is
+        meant to go unanswered must not cost the long patience — so a poller that
+        called `state()` next was handed the line from before its own question.
+        Nothing distinguishes the two, and the pollers all ask about values that
+        were *already* what they wanted before the keys landed: `busy` and
+        `loading` are false on an idle window, so `settled` returned **at once**
+        with a state from before the keystrokes it existed to wait for.
+
+        Measured: that is what `a-permanent-delete-asks-in-a-panel` did on X11
+        under twelve spinning processes, once in about ten runs, and it read as
+        the window ignoring two keystrokes — with a state dump that looked
+        pristine because it *was* the dump from before them.
+        """
+        before = self.reported()
+        # `answering=False`, so this `F12` is never added to what `state` waits
+        # for: a poller is the one caller that must be *able* to be told no,
+        # because asking again is exactly what it does.
+        self.drive(f"key f12\nsleep {settle}\n", answering=False)
+        self.reports_reached(before + 1)
+        return self.state() if self.reported() > before else None
 
     def states(self) -> list[dict[str, str]]:
         found = []
@@ -778,6 +832,20 @@ class Run:
         return found
 
     def state(self, index: int = -1) -> dict[str, str]:
+        """The state the window reported, once it has answered everything asked.
+
+        **The wait is here because this is where a stale line does harm.** Every
+        `F12` in every script `drive` was given is counted; this blocks until that
+        many answers are in the log. Without it the last line was whatever the
+        window had said *previously*, which is indistinguishable from a fresh one
+        and is wrong in exactly the way that matters — it describes the window
+        before the keys under test.
+        """
+        if not self.reports_reached(self.owed, patience=PATIENCE):
+            raise Failure(
+                f"the window answered {self.reported()} of {self.owed} F12s "
+                f"in {PATIENCE}s"
+            )
         found = self.states()
         if not found:
             raise Failure("the window reported no state at all")
@@ -939,7 +1007,7 @@ def differing_pixels(left: "object", right: "object") -> int:
     return sum(sum(band.histogram()[1:]) for band in difference.split())
 
 
-def listed(run: Run, tries: int = 30) -> dict[str, str]:
+def listed(run: Run) -> dict[str, str]:
     """Waits for a directory read to land, and returns the state once it has.
 
     **A `sleep` before the first key is a guess about how long a read takes**,
@@ -948,15 +1016,15 @@ def listed(run: Run, tries: int = 30) -> dict[str, str]:
     failure reads as `cursor is ''` two assertions later. Polling the state the
     window already reports costs nothing and cannot be wrong.
     """
-    for _ in range(tries):
-        run.drive("key f12\nsleep 120\n")
-        state = run.state()
-        if state.get("loading") == "false" and int(state.get("rows", "0")) > 0:
+    deadline = time.time() + WAITING
+    while time.time() < deadline:
+        state = run.answered()
+        if state and state.get("loading") == "false" and int(state.get("rows", "0")) > 0:
             return state
-    raise Failure("the listing never arrived")
+    raise Failure(f"the listing never arrived in {WAITING}s")
 
 
-def settled(run: Run, tries: int = 40) -> dict[str, str]:
+def settled(run: Run) -> dict[str, str]:
     """Waits until the window has finished what it was last asked to do.
 
     **`busy` is the operation queue and `loading` is the read**, and every
@@ -967,15 +1035,20 @@ def settled(run: Run, tries: int = 40) -> dict[str, str]:
     jobs outstanding, nine hundred milliseconds after asking for a folder.
     """
     state: dict[str, str] = {}
-    for _ in range(tries):
-        run.drive("key f12\nsleep 60\n")
-        state = run.state()
-        if state.get("busy") == "false" and state.get("loading") == "false":
-            return state
-    raise Failure(f"the window never went quiet: busy={state.get('busy')} queue={state.get('queue')}")
+    deadline = time.time() + WORKING
+    while time.time() < deadline:
+        fresh = run.answered(settle=60)
+        if fresh is not None:
+            state = fresh
+            if state.get("busy") == "false" and state.get("loading") == "false":
+                return state
+    raise Failure(
+        f"the window never went quiet in {WORKING}s: "
+        f"busy={state.get('busy')} queue={state.get('queue')}"
+    )
 
 
-def until(run: Run, tries: int = 40, **wanted) -> dict[str, str]:
+def until(run: Run, **wanted) -> dict[str, str]:
     """Waits for the window to report what is wanted, and returns that state.
 
     **A `sleep` long enough on an idle machine is too short on a busy one**, and
@@ -987,11 +1060,13 @@ def until(run: Run, tries: int = 40, **wanted) -> dict[str, str]:
     and cannot be wrong. The generalisation of `listed`.
     """
     state: dict[str, str] = {}
-    for _ in range(tries):
-        run.drive("key f12\nsleep 120\n")
-        state = run.state()
-        if all(str(state.get(key)) == str(value) for key, value in wanted.items()):
-            return state
+    deadline = time.time() + WAITING
+    while time.time() < deadline:
+        fresh = run.answered()
+        if fresh is not None:
+            state = fresh
+            if all(str(state.get(key)) == str(value) for key, value in wanted.items()):
+                return state
     missed = {key: (value, state.get(key)) for key, value in wanted.items()
               if str(state.get(key)) != str(value)}
     raise Failure(f"never reached {missed} (wanted, then last seen)")
@@ -1115,7 +1190,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 95
+FEWEST_SCENARIOS = 97
 
 
 def scenario(name, fresh: bool = False):
@@ -1137,11 +1212,15 @@ def scenario(name, fresh: bool = False):
 
 @scenario("keyboard-cursor")
 def keyboard_cursor(run: Run, fixture: Path) -> None:
-    run.drive("sleep 400\nkey f12\nkey down\nkey down\nkey f12\nkey up\nkey f12\nsleep 300\n")
-    first, second, third = run.states()[:3]
-    expect(first, rows="9", cursor="", selected="0")
-    expect(second, cursor="beta", selected="1")
-    expect(third, cursor="alpha", selected="1")
+    # Three answers out of one script, read by position, after a sleep that
+    # guessed at the first read: under a full sweep only one of the three had been
+    # printed and the unpacking raised `ValueError` — a crash rather than a
+    # failure, which used to take the rest of the sweep with it.
+    expect(listed(run), rows="9", cursor="", selected="0")
+    run.drive("key down\nkey down\n")
+    expect(until(run, cursor="beta"), selected="1")
+    run.drive("key up\n")
+    expect(until(run, cursor="alpha"), selected="1")
 
 
 @scenario("keyboard-navigate")
@@ -2916,12 +2995,17 @@ class Peer:
         **verified**, because a focus request is asynchronous and a scenario that
         assumed it had landed failed later, on a state dump that never arrived,
         with a message about the window rather than about the focus.
+
+        **The verification has to be of a *new* answer.** It used to be
+        `run.state()` under a `suppress`, which reads the last line in the log —
+        a line every scenario already has by the time it starts a peer. It could
+        not raise, so it returned on the first attempt with the keyboard still on
+        the peer, and this loop had never once gone round twice.
         """
         for _ in range(10):
             SERVER.focus("dev.skerry.Skerry")
-            run.drive("sleep 200\nkey f12\nsleep 200\n", answering=False)
-            with contextlib.suppress(Failure):
-                run.state()
+            run.drive("sleep 200\n", answering=False)
+            if run.answered(settle=200) is not None:
                 return
         raise Failure("the window under test would not take the keyboard back")
 
@@ -3006,8 +3090,15 @@ def paste_from_a_peer(run: Run, fixture: Path) -> None:
     if owning is None:
         raise Skipped("no third-party clipboard writer for this display server")
 
+    # **Waited for, because the window is already listing this directory.** The
+    # folder arrives by inotify rather than in the first read, and type-ahead
+    # cannot match a row that has not been delivered yet. This used to work by
+    # accident: `listed` stalled five seconds on a miscounted report, which was
+    # long enough for the watch to fire, and the scenario failed the moment that
+    # stall was fixed.
+    rows = int(listed(run)["rows"])
     (fixture / "target").mkdir()
-    listed(run)
+    until(run, rows=str(rows + 1))
     run.drive("text target\nkey enter\n")
     until(run, path=str(fixture / "target"), loading="false")
 
@@ -3832,6 +3923,31 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
             )
     run.drive("key escape\nsleep 200\n")
 
+    # The delete question's own two buttons. Both answer a click, and both drew
+    # the default arrow — a target saying it is not one — while the rest of the
+    # panel showed the shapes of whatever was underneath it.
+    run.drive("key escape\nsleep 200\nkey end\n")
+    until(run, selected="1")
+    run.drive("key shift+delete\n")
+    asking = until(run, erasing="1")
+    for index, name in ((0, "Cancel"), (1, "Delete")):
+        x, _, y = asking["erase_aim"].split(",")[index].partition(":")
+        at = aim(run, asking, float(x), float(y))
+        run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 250\nkey f12\nsleep 150\n")
+        shape = run.state()["pointer"]
+        if shape != "hand":
+            raise Failure(f"over {name} the pointer is a {shape}, wanted a hand")
+    # And the panel's own background is an arrow, whatever is beneath it: the
+    # column header's hand used to show through.
+    px, py, pw, _ = (float(part) for part in asking["panel_area"].split(":"))
+    empty = aim(run, asking, px + pw / 2.0, py + 6.0)
+    run.drive(f"move {empty[0]:.2f} {empty[1]:.2f}\nsleep 250\nkey f12\nsleep 150\n")
+    shape = run.state()["pointer"]
+    if shape != "arrow":
+        raise Failure(f"over the panel's ground the pointer is a {shape}, wanted an arrow")
+    run.drive("key escape\n")
+    until(run, erasing="0")
+
     # And an I-beam over text a click puts a caret into, rather than the hand
     # that says "this does something" or the arrow that says "this does not".
     run.drive("key ctrl+l\nsleep 300\nkey f12\nsleep 150\n")
@@ -3854,21 +3970,25 @@ def copy_and_paste(run: Run, fixture: Path) -> None:
     the copy engine on a job, and one undo entry over it.
     """
     (fixture / "target").mkdir()
-    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    listed(run)
     # Pick a file by typing its name, so the scenario does not depend on row order.
-    run.drive("text file-1.txt\nsleep 400\nkey ctrl+c\nsleep 400\nkey f12\nsleep 150\n")
-    copied = run.state()
-    expect(copied, cursor="file-1.txt")
+    run.drive("text file-1.txt\n")
+    until(run, cursor="file-1.txt")
+    run.drive("key ctrl+c\n")
+    settled(run)
     if "file-1.txt" not in clipboard(run, "text/uri-list"):
         raise Failure(f"the clipboard holds {clipboard(run, 'text/uri-list')!r}")
 
     # Into the folder, and paste.
     # The type-ahead buffer lives for a second, so the wait is not padding: a
     # second `text` inside that window appends to the first and matches nothing.
-    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 900\nkey f12\nsleep 150\n")
-    inside = run.state()
+    run.drive("sleep 1200\ntext target\nkey enter\n")
+    # Not `listed`: the folder is empty, and a listing of nothing reports no row
+    # to wait for.
+    inside = until(run, path=str(fixture / "target"), loading="false")
     expect(inside, rows="0")
-    run.drive("key ctrl+v\nsleep 900\nkey f12\nsleep 200\n")
+    run.drive("key ctrl+v\n")
+    settled(run)
     pasted = run.state()
     if int(pasted["rows"]) != 1:
         raise Failure(f"after pasting, the folder holds {pasted['rows']} rows")
@@ -4916,43 +5036,153 @@ def input_method(run: Run, fixture: Path) -> None:
             raise Failure(f"the input method refused: {said.read_text().strip()[:200]}")
 
 
-@scenario("a-permanent-delete-takes-two-presses", fresh=True)
+@scenario("a-permanent-delete-asks-in-a-panel", fresh=True)
 def permanent_delete(run: Run, fixture: Path) -> None:
-    """`Shift+Delete` asks, and only the second press inside the window deletes.
+    """`Shift+Delete` asks a question, and only an answer deletes anything.
 
-    Rule 3 calls permanent deletion "an explicit, differently-shaped action".
-    This is the shape, and the assertion worth making is the *first* half: one
-    press leaves the file exactly where it was.
+    Rule 3 calls permanent deletion "an explicit, differently-shaped action" and
+    leaves it off the undo stack. The shape used to be a sentence in the status
+    strip, in the same dim grey as the row count, armed for exactly as long as
+    that sentence stayed up — so **anything else replacing the notice silently
+    withdrew the offer**, which the old version of this scenario asserted as
+    though it were the feature. The wait below is what that could not survive.
     """
-    run.drive("sleep 500\nkey end\nsleep 300\nkey f12\nsleep 200\n")
-    chosen = run.state()["cursor"]
+    listed(run)
+    run.drive("key end\n")
+    chosen = until(run, selected="1")["cursor"]
     if not chosen:
         raise Failure("nothing is selected to delete")
     doomed = fixture / chosen
 
-    run.drive("key shift+delete\nsleep 600\nkey f12\nsleep 300\n")
-    asked = run.state()
-    if "again" not in asked.get("notice", ""):
-        raise Failure(f"the first press said {asked.get('notice')!r}")
+    run.drive("key shift+delete\n")
+    asked = until(run, erasing="1")
+    # Cancel is the one the keyboard starts on: the answer a hand arrives at by
+    # reflex has to be the safe one.
+    expect(asked, erasing_on="cancel")
     if not doomed.exists():
-        raise Failure("one press deleted it")
+        raise Failure("asking deleted it")
 
-    # Anything else takes the question off the screen, and the offer with it.
-    run.drive("key escape\nsleep 200\nkey ctrl+a\nsleep 400\nkey f12\nsleep 200\n")
-    run.drive("key shift+delete\nsleep 600\nkey f12\nsleep 300\n")
+    # **Six seconds**, which is half again the old notice window. The question is
+    # still there, and still the same question.
+    run.drive("sleep 6000\n")
+    expect(until(run, erasing="1"), erasing_on="cancel")
+
+    run.drive("key escape\n")
+    until(run, erasing="0")
     if not doomed.exists():
-        raise Failure("a press after the offer lapsed deleted it anyway")
+        raise Failure("cancelling deleted it")
 
-    # Two in a row, on the same selection, does.
-    run.drive("key escape\nsleep 200\nkey end\nsleep 400\nkey f12\nsleep 200\n")
-    run.drive("key shift+delete\nsleep 400\nkey shift+delete\nsleep 1000\nkey f12\nsleep 400\n")
+    # Twice in a row is the keyboard's fast path, and the second press is the
+    # answer rather than a repeat of the question.
+    run.drive("key shift+delete\nkey shift+delete\n")
+    state = settled(run)
     if doomed.exists():
-        raise Failure(f"two presses left {doomed.name} behind")
+        raise Failure(
+            f"answering left {doomed.name} behind: erasing={state.get('erasing')} "
+            f"on={state.get('erasing_on')} busy={state.get('busy')} "
+            f"queue={state.get('queue')} cursor={state.get('cursor')!r}"
+        )
+    expect(state, erasing="0")
 
     # And it is not on the undo stack: `Ctrl+Z` must not claim to bring it back.
-    run.drive("key ctrl+z\nsleep 800\nkey f12\nsleep 300\n")
+    run.drive("key ctrl+z\n")
+    settled(run)
     if doomed.exists():
         raise Failure("undo brought back a permanent delete")
+
+
+@scenario("a-panel-blocks-the-hover-under-it", fresh=True)
+def panels_block_hover(run: Run, fixture: Path) -> None:
+    """A row under a panel does not light up as the pointer crosses it.
+
+    **A highlight tracking a pointer that is reading something else**, on rows a
+    click cannot reach: the panel takes the press, so the row lighting up is not
+    a row anything would happen to. Every panel records its rectangle for this; a
+    drag card deliberately does not, because a drag has to see the rows under it.
+
+    **One point, two states**, which is what makes this able to fail. The first
+    version aimed forty pixels above a button and landed past the last row, where
+    nothing hovers with the bug or without it — so it passed against the defect it
+    was written for. The point below is proven to be over a row by hovering it
+    *after* the panel closes; if it were not, this would fail there instead.
+    """
+    # **Enough rows to reach the middle of the window.** A panel is centred and
+    # the shared fixture is nine rows in a thousand-pixel window, so the panel
+    # lands entirely below the last row — over nothing, where the hover is `-1`
+    # with the bug and without it.
+    for index in range(40):
+        (fixture / f"filler-{index:02}.txt").write_text("x")
+    listed(run)
+    run.drive("key f5\n")
+    until(run, loading="false", rows="49")
+    # Everything, so the question lists six names and an "and N more" — a panel
+    # tall enough that its top edge is over the rows rather than over the empty
+    # space below them, which is where a short one lands in a small fixture.
+    run.drive("key ctrl+a\n")
+    chosen = until(run, loading="false")
+    if int(chosen["selected"]) < 6:
+        raise Failure(f"only {chosen['selected']} selected, too few for a tall panel")
+    run.drive("key shift+delete\n")
+    asked = until(run, erasing=chosen["selected"])
+
+    x, y, _, _ = (float(part) for part in asked["panel_area"].split(":"))
+    inside = aim(run, asked, x + 40.0, y + 12.0)
+    run.drive(f"move {inside[0]:.1f} {inside[1]:.1f}\nsleep 200\nkey f12\nsleep 150\n")
+    under = run.state()
+    if under["hover"] != "-1":
+        raise Failure(f"row {under['hover']} lit up under the panel: {under['hover_name']!r}")
+
+    run.drive("key escape\n")
+    until(run, erasing="0")
+    # The same point, with the panel gone. This has to hover something, or the
+    # assertion above was about a point with no row under it.
+    #
+    # **Away and back**, because a `move` to where the pointer already is sends
+    # no motion at all — so the hover would still be the one from under the panel
+    # and this check would agree with itself.
+    elsewhere = aim(run, asked, x + 40.0, y - 80.0)
+    run.drive(
+        f"move {elsewhere[0]:.1f} {elsewhere[1]:.1f}\nsleep 120\n"
+        f"move {inside[0]:.1f} {inside[1]:.1f}\nsleep 200\nkey f12\nsleep 150\n"
+    )
+    after = run.state()
+    if after["hover"] == "-1":
+        raise Failure("that point has no row under it, so the check above proved nothing")
+
+
+@scenario("the-delete-question-answers-to-a-pointer", fresh=True)
+def permanent_delete_by_pointer(run: Run, fixture: Path) -> None:
+    """Both answers are real targets, and Cancel is one of them.
+
+    A question a pointer can only agree with is not a question. This clicks
+    Cancel first, on purpose: the button that does nothing is the one worth
+    proving, because a panel whose Cancel does not work deletes files.
+    """
+    listed(run)
+    run.drive("key end\n")
+    chosen = until(run, selected="1")["cursor"]
+    doomed = fixture / chosen
+
+    def aim_at(state, index):
+        points = [it for it in state.get("erase_aim", "").split(",") if it]
+        if len(points) != 2:
+            raise Failure(f"the question drew {len(points)} buttons, wanted two")
+        x, _, y = points[index].partition(":")
+        return aim(run, state, float(x), float(y))
+
+    run.drive("key shift+delete\n")
+    cancel = aim_at(until(run, erasing="1"), 0)
+    run.drive(f"move {cancel[0]:.1f} {cancel[1]:.1f}\nsleep 150\nclick\n")
+    until(run, erasing="0")
+    if not doomed.exists():
+        raise Failure("clicking Cancel deleted it")
+
+    run.drive("key shift+delete\n")
+    delete = aim_at(until(run, erasing="1"), 1)
+    run.drive(f"move {delete[0]:.1f} {delete[1]:.1f}\nsleep 150\nclick\n")
+    settled(run)
+    if doomed.exists():
+        raise Failure("clicking Delete left it behind")
 
 
 @scenario("duplicate-copies-beside-the-original", fresh=True)

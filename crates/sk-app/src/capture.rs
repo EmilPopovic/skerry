@@ -63,6 +63,11 @@ pub struct Capture {
     pub row_menu: bool,
     /// Whether to draw the panel that asks about a name already taken.
     pub clash: bool,
+    /// Whether to draw the question a permanent deletion asks.
+    pub erase: bool,
+    /// Whether to draw the status strip mid-operation: the bar behind its own
+    /// text, with Pause and Stop in it.
+    pub progress: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -496,6 +501,7 @@ struct Sample<'a> {
     leaves: &'a [crate::panes::PaneLayout],
     dividers: &'a [crate::panes::Divider],
     drop_tab: Option<(crate::panes::PaneId, usize)>,
+    erasing: Option<(&'a [String], usize, bool)>,
 }
 
 /// The chrome of the frame this capture was asked for.
@@ -506,7 +512,10 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         typed: None,
         band: None,
         watching: true,
-        notice: None,
+        // A capture has no queue, so the sentence a copy would be writing is
+        // stated — the same trade `sample_properties` makes, and for the same
+        // reason: a frame has to be the same on every machine.
+        notice: request.progress.then_some("Copying 1,204 of 1,776 · 42 MB/s · about 14 s left"),
         // The pointer is on a row, so nothing in the frame is hovered
         // — the hover shapes are covered by the GUI scenarios, which can
         // actually move a pointer.
@@ -522,7 +531,11 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         drop_pane: None,
         answering: 1,
         for_the_rest: true,
-        progress: None,
+        // Two thirds through and not paused, which is the state that draws every
+        // part of this: a filled bar, its head, the sentence at full strength and
+        // both controls.
+        progress: request.progress.then_some(0.66),
+        paused: false,
         naming: sample.overlays.naming.as_ref(),
         // What a freshly opened directory looks like: nowhere to go
         // back to, nowhere forward, a parent and a reload. Hardcoded
@@ -550,6 +563,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         carrying: sample.overlays.carrying.as_ref(),
         search: sample.overlays.search.as_ref(),
         clash: sample.overlays.clash.as_ref(),
+        erasing: sample.erasing,
         hint: sample.hint,
         leaves: sample.leaves,
         dividers: sample.dividers,
@@ -606,6 +620,12 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // only tab in this frame that is not the one its leaf is showing — and being
     // the one that is not showing is the whole of what this mark means.
     let drop_tab = (request.split && request.tab_drop).then(|| (panes.focus(), 0));
+    // Three names and a total of nine, so the frame holds both the list and the
+    // "and 6 more" line the list stops at.
+    let doomed: Vec<String> = ["quarterly-report.pdf", "archive.tar.gz", "notes"]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
@@ -628,6 +648,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         leaves: &leaves,
         dividers: &dividers,
         drop_tab,
+        erasing: request.erase.then_some((doomed.as_slice(), 9, false)),
     };
     let mut stats = FrameStats::default();
     for pass in 0..MAX_PASSES {

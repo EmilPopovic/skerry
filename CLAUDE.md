@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Eleven crates, 516
-tests, 95 GUI scenarios **on both Wayland and X11**, twenty-six golden frames, every
+tests, 97 GUI scenarios **on both Wayland and X11**, twenty-eight golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -15,8 +15,9 @@ binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
 where a tab dragged to a pane's edge splits it, a command registry
 behind every key, a context menu and a fuzzy palette over the same registry,
 new-folder / rename / **copy / cut / paste / duplicate / Move to Trash** with one
-undo stack over all of it — and **delete for good**, which takes two presses and
-is on no stack, because rule 3 calls it "an explicit, differently-shaped action"
+undo stack over all of it — and **delete for good**, which asks in a panel that names what goes and says
+it cannot be undone, and is on no stack, because rule 3 calls it "an explicit,
+differently-shaped action"
 — a status line that counts what a copy has done, files that open in the
 application the desktop says owns them or in **the one you pick**, **Properties**
 and **a terminal here**, a clipboard that takes files, paths, and the text
@@ -77,7 +78,12 @@ day each: load contamination is worth 6×, a single per-core multiplier is not a
 portability model, and a gate nobody has watched fail is decoration. M0 added
 three more, and each began as a green test: an assertion between two derived
 numbers passed while both were 13× wrong, a per-frame budget counted the wrong
-quantity, and an accelerator disagreed with the order it was accelerating.
+quantity, and an accelerator disagreed with the order it was accelerating. A
+fourth began as a *red* one that named the wrong process for four rounds: a
+counter that was one short made every wait run out, the wait then gave up
+quietly, and the poller behind it read the answer to the previous question — and
+a stale state dump is pristine, which reads exactly like a window that ignored
+the keys.
 
 Phase 0 moved the architecture in eight places, listed in
 [docs/08-roadmap.md](docs/08-roadmap.md#what-phase-0-changed-in-the-plan). Two

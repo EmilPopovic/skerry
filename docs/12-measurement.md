@@ -1144,3 +1144,102 @@ lower bound instead of the whole guarantee — which is what one of the four was
 failing on, three assertions later and under a message about the *window* rather
 than about the wait. The sleeps stay: they are also what gives a pointer motion
 time to be drawn, and a motion has nothing to print.
+
+## A wait that gives up quietly hands back the answer to the previous question
+
+The fix above put the guarantee one level down: `Run.drive` counted the `key f12`
+lines in its script and waited for the window to print that many answers. Three
+things were wrong with it, and each hid the next.
+
+**The counter was one short, always.** `reported()` counted occurrences of
+`"\nskerry-state "` — the marker with a newline in front of it — so the *first*
+state line in a log, which has nothing in front of it, was never counted. Every
+scenario's opening `drive` therefore waited its full five seconds for an answer
+that was already there, and every scenario paid that. It is invisible in a green
+suite: the wait ends, the assertion passes, and the only symptom is a sweep that
+takes longer than it should.
+
+**The wait then gave up silently.** Five seconds — `A_FRAME`, a frame and not a
+job — and then it returned, with no complaint. Deliberately: a drive that is
+*meant* to go unanswered must not cost the long patience, and `yield_focus` asks
+ten times.
+
+**And the callers could not tell.** All three pollers did this next:
+
+    run.drive("key f12\nsleep 120\n")
+    state = run.state()        # the last `skerry-state` line in the log
+
+When the answer had not come, that line was the one from *before* the question.
+Nothing distinguishes a stale reading from a fresh one, and the values these
+pollers wait on are exactly the values that are already right on an idle window:
+`busy` and `loading` are both false before an operation starts and after it ends.
+So `settled()` — the function whose whole job is to wait for the keystrokes to
+land — returned **on its first try, immediately**, holding a state from before
+them.
+
+Measured: `a-permanent-delete-asks-in-a-panel` failed about once in nine on X11
+under twelve spinning processes, and passed twenty-five times alone. It read as
+the window ignoring two keystrokes. Every diagnostic made it read *more* like
+that: the state dump at the failure was pristine — no panel, no queue, no undo
+entry, the selection still exactly where the scenario had put it — because it was
+the dump from before the keys were pressed. Three rounds of instrumenting the
+window looked in the wrong process. The fourth printed the state from before the
+presses beside the state from after, and they were identical field for field,
+which no two readings of a live window ever are.
+
+The same defect had eaten a second check whole. `Peer.yield_focus` asks the
+compositor for the keyboard and then *verifies* it — with `run.state()` under a
+`suppress(Failure)`, which reads the last line in a log that every scenario
+already has lines in by the time it starts a peer. It could not raise. The loop
+returned on its first attempt whether or not focus had moved, and had never once
+gone round twice.
+
+Three changes, and the third is the general one:
+
+- Count the lines the way they are parsed. `reported()` now counts lines that
+  start with the marker, which is what `states()` does.
+- The pollers ask for an answer to **their own** `F12`. `Run.answered()` records
+  the report count, drives, waits, and returns `None` — not a stale dict — unless
+  the count moved. A poller is the one caller that must be able to be told no,
+  because asking again is what it does.
+- **The wait moved to where the answer is used.** `drive` no longer waits at all;
+  it adds the `F12`s it sent to a running total, and `state()` blocks until the
+  window has answered that many. A one-shot `drive(...)` then `state()` — which
+  is 57 of the call sites, most of them opening with a `sleep` that guesses at a
+  directory read — cannot read a stale line any more, and a slow window costs
+  seconds instead of a verdict.
+
+**Taking a stall out breaks whatever was leaning on it.** Five seconds per
+scenario is not a delay anybody chose, but it was a delay everything ran with,
+and `a-paste-takes-what-another-application-copied` had grown into it: the
+scenario makes a folder in a directory the window is *already* listing, so the
+row arrives by inotify rather than in the first read, and the stall was what gave
+the watch time to fire before type-ahead went looking for the row. It failed the
+moment the stall went, on the first assertion after the folder — which is the
+right place for it to fail and eleven months later than it should have. It waits
+for the row count to move now, and takes 1.5 s instead of 30. Expect one of these
+for every hidden wait removed, and treat each as the defect it always was rather
+than as a regression in the change that exposed it.
+
+Two wrong turns on the way, both worth recording.
+
+The first is worth recording because it was wrong in an
+instructive way. Making `drive` *raise* when its answers had not arrived in five
+seconds looked like the strict, honest choice; it failed six scenarios on the
+first sweep. A ceiling short enough to be worth having is one a cold window
+misses, and a wait whose only outcomes are "answered" and "the run is over" has
+no way to express the ordinary case of *not yet*.
+
+The second is subtler. The pollers counted **tries**, not seconds — forty of
+them — which was a duration only by accident: each try took as long as a `drive`
+took, so it had been minutes while every drive stalled for five seconds, and
+became six seconds the moment that was fixed. Nothing in the code changed
+meaning; a number that had never been written down quietly moved by a factor of
+thirty, and an assertion that had never once been given time to be true began
+failing at 5.8 s. **A budget measured in iterations is not a budget.** They wait
+on a clock now.
+
+The rule that survives both: **a wait that can time out must return whether it
+timed out, and the caller decides what that means.** A `bool` nobody reads is a
+latent stale read at every call site; a `raise` nobody can catch is a flaky
+suite.

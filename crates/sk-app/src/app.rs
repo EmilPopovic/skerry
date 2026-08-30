@@ -105,6 +105,24 @@ struct FilesDrag {
     sprung_at: Option<Point>,
 }
 
+/// A permanent deletion waiting for an answer.
+///
+/// Holds the paths rather than re-reading the selection when the answer comes:
+/// the question names what it named, and a selection that changed underneath —
+/// a watch firing, a row arriving — must not change what gets deleted.
+struct Erasing {
+    paths: Vec<PathBuf>,
+    on: Confirm,
+}
+
+/// Which button the keyboard is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Confirm {
+    /// The safe one, and the one it starts on.
+    Cancel,
+    Delete,
+}
+
 /// Where a drop would land, and what the frame marks to say so.
 ///
 /// One value rather than four fields, because all four answer "where would this
@@ -753,7 +771,15 @@ pub struct App {
     /// action". This is the shape: the first press arms and says what it would
     /// do, the second does it, and anything else at all disarms. It expires with
     /// the notice that describes it, so the offer never outlives the sentence.
-    arming: Option<(Vec<PathBuf>, Instant)>,
+    /// The permanent deletion waiting to be confirmed, while one is.
+    ///
+    /// **A question, not a notice.** This used to be a sentence in the status
+    /// line armed for as long as that sentence happened to stay up — so a copy
+    /// finishing, or four seconds passing, silently withdrew an offer the person
+    /// was still reading, and the highest-stakes action in the program was drawn
+    /// in the same dim grey as a row count. It is a panel now, and it goes away
+    /// when it is answered and not before.
+    erasing: Option<Erasing>,
     /// Whether the paths on the clipboard were cut rather than copied.
     ///
     /// Cleared by a copy and by a paste, so a second paste after a cut copies
@@ -1022,7 +1048,7 @@ impl App {
             openers: None,
             tab_press: None,
             tab_dragging: false,
-            arming: None,
+            erasing: None,
             cutting: false,
             menu: None,
             menu_wanted: None,
@@ -1533,6 +1559,12 @@ impl App {
         // nothing on screen saying so. `Escape` is bound to Stop, which is the
         // answer a person means by it.
         if self.edits.asking() && self.clash_key(event, commands) {
+            return;
+        }
+        // Beside it, and for the same reason: the only irreversible thing this
+        // program does is waiting for an answer, and a key that fell through
+        // would be a key acting on a selection the question names.
+        if self.erasing.is_some() && self.erasing_key(event, commands) {
             return;
         }
         // The Open With list takes the keyboard while it is up: arrows move,
@@ -2287,28 +2319,146 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let message = match paths.as_slice() {
-            [one] => sk_model::i18n::format(
-                "confirm.delete_one",
-                &[&one.file_name().unwrap_or_default().to_string_lossy()],
-            ),
-            many => sk_model::i18n::format("confirm.delete_many", &[&many.len()]),
-        };
-        // **The offer lasts exactly as long as the sentence describing it.**
-        // Not a timer of its own: anything that replaces the notice — a copy
-        // finishing, a paste refusing, the four seconds running out — takes the
-        // question off the screen, and an offer nobody can see is an offer
-        // nobody agreed to.
-        let armed = self.arming.take().is_some_and(|(armed, _)| armed == paths)
-            && self.notice.as_ref().is_some_and(|(showing, _)| *showing == message);
-        if armed {
-            self.step_off_the_selection(&paths);
-            self.edits.erase_all(paths, &self.jobs);
+        // **The second press is the fast path, not the mechanism.** A person who
+        // knows what they are doing presses Delete twice; the panel is what makes
+        // that safe for everybody else, and it is what a pointer answers.
+        if self.erasing.as_ref().is_some_and(|asking| asking.paths == paths) {
+            self.erase_for_good();
             return;
         }
-        self.notice = Some((message, Instant::now()));
-        self.arming = Some((paths, Instant::now()));
+        self.erasing = Some(Erasing { paths, on: Confirm::Cancel });
         self.dirty = true;
+    }
+
+    /// Does what the panel is asking about, and closes it.
+    pub(crate) fn erase_for_good(&mut self) {
+        let Some(asking) = self.erasing.take() else { return };
+        self.step_off_the_selection(&asking.paths);
+        self.edits.erase_all(asking.paths, &self.jobs);
+        self.dirty = true;
+    }
+
+    /// Closes the panel without deleting anything.
+    pub(crate) fn keep_them(&mut self) {
+        self.erasing = None;
+        self.dirty = true;
+    }
+
+    /// Keys while the panel is up. Whether it took the event.
+    ///
+    /// **`Enter` is not the destructive one.** The answer a hand arrives at by
+    /// reflex has to be the safe one, so `Enter` takes whichever button is on and
+    /// the one that starts on is Cancel — and `Delete` again is the deliberate
+    /// second press that was always the keyboard's way in.
+    fn erasing_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.keep_them(),
+            // **With or without `Shift`.** The chord that asked the question has
+            // to be able to answer it, and `Shift+Delete` is what asked — a panel
+            // that swallowed the second press would turn the keyboard's two-press
+            // fast path into a key that does nothing at all.
+            Key::Named(Named::Delete) => self.erase_for_good(),
+            Key::Named(Named::Left | Named::Right | Named::Tab) if bare => {
+                if let Some(asking) = self.erasing.as_mut() {
+                    asking.on = match asking.on {
+                        Confirm::Cancel => Confirm::Delete,
+                        Confirm::Delete => Confirm::Cancel,
+                    };
+                }
+            }
+            Key::Named(Named::Enter) => match self.erasing.as_ref().map(|asking| asking.on) {
+                Some(Confirm::Delete) => self.erase_for_good(),
+                _ => self.keep_them(),
+            },
+            _ => {
+                // The diagnostic report passes through, for the reason it passes
+                // through an open menu: it is the only way the harness sees this.
+                let diagnostic = commands
+                    .resolve(event, Scope::Global)
+                    .and_then(|id| commands.describe(id))
+                    .is_some_and(|command| command.id == "help.dump");
+                return !diagnostic;
+            }
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// What the delete-for-good question is showing, for the diagnostic line.
+    ///
+    /// The topmost panel's rectangle, where to click the two buttons, and which
+    /// one the keyboard is on. The rectangle is here so a scenario can aim *into*
+    /// a panel rather than guessing from a button and landing past the last row —
+    /// a point where nothing hovers either way, which is how the first version of
+    /// the hover scenario passed against the bug it was written for.
+    fn question_state(&self) -> (String, String, &'static str) {
+        let panel_area = self.hits.panels.last().map_or_else(String::new, |a| {
+            format!("{:.0}:{:.0}:{:.0}:{:.0}", a.x, a.y, a.width, a.height)
+        });
+        let erase_aim = [self.hits.erase_cancel, self.hits.erase_delete]
+            .iter()
+            .flatten()
+            .map(|a| format!("{:.0}:{:.0}", a.x + a.width / 2.0, a.y + a.height / 2.0))
+            .collect::<Vec<_>>()
+            .join(",");
+        let on = match self.erasing.as_ref().map(|asking| asking.on) {
+            Some(Confirm::Delete) => "delete",
+            Some(Confirm::Cancel) => "cancel",
+            None => "",
+        };
+        (panel_area, erase_aim, on)
+    }
+
+    /// Whether the pointer is on something inside a panel that answers a click.
+    ///
+    /// The delete question's two buttons, and the name-taken question's answers
+    /// and its checkbox — every one of them a target that a click does something
+    /// with, and every one of them drawn with the default arrow over it until
+    /// now. The panels with no targets of their own fall through to the plain
+    /// arrow, which is what they already had.
+    fn over_a_panel_button(&self, position: Point) -> bool {
+        let on = |area: &crate::layout::Area| area.contains(position.x, position.y);
+        [self.hits.erase_cancel, self.hits.erase_delete, self.hits.for_the_rest]
+            .iter()
+            .flatten()
+            .any(on)
+            || self.hits.answers.iter().any(on)
+    }
+
+    /// A press on the status strip's own controls. Whether it was taken.
+    ///
+    /// Only while an operation is running, which is the only time they are drawn:
+    /// a hit area for a control nobody can see is a press that does something
+    /// invisible.
+    fn press_in_the_status(&mut self, position: Point) -> bool {
+        if self.hits.pause.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.toggle_pause();
+            return true;
+        }
+        if self.hits.cancel.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.cancel_operation();
+            return true;
+        }
+        false
+    }
+
+    /// A press while the panel is up. Whether it was taken.
+    ///
+    /// **Always taken, and a press outside answers nothing.** The same rule the
+    /// name-taken question follows: a question with no answer left on screen is
+    /// worse than one that insists.
+    fn press_in_the_erasing(&mut self, position: Point) -> bool {
+        if self.erasing.is_none() {
+            return false;
+        }
+        if self.hits.erase_cancel.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.keep_them();
+        } else if self.hits.erase_delete.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.erase_for_good();
+        }
+        true
     }
 
     /// Moves what is selected to the trash.
@@ -4137,10 +4287,15 @@ search_active={active:?}",
         // directory. Reported because from outside the two look identical: rows
         // are rows, which is the point.
         let results = self.panes.focused().results.clone().unwrap_or_default();
+        // How many the delete-for-good question is asking about, and which button
+        // it is on. `0` when it is not up, which is not the same as asking about
+        // nothing — the panel never opens on an empty selection.
+        let erasing = self.erasing.as_ref().map_or(0, |asking| asking.paths.len());
+        let (panel_area, erase_aim, erasing_on) = self.question_state();
         let drag_in = self.window.dragging().is_some();
         let drag_out = self.window.dragging_out();
         format!(
-            "path={:?} results={results:?} rows={} hidden={} sort={:?} descending={} \
+            "path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
@@ -4555,6 +4710,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // press that fell through to the list behind it would move a selection
         // the queue is about to act on.
         if self.press_in_the_clash(position) {
+            return;
+        }
+        if self.press_in_the_erasing(position) {
+            return;
+        }
+        if self.press_in_the_status(position) {
             return;
         }
         if self.palette.is_some() {
@@ -5139,6 +5300,21 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if let Some(edge) = self.layout.edge_at(position.x, position.y) {
             return sk_plat::Cursor::Resize(edge);
         }
+        // **A panel is opaque to the shape as well as to the hover.** Under one,
+        // the column header's hand and the divider's arrows used to show through
+        // — a pointer promising something a click on a panel will not do. And on
+        // the panel's own two buttons it stayed the default arrow, which is a
+        // target saying it is not one.
+        //
+        // After the resize band, which is the window's edge and wins over
+        // anything drawn inside it.
+        if self.hits.panels.iter().any(|panel| panel.contains(position.x, position.y)) {
+            return if self.over_a_panel_button(position) {
+                sk_plat::Cursor::Hand
+            } else {
+                sk_plat::Cursor::Arrow
+            };
+        }
         // Before every other shape, and including while one is being dragged:
         // a divider under the pointer is the most specific thing there, and a
         // drag that leaves the band must not change shape halfway.
@@ -5159,7 +5335,15 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             .layout
             .tool_at(position.x, position.y)
             .is_some_and(|tool| runnable(commands, self, tool.command()));
+        // The status strip's Pause and Stop are here rather than with the panel
+        // buttons above: the strip is not a panel, and they are drawn only while
+        // there is an operation to stop.
+        let on_the_strip = [self.hits.pause, self.hits.cancel]
+            .iter()
+            .flatten()
+            .any(|area| area.contains(position.x, position.y));
         if over_tool
+            || on_the_strip
             || self.crumb_at(position).is_some()
             || self.layout.button_at(position.x, position.y).is_some()
             || self.place_at(position).is_some()
@@ -5916,11 +6100,18 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // **Inside the list, not merely at the same height as it.** `row_at` is
         // told a `y` and answers about rows; the sidebar is at the same `y` as
         // every row of the list, so hovering a place lit the row beside it.
-        let row = self
-            .placement
-            .here
-            .body
-            .contains(position.x, position.y)
+        //
+        // **And not under a panel.** A question, a menu or the Properties panel
+        // over the list left the row beneath it lighting up as the pointer
+        // crossed it — a highlight tracking a pointer that was reading something
+        // else, on rows a click could not reach. Every panel records its
+        // rectangle; a card that follows the pointer deliberately does not, so a
+        // drag still sees the rows under it.
+        let under_a_panel =
+            self.hits.panels.iter().any(|panel| panel.contains(position.x, position.y));
+        let in_the_list =
+            !under_a_panel && self.placement.here.body.contains(position.x, position.y);
+        let row = in_the_list
             .then(|| {
                 self.placement.here.row_at(
                     position.y,
@@ -6071,6 +6262,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             menu,
             typing_path,
             palette,
+            erasing,
             search,
             properties,
             openers,
@@ -6081,6 +6273,15 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // Built only when the overlay is up, which is why it may allocate.
         let rows = show_keys.then(|| crate::commands::overlay_rows(commands));
         let progress = edits.progress_line();
+        let doomed: Option<(Vec<String>, usize, bool)> = erasing.as_ref().map(|asking| {
+            let names = asking
+                .paths
+                .iter()
+                .take(crate::view::ERASE_NAMES)
+                .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                .collect();
+            (names, asking.paths.len(), asking.on == Confirm::Delete)
+        });
         let dropping = files_drag.as_ref().filter(|drag| drag.active);
         // Only for a drag this window started: a peer's carries paths we have
         // not read and names we would have to invent.
@@ -6119,9 +6320,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             carrying: carrying.as_ref(),
             search: search.as_ref(),
             clash: edits.clash.as_ref(),
+            erasing: doomed.as_ref().map(|(names, total, on)| (names.as_slice(), *total, *on)),
             answering: edits.answering,
             for_the_rest: edits.for_the_rest,
             progress: edits.fraction(),
+            paused: edits.held(),
             naming: edits.naming.as_ref(),
             tools,
             filtering: *filtering,
