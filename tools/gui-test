@@ -289,6 +289,16 @@ class Server:
     def paste_command(self, mime: str) -> list[str] | None:
         raise NotImplementedError
 
+    def copy_command(self, mime: str) -> list[str] | None:
+        """A **third party** that will own the clipboard, or nothing.
+
+        The other direction from `paste_command`, and it has the same rule: what
+        a scenario needs here is somebody else's implementation, because a window
+        asked what it thinks it published has tested nothing. `None` where this
+        display server has no such program on the machine.
+        """
+        raise NotImplementedError
+
     def ask_to_close(self) -> None:
         raise NotImplementedError
 
@@ -333,6 +343,15 @@ class WaylandServer(Server):
         if not shutil.which("wl-paste"):
             return None
         return ["wl-paste", "--no-newline", "--type", mime]
+
+    def copy_command(self, mime: str) -> list[str] | None:
+        if not shutil.which("wl-copy"):
+            return None
+        # `--foreground` so the process can be ended: without it `wl-copy` forks,
+        # the parent exits, and the selection is held by a child nothing has the
+        # pid of — for the rest of the sweep, in front of every scenario after
+        # this one that asserts about a clipboard.
+        return ["wl-copy", "--foreground", "--type", mime]
 
     def ask_to_close(self) -> None:
         if not self.instance:
@@ -520,6 +539,14 @@ class X11Server(Server):
 
     def paste_command(self, mime: str) -> list[str] | None:
         return [str(DRIVE), "--x11", "--paste", mime]
+
+    def copy_command(self, mime: str) -> list[str] | None:
+        # Nothing here is somebody else's: `xclip` and `xsel` are not a given on
+        # a machine, and `skerry-drive` is this repository's own clipboard code,
+        # which would make the test a conversation with itself. `wl-copy` is on
+        # most machines that have either, and it speaks Wayland.
+        del mime
+        return None
 
     def ask_to_close(self) -> None:
         subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True, timeout=PATIENCE)
@@ -1088,7 +1115,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 93
+FEWEST_SCENARIOS = 94
 
 
 def scenario(name, fresh: bool = False):
@@ -2897,6 +2924,75 @@ def middle_of(run: Run, box: tuple[int, int, int, int]) -> tuple[float, float]:
     left, top, width, height = box
     across, down = SERVER.output_size()
     return ((left + width / 2) / across * 100.0, (top + height / 2) / down * 100.0)
+
+
+@scenario("a-paste-takes-what-another-application-copied", fresh=True)
+def paste_from_a_peer(run: Run, fixture: Path) -> None:
+    """`x-special/gnome-copied-files` from somebody else, copy verb and cut verb.
+
+    **The cut half is the one worth having.** Every other clipboard type names
+    files and nothing else, so a cut that arrives as one of those is pasted as a
+    copy and quietly leaves the original where it was — half of what was asked,
+    with nothing to say so. This type is the only one carrying the verb, and the
+    rule is that a peer's verb beats our own idea of what is on the clipboard.
+
+    **`wl-copy` owns the selection, not this window**, because a window asked
+    what it thinks it published is a test of nothing. That is the same bargain
+    `clipboard()` makes in the other direction, and it is why this skips where
+    `wl-copy` is absent — which is the X11 half, where no third-party clipboard
+    writer is a given on a machine.
+
+    What this does *not* verify is Nautilus's own bytes: the format below is the
+    documented one, composed here. PyGObject cannot offer custom clipboard
+    targets at all — `Gtk.Clipboard.set_with_data` and `set_with_owner` are both
+    unbound — so the GTK peer that covers drag-and-drop cannot cover this, and
+    the round trip against a real GNOME application stays owed.
+    """
+    owning = SERVER.copy_command("x-special/gnome-copied-files")
+    if owning is None:
+        raise Skipped("no third-party clipboard writer for this display server")
+
+    (fixture / "target").mkdir()
+    listed(run)
+    run.drive("text target\nkey enter\n")
+    until(run, path=str(fixture / "target"), loading="false")
+
+    for verb, name, moves in (("copy", "file-1.txt", False), ("cut", "file-2.txt", True)):
+        source = fixture / name
+        offered = f"{verb}\nfile://{source}".encode()
+        owner = subprocess.Popen(
+            owning,
+            stdin=subprocess.PIPE,
+            env=with_server(),
+            start_new_session=True,
+        )
+        try:
+            owner.stdin.write(offered)
+            owner.stdin.close()
+            # The offer has to be up before the paste asks for it, and `wl-copy`
+            # takes the selection a moment after it is spawned.
+            until(run, path=str(fixture / "target"))
+            run.drive("key ctrl+v\n")
+            settled(run)
+            if not (fixture / "target" / name).is_file():
+                raise Failure(f"a {verb} from another application did not paste {name}")
+            if source.exists() is moves:
+                raise Failure(
+                    f"a {verb} left the original "
+                    + ("behind" if moves else "nowhere")
+                    + f": {name}"
+                )
+        finally:
+            owner.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                owner.wait(timeout=5)
+
+    # And `Ctrl+Z` walks back the one that moved, which is the half that would
+    # otherwise be a peer's cut turning into a deletion nothing can undo.
+    run.drive("key ctrl+z\n")
+    settled(run)
+    if not (fixture / "file-2.txt").is_file():
+        raise Failure("undo did not bring back what a peer's cut moved")
 
 
 @scenario("a-drag-out-lands-in-another-application", fresh=True)

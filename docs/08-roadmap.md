@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 514 tests, 93 GUI scenarios on two display servers and twenty-six golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 514 tests, 94 GUI scenarios on two display servers and twenty-six golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -166,7 +166,7 @@ measured the negotiated action reported zero times and `dnd_finished` delivered 
 some peers and not others, and deleting an original on a confirmation that may
 never arrive is how a drag loses somebody's files.
 
-**The 93 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The 94 GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are
@@ -322,7 +322,7 @@ to have run.
 | --- | --- | --- | --- |
 | 4 | ~~**Copy, move and permanent delete**~~ **Done.** Spike E's engine is `sk-fs::copy`: reflink, `copy_file_range` per extent, a hole-preserving floor, temp-then-rename, the three-step placement chain, recursive trees, symlinks recreated, and cancellation | M3 | Per-extent `copy_file_range` and the placement chain survive as tests rather than being rediscovered — met. The sparse test was watched failing against the naive loop: **131,072 blocks against 32** |
 | 5 | ~~**The queue: honest progress, cancel, an ETA and pause**~~ **Done, and conflict resolution with it.** A walk runs beside the copy and counts what there is, so the line adds a rate and then a time left, and the status strip's divider becomes a determinate bar. `sk_util::Pause` is a latch the job waits on between files, which is where a cancel also lands. A taken name stops the queue and asks, with both files' sizes and dates | M3, [rule 7](03-principles.md#7-honest-progress) | Real throughput, a real ETA and per-file conflict resolution — met. **Replace trashes what it replaces**, as one `Change::Batch`, because [rule 3](03-principles.md#3-everything-is-reversible) does not let anything here destroy a file; where the trash refuses, the answer fails and says so. The one clause still unmet is *resumable*: a copy stopped part way is recorded as a change rather than as something to pick up |
-| 6 | ~~**A paste that pastes files, and Cut**~~ **Mostly done.** `Ctrl+V` pastes what the clipboard names, `Ctrl+X` cuts, both undoable, both on the menus. `Ctrl+V` took over from *Go to the copied folder*, which moved to `Ctrl+Shift+V` | M0 owed | A file copied in Nautilus pastes here — **unverified**, and the reverse needs `x-special/gnome-copied-files` for a cut to arrive as a move rather than a copy. That marker is what is left |
+| 6 | ~~**A paste that pastes files, and Cut**~~ **Done.** `Ctrl+V` pastes what the clipboard names, `Ctrl+X` cuts, both undoable, both on the menus. `Ctrl+V` took over from *Go to the copied folder*, which moved to `Ctrl+Shift+V` | M0 owed | `x-special/gnome-copied-files` is published *and* read, so a peer's verb wins: a scenario has `wl-copy` own the selection with a `cut` in it and asserts the original is gone and `Ctrl+Z` brings it back. Watched failing against a paste that ignored the verb. What is still owed is narrower than the row used to say: the bytes are the documented format rather than Nautilus's own, because PyGObject cannot offer custom clipboard targets — `set_with_data` and `set_with_owner` are both unbound — so the GTK peer that covers drag-and-drop cannot cover this |
 | 7 | **Undo across copy and move** — done — **and a visible history**, which is not | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation: met, and asserted through the window for a file, a cut and a whole folder. Undoing a copy removes only what the copy made, which is why its inverse may be recursive at all |
 
 Four and five were one decision apart and were not split: a copy with no progress
