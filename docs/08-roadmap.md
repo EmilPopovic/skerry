@@ -392,9 +392,14 @@ Three rows claim a gate that does not exist. Each is a job in
   required"* in [07-dependencies.md](07-dependencies.md#budgets-and-enforcement).
 - **`cargo-deny`**, which is the whole evidence behind *"permissive licences only,
   rejected at the gate"* in the same table.
-- **The sixty GUI scenarios**, which need a compositor that will hand out
-  `zwp_virtual_keyboard_v1` on a runner with no seat. The answer is a headless
-  backend or nothing; until then a scenario is a person's job before pushing.
+- ~~**The sixty GUI scenarios**~~ **Done**, and by the X11 backend rather than by
+  a headless compositor: `XTEST` under `Xvfb` needs no seat, so
+  [check.yml](../.github/workflows/check.yml)'s `scenarios` job runs all 93 at
+  100% and at 125%. What that job was quietly not getting is a *reliable* answer —
+  one or two scenarios per sweep failed on timing, and
+  [12-measurement.md](12-measurement.md#a-suite-is-a-load-test-of-whatever-else-is-running)
+  records both the four defects and the wrong conclusion that had excused them.
+  The Wayland half stays local, because that one does need the seat.
 
 ### After those, and in this order
 

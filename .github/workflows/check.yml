@@ -137,7 +137,7 @@ jobs:
     # half drives a nested compositor through `zwp_virtual_keyboard_manager_v1`
     # and `zwlr_virtual_pointer_manager_v1`, and a compositor only offers those
     # to a real session with a seat — which a runner has not got. `XTEST` needs
-    # neither, so the *same* 80 scenarios run against a private `Xvfb` here.
+    # neither, so the *same* 93 scenarios run against a private `Xvfb` here.
     #
     # The same scenarios and not a second set written for X11: a scenario that
     # has only ever run on one display server is evidence about that server, and

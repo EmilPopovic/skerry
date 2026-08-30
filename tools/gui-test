@@ -10,6 +10,8 @@ it to be seen.
     tools/gui-test                 # run every scenario
     tools/gui-test --keep          # leave the fixture and the log behind
     tools/gui-test --scale=1.25    # nest the compositor at a fractional scale
+    tools/gui-test --scenario-timeout=30   # fail anything slower, to find one
+    tools/gui-test --suite-timeout=600     # and a ceiling for the whole sweep
     tools/gui-test selection       # run the scenarios whose name matches
 
 **It needs a nested compositor and refuses to run without one.** Synthetic input
@@ -33,6 +35,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -45,6 +48,20 @@ DRIVE = ROOT / "target" / "release" / "skerry-drive"
 
 # How long to wait for a socket, a window, or a directory read.
 PATIENCE = 20.0
+
+# The longest a window may take to answer one `F12` before the wait gives up and
+# lets the scenario's own assertion speak. A frame and a scheduler hiccup, not an
+# operation: anything that waits on a *job* polls instead.
+A_FRAME = 5.0
+
+# The longest one scenario may take, and the longest a whole sweep may take.
+#
+# **Both are ceilings rather than expectations.** A scenario that hangs used to
+# hang the sweep, and a sweep with no bound is one that a runner kills at its own
+# job timeout with no idea which scenario was to blame — which is the failure this
+# harness was least able to report on and the one most likely to happen at night.
+SCENARIO_BUDGET = 180.0
+SUITE_BUDGET = 2400.0
 
 
 class Failure(Exception):
@@ -63,6 +80,43 @@ class Skipped(Exception):
 def sockets() -> set[str]:
     runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"))
     return {p.name for p in runtime.glob("wayland-*") if p.name.count("-") == 1}
+
+
+def sweep_dead_sockets() -> list[str]:
+    """Removes Wayland sockets nobody is listening on. What it removed.
+
+    **A compositor killed with `SIGKILL` leaves its socket behind**, and the next
+    run pays for it in a way that names the wrong thing. Hyprland finds the
+    orphaned `wayland-N.lock` unheld, takes that name back, and creates no *new*
+    socket — so `start_compositor`, which watches for one to appear, waits out its
+    patience and reports *the nested compositor never created a socket* about a
+    compositor that started perfectly. Measured: one `SIGKILL` during a sweep cost
+    every Wayland run after it until the file was deleted by hand.
+
+    **Connecting is the test, not the lock.** A live socket has something
+    accepting on it; a dead one refuses. The session's own is live by
+    definition, so this cannot take out the display the tests are running inside
+    — which the lock file alone would not guarantee, since a lock is held by a
+    process and a socket is served by one.
+    """
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", "/run/user/1000"))
+    swept = []
+    for path in sorted(runtime.glob("wayland-*")):
+        if path.name.count("-") != 1 or not path.is_socket():
+            continue
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(1.0)
+        try:
+            probe.connect(str(path))
+        except OSError:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            with contextlib.suppress(OSError):
+                path.with_suffix(path.suffix + ".lock").unlink()
+            swept.append(path.name)
+        finally:
+            probe.close()
+    return swept
 
 
 def instances() -> set[str]:
@@ -100,10 +154,15 @@ def start_compositor(work: Path, scale: str = "1") -> tuple[subprocess.Popen, st
     # *process*: an instance directory outlives the compositor that made it, so
     # counting those reports a crowd of ghosts.
     already = subprocess.run(
-        ["pgrep", "-c", "-x", "Hyprland"], capture_output=True, text=True
+        ["pgrep", "-c", "-x", "Hyprland"], capture_output=True, text=True,
+        timeout=PATIENCE,
     ).stdout.strip()
     if already.isdigit() and int(already) > 3:
         print(f"  warn  {already} Hyprland processes are running; something is leaking them")
+    # Before the *before*, or a socket left by a killed run is counted as one
+    # that already existed and the new one is never seen as new.
+    for dead in sweep_dead_sockets():
+        print(f"  warn  swept {dead}, left by a compositor that was killed")
     before, before_instances = sockets(), instances()
     process = subprocess.Popen(
         ["Hyprland", "--config", str(config)],
@@ -154,7 +213,8 @@ def stop_compositor(process: subprocess.Popen | None, config: Path) -> None:
     # `--config` under a temporary directory.
     for _ in range(20):
         found = subprocess.run(
-            ["pgrep", "-f", f"Hyprland --config {config}"], capture_output=True, text=True
+            ["pgrep", "-f", f"Hyprland --config {config}"], capture_output=True, text=True,
+            timeout=PATIENCE,
         ).stdout.split()
         if not found:
             return
@@ -281,6 +341,7 @@ class WaylandServer(Server):
             ["hyprctl", "dispatch", "closewindow", "class:dev.skerry.Skerry"],
             env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
             capture_output=True,
+            timeout=PATIENCE,
         )
 
     def resize(self, width: int, height: int) -> None:
@@ -293,6 +354,7 @@ class WaylandServer(Server):
             ],
             env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
             capture_output=True,
+            timeout=PATIENCE,
         )
 
     def focus(self, app_id: str) -> None:
@@ -300,6 +362,7 @@ class WaylandServer(Server):
             ["hyprctl", "dispatch", "focuswindow", f"class:{app_id}"],
             env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
             capture_output=True,
+            timeout=PATIENCE,
         )
         time.sleep(0.3)
 
@@ -312,6 +375,7 @@ class WaylandServer(Server):
             ["hyprctl", "dispatch", "setfloating", "class:dev.skerry.Skerry"],
             env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
             capture_output=True,
+            timeout=PATIENCE,
         )
         time.sleep(0.4)
 
@@ -321,6 +385,7 @@ class WaylandServer(Server):
             env=dict(os.environ, HYPRLAND_INSTANCE_SIGNATURE=self.instance),
             capture_output=True,
             text=True,
+            timeout=PATIENCE,
         )
         return json.loads(done.stdout)
 
@@ -351,6 +416,7 @@ class WaylandServer(Server):
             env=dict(os.environ, WAYLAND_DISPLAY=self.display),
             capture_output=True,
             check=True,
+            timeout=PATIENCE,
         )
 
 
@@ -382,7 +448,8 @@ class X11Server(Server):
         deadline = time.time() + PATIENCE
         while time.time() < deadline:
             probe = subprocess.run(
-                ["xdpyinfo", "-display", self.display], capture_output=True
+                ["xdpyinfo", "-display", self.display], capture_output=True,
+                timeout=PATIENCE,
             )
             if probe.returncode == 0:
                 break
@@ -407,6 +474,7 @@ class X11Server(Server):
             env=dict(os.environ, DISPLAY=self.display),
             capture_output=True,
             check=True,
+            timeout=PATIENCE,
         )
 
     def stop(self) -> None:
@@ -454,7 +522,7 @@ class X11Server(Server):
         return [str(DRIVE), "--x11", "--paste", mime]
 
     def ask_to_close(self) -> None:
-        subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True)
+        subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True, timeout=PATIENCE)
 
     def focus(self, app_id: str) -> None:
         """Nothing to do: with no window manager the window focuses itself when
@@ -466,6 +534,7 @@ class X11Server(Server):
             [str(DRIVE), "--x11", "--resize", f"{width}x{height}"],
             env=with_server(),
             capture_output=True,
+            timeout=PATIENCE,
         )
 
     def box_of(self, app_id: str) -> tuple[int, int, int, int]:
@@ -473,6 +542,7 @@ class X11Server(Server):
             ["xwininfo", "-display", self.display, "-root", "-tree"],
             capture_output=True,
             text=True,
+            timeout=PATIENCE,
         ).stdout
         # `0x200000 "Skerry": ("skerry" "Skerry")  1100x720+0+0  +0+0` — the
         # instance half of `WM_CLASS`, which is the app id lowercased.
@@ -496,7 +566,8 @@ class X11Server(Server):
 
     def output_size(self) -> tuple[int, int]:
         info = subprocess.run(
-            ["xdpyinfo", "-display", self.display], capture_output=True, text=True
+            ["xdpyinfo", "-display", self.display], capture_output=True, text=True,
+            timeout=PATIENCE,
         ).stdout
         found = re.search(r"dimensions:\s+(\d+)x(\d+) pixels", info)
         if not found:
@@ -519,6 +590,7 @@ class X11Server(Server):
             env=dict(os.environ, DISPLAY=self.display),
             capture_output=True,
             text=True,
+            timeout=PATIENCE,
         ).stdout
         return float(shown.strip() or 96.0) / 96.0
 
@@ -530,6 +602,7 @@ class X11Server(Server):
             ["import", "-display", self.display, "-window", "root", str(whole)],
             capture_output=True,
             check=True,
+            timeout=PATIENCE,
         )
         left, top, width, height = box
         Image.open(whole).crop((left, top, left + width, top + height)).save(into)
@@ -605,16 +678,60 @@ class Run:
             time.sleep(0.1)
         raise Failure("the window never drew a first frame")
 
-    def drive(self, script: str) -> None:
+    def drive(self, script: str, answering: bool = True) -> None:
+        """Sends a script, and waits for the answers it asked for.
+
+        `answering=False` where a *silent* window is the expected outcome —
+        `Peer.yield_focus` drives an `F12` precisely to find out whether the
+        keyboard came back, so waiting for the answer there is waiting out the
+        question.
+        """
+        before = self.reported()
         done = subprocess.run(
             [str(DRIVE), SERVER.driver_flag()],
             input=script,
             text=True,
             env=with_server(),
             capture_output=True,
+            timeout=PATIENCE,
         )
         if done.returncode != 0:
             raise Failure(f"the driver refused the script: {done.stderr.strip()}")
+        if answering:
+            self.wait_for_reports(before + script.count("key f12"))
+
+    def reported(self) -> int:
+        """How many state lines the window has printed so far."""
+        return self.log.read_text().count("\nskerry-state ")
+
+    def wait_for_reports(self, wanted: int) -> None:
+        """Waits for the window to answer every `F12` the script asked for.
+
+        **The sleep after an `F12` is a guess and this is the fact.** A script
+        ends `key f12\nsleep 200` because the answer is printed a frame later,
+        and 200 ms is enough on an idle machine — but under a full sweep the
+        window can still be reading, and then the driver returns, the log has no
+        new line in it, and the scenario fails as *the window reported no state
+        at all* three lines further on. Measured: that is what
+        `dragging-files-into-another-pane` did on X11, and it passed alone.
+
+        The sleeps stay, because they are also what gives a *pointer* motion
+        time to be drawn. This only stops them being the whole guarantee.
+
+        **A frame, not a job**, which is what `A_FRAME` is and what `PATIENCE` is
+        not. Waiting the long patience here made every drive that was *meant* to
+        go unanswered cost twenty seconds — `yield_focus` asks ten times — and
+        turned a nine-minute sweep into a thirty-minute one. The waiting for a
+        directory read or a copy belongs in `listed`, `until` and `settled`, which
+        poll: they can ask again, and this can only sit still.
+        """
+        deadline = time.time() + A_FRAME
+        while self.reported() < wanted and time.time() < deadline:
+            if self.process.poll() is not None:
+                # A window on its way out owes nothing: `clean-close` and the
+                # last-tab scenarios both drive a window that is meant to end.
+                return
+            time.sleep(0.05)
 
     def states(self) -> list[dict[str, str]]:
         found = []
@@ -638,6 +755,20 @@ class Run:
         if not found:
             raise Failure("the window reported no state at all")
         return found[index]
+
+    def ended(self, patience: float = 10.0) -> bool:
+        """Whether the window has exited — **waited for, not slept at**.
+
+        A window closing is a frame, an unmap, a destructor chain and a process
+        exit, and `sleep 700` is a guess at all four. Measured: that guess ran out
+        on the Wayland half with twelve other things on the machine, and the
+        failure read as *a double click on the last tab left the window open*.
+        """
+        try:
+            self.process.wait(timeout=patience)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
 
     def make_floating(self) -> None:
         """Take the window out of whatever layout the server has it in."""
@@ -798,6 +929,25 @@ def listed(run: Run, tries: int = 30) -> dict[str, str]:
     raise Failure("the listing never arrived")
 
 
+def settled(run: Run, tries: int = 40) -> dict[str, str]:
+    """Waits until the window has finished what it was last asked to do.
+
+    **`busy` is the operation queue and `loading` is the read**, and every
+    assertion about what is on the disk or in the listing is really an assertion
+    about one of those having finished. A scenario that sleeps instead is stating
+    how long an operation takes on the machine it was written on: measured,
+    `keyboard-new-folder` failed a full X11 sweep with `busy: true` and seven
+    jobs outstanding, nine hundred milliseconds after asking for a folder.
+    """
+    state: dict[str, str] = {}
+    for _ in range(tries):
+        run.drive("key f12\nsleep 60\n")
+        state = run.state()
+        if state.get("busy") == "false" and state.get("loading") == "false":
+            return state
+    raise Failure(f"the window never went quiet: busy={state.get('busy')} queue={state.get('queue')}")
+
+
 def until(run: Run, tries: int = 40, **wanted) -> dict[str, str]:
     """Waits for the window to report what is wanted, and returns that state.
 
@@ -852,6 +1002,67 @@ def clipboard(run: Run, mime: str = "text/plain;charset=utf-8") -> str:
     if done.returncode != 0:
         raise Failure(f"the clipboard reader refused: {done.stderr.decode().strip()}")
     return done.stdout.decode("utf-8", "replace")
+
+
+class OutOfTime(BaseException):
+    """A scenario that overran its budget.
+
+    **`BaseException`, and that is the whole design.** The first version raised
+    `Failure`, which scenarios and helpers legitimately catch — `yield_focus`
+    suppresses one on purpose — so a budget that expired inside such a block was
+    swallowed, and `signal.setitimer` is one-shot, so it never fired again. The
+    scenario it was supposed to stop then ran for **1,869 seconds** against a
+    180-second ceiling and took the rest of the sweep's budget with it. Nothing
+    in this file may catch this by accident, so it descends from the one thing
+    `except Exception` does not cover.
+    """
+
+
+@contextlib.contextmanager
+def a_budget(seconds: float):
+    """Fails a scenario that runs longer than `seconds` instead of hanging.
+
+    **A stuck scenario used to be a stuck sweep.** Every wait in here is bounded
+    now, which is the real fix — but "every" is a claim about code that keeps
+    being written, and this is the one that does not depend on the next wait
+    remembering. `SIGALRM` lands inside whatever `subprocess.run` or `sleep` the
+    scenario is in and comes out as an ordinary failure, so the sweep reports the
+    name and carries on to the next one.
+
+    Single-threaded on purpose: `signal.setitimer` only interrupts the main
+    thread, and this runner has no other.
+    """
+    def rang(_signum, _frame):
+        raise OutOfTime(f"took longer than {seconds:.0f}s, which is a hang and not a wait")
+
+    previous = signal.signal(signal.SIGALRM, rang)
+    # **Repeating, not one-shot.** Belt as well as braces: if anything ever does
+    # swallow one of these, the next arrives five seconds later rather than never.
+    signal.setitimer(signal.ITIMER_REAL, seconds, 5.0)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def announce(name: str) -> None:
+    """Says which scenario is running, before it is known how it went.
+
+    A sweep that prints only verdicts is a terminal with nothing in it for
+    however long the slow one takes, and "nothing is happening" and "this one is
+    stuck" look identical. On a terminal the line is overwritten by the verdict;
+    in a log it stays, which is where knowing the name matters most.
+    """
+    end = "\r" if sys.stdout.isatty() else "\n"
+    print(f"  ..    {name}", end=end, flush=True)
+
+
+def verdict(line: str, began: float) -> None:
+    # Padded past the announcement it overwrites on a terminal, and timed: a
+    # scenario that has quietly grown to forty seconds is a defect nobody would
+    # otherwise read, and the sweep's own budget is stated in the same unit.
+    print(f"{line}  {time.time() - began:.1f}s".ljust(74))
 
 
 def make_fixture(root: Path, name: str = "fixture") -> Path:
@@ -1211,21 +1422,15 @@ def keyboard_new_folder(run: Run, fixture: Path) -> None:
     that the field opened on the row the reload brought in rather than on
     whatever row that index held before.
     """
-    run.drive("sleep 500\nkey f12\nkey ctrl+shift+n\nsleep 900\nkey f12\nsleep 200\n")
-    before, naming = run.states()[:2]
-    expect(before, rows="9", undo="false")
-    if not naming["naming"]:
-        raise Failure(f"no name field opened: {naming}")
-    expect(naming, rows="10", naming="New folder")
+    expect(listed(run), rows="9", undo="false")
+    run.drive("key ctrl+shift+n\n")
+    expect(until(run, naming="New folder"), rows="10")
 
     # Ctrl+U clears the field, which is the whole reason it exists.
-    run.drive(
-        "key ctrl+u\ntext zeta\nsleep 200\nkey f12\nsleep 150\n"
-        "key enter\nsleep 900\nkey f12\nsleep 200\n"
-    )
-    typed, committed = run.states()[-2:]
-    expect(typed, naming="zeta")
-    expect(committed, naming="", rows="10", undo="true")
+    run.drive("key ctrl+u\ntext zeta\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), naming="zeta")
+    run.drive("key enter\n")
+    expect(until(run, naming="", undo="true"), rows="10")
     if not (fixture / "zeta").is_dir():
         raise Failure("the folder was named zeta and is not on the disk")
 
@@ -1233,17 +1438,15 @@ def keyboard_new_folder(run: Run, fixture: Path) -> None:
     # entries on one stack, and the first Ctrl+Z takes back the name rather than
     # the folder — which is the whole point of rule 3 being about mutations and
     # not about gestures.
-    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
-    unnamed = run.state()
-    expect(unnamed, rows="10", undo="true", redo="true", cursor="New folder")
+    run.drive("key ctrl+z\n")
+    expect(until(run, cursor="New folder", redo="true"), rows="10", undo="true")
     if (fixture / "zeta").exists():
         raise Failure("undoing the rename left zeta behind")
 
-    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
-    undone = run.state()
+    run.drive("key ctrl+z\n")
+    expect(until(run, rows="9", undo="false"), redo="true")
     if (fixture / "New folder").exists():
         raise Failure("undo left the folder behind")
-    expect(undone, rows="9", undo="false", redo="true")
 
 
 @scenario("keyboard-rename", fresh=True)
@@ -2060,18 +2263,18 @@ def dragging_between_panes(run: Run, fixture: Path) -> None:
     listed(run)
     # The right pane, showing `alpha`, opened from the row itself so the two
     # panes are showing different directories without a path being typed.
-    run.drive("text alpha\nsleep 500\nkey f12\nsleep 200\n")
-    expect(run.state(), cursor="alpha")
-    run.drive("key shift+enter\nsleep 900\nkey f12\nsleep 300\n")
-    split = run.state()
-    expect(split, panes="2", pane_focus="0")
+    run.drive("text alpha\n")
+    until(run, cursor="alpha")
+    run.drive("key shift+enter\n")
+    split = until(run, panes="2", pane_focus="0")
     if split["pane_paths"] != f"{Path(split['path']).name},alpha":
         raise Failure(f"the panes are showing {split['pane_paths']!r}")
 
-    # One file, chosen with the keyboard, in the pane that still has it.
-    run.drive("text file-1.txt\nsleep 400\nkey f12\nsleep 200\n")
-    chosen = run.state()
-    expect(chosen, selected="1", cursor="file-1.txt")
+    # One file, chosen with the keyboard, in the pane that still has it. The
+    # sleep is the type-ahead window: a second `text` inside a second of the
+    # first extends the buffer rather than starting a new jump.
+    run.drive("sleep 1100\ntext file-1.txt\n")
+    chosen = until(run, selected="1", cursor="file-1.txt")
     held = point_at(run, int(chosen["cursor_row"]))
     if held["hover_name"] != "file-1.txt":
         raise Failure(f"the pointer is over {held['hover_name']!r}, wanted file-1.txt")
@@ -2084,16 +2287,18 @@ def dragging_between_panes(run: Run, fixture: Path) -> None:
     run.drive(
         f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\n"
         f"drag {from_point[0]:.1f} {from_point[1]:.1f} {to_point[0]:.1f} {to_point[1]:.1f}\n"
-        "sleep 1200\nkey f12\nsleep 400\n"
     )
+    until(run, undo="true", dragging="false")
     if not (fixture / "alpha" / "file-1.txt").is_file():
         landed = sorted(path.name for path in (fixture / "alpha").iterdir())
         raise Failure(f"file-1.txt did not land in alpha: {landed}")
     if (fixture / "file-1.txt").exists():
         raise Failure("file-1.txt is still where it was, so the drop copied rather than moved")
-    expect(run.state(), undo="true", dragging="false", drag_in="false", drag_out="false")
+    expect(run.state(), drag_in="false", drag_out="false")
 
-    run.drive("key ctrl+z\nsleep 1500\nkey f12\nsleep 400\n")
+    run.drive("key ctrl+z\n")
+    until(run, undo="false")
+    settled(run)
     if not (fixture / "file-1.txt").is_file():
         raise Failure("undo did not bring file-1.txt back")
 
@@ -2633,7 +2838,7 @@ class Peer:
         """
         for _ in range(10):
             SERVER.focus("dev.skerry.Skerry")
-            run.drive("sleep 200\nkey f12\nsleep 200\n")
+            run.drive("sleep 200\nkey f12\nsleep 200\n", answering=False)
             with contextlib.suppress(Failure):
                 run.state()
                 return
@@ -3537,21 +3742,26 @@ def copy_and_paste(run: Run, fixture: Path) -> None:
 def cut_and_paste(run: Run, fixture: Path) -> None:
     """Ctrl+X then Ctrl+V moves rather than copies, and the undo brings it back."""
     (fixture / "target").mkdir()
-    run.drive("sleep 700\nkey f12\nsleep 150\n")
-    run.drive("text file-2.txt\nsleep 400\nkey ctrl+x\nsleep 400\nkey f12\nsleep 150\n")
-    expect(run.state(), cursor="file-2.txt")
+    listed(run)
+    run.drive("text file-2.txt\n")
+    until(run, cursor="file-2.txt")
+    run.drive("key ctrl+x\n")
 
-    run.drive("sleep 1200\ntext target\nsleep 400\nkey enter\nsleep 900\nkey ctrl+v\nsleep 900\n")
-    run.drive("key f12\nsleep 200\n")
-    moved = run.state()
-    if int(moved["rows"]) != 1:
-        raise Failure(f"after pasting a cut, the folder holds {moved['rows']} rows")
+    # The sleep is the type-ahead window and not a guess about a job: a second
+    # `text` inside a second of the first extends the buffer.
+    run.drive("sleep 1200\ntext target\nkey enter\n")
+    # Not `listed`: `target` is empty, and a listing of nothing never reports a
+    # row to wait for.
+    until(run, path=str(fixture / "target"), loading="false")
+    run.drive("key ctrl+v\n")
+    moved = until(run, rows="1", busy="false")
     if (fixture / "file-2.txt").exists():
         raise Failure("a cut and paste left the original behind")
     if not (fixture / "target/file-2.txt").is_file():
         raise Failure("the file did not arrive")
 
-    run.drive("key ctrl+z\nsleep 900\nkey f12\nsleep 200\n")
+    run.drive("key ctrl+z\n")
+    settled(run)
     if not (fixture / "file-2.txt").is_file():
         raise Failure("the undo did not bring it back")
     if (fixture / "target/file-2.txt").exists():
@@ -4236,8 +4446,8 @@ def tab_pointer(run: Run, fixture: Path) -> None:
     # And the last tab of the last pane closes the window, which is what
     # `Ctrl+W` does and what a person who has used a browser expects.
     last = tab_aim(run, run.state(), 0)
-    run.drive(f"move {last[0]:.1f} {last[1]:.1f}\nsleep 250\ndouble\nsleep 700\n")
-    if run.process.poll() is None:
+    run.drive(f"move {last[0]:.1f} {last[1]:.1f}\nsleep 250\ndouble\n")
+    if not run.ended():
         raise Failure("a double click on the last tab left the window open")
 
 
@@ -4802,9 +5012,17 @@ def main(argv: list[str]) -> int:
     keep = "--keep" in argv
     x11 = "--x11" in argv
     scale = "1"
+    # Both ceilings are arguments so a person chasing a slow scenario can lower
+    # them rather than sit through one, and so a runner with a tighter job limit
+    # than this file assumes can say so.
+    global SCENARIO_BUDGET, SUITE_BUDGET
     for argument in argv[1:]:
         if argument.startswith("--scale="):
             scale = argument.removeprefix("--scale=")
+        elif argument.startswith("--scenario-timeout="):
+            SCENARIO_BUDGET = float(argument.removeprefix("--scenario-timeout="))
+        elif argument.startswith("--suite-timeout="):
+            SUITE_BUDGET = float(argument.removeprefix("--suite-timeout="))
 
     for binary in (SKERRY, DRIVE):
         if not binary.is_file():
@@ -4839,23 +5057,42 @@ def main(argv: list[str]) -> int:
         global STATE
         STATE = str(work / "state")
 
+        started = time.time()
         for name, function in SCENARIOS.items():
             if wanted and not any(needle in name for needle in wanted):
                 continue
+            left = SUITE_BUDGET - (time.time() - started)
+            if left <= 0:
+                print(f"  over  {name}: the sweep ran out of its {SUITE_BUDGET:.0f}s budget")
+                failed.append(name)
+                continue
             run = None
+            began = time.time()
+            announce(name)
             try:
                 own = getattr(function, "fresh", False)
                 path = make_fixture(work, f"fixture-{name}") if own else fixture
                 data = work / "data" / name
                 environment = {"XDG_DATA_HOME": str(data)} if own else None
-                run = Run(display, work, path, [], instance, environment)
-                function(run, path)
-                print(f"  ok    {name}")
+                with a_budget(min(SCENARIO_BUDGET, left)):
+                    run = Run(display, work, path, [], instance, environment)
+                    function(run, path)
+                verdict(f"  ok    {name}", began)
                 passed += 1
             except Skipped as why:
-                print(f"  skip  {name}: {why}")
+                verdict(f"  skip  {name}: {why}", began)
+            except OutOfTime as overran:
+                verdict(f"  FAIL  {name}: {overran}", began)
+                failed.append(name)
             except Failure as problem:
-                print(f"  FAIL  {name}: {problem}")
+                verdict(f"  FAIL  {name}: {problem}", began)
+                failed.append(name)
+            except Exception as crash:  # noqa: BLE001
+                # **One scenario's crash is not the sweep's.** A `TimeoutExpired`
+                # from a bounded subprocess, or a typo in a scenario, used to end
+                # the run at whatever scenario it happened in and report nothing
+                # about the ninety after it.
+                verdict(f"  FAIL  {name}: {type(crash).__name__}: {crash}", began)
                 failed.append(name)
             finally:
                 if run is not None:

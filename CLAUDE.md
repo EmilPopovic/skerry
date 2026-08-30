@@ -154,11 +154,14 @@ retrofitting extraction across twelve crates costs weeks.
 That is also all CI runs — [check.yml](.github/workflows/check.yml) calls the same
 script, because a gate that exists only in a workflow file is a gate nobody can
 reproduce. Alongside it: the golden frames on lavapipe, and `cargo check` on the
-oldest toolchain `rust-version` claims. **Two harnesses stay local on purpose.**
-`tools/gui-test` needs a compositor advertising the virtual-input protocols and a
-runner has no seat to give one, and `--bench` on a shared runner measures the
-runner's neighbours — so a scenario or a frame time is *your* job before you push,
-not CI's after.
+oldest toolchain `rust-version` claims. **One and a half harnesses stay local on purpose.** `tools/gui-test --x11`
+is in CI — `XTEST` under `Xvfb` needs no seat — but the Wayland half needs a
+compositor advertising the virtual-input protocols and a runner has none to give,
+and `--bench` on a shared runner measures the runner's neighbours. So a frame time
+is *your* job before you push, and so is the Wayland half of a scenario.
+**Run the suite under load before you trust it**: twelve spinning processes is
+what found four scenarios that were guessing with a `sleep` where a wait belonged,
+after four quiet sweeps had called them the machine's fault.
 
 Then: **is this in [docs/11-non-goals.md](docs/11-non-goals.md)?** That list
 exists so declined features are declined by pointing, not by re-arguing. A

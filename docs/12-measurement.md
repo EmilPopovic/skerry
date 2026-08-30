@@ -1001,6 +1001,23 @@ prices for benchmarks — and which is easy to forget for a test suite, because 
 test suite is supposed to be a yes or a no rather than a measurement. A scenario
 that waits 300 ms for a directory read is a measurement.
 
+**That last paragraph was wrong, and it was wrong in the direction that costs
+most.** Months later the X11 half failed one or two scenarios per full sweep on a
+*quiet* machine — three runs, three different names, and one of them on a commit
+with nothing of that day's work applied. The conclusion above had excused four
+real defects as somebody else's load, which is precisely what
+[a flaky test is a defect in the test until proven otherwise](#five-flaky-scenarios-one-defect-a-sleep-where-a-wait-belonged)
+says not to do. The evidence that settles it: with the four sleeps replaced by
+waits, the same suite passes with **twelve spinning processes** on a
+twenty-four-thread machine, which is far more load than the build that was blamed.
+
+So the two lessons compose, and the order matters. Load *is* a confound, and a
+figure taken beside a build is worth nothing. But for a suite, load is an
+**instrument**: it does not create the failure, it reveals which scenarios are
+measurements pretending to be assertions. One deliberately loaded sweep found
+what four quiet sweeps and an hour had not, and a suite that survives one is
+telling the truth about the code rather than about the afternoon.
+
 ## The received wisdom about a library is worth one probe
 
 "Do not feed modifier keysyms to `xkb_compose_state_feed`" is advice that appears
@@ -1112,3 +1129,18 @@ cause. The second is that every repair was checked for still being able to fail:
 the idle gate against a frame loop that sleeps on an 8 ms timer, the watch
 scenario against a watcher that watches only the focused pane. A test made
 reliable by weakening it is worse than a flaky one, because nothing announces it.
+
+**It happened again, in the four scenarios the first pass did not reach**, and the
+second time the fix went one level down. Three of them guessed at an operation
+rather than at a read — `busy` and `queue` say when a copy or a new folder has
+finished, and `sleep 900` says when it finished on the machine the scenario was
+written on. The fourth guessed at a *process exit*: `sleep 700` after the gesture
+that closes the last tab, where the answer is `wait(timeout=)` on the child.
+
+The level below is what stops there being a fifth. `Run.drive` now counts the
+`key f12` lines in the script it was handed and does not return until the window
+has printed that many answers, so the trailing `sleep 200` after an `F12` is a
+lower bound instead of the whole guarantee — which is what one of the four was
+failing on, three assertions later and under a message about the *window* rather
+than about the wait. The sleeps stay: they are also what gives a pointer motion
+time to be drawn, and a motion has nothing to print.
