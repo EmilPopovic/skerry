@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{
     self, AtFlags, Mode, OFlags, RenameFlags, SeekFrom, Stat, Timespec, Timestamps, fchmod, fstat,
-    ftruncate, futimens, openat, renameat_with, seek, statat, unlinkat,
+    fsync, ftruncate, futimens, openat, renameat_with, seek, statat, unlinkat,
 };
 use rustix::io::Errno;
 use sk_model::{Problem, ProblemKind};
@@ -82,6 +82,15 @@ pub struct Copied {
     /// Ignoring this is what left a `.skerry-copy-*` name on NTFS and made a
     /// three-name hardlink set report a link count of four.
     pub orphan: Option<PathBuf>,
+    /// Every strategy that was tried and refused, with the raw errno it refused
+    /// with.
+    ///
+    /// **The only way to tell "this filesystem cannot" from "we never asked".**
+    /// A matrix row saying `read/write` means nothing on its own: it is the same
+    /// answer whether `FICLONE` was refused with `EOPNOTSUPP` or never attempted
+    /// because the caller turned it off. Raw `i32` rather than `rustix::Errno`,
+    /// so a caller reading this needs no dependency the crate chose.
+    pub refused: Vec<(Strategy, i32)>,
 }
 
 /// What a copy may do about metadata and an existing destination.
@@ -94,11 +103,28 @@ pub struct Options {
     pub replace: bool,
     /// Whether extended attributes are carried over.
     pub xattrs: bool,
+    /// Whether `FICLONE` may be tried.
+    ///
+    /// **Off is for measuring, not for policy.** The torture matrix in
+    /// `spikes/e-operations` forces the floor so it can compare a reflink
+    /// against a true byte copy on the same filesystem, and so it can exercise
+    /// `read/write` on a filesystem where the kernel would never have chosen it.
+    /// Nothing in the product turns these off.
+    pub reflink: bool,
+    /// Whether `copy_file_range` may be tried. See [`Self::reflink`].
+    pub kernel_copy: bool,
+    /// Whether the destination is flushed before the copy is reported done.
+    ///
+    /// Off in the product, because the page cache is the kernel's business and a
+    /// file manager that fsyncs every file is one that copies at the speed of the
+    /// disk queue. On for a *measurement*: a timing that ends before the bytes
+    /// have left memory is a timing of memcpy.
+    pub fsync: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { replace: false, xattrs: true }
+        Self { replace: false, xattrs: true, reflink: true, kernel_copy: true, fsync: false }
     }
 }
 
@@ -139,7 +165,8 @@ pub fn copy_file(source: &Path, destination: &Path, options: Options) -> Result<
     .map_err(|error| at(error, destination, "create"))?;
 
     let size = stat.st_size.cast_unsigned();
-    let (strategy, bytes) = match write_contents(&from, &into, size) {
+    let mut refused = Vec::new();
+    let (strategy, bytes) = match write_contents(&from, &into, size, options, &mut refused) {
         Ok(written) => written,
         Err((error, stage)) => return Err(discard(&temp, error, destination, stage)),
     };
@@ -157,11 +184,17 @@ pub fn copy_file(source: &Path, destination: &Path, options: Options) -> Result<
     if futimens(&into, &times_of(&stat)).is_err() {
         unpreserved.push("times".to_owned());
     }
+    // Before the placement, so what is renamed into place is what is on the
+    // disk. A flush after the rename would be a flush of a name that already
+    // points at bytes the caller has been told are safe.
+    if options.fsync && fsync(&into).is_err() {
+        unpreserved.push("fsync".to_owned());
+    }
     drop(into);
 
     let (placement, orphan) = place(&temp, destination, options.replace)
         .map_err(|error| discard(&temp, error, destination, "place"))?;
-    Ok(Copied { strategy, placement, bytes, unpreserved, orphan })
+    Ok(Copied { strategy, placement, bytes, unpreserved, orphan, refused })
 }
 
 /// Moves one file, which is two entirely different operations behind one word.
@@ -612,18 +645,25 @@ fn write_contents(
     from: &impl std::os::fd::AsFd,
     into: &impl std::os::fd::AsFd,
     size: u64,
+    options: Options,
+    refused: &mut Vec<(Strategy, i32)>,
 ) -> Result<(Strategy, u64), (Errno, &'static str)> {
     // Not an error when it fails: most filesystems cannot share extents, which is
     // exactly why the strategy is probed and not assumed.
-    if fs::ioctl_ficlone(into.as_fd(), from.as_fd()).is_ok() {
-        return Ok((Strategy::Reflink, 0));
+    if options.reflink {
+        match fs::ioctl_ficlone(into.as_fd(), from.as_fd()) {
+            Ok(()) => return Ok((Strategy::Reflink, 0)),
+            Err(error) => refused.push((Strategy::Reflink, error.raw_os_error())),
+        }
     }
-    match kernel_copy(from, into, size) {
-        Ok(bytes) => return Ok((Strategy::KernelCopy, bytes)),
-        // Bytes already moved means a real failure rather than a refusal, and
-        // starting over would write them twice.
-        Err((error, bytes)) if bytes > 0 => return Err((error, "copy_file_range")),
-        Err(_) => {}
+    if options.kernel_copy {
+        match kernel_copy(from, into, size) {
+            Ok(bytes) => return Ok((Strategy::KernelCopy, bytes)),
+            // Bytes already moved means a real failure rather than a refusal, and
+            // starting over would write them twice.
+            Err((error, bytes)) if bytes > 0 => return Err((error, "copy_file_range")),
+            Err((error, _)) => refused.push((Strategy::KernelCopy, error.raw_os_error())),
+        }
     }
     read_write(from, into, size).map(|bytes| (Strategy::ReadWrite, bytes))
 }
@@ -806,13 +846,33 @@ fn discard(temp: &Path, error: Errno, subject: &Path, stage: &'static str) -> Pr
 /// The same mapping `ops::problem` uses, with `ENOSPC` split out: a destination
 /// with no room is the answer a copy gives most often after a name collision, and
 /// "a per-user kernel resource is exhausted" is not advice about it.
+/// The [`Problem`] this crate raises for a raw errno.
+///
+/// **Public so there is one table and not two.** A caller that does part of an
+/// operation itself — the Spike E matrix copies symlinks with its own code —
+/// otherwise keeps a second mapping from errno to kind, and the two drift: that
+/// one classified an `EILSEQ` as unreadable while this one called it
+/// [`ProblemKind::NameRefused`], and a matrix row went from a limitation to a
+/// failure on the strength of the disagreement.
+#[must_use]
+pub fn problem_for(errno: i32, path: &Path, stage: &str) -> Problem {
+    at_stage(Errno::from_raw_os_error(errno), path, stage)
+}
+
 fn at(error: Errno, path: &Path, stage: &'static str) -> Problem {
+    at_stage(error, path, stage)
+}
+
+fn at_stage(error: Errno, path: &Path, stage: &str) -> Problem {
     let kind = match error {
         Errno::NOENT => ProblemKind::Gone,
         Errno::EXIST => ProblemKind::NameTaken,
         Errno::XDEV => ProblemKind::AcrossFilesystems,
         Errno::NOSPC | Errno::DQUOT => ProblemKind::Full,
         Errno::MFILE | Errno::NFILE => ProblemKind::OutOfResources,
+        // A destination that will not encode the name's bytes: vfat and NTFS
+        // both do this, and it is not the source being unreadable.
+        Errno::ILSEQ => ProblemKind::NameRefused,
         // Permission, a read-only mount, and everything left over: the message
         // carries the errno, and the kind decides the advice.
         _ => ProblemKind::Unreadable,
@@ -963,6 +1023,43 @@ mod tests {
         assert!(copy_file(&source, &source, replace).is_err());
         assert!(copy_file(&source, &same, replace).is_err(), "a hardlink is the same file");
         assert_eq!(std::fs::read(&source).unwrap(), b"precious");
+    }
+
+    /// The two questions the torture matrix asks that the product never does:
+    /// what did the filesystem refuse, and what happens with the floor forced.
+    ///
+    /// **A matrix row saying `read/write` means nothing on its own.** It is the
+    /// same answer whether `FICLONE` was refused with `EOPNOTSUPP` or never
+    /// attempted, and `spikes/e-operations` exists to tell those apart on seven
+    /// filesystems. Turning a strategy off has to *both* skip it and leave no
+    /// refusal behind, or the report says a filesystem cannot do something
+    /// nobody asked it to do.
+    #[test]
+    fn a_forced_floor_skips_the_faster_ways_and_says_it_did_not_ask() {
+        let root = scratch("forced");
+        let source = root.join("source");
+        std::fs::write(&source, b"some bytes to move").unwrap();
+
+        let asked = copy_file(&source, &root.join("asked"), Options::default()).unwrap();
+        // Whatever this filesystem does, everything it did *not* choose was
+        // tried first and is on the list with an errno.
+        assert_eq!(
+            asked.refused.len(),
+            match asked.strategy {
+                Strategy::Reflink => 0,
+                Strategy::KernelCopy => 1,
+                Strategy::ReadWrite => 2,
+            },
+            "strategy {:?} against refusals {:?}",
+            asked.strategy,
+            asked.refused
+        );
+
+        let floor = Options { reflink: false, kernel_copy: false, ..Options::default() };
+        let forced = copy_file(&source, &root.join("forced"), floor).unwrap();
+        assert_eq!(forced.strategy, Strategy::ReadWrite);
+        assert!(forced.refused.is_empty(), "refused {:?} while asking for none", forced.refused);
+        assert_eq!(std::fs::read(root.join("forced")).unwrap(), b"some bytes to move");
     }
 
     /// Nothing is left behind when a copy fails, because nothing was ever written

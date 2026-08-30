@@ -296,6 +296,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "sk-fs"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "rustix",
+ "sk-model",
+ "sk-util",
+]
+
+[[package]]
+name = "sk-model"
+version = "0.0.1"
+
+[[package]]
+name = "sk-util"
+version = "0.0.1"
+dependencies = [
+ "rustix",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -308,6 +329,9 @@ dependencies = [
  "fuser",
  "libc",
  "rustix",
+ "sk-fs",
+ "sk-model",
+ "sk-util",
 ]
 
 [[package]]

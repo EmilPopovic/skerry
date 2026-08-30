@@ -368,20 +368,31 @@ argument for doing it earlier than this. The reason it is not earlier: a split p
 whose two halves cannot copy a file between them is the demo version of the feature,
 and the operations engine is what makes the second pane worth having.
 
-### One thing the port left behind
+### ~~One thing the port left behind~~ Closed
 
-**Spike E's matrix now tests a copy of the engine rather than the engine.** The
-code in `sk-fs::copy` is the spike's, ported; the matrix in
-`spikes/e-operations` still exercises its own. So *"M3 does not ship until the
-Spike E matrix is green in CI"* is now a gate over a fork, and two engines that
-agree today can stop agreeing without anything failing.
+**Spike E's matrix tested a copy of the engine rather than the engine**, so
+*"M3 does not ship until the Spike E matrix is green in CI"* was a gate over a
+fork. It now takes `sk-fs` as a path dependency and its own `copy.rs` is deleted:
+being a standalone `[workspace]` was never the obstacle this section assumed,
+because a path dependency resolves workspace inheritance from its own directory.
 
-The spike is standalone on purpose — its own `[workspace]`, exempt from the
-layering and dependency rules — so it cannot simply depend on `sk-fs`. The fix is
-to make the matrix an integration test over `sk-fs::copy` and keep the
-filesystem-discovery half, which is the part that has no equivalent anywhere else.
-Until that happens the product's engine is covered by 18 unit tests on tmpfs and
-ext4 and by nothing on btrfs, xfs, exFAT, vfat or NTFS.
+The port paid for itself immediately. `sk-fs::copy` gained the three things the
+matrix needs and the product does not — `reflink`, `kernel_copy` and `fsync`
+switches, so the floor can be forced and a clone compared against a true byte
+copy, and a `refused` list, which is *the only way to tell "this filesystem
+cannot" from "we never asked"*. It also gained a `ProblemKind::NameRefused`:
+`EILSEQ` from a destination that will not encode a name — which is what copying to
+a FAT stick does — was reported as `Unreadable`, whose advice is to check
+permissions the person already has.
+
+And the drift the fork was going to cause showed up inside the port: the matrix's
+own symlink walker kept a second errno-to-kind table, classified an `EILSEQ` as
+unreadable where the engine called it `NameRefused`, and turned a limitation into
+a failure. `sk_fs::copy::problem_for` is now the one table.
+
+**37 pass, 0 fail, 6 limitations, 3 owed** over tmpfs, ext4 and NTFS on this
+machine, plus four injected faults; the four loop-device filesystems are
+[torture.yml](../.github/workflows/torture.yml)'s.
 
 ### Owed, and cheap now that there is somewhere to run them
 

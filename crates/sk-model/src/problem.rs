@@ -68,6 +68,15 @@ pub enum ProblemKind {
     /// copy engine has to handle cleanly rather than the one it hopes not to see:
     /// Spike E measured `ENOSPC` at an exact byte with nothing left behind.
     Full,
+    /// The destination filesystem will not store a name with those bytes in it.
+    ///
+    /// Its own kind because the advice is "rename it for that disk", which no
+    /// other kind here says: `Unreadable` sends the person to check permissions
+    /// they already have, and [`Self::BadName`] tells them a name cannot contain
+    /// a slash when it does not. `EILSEQ` from a copy onto vfat or NTFS is what
+    /// raises it, which is what copying to a USB stick is — found by pointing
+    /// the Spike E matrix at `sk-fs::copy` instead of at its own fork.
+    NameRefused,
     /// The bytes are not text, so they cannot be treated as text.
     ///
     /// Its own kind because the answer is not "this failed" but "this is not the
@@ -92,6 +101,7 @@ impl ProblemKind {
             Self::TooLarge => "error.too_large",
             Self::Full => "error.full",
             Self::NotCopyable => "error.not_copyable",
+            Self::NameRefused => "error.name_refused",
             Self::NotText => "error.not_text",
         }
     }

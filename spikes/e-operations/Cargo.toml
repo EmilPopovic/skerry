@@ -18,6 +18,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+sk-fs = { path = "../../crates/sk-fs" }
+sk-util = { path = "../../crates/sk-util" }
+sk-model = { path = "../../crates/sk-model" }
 rustix = { version = "1", features = ["fs", "process", "time"] }
 # The filesystem that fails at an exact offset. Optional so the engine still
 # builds where libfuse is absent — a real full disk is not a repeatable

@@ -4,9 +4,8 @@
 use std::path::Path;
 
 use rustix::fs::{self, AtFlags};
-use rustix::io::Errno;
 
-use crate::copy::{self, Options, Strategy};
+use sk_fs::copy::{self, Options, Strategy};
 use crate::fixture::{self, Fixture};
 use crate::probe::Target;
 use crate::report::{Outcome, Report};
@@ -65,7 +64,7 @@ pub fn run_pair(report: &mut Report, fx: &Fixture, target: &Target, pair: &str) 
     tree::remove_tree(&dst);
 
     let opts = Options { replace: false, fsync: false, ..Default::default() };
-    let t = tree::copy_tree(&fx.root, &dst, &opts);
+    let t = tree::copy_tree(&fx.root, &dst, opts);
 
     let strategies: Vec<String> = t.strategies.iter().map(|(k, v)| format!("{v}x {k}")).collect();
     let placements: Vec<String> = t.placements.iter().map(|(k, v)| format!("{v}x {k}")).collect();
@@ -88,12 +87,17 @@ pub fn run_pair(report: &mut Report, fx: &Fixture, target: &Target, pair: &str) 
             .failures
             .iter()
             .take(4)
-            .map(|(p, f)| format!("{}: {:?} at {}", name_of(p), f.errno, f.stage))
+            .map(|(p, f)| format!("{}: {f}", name_of(p)))
             .collect();
         // A destination that cannot represent a name refuses it, and that is a
         // limitation of the destination rather than a defect in the copy — as
         // long as it is reported, which is what `detail` is.
-        let encoding_only = t.failures.iter().all(|(_, f)| f.errno == Errno::ILSEQ);
+        // `NameRefused` is `EILSEQ` given a name: the destination will not encode
+        // the bytes. Asked as a kind rather than as an errno because that is what
+        // `sk-fs` reports, and because the kind is what decides the advice a
+        // person actually sees.
+        let encoding_only =
+            t.failures.iter().all(|(_, f)| f.kind() == sk_model::ProblemKind::NameRefused);
         report.record(
             format!("tree/{pair}"),
             if encoding_only { Outcome::Limitation } else { Outcome::Fail },
@@ -103,13 +107,12 @@ pub fn run_pair(report: &mut Report, fx: &Fixture, target: &Target, pair: &str) 
     // Nothing of ours may survive a copy, whether it succeeded or failed. The
     // tree is walked for the temporary-file prefix as well as trusting the
     // engine's own accounting, because the engine is what is under test.
-    let leftovers: Vec<String> = t
-        .failures
-        .iter()
-        .filter_map(|(_, f)| f.leftover.as_ref())
-        .chain(t.orphans.iter())
-        .map(|p| name_of(p))
-        .collect();
+    // **Only the engine's own orphans now.** The forked engine reported a
+    // `leftover` path on a *failed* copy; `sk-fs` discards its temporary on every
+    // failure path instead, so there is nothing for it to report and a leftover
+    // there would be a bug rather than a field. Which is why the walk below is
+    // the half that matters, and it was always the half that could catch this.
+    let leftovers: Vec<String> = t.orphans.iter().map(|p| name_of(p)).collect();
     let stray = stray_temporaries(&dst);
     let evidence = format!(
         "{} reported by the engine, {} found by walking the destination",
@@ -310,7 +313,7 @@ fn xattrs(report: &mut Report, src: &Path, dst: &Path, target: &Target, t: &tree
     let reported: Vec<String> = t
         .unpreserved
         .iter()
-        .map(|(p, what, e)| format!("{} {what} ({e:?})", name_of(p)))
+        .map(|(p, what)| format!("{} {what}", name_of(p)))
         .collect();
     let evidence = format!(
         "{} user attributes on the source, {} on the copy; {} reported as unpreservable{}",
@@ -506,11 +509,11 @@ fn names(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
 fn self_copy(report: &mut Report, src: &Path, pair: &str) {
     let path = src.join("plain.bin");
     let before = verify::meta(&path).map(|m| m.size).unwrap_or(0);
-    let result = copy::copy_file(&path, &path, &Options { replace: true, ..Default::default() });
+    let result = copy::copy_file(&path, &path, Options { replace: true, ..Default::default() });
     let after = verify::meta(&path).map(|m| m.size).unwrap_or(0);
     let evidence = match &result {
         Ok(_) => format!("the copy was allowed; size {before} became {after}"),
-        Err(f) => format!("refused at {} with {:?}; size still {after} of {before}", f.stage, f.errno),
+        Err(problem) => format!("refused with {problem}; size still {after} of {before}"),
     };
     let ok = result.is_err() && before == after && before > 0;
     report.record(format!("self-copy/{pair}"), if ok { Outcome::Pass } else { Outcome::Fail }, evidence);
@@ -530,11 +533,11 @@ fn clobber(report: &mut Report, src: &Path, dst: &Path, pair: &str) {
         return;
     }
     let before = verify::meta(&onto).map(|m| (m.size, m.mtime)).ok();
-    let result = copy::copy_file(&from, &onto, &Options { replace: false, ..Default::default() });
+    let result = copy::copy_file(&from, &onto, Options { replace: false, ..Default::default() });
     let after = verify::meta(&onto).map(|m| (m.size, m.mtime)).ok();
     let evidence = match &result {
         Ok(_) => "the copy was allowed over an existing file".to_string(),
-        Err(f) => format!("refused at {} with {:?}", f.stage, f.errno),
+        Err(problem) => format!("refused with {problem}"),
     };
     let ok = result.is_err() && before == after && before.is_some();
     report.record(
@@ -558,8 +561,18 @@ fn moves(report: &mut Report, src: &Path, target: &Target, pair: &str) {
         report.owed(format!("move/{pair}"), "could not write a source file");
         return;
     }
-    let within = copy::move_file(&a, &b, &Options::default());
-    let within_ok = matches!(&within, Ok(m) if m.renamed) && !a.exists() && b.exists();
+    // **What the move did is read off the disk, not asked of the engine**, which
+    // is this module's rule and which the forked engine let it break: that one
+    // returned a `verified` flag and this check believed it. `sk-fs::move_file`
+    // reports only how the destination got its name, so the source being gone
+    // and the destination holding the same bytes are both established here.
+    let before = verify::meta(&a).ok();
+    let started = std::time::Instant::now();
+    let within = copy::move_file(&a, &b, Options::default());
+    let within_took = started.elapsed();
+    let within_ok = within.is_ok()
+        && !a.exists()
+        && verify::meta(&b).ok().map(|m| m.size) == before.as_ref().map(|m| m.size);
 
     // Across filesystems: the destination is on the target, the source is not.
     let across_src = std::env::temp_dir().join(format!("skerry-spike-e-move-{}", std::process::id()));
@@ -567,14 +580,16 @@ fn moves(report: &mut Report, src: &Path, target: &Target, pair: &str) {
     let _ = std::fs::remove_file(&across_src);
     let _ = std::fs::remove_file(&across_dst);
     let across = if fixture::write_pattern(&across_src, 65536).is_ok() {
-        Some(copy::move_file(&across_src, &across_dst, &Options::default()))
+        Some(copy::move_file(&across_src, &across_dst, Options::default()))
     } else {
         None
     };
     let across_ok = match &across {
-        // A rename here means the two paths were on the same filesystem after
-        // all, which is a valid outcome and not what this half is testing.
-        Some(Ok(m)) => (m.verified || m.renamed) && !across_src.exists() && across_dst.exists(),
+        // Whether it renamed or copied-then-unlinked does not matter and cannot
+        // be told from here: what matters is that the source is gone exactly when
+        // the destination arrived. A move that unlinks first, or that trusts a
+        // return value it did not check, is how a file manager destroys a file.
+        Some(Ok(_)) => !across_src.exists() && across_dst.exists(),
         // No source: nothing to check, and nothing was lost.
         None => true,
         Some(Err(_)) => across_src.exists() && !across_dst.exists(),
@@ -583,14 +598,16 @@ fn moves(report: &mut Report, src: &Path, target: &Target, pair: &str) {
         "within a filesystem: {}; across: {}; the source survives exactly when the destination \
          does not: {}",
         match &within {
-            Ok(m) if m.renamed => format!("renamed in {:.3} ms", m.elapsed.as_secs_f64() * 1000.0),
-            Ok(m) => format!("copied {} bytes and verified {}", m.bytes, m.verified),
-            Err(f) => format!("failed at {} with {:?}", f.stage, f.errno),
+            Ok(placement) => format!(
+                "{placement:?} in {:.3} ms, {} bytes intact",
+                within_took.as_secs_f64() * 1000.0,
+                before.as_ref().map_or(0, |m| m.size)
+            ),
+            Err(problem) => format!("failed with {problem}"),
         },
         match &across {
-            Some(Ok(m)) if m.renamed => "renamed — the paths were on one filesystem".to_string(),
-            Some(Ok(m)) => format!("copied {} bytes, verified before unlinking: {}", m.bytes, m.verified),
-            Some(Err(f)) => format!("failed at {} with {:?}", f.stage, f.errno),
+            Some(Ok(placement)) => format!("{placement:?}, source gone: {}", !across_src.exists()),
+            Some(Err(problem)) => format!("failed with {problem}"),
             None => "not attempted".to_string(),
         },
         across_ok
@@ -657,22 +674,30 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
     settle(&big);
     let free_before = free_bytes(src);
 
+    // **Timed from out here.** The engine used to return an `elapsed`; `sk-fs`
+    // does not, and should not — a clock inside a copy is a field every caller
+    // pays for so that one measurement can read it. The difference is the call
+    // overhead, which is nanoseconds against the hundred milliseconds below.
+    let started = std::time::Instant::now();
     let clone =
-        copy::copy_file(&big, &cloned, &Options { reflink: true, fsync: true, ..Default::default() });
+        copy::copy_file(&big, &cloned, Options { reflink: true, fsync: true, ..Default::default() });
+    let clone_took = started.elapsed();
     settle(&cloned);
     let free_after_clone = free_bytes(src);
 
+    let started = std::time::Instant::now();
     let plain = copy::copy_file(
         &big,
         &copied,
         // Both kernel-side paths off: on btrfs and xfs `copy_file_range` is itself
         // a clone, so leaving it on measures nothing.
-        &Options { reflink: false, kernel_copy: false, fsync: true, ..Default::default() },
+        Options { reflink: false, kernel_copy: false, fsync: true, ..Default::default() },
     );
+    let plain_took = started.elapsed();
     settle(&copied);
     let free_after_copy = free_bytes(src);
 
-    let (Ok(c), Ok(p)) = (&clone, &plain) else {
+    let (Ok(c), Ok(_)) = (&clone, &plain) else {
         report.fail(format!("reflink/{pair}"), format!("a copy failed: {clone:?} / {plain:?}"));
         for f in [&big, &cloned, &copied] {
             let _ = std::fs::remove_file(f);
@@ -681,7 +706,7 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
     };
     let clone_cost = free_before.saturating_sub(free_after_clone);
     let copy_cost = free_after_clone.saturating_sub(free_after_copy);
-    let speedup = p.elapsed.as_secs_f64() / c.elapsed.as_secs_f64().max(1e-9);
+    let speedup = plain_took.as_secs_f64() / clone_took.as_secs_f64().max(1e-9);
     let evidence = format!(
         "{} MiB: FICLONE consumed {} KiB of free space in {:.1} ms; a true byte copy of the same \
          file consumed {} KiB in {:.1} ms — {speedup:.0}x faster for {}. copy_file_range is \
@@ -689,9 +714,9 @@ fn reflink(report: &mut Report, target: &Target, src: &Path, pair: &str) {
          before the space is read",
         SIZE / (1 << 20),
         clone_cost / 1024,
-        c.elapsed.as_secs_f64() * 1000.0,
+        clone_took.as_secs_f64() * 1000.0,
         copy_cost / 1024,
-        p.elapsed.as_secs_f64() * 1000.0,
+        plain_took.as_secs_f64() * 1000.0,
         if clone_cost == 0 { "no space at all".to_string() } else { format!("{}x less space", copy_cost / clone_cost.max(1)) }
     );
     // Both halves have to hold, and the second one is what keeps the first
@@ -759,22 +784,25 @@ pub fn fault_enospc(report: &mut Report, mount: &Path, source_bytes: u64, limit:
     // and renames, so a failure at any byte must leave the destination name
     // absent — not empty, absent.
     let before: Vec<_> = entries(mount);
-    let result = copy::copy_file(&source, &dest, &Options { fsync: true, ..Default::default() });
+    let result = copy::copy_file(&source, &dest, Options { fsync: true, ..Default::default() });
     let after: Vec<_> = entries(mount);
     let leftover: Vec<&String> = after.iter().filter(|n| !before.contains(n)).collect();
     let evidence = match &result {
         Ok(c) => format!("the copy succeeded, {} bytes — the fault did not fire", c.bytes),
-        Err(f) => format!(
-            "failed at {} with {:?} after {} of {source_bytes} bytes, {} short of the file; \
-             the destination filesystem accepted {limit} bytes",
-            f.stage,
-            f.errno,
-            f.bytes_written,
-            source_bytes - f.bytes_written.min(source_bytes)
+        // **How far it got is no longer reported, and does not need to be.**
+        // The forked engine returned a `bytes_written`; `sk-fs` returns a
+        // `Problem`, and what this check asserts was never the count — it is that
+        // the failure is `ENOSPC` and that the destination *name* is absent
+        // rather than empty. The count only ever decorated the sentence, and the
+        // injected filesystem's own `limit` says the same thing from the outside.
+        Err(problem) => format!(
+            "failed with {problem}, against a {source_bytes}-byte source; the destination \
+             filesystem accepted {limit} bytes"
         ),
     };
     let clean = leftover.is_empty() && !dest.exists();
-    let failed_with_enospc = matches!(&result, Err(f) if f.errno == Errno::NOSPC);
+    let failed_with_enospc =
+        matches!(&result, Err(problem) if problem.kind() == sk_model::ProblemKind::Full);
     report.record(
         "enospc",
         if failed_with_enospc && clean { Outcome::Pass } else { Outcome::Fail },
@@ -793,15 +821,16 @@ pub fn fault_eio(report: &mut Report, mount: &Path, dest_dir: &Path, limit: u64)
     let source = mount.join("source.bin");
     let dest = dest_dir.join("from-failing-disk.bin");
     let _ = std::fs::remove_file(&dest);
-    let result = copy::copy_file(&source, &dest, &Options::default());
+    let result = copy::copy_file(&source, &dest, Options::default());
     let evidence = match &result {
         Ok(c) => format!("the copy reported success with {} bytes — a truncated file", c.bytes),
-        Err(f) => format!(
-            "failed at {} with {:?} after {} bytes, with the fault set at {limit}",
-            f.stage, f.errno, f.bytes_written
-        ),
+        Err(problem) => format!("failed with {problem}, with the fault set at {limit}"),
     };
-    let ok = matches!(&result, Err(f) if f.errno == Errno::IO) && !dest.exists();
+    // `EIO` has no kind of its own — a disk that will not read is `Unreadable`,
+    // which is exactly what it is — so the errno is asked for by name in the
+    // chain the `Problem` carries for the log.
+    let ok = matches!(&result, Err(problem) if problem.detail().contains("Input/output error"))
+        && !dest.exists();
     report.record(
         "eio",
         if ok { Outcome::Pass } else { Outcome::Fail },
@@ -821,21 +850,17 @@ pub fn fault_no_xattr(report: &mut Report, mount: &Path, src_dir: &Path) {
     fs::setxattr(&source, "user.skerry.one", b"first", fs::XattrFlags::empty()).ok();
     fs::setxattr(&source, "user.skerry.two", b"second", fs::XattrFlags::empty()).ok();
     let dest = mount.join("with-attrs.bin");
-    let result = copy::copy_file(&source, &dest, &Options::default());
+    let result = copy::copy_file(&source, &dest, Options::default());
     let evidence = match &result {
         Ok(c) => format!(
             "the copy completed with {} bytes and reported {} attributes as unpreservable: {}",
             c.bytes,
             c.unpreserved.len(),
-            c.unpreserved
-                .iter()
-                .map(|(n, e)| format!("{n} ({e:?})"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            c.unpreserved.join(", ")
         ),
-        Err(f) => format!("the copy failed at {} with {:?}", f.stage, f.errno),
+        Err(problem) => format!("the copy failed with {problem}"),
     };
-    let ok = matches!(&result, Ok(c) if c.unpreserved.iter().any(|(n, _)| n.starts_with("user.")));
+    let ok = matches!(&result, Ok(c) if c.unpreserved.iter().any(|n| n.starts_with("user.")));
     report.record("no-xattr", if ok { Outcome::Pass } else { Outcome::Fail }, evidence);
     let _ = std::fs::remove_file(&source);
 }
@@ -851,7 +876,7 @@ pub fn fault_short_write(report: &mut Report, mount: &Path, src_dir: &Path, chun
         return;
     }
     let dest = mount.join("short-write.bin");
-    let result = copy::copy_file(&source, &dest, &Options::default());
+    let result = copy::copy_file(&source, &dest, Options::default());
     let evidence = match &result {
         Ok(c) => {
             let diff = verify::first_difference(&source, &dest);
@@ -859,11 +884,11 @@ pub fn fault_short_write(report: &mut Report, mount: &Path, src_dir: &Path, chun
                 "{} bytes written {} bytes at a time via {}; first difference from the source: {:?}",
                 c.bytes,
                 chunk,
-                c.strategy.name(),
+                tree::strategy_name(c.strategy),
                 diff
             )
         }
-        Err(f) => format!("failed at {} with {:?} after {} bytes", f.stage, f.errno, f.bytes_written),
+        Err(problem) => format!("failed with {problem}"),
     };
     let ok = matches!(&result, Ok(_))
         && matches!(verify::first_difference(&source, &dest), Ok(None));
@@ -877,7 +902,7 @@ pub fn fault_short_write(report: &mut Report, mount: &Path, src_dir: &Path, chun
 /// that do not exist were never started.
 pub fn fault_tree_enospc(report: &mut Report, mount: &Path, src: &Path, limit: u64) {
     let dst = mount.join("tree");
-    let t = crate::tree::copy_tree(src, &dst, &Options::default());
+    let t = crate::tree::copy_tree(src, &dst, Options::default());
     // Whatever arrived must be byte-exact. A short file would mean the failure
     // was reported for one file while another was quietly truncated.
     let mut incomplete = Vec::new();

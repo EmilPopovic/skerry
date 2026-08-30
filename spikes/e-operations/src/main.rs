@@ -13,7 +13,6 @@ use std::time::Duration;
 
 mod checks;
 mod fixture;
-mod copy;
 mod probe;
 mod report;
 mod tree;

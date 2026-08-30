@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{self, AtFlags, Mode, OFlags};
 
-use crate::copy::{self, Failed, Options, Placement};
+use sk_fs::copy::{self, Options, Placement};
+use sk_model::Problem;
 
 #[derive(Default)]
 pub struct Tree {
@@ -28,22 +29,33 @@ pub struct Tree {
     /// rather than copied again.
     pub relinked: usize,
     pub strategies: BTreeMap<&'static str, usize>,
-    pub unpreserved: Vec<(PathBuf, String, rustix::io::Errno)>,
-    pub failures: Vec<(PathBuf, Failed)>,
+    /// Metadata the destination would not take. No errno beside it any more:
+    /// `sk-fs` reports *what* it could not preserve and puts the reason in the
+    /// `Problem` chain, and this walker's job is to count, not to diagnose.
+    pub unpreserved: Vec<(PathBuf, String)>,
+    pub failures: Vec<(PathBuf, Problem)>,
     /// Temporary files that survived a successful copy. Any entry is a defect.
     pub orphans: Vec<PathBuf>,
 }
 
+pub fn strategy_name(s: sk_fs::copy::Strategy) -> &'static str {
+    match s {
+        sk_fs::copy::Strategy::Reflink => "FICLONE",
+        sk_fs::copy::Strategy::KernelCopy => "copy_file_range",
+        sk_fs::copy::Strategy::ReadWrite => "read/write",
+    }
+}
+
 fn placement_name(p: Placement) -> &'static str {
     match p {
-        Placement::RenameNoReplace => "renameat2(NOREPLACE)",
+        Placement::NoReplace => "renameat2(NOREPLACE)",
         Placement::LinkThenUnlink => "link+unlink",
         Placement::CheckThenRename => "stat+rename (not atomic)",
         Placement::Replace => "rename (replacing)",
     }
 }
 
-pub fn copy_tree(src: &Path, dst: &Path, o: &Options) -> Tree {
+pub fn copy_tree(src: &Path, dst: &Path, o: Options) -> Tree {
     let mut t = Tree::default();
     // (dev, ino) of a source file to the destination path we already wrote for
     // it. Keyed on the device too, because inode numbers are only unique within
@@ -53,14 +65,10 @@ pub fn copy_tree(src: &Path, dst: &Path, o: &Options) -> Tree {
     t
 }
 
-fn walk(src: &Path, dst: &Path, o: &Options, t: &mut Tree, inodes: &mut BTreeMap<(u64, u64), PathBuf>) {
+fn walk(src: &Path, dst: &Path, o: Options, t: &mut Tree, inodes: &mut BTreeMap<(u64, u64), PathBuf>) {
     if let Err(e) = std::fs::create_dir_all(dst) {
-        t.failures.push((dst.to_path_buf(), Failed {
-            errno: e.raw_os_error().map(rustix::io::Errno::from_raw_os_error).unwrap_or(rustix::io::Errno::IO),
-            stage: "mkdir",
-            bytes_written: 0,
-            leftover: None,
-        }));
+        let errno = e.raw_os_error().unwrap_or(0);
+        t.failures.push((dst.to_path_buf(), copy::problem_for(errno, dst, "mkdir")));
         return;
     }
     t.dirs += 1;
@@ -79,12 +87,13 @@ fn walk(src: &Path, dst: &Path, o: &Options, t: &mut Tree, inodes: &mut BTreeMap
         if kind == fs::FileType::Symlink {
             match copy_symlink(&from, &to) {
                 Ok(()) => t.symlinks += 1,
-                Err(e) => t.failures.push((from.clone(), Failed {
-                    errno: e,
-                    stage: "symlink",
-                    bytes_written: 0,
-                    leftover: None,
-                })),
+                // Classified by `sk-fs` rather than here: a symlink this walker
+                // could not create fails for the same reasons a file does, and a
+                // second table would be the fork all over again in miniature.
+                Err(e) => t.failures.push((
+                    from.clone(),
+                    copy::problem_for(e.raw_os_error(), &from, "symlink"),
+                )),
             }
             continue;
         }
@@ -112,13 +121,13 @@ fn walk(src: &Path, dst: &Path, o: &Options, t: &mut Tree, inodes: &mut BTreeMap
         match copy::copy_file(&from, &to, o) {
             Ok(c) => {
                 t.files += 1;
-                *t.strategies.entry(c.strategy.name()).or_insert(0) += 1;
+                *t.strategies.entry(strategy_name(c.strategy)).or_insert(0) += 1;
                 *t.placements.entry(placement_name(c.placement)).or_insert(0) += 1;
                 if let Some(o) = c.orphan {
                     t.orphans.push(o);
                 }
-                for (what, e) in c.unpreserved {
-                    t.unpreserved.push((from.clone(), what, e));
+                for what in c.unpreserved {
+                    t.unpreserved.push((from.clone(), what));
                 }
                 if st.st_nlink > 1 {
                     inodes.insert(key, to.clone());

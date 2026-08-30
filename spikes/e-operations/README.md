@@ -31,6 +31,15 @@ outlives the spike: [08-roadmap.md](../../docs/08-roadmap.md) says "this spike
 becomes the permanent torture matrix", and every other spike's code is thrown
 away.
 
+**It tests `sk-fs::copy`, and it did not always.** The engine here was ported
+into the product and the matrix kept exercising its own copy of it — so the gate
+above was a gate over a fork, and two engines that agreed on the day of the port
+could stop agreeing with nothing failing. The spike now takes `sk-fs`, `sk-util`
+and `sk-model` as path dependencies and its own 510-line `copy.rs` is deleted. A
+standalone `[workspace]` turns out to be no obstacle to that at all: a path
+dependency resolves its own workspace inheritance from its own directory, which
+is what the roadmap assumed it could not do.
+
 That changes how it is built. The other spikes measure one thing quickly. This one
 is written to be **re-run against a filesystem it has never seen**, because the
 list of filesystems is not knowable in advance — it is whatever the user's machine
