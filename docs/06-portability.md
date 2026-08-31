@@ -39,6 +39,7 @@ portability contract, and each row has a test that forces the fallback path.
 | `fanotify` with FID | Requires privilege | inotify, which is the default path |
 | A notification daemon | D-Bus name | In-app toasts only |
 | `ffmpeg` / document renderer helpers | `PATH` lookup at first use | That preview kind is unavailable; nothing else changes |
+| `wl_pointer.axis_source` and `.axis_stop` | The events arrive, or they do not | No flick: a touchpad's deltas are still tracked 1:1, and a gesture that ends has no end to detect, so the list stops where the fingers stopped. **X11 is this case permanently** — core buttons 4 to 7 are notches with no source and no end |
 
 Two rules govern this table:
 

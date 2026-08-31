@@ -1185,6 +1185,23 @@ impl App {
         if self.dirty {
             return Some(Duration::ZERO);
         }
+        // **An animation owes the next frame and nothing else will ask for it.**
+        // This loop requests no `wl_surface.frame` callbacks, so after a frame is
+        // submitted the only things that wake it are input, a job and the
+        // deadlines below. A scroll that eased part of the way and then slept
+        // simply stopped there — and since `advance` is handed the time since the
+        // *last* frame, which after an idle window is seconds, a wheel notch
+        // covered its whole distance in one frame and landed as a jump. Which is
+        // the thing the easing exists to prevent.
+        //
+        // `Scroll::animating` was written for this and had no caller. Zero rather
+        // than a frame interval because presentation is `PresentMode::Fifo`: the
+        // submit blocks on the vertical blank, so the loop is paced by the
+        // display and asking for a timer would only pick a worse rate than the
+        // one the monitor already has.
+        if self.panes.visible().any(|pane| pane.scroll.animating()) {
+            return Some(Duration::ZERO);
+        }
         // A read that the floor deferred owes a wake-up, or it would wait for
         // whatever the user does next.
         let deadlines = [
@@ -1375,9 +1392,16 @@ impl App {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
-        if self.panes.focused_mut().scroll.advance(elapsed) {
-            self.dirty = true;
+        // **Every visible pane, not only the focused one.** A pane scrolls when
+        // the pointer is over it whether or not it holds the keyboard, so a fling
+        // in one half of a split would otherwise freeze mid-flight the moment the
+        // other half took focus, and an unfocused pane's wheel easing would never
+        // arrive at all.
+        let mut moved = false;
+        for pane in self.panes.visible_mut() {
+            moved |= pane.scroll.advance(elapsed);
         }
+        self.dirty |= moved;
         if !self.typed.is_empty() && self.typed_at.elapsed() > TYPE_AHEAD_WINDOW {
             self.typed.clear();
             self.dirty = true;
@@ -1506,28 +1530,10 @@ impl App {
                 Button::Secondary if *pressed => self.open_menu(*position),
                 _ => {}
             },
-            Event::Scroll { delta, precise, mods } => {
-                // The palette takes the wheel while it is open. Without this the
-                // twelfth result of fifty is unreachable by pointer alone, and
-                // the listing scrolls behind a panel covering it.
-                if mods.ctrl && self.palette.is_none() && self.menu.is_none() {
-                    // What `Ctrl` and a wheel do in every list and every
-                    // browser, and the pointer's half of what a pinch does.
-                    self.zoom_by(if delta.y < 0.0 { 1 } else { -1 });
-                } else if let Some(palette) = self.palette.as_mut() {
-                    palette.wheel(delta.y);
-                } else if self.menu.is_some() {
-                    // A menu taller than the window scrolls; one that fits does
-                    // not move, and neither does the list behind it.
-                    let room = self.layout.window.height - crate::menu::MARGIN * 2.0;
-                    if let Some(menu) = self.menu.as_mut() {
-                        menu.wheel(delta.y, room);
-                    }
-                } else {
-                    self.panes.focused_mut().scroll.by(delta.y, *precise);
-                }
-                self.dirty = true;
+            Event::Scroll { delta, precise, time, mods } => {
+                self.scrolled(*delta, *precise, *time, *mods);
             }
+            Event::ScrollEnded { time } => self.scroll_released(*time),
             // **Three fingers, not two.** Two-finger movement on a touchpad is
             // scroll and arrives as `Scroll`; a compositor that also reported it
             // as a swipe would navigate while the list moved.
@@ -1880,11 +1886,19 @@ impl App {
     fn settle_rows(&mut self) {
         self.settle_views();
         self.rebandif_needed();
+        // **Every leaf, because every leaf can be scrolled.** A pane whose extent
+        // is never set clamps every scroll against a `max` of zero, so the wheel
+        // over the unfocused half of a split moved nothing whatsoever.
+        let leaves = std::mem::take(&mut self.placement.leaves);
+        for layout in &leaves {
+            let Some(tabs) = self.panes.leaf(layout.id) else { continue };
+            let content = self.cells_of(layout, tabs.showing()).content_height();
+            if let Some(tabs) = self.panes.leaf_mut(layout.id) {
+                tabs.showing_mut().scroll.set_extent(content, layout.body.height);
+            }
+        }
+        self.placement.leaves = leaves;
         let cells = self.cells();
-        self.panes
-            .focused_mut()
-            .scroll
-            .set_extent(cells.content_height(), self.placement.here.body.height);
         let visible = cells.visible(self.panes.focused().scroll.offset());
         let Self { measurer, panes, jobs, .. } = self;
         measurer.update(panes.focused_mut(), visible, jobs);
@@ -2927,6 +2941,67 @@ impl App {
             .iter()
             .find(|divider| divider.area.contains(position.x, position.y))
             .map(|divider| divider.id)
+    }
+
+    /// A wheel notch or a touchpad delta, wherever it belongs.
+    fn scrolled(&mut self, delta: Point, precise: bool, time: u32, mods: sk_plat::Modifiers) {
+        // The palette takes the wheel while it is open. Without this the twelfth
+        // result of fifty is unreachable by pointer alone, and the listing
+        // scrolls behind a panel covering it.
+        if mods.ctrl && self.palette.is_none() && self.menu.is_none() {
+            // What `Ctrl` and a wheel do in every list and every browser, and
+            // the pointer's half of what a pinch does.
+            self.zoom_by(if delta.y < 0.0 { 1 } else { -1 });
+        } else if let Some(palette) = self.palette.as_mut() {
+            palette.wheel(delta.y);
+        } else if self.menu.is_some() {
+            // A menu taller than the window scrolls; one that fits does not
+            // move, and neither does the list behind it.
+            let room = self.layout.window.height - crate::menu::MARGIN * 2.0;
+            if let Some(menu) = self.menu.as_mut() {
+                menu.wheel(delta.y, room);
+            }
+        } else {
+            let id = self.scrolling_pane();
+            if let Some(leaf) = self.panes.leaf_mut(id) {
+                leaf.showing_mut().scroll.by(delta.y, precise, time);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// **The fingers left the pad**, and the list is thrown if they were moving.
+    ///
+    /// Only ever sent for a touchpad, and only on Wayland: a wheel has no end and
+    /// X11 reports no source. Does nothing at all when the fingers had come to
+    /// rest, and nothing when a panel took the gesture — the pane saw no sample,
+    /// so there is no velocity to throw and no guard needed for one.
+    fn scroll_released(&mut self, time: u32) {
+        let id = self.scrolling_pane();
+        let thrown = self.panes.leaf_mut(id).is_some_and(|leaf| {
+            let scroll = &mut leaf.showing_mut().scroll;
+            scroll.released(time);
+            scroll.animating()
+        });
+        // A lift that threw nothing is not a frame: the list is already drawn
+        // where the finger stopped it.
+        self.dirty |= thrown;
+    }
+
+    /// The pane a scroll is about.
+    ///
+    /// **The one under the pointer, whichever pane holds the keyboard.** That is
+    /// what every list in every application does, and a split makes the
+    /// difference obvious: hovering one half and turning the wheel used to move
+    /// the other. The whole leaf rather than its body, because a tab strip and a
+    /// column header are part of the same list to look at, and a wheel that dies
+    /// over the header is a worse surprise than one that scrolls.
+    ///
+    /// Falls back to the focused pane when the pointer is over no pane at all —
+    /// the sidebar, a window edge, or a position never reported because nothing
+    /// has moved the pointer yet.
+    fn scrolling_pane(&self) -> crate::panes::PaneId {
+        self.leaf_at(self.pointer).unwrap_or_else(|| self.panes.focus())
     }
 
     /// The leaf `position` is inside.

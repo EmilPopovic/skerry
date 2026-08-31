@@ -210,8 +210,32 @@ pub enum Event {
         /// Whether this came from a touchpad, which sends continuous deltas
         /// worth animating, rather than a wheel, which sends notches.
         precise: bool,
+        /// The display server's millisecond clock, which wraps every 49 days on
+        /// both of them.
+        ///
+        /// **Carried because a finger's speed is the device's measurement, not
+        /// ours.** Reading a clock when the event is handled divides the distance
+        /// by however late the frame loop was, and this loop is allowed to be
+        /// late; four events drained in one pass would read as an infinite speed.
+        time: u32,
         /// What is held.
         mods: Modifiers,
+    },
+    /// The fingers left the touchpad, ending a scroll gesture.
+    ///
+    /// `wl_pointer.axis_stop`, which only a finger or continuous source sends —
+    /// a wheel has no end. It is the only thing that separates "the list stopped
+    /// because the finger stopped" from "the finger left while still moving", so
+    /// it is the only thing a fling can be started from.
+    ///
+    /// **Never sent on X11.** That backend reads core button 4 to 7 presses,
+    /// which are notches with no source and no end, the same reason
+    /// [`Capabilities::gestures`](crate::Capabilities::gestures) is false there.
+    ScrollEnded {
+        /// The display server's millisecond clock, as on [`Event::Scroll`]. How
+        /// old the last movement is decides whether the fingers left at speed or
+        /// had already come to rest.
+        time: u32,
     },
     /// A drag from another application arrived over the window.
     DragEntered {

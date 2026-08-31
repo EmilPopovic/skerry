@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 99
+FEWEST_SCENARIOS = 100
 
 
 def scenario(name, fresh: bool = False):
@@ -1439,23 +1439,19 @@ def pointer_rubber_band(run: Run, fixture: Path) -> None:
         raise Failure(f"a rubber band across several rows selected {banded['selected']}")
 
 
-@scenario("pointer-scroll", fresh=True)
-def pointer_scroll(run: Run, fixture: Path) -> None:
-    """A wheel notch scrolls the list.
+def fill_until_scrollable(run: Run, fixture: Path) -> dict:
+    """Puts two hundred files in `fixture` and waits for the rows to arrive.
 
-    **Its own fixture, filled until there is somewhere to scroll to.** This used
-    to run against the shared nine-row fixture and return early because the
-    content was shorter than the window — so it passed without asserting
-    anything, for as long as it existed, while `skerry-drive` sent a scroll the
-    compositor translated to a delta of zero. A test that can only pass has
-    measured nothing; see docs/12-measurement.md.
+    **A scroll test whose content fits the window asserts nothing.** The wheel
+    scenario used to run against the shared nine-row fixture and return early for
+    exactly that reason, so it passed for as long as it existed while
+    `skerry-drive` sent a scroll the compositor translated to a delta of zero.
+    See docs/12-measurement.md.
     """
-    run.drive("sleep 400\nkey f12\nsleep 100\n")
-    start = run.state()
     for index in range(200):
         (fixture / f"filler-{index:03}.txt").write_text("x")
     # inotify, rather than a reload: the rows have to arrive by themselves for
-    # the assertion below to be about scrolling and not about `F5`.
+    # what follows to be about scrolling and not about `F5`.
     for _ in range(40):
         run.drive("sleep 150\nkey f12\nsleep 50\n")
         filled = run.state()
@@ -1463,9 +1459,18 @@ def pointer_scroll(run: Run, fixture: Path) -> None:
             break
     else:
         raise Failure(f"the filler files never arrived: {filled['rows']} rows")
-    content = int(filled["rows"]) * float(filled["row_h"])
-    if content <= float(filled["body_height"]):
+    if int(filled["rows"]) * float(filled["row_h"]) <= float(filled["body_height"]):
         raise Failure(f"{filled['rows']} rows still fit in {filled['body_height']}")
+    return filled
+
+
+@scenario("pointer-scroll", fresh=True)
+def pointer_scroll(run: Run, fixture: Path) -> None:
+    """A wheel notch scrolls the list, and its own fixture gives it somewhere to
+    scroll to."""
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    start = run.state()
+    fill_until_scrollable(run, fixture)
 
     run.drive("move 50 50\nsleep 150\nscroll 5\nsleep 400\nkey f12\nsleep 200\n")
     after = run.state()
@@ -1475,6 +1480,46 @@ def pointer_scroll(run: Run, fixture: Path) -> None:
     run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 400\nkey f12\nsleep 200\n")
     if float(run.state()["scroll"]) >= float(after["scroll"]):
         raise Failure("scrolling up moved nothing")
+
+
+@scenario("touchpad-flick", fresh=True)
+def touchpad_flick(run: Run, fixture: Path) -> None:
+    """The fingers leave the pad at speed and the list keeps going.
+
+    **Differential, because the distance is not ours to predict.** A compositor
+    applies its own factor to a finger's scroll, so an absolute assertion here
+    would be about Hyprland's configuration rather than about this code. The same
+    twenty deltas are sent twice — once lifting the moment they stop, once resting
+    300 ms first — and only the first should coast past where the finger left off.
+    That is the whole of the feature: a lift at speed throws the list, a lift at
+    rest does not.
+
+    It also covers the thing that made a flick impossible before it existed. The
+    frame loop requests no frame callbacks, so an animation only continues if
+    `App::timeout` says a frame is owed; without that, a fling moved for one frame
+    and then slept, which is a coast of about three per cent.
+    """
+    if isinstance(SERVER, X11Server):
+        raise Skipped("X11 core events are wheel buttons: no finger source, no axis_stop")
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    fill_until_scrollable(run, fixture)
+
+    def travel(hold: int) -> float:
+        # Home first, so each gesture starts from the top and neither of them
+        # measures the tail of the other.
+        run.drive("key home\nsleep 300\nkey f12\nsleep 150\n")
+        before = float(run.state()["scroll"])
+        run.drive(
+            f"move 50 50\nsleep 150\nflick 16 20 {hold}\nsleep 800\nkey f12\nsleep 200\n"
+        )
+        return float(run.state()["scroll"]) - before
+
+    at_rest = travel(300)
+    if at_rest <= 0.0:
+        raise Failure(f"the gesture itself moved nothing: {at_rest}")
+    thrown = travel(0)
+    if thrown < at_rest * 1.25:
+        raise Failure(f"a lift at speed travelled {thrown} against {at_rest} for one at rest")
 
 
 @scenario("type-ahead")

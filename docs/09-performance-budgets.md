@@ -171,6 +171,26 @@ on each binary — the frame the read lands on, which is the row above and not t
 change. The spread is wider than the difference, so what this records is the
 absence of a regression rather than a gain.
 
+**Scrolling every visible pane rather than the focused one costs 0.006 ms a
+frame.** A scroll now goes to the pane under the pointer, which means every leaf
+needs an extent every frame and every leaf's animation needs advancing — three
+per-frame loops over the leaves where there was one call on the focused pane.
+Seven interleaved pairs of `--bench 400` at 200,000 entries, load average 2.3:
+p50 median **0.196 ms before, 0.202 ms after**; p99 medians 0.758 and 0.912 with
+the two ranges overlapping across most of their width (before 0.639–1.182, after
+0.691–1.246), which is load rather than the change.
+
+Both arms read high against the 0.342 ms in the row above, and that is the point
+of interleaving: the earlier figure was taken on an idle machine and this pair was
+not, so the absolute numbers here are worth nothing and the difference between
+them is worth everything. Three per cent of p50 and 0.07% of the 8 ms budget.
+
+**The animation that never got a second frame is not in any number**, because it
+never cost time — it cost frames that were never requested. The loop asks for no
+`wl_surface.frame` callbacks, so `App::timeout` is the complete list of things
+that can continue without input, and a scroll animation was not on it. See
+[12-measurement.md](12-measurement.md#an-accessor-written-for-a-caller-that-never-arrived).
+
 **What the row mark costs: 0.012 ms a frame.** Colouring a row by the kind of
 file it names asks `MimeDatabase::by_name` once per visible row per frame — a
 hash lookup and, for the four globs on this machine that are not `*.ext`, a short

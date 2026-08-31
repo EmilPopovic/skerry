@@ -56,6 +56,20 @@ struct PendingScroll {
     distance: Point,
     precise: bool,
     any: bool,
+    /// `axis_stop`: the fingers left the pad. Sent for a finger or continuous
+    /// source and never for a wheel, and it arrives with no axis value of its
+    /// own — so it cannot ride on `any`, which is what a distance sets.
+    stopped: bool,
+    /// The server's millisecond clock, from whichever event in this frame carried
+    /// one.
+    ///
+    /// `axis` and `axis_stop` are timestamped; `axis_value120` and
+    /// `axis_discrete` are not, which is why this is recorded rather than taken
+    /// from the event that decided the distance. A frame that somehow carried
+    /// neither reports zero, and a velocity wants two samples with a span between
+    /// them — so the honest consequence is a wheel that scrolls and a flick that
+    /// does not throw, rather than a speed invented from nothing.
+    time: u32,
 }
 
 impl PendingScroll {
@@ -69,6 +83,21 @@ impl PendingScroll {
             return scale(self.notches, WHEEL_NOTCH);
         }
         self.distance
+    }
+
+    /// What one `frame` is worth: a distance if any axis moved, and whether the
+    /// gesture ended with it.
+    ///
+    /// Both, because the protocol permits `axis_stop` in the same frame as the
+    /// last distance and every compositor measured here does exactly that. A
+    /// frame that only stopped still has to be reported, or a fling never starts.
+    fn emit(&self) -> (Option<Point>, bool) {
+        // `any` is set by an axis event of any value, and a compositor marking
+        // the end of a gesture sends one of zero beside `axis_stop`. Reporting
+        // it would cost a redraw that changes no pixel, and downstream it looks
+        // exactly like a finger that came to rest at speed.
+        let moved = self.resolve();
+        ((self.any && (moved.x != 0.0 || moved.y != 0.0)).then_some(moved), self.stopped)
     }
 }
 
@@ -391,17 +420,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 let amount = discrete as f32;
                 accumulate(&mut seat.scroll.notches, &mut seat.scroll.any, axis, amount);
             }
-            wl_pointer::Event::Axis { axis, value, .. } => {
+            wl_pointer::Event::Axis { axis, value, time } => {
                 let amount = value as f32;
+                seat.scroll.time = time;
                 accumulate(&mut seat.scroll.distance, &mut seat.scroll.any, axis, amount);
             }
-            wl_pointer::Event::Frame if seat.scroll.any => {
+            wl_pointer::Event::AxisStop { time, .. } => {
+                seat.scroll.stopped = true;
+                seat.scroll.time = time;
+            }
+            wl_pointer::Event::Frame if seat.scroll.any || seat.scroll.stopped => {
                 let scroll = std::mem::take(&mut seat.scroll);
-                state.events.push_back(Event::Scroll {
-                    delta: scroll.resolve(),
-                    precise: scroll.precise,
-                    mods: seat.mods,
-                });
+                let (delta, ended) = scroll.emit();
+                let time = scroll.time;
+                if let Some(delta) = delta {
+                    let precise = scroll.precise;
+                    state.events.push_back(Event::Scroll { delta, precise, time, mods: seat.mods });
+                }
+                if ended {
+                    state.events.push_back(Event::ScrollEnded { time });
+                }
             }
             _ => {}
         }
@@ -524,6 +562,41 @@ mod tests {
             ..Default::default()
         };
         assert!((all.resolve().y - WHEEL_NOTCH / 2.0).abs() < f32::EPSILON);
+    }
+
+    /// A frame that only stopped carries no distance and still has to be
+    /// reported, and a frame that did both reports both — the protocol permits
+    /// `axis_stop` beside the last distance, and a fling started from the frame
+    /// after would start from a velocity one event stale.
+    #[test]
+    fn a_frame_that_only_stopped_is_still_a_frame_worth_reporting() {
+        let stopped = PendingScroll { stopped: true, ..Default::default() };
+        assert_eq!(stopped.emit(), (None, true));
+
+        let both = PendingScroll {
+            distance: Point::new(0.0, 4.0),
+            precise: true,
+            any: true,
+            stopped: true,
+            ..Default::default()
+        };
+        let (delta, ended) = both.emit();
+        assert!(delta.is_some_and(|delta| (delta.y - 4.0).abs() < f32::EPSILON));
+        assert!(ended);
+
+        assert_eq!(PendingScroll::default().emit(), (None, false));
+
+        // The shape a compositor actually sends to mark the end: an axis of
+        // zero and the stop together. The distance is not worth a frame; the
+        // stop is the only thing in it.
+        let marker = PendingScroll {
+            distance: Point::new(0.0, 0.0),
+            precise: true,
+            any: true,
+            stopped: true,
+            ..Default::default()
+        };
+        assert_eq!(marker.emit(), (None, true));
     }
 
     /// A touchpad sends a real distance and nothing else, and that distance is

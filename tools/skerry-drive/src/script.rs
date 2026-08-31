@@ -58,6 +58,17 @@ pub enum Action {
     Scroll {
         notches: i32,
     },
+    /// A two-finger touchpad gesture that ends with the fingers leaving the pad.
+    ///
+    /// `hold` is how long they rest before lifting, which is the difference
+    /// between a flick and a drag that stopped — and the only way to test one
+    /// against the other without asserting an absolute distance that whatever
+    /// scroll factor the compositor applies would decide.
+    Flick {
+        pixels: i32,
+        events: u32,
+        hold: u32,
+    },
     Sleep {
         milliseconds: u32,
     },
@@ -127,6 +138,18 @@ fn step(verb: &str, rest: &[&str]) -> Result<Vec<Action>, String> {
             let amount = rest.first().ok_or("scroll needs a number")?;
             let notches: i32 = amount.parse().map_err(|_| format!("`{amount}` is not a number"))?;
             Ok(vec![Action::Scroll { notches }])
+        }
+        "flick" => {
+            if rest.len() < 2 || rest.len() > 3 {
+                return Err("flick needs pixels, events and optionally a hold".into());
+            }
+            let pixels = rest[0].parse().map_err(|_| format!("`{}` is not a number", rest[0]))?;
+            let events = rest[1].parse().map_err(|_| format!("`{}` is not a number", rest[1]))?;
+            let hold = match rest.get(2) {
+                Some(word) => word.parse().map_err(|_| format!("`{word}` is not a number"))?,
+                None => 0,
+            };
+            Ok(vec![Action::Flick { pixels, events, hold }])
         }
         "sleep" => {
             let amount = rest.first().ok_or("sleep needs milliseconds")?;
@@ -426,6 +449,16 @@ mod tests {
         let actions = parse(script).expect("parsed");
         assert!(actions.iter().any(|action| matches!(action, Action::Drag { .. })));
         assert!(actions.contains(&Action::Scroll { notches: -3 }));
+        assert_eq!(
+            parse("flick 16 20").as_deref(),
+            Ok([Action::Flick { pixels: 16, events: 20, hold: 0 }].as_slice()),
+            "a flick with no hold lifts the moment it stops moving"
+        );
+        assert_eq!(
+            parse("flick -8 12 300").as_deref(),
+            Ok([Action::Flick { pixels: -8, events: 12, hold: 300 }].as_slice())
+        );
+        assert!(parse("flick 16").is_err(), "pixels alone is not a gesture");
         assert!(actions.contains(&Action::Click { button: Button::Right, times: 1 }));
         assert!(actions.contains(&Action::Sleep { milliseconds: 250 }));
     }

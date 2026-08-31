@@ -1403,3 +1403,61 @@ be a fraction reads one of them.
 The general form, which is the same shape as every other rule in this file: an
 instrument that reports the right answer for the wrong reason is not an
 instrument. It is a coincidence with a test name.
+
+## An accessor written for a caller that never arrived
+
+`Scroll::animating` returned whether a scroll owed another frame. Its doc comment
+said so — "whether an animation is in flight, and therefore whether the frame
+loop owes another frame" — and it had **no caller anywhere in the workspace**.
+
+Nothing complained. It is `pub` in a library crate, so the dead-code lint has no
+opinion; the crate compiles, the function is tested, and the tests pass. What it
+cost was the feature it existed for. `App::timeout` decides how long the loop may
+sleep, the loop requests no `wl_surface.frame` callbacks, and the scroll animation
+was not among the deadlines — so after a frame was submitted, nothing would wake
+the loop again. Every eased scroll moved once and then slept.
+
+The reason nobody noticed for the life of the code is worth more than the defect.
+`Scroll::advance` is handed the time since the *last* frame, and after an idle
+window that is seconds. `1 - e^(-2/0.03)` is 1.0, so a wheel notch arriving on an
+idle window covered its entire distance in the single frame it got. **The easing
+was not visibly broken. It was invisibly absent** — every notch landed as a jump,
+which is precisely the thing the module's own doc comment says the easing exists
+to prevent.
+
+The scenario that was supposed to cover this asserted the right thing in the
+wrong units:
+
+```python
+if float(after["scroll"]) <= float(start["scroll"]):
+    raise Failure(f"a wheel scroll moved nothing: {after['scroll']}")
+```
+
+A *direction*. Anything that moved down passed, including a list that jumped its
+whole distance in one frame with no animation at all, and including a fling that
+coasted three per cent of the way and stopped. Two of the rules already in this
+file combine into this one: a test that can only pass has measured nothing, and a
+gate nobody has watched fail is decoration.
+
+Three things to take from it.
+
+**An animation is a wake-up, and a wake-up has an owner.** Wherever the loop
+decides how long to sleep is the complete list of things that can continue without
+input. A feature that animates and is not on that list does not animate; it moves
+once. The list is four lines long and it is the one place worth re-reading when
+something moves and then stops.
+
+**A `pub` accessor in a workspace of one binary is dead code the compiler cannot
+see.** The eleven crates here are one application divided into levels, not
+libraries for anybody else — which is stated in the workspace manifest for
+`cargo-deny`'s benefit and is just as true for this. Any accessor whose only
+purpose is to answer one question for one caller is worth grepping for a caller
+the day it is written.
+
+**Assert the distance, not the sign.** The wheel scenario now asserts against a
+fixture filled until the content exceeds the window, and the flick scenario is
+differential: the same twenty deltas sent twice, once lifting at speed and once
+after resting 300 ms, with only the first allowed to coast. A compositor decides
+what a finger's delta is worth, so an absolute number there would be a test of
+Hyprland's configuration — but the *ratio* between a lift at speed and a lift at
+rest is entirely this code's, and it is 1.0 when the feature is missing.

@@ -239,6 +239,8 @@ display — and can be said outright.
   double                two clicks inside the double-click window
   drag 10 20 80 90      press at the first point, move to the second, release
   scroll -3             wheel notches, negative is up
+  flick 16 20 [HOLD]    a touchpad gesture of EVENTS deltas of PIXELS, then the
+                   fingers leave — after resting HOLD ms, if given
   sleep 250             milliseconds";
 
 /// What a backend has to be able to do. Deliberately primitive: every decision
@@ -255,6 +257,19 @@ trait Input {
     fn button(&mut self, button: Button, down: bool);
     /// One wheel notch, negative being up.
     fn notch(&mut self, up: bool);
+    /// One touchpad delta, from a finger source. Positive is down.
+    ///
+    /// Defaulted to a diagnostic rather than to nothing, because a backend that
+    /// cannot express a finger has to say so: X11 core events are wheel buttons
+    /// with no source and no end, so a scenario needing this skips there rather
+    /// than passing against a gesture that never happened.
+    fn finger(&mut self, _pixels: f64) {
+        eprintln!("skerry-drive: this backend cannot send a finger-source scroll");
+    }
+    /// The fingers leaving the pad, which is what ends the gesture.
+    fn finger_stop(&mut self) {
+        eprintln!("skerry-drive: this backend cannot end a scroll gesture");
+    }
     /// Sends everything queued.
     fn flush(&mut self);
     /// A last round trip before the process exits.
@@ -306,6 +321,20 @@ fn play(input: &mut dyn Input, actions: &[Action]) {
                 for _ in 0..notches.abs() {
                     input.notch(*notches < 0);
                 }
+            }
+            // **Paced in real time, not only in the timestamps.** The client
+            // measures a finger's speed from the server's clock, and a compositor
+            // is free to restamp what a virtual pointer sends with its own — so a
+            // burst of twenty events sent in one microsecond would arrive as
+            // twenty events in the same millisecond and have no speed at all.
+            Action::Flick { pixels, events, hold } => {
+                for _ in 0..*events {
+                    input.finger(f64::from(*pixels));
+                    input.flush();
+                    std::thread::sleep(Duration::from_millis(8));
+                }
+                std::thread::sleep(Duration::from_millis(u64::from(*hold)));
+                input.finger_stop();
             }
             Action::Sleep { milliseconds } => {
                 input.flush();
@@ -365,6 +394,26 @@ impl Driver {
         self.time
     }
 
+    /// One touchpad delta: a distance with a finger source and no notch count.
+    ///
+    /// The pair of them is what makes it a touchpad rather than a wheel at the
+    /// far end — `axis_source` decides whether the client tracks the distance 1:1
+    /// or eases a notch, and `axis_discrete` is what a finger does not send.
+    fn delta(&mut self, pixels: f64) {
+        let time = self.tick();
+        self.pointer.axis_source(wl_pointer::AxisSource::Finger);
+        self.pointer.axis(time, wl_pointer::Axis::VerticalScroll, pixels);
+        self.pointer.frame();
+    }
+
+    /// The fingers leaving the pad: `axis_stop`, in its own frame.
+    fn lift(&mut self) {
+        let time = self.tick();
+        self.pointer.axis_source(wl_pointer::AxisSource::Finger);
+        self.pointer.axis_stop(time, wl_pointer::Axis::VerticalScroll);
+        self.pointer.frame();
+    }
+
     /// One wheel notch, as a discrete axis with a source.
     ///
     /// **`axis` alone produced nothing.** Hyprland forwarded a bare
@@ -413,6 +462,14 @@ impl Input for Driver {
 
     fn notch(&mut self, up: bool) {
         self.wheel(up);
+    }
+
+    fn finger(&mut self, pixels: f64) {
+        self.delta(pixels);
+    }
+
+    fn finger_stop(&mut self) {
+        self.lift();
     }
 
     fn flush(&mut self) {

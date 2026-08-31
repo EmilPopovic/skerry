@@ -1065,7 +1065,7 @@ impl Window {
         // and scrolling twice for it is the classic X11 double-scroll.
         if let Some(delta) = wheel_delta(detail) {
             if pressed {
-                self.events.push_back(Event::Scroll { delta, precise: false, mods });
+                self.events.push_back(Event::Scroll { delta, precise: false, time, mods });
             }
             return;
         }

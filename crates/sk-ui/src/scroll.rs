@@ -1,6 +1,6 @@
 //! Scrolling, and which rows a viewport can see.
 //!
-//! Two decisions here are the difference between a list that feels attached to
+//! Three decisions here are the difference between a list that feels attached to
 //! the input device and one that does not:
 //!
 //! * **A touchpad is tracked exactly and a wheel is eased.** A touchpad sends a
@@ -8,6 +8,12 @@
 //!   that reads as lag. A wheel sends a notch, which is a jump, and easing the
 //!   jump over about 90 ms is the whole difference between a list that snaps and
 //!   one that moves.
+//! * **A finger that leaves the pad while still moving throws the list.** The
+//!   distance a flick travels is its velocity when the fingers lifted times
+//!   [`FLING_TAU`], because a velocity decaying as `e^(-t/τ)` covers `v·τ` in
+//!   total — which is exactly the distance the easing below already covers when
+//!   the target is that far away. So a fling is not a second animation. It is
+//!   this one with a longer time constant and a target the finger chose.
 //! * **The animation advances by real elapsed time**, never by frame count.
 //!   Step 2 of the frame loop in
 //!   [docs/04-architecture.md](../../../docs/04-architecture.md#the-frame-loop-precisely)
@@ -29,6 +35,35 @@ const TAU: f32 = 0.030;
 /// a distance no display can show, which is a hole in "zero CPU at idle".
 const SETTLED: f32 = 0.5;
 
+/// Time constant of a fling's decay, in seconds.
+///
+/// Both the friction and the reach, since the two are the same number: a flick
+/// of 3,000 logical pixels a second — a vigorous one — travels 750 px, about
+/// twenty-nine rows at the default row height, and is visually done in a second
+/// and a half.
+const FLING_TAU: f32 = 0.25;
+
+/// The window a finger's velocity is averaged over, in seconds.
+///
+/// Fifty milliseconds is about six events from a 125 Hz touchpad: short enough
+/// that the number describes the end of the gesture rather than its middle, long
+/// enough that one jittery event cannot decide where the list lands.
+const VELOCITY_TAU: f32 = 0.050;
+
+/// Below this many logical pixels a second, a lift is not a flick.
+///
+/// 150 px/s would travel 37 px, under a row and a half. Drifting to a stop over
+/// a distance that small reads as the list failing to settle, so it settles.
+const FLING_MIN: f32 = 150.0;
+
+/// How close a fling has to get before it is over, in logical pixels.
+///
+/// Looser than [`SETTLED`] because an exponential's tail is long: from 750 px at
+/// [`FLING_TAU`] the last half-pixel is a further 800 ms of crawl at a fraction
+/// of a pixel per frame, which reads as the list sticking rather than stopping.
+/// A wheel notch has no tail worth the same licence.
+const FLING_SETTLED: f32 = 1.5;
+
 /// A scroll position in logical pixels, with its easing.
 ///
 /// Logical rather than device, so that a scale change does not move the view and
@@ -40,6 +75,33 @@ pub struct Scroll {
     max: f32,
     /// A position asked for before there was an extent to clamp it against.
     wanted: Option<f32>,
+    /// Whether the animation in flight is a fling rather than a wheel's easing,
+    /// which is the only thing that differs between them.
+    ///
+    /// **Set by [`Scroll::released`] and cleared by every setter that moves the
+    /// target away from the offset**, which is the whole of [`Scroll::by`] and
+    /// [`Scroll::to`]. A new setter that forgets is a wheel notch eased over a
+    /// fling's time constant, eight times too long.
+    flinging: bool,
+    /// The finger's estimated speed in logical pixels a second, positive down.
+    velocity: f32,
+    /// Distance travelled since the last sample that had a span to divide by.
+    ///
+    /// Two events inside one millisecond have no span, and the timestamps are
+    /// milliseconds because that is what both display servers report. Holding the
+    /// distance rather than dropping it means a 1,000 Hz pad measures the same
+    /// speed as a 125 Hz one instead of losing half its travel.
+    pending: f32,
+    /// The display server's millisecond clock at the last sample.
+    ///
+    /// **The device's clock, not this process's.** A velocity taken from
+    /// `Instant::now()` is a velocity divided by however late the frame loop was,
+    /// and this loop is allowed to be late — a flick that lands in the same pass
+    /// as a 200,000-entry listing would arrive as four events in the same instant
+    /// and throw the list three times as far as the finger asked. Wraps every 49
+    /// days on both servers, hence `wrapping_sub`, which is the same reasoning
+    /// the click counter in `sk-plat` records.
+    sampled: Option<u32>,
 }
 
 impl Scroll {
@@ -59,7 +121,7 @@ impl Scroll {
     /// owes another frame.
     #[must_use]
     pub fn animating(&self) -> bool {
-        (self.target - self.offset).abs() > SETTLED
+        (self.target - self.offset).abs() > self.settled()
     }
 
     /// Asks for a position that the extent may not allow yet.
@@ -92,21 +154,115 @@ impl Scroll {
         self.offset = self.offset.clamp(0.0, self.max);
     }
 
-    /// Moves by `delta` logical pixels.
+    /// Moves by `delta` logical pixels, `at` the moment the event arrived.
     ///
     /// `precise` means the delta came from a touchpad, and is applied to the
-    /// visible position immediately with no easing.
-    pub fn by(&mut self, delta: f32, precise: bool) {
+    /// visible position immediately with no easing. `at` is only read for a
+    /// precise delta, where it is what makes a velocity — and therefore a fling
+    /// — knowable; a wheel notch is a distance with no speed attached.
+    pub fn by(&mut self, delta: f32, precise: bool, at: u32) {
+        // A zero delta is a frame some compositors send beside `axis_stop`. It
+        // must not read as a finger that has come to rest, and it must not stop
+        // a fling that the same frame is about to start.
+        if delta == 0.0 {
+            return;
+        }
+        if self.flinging {
+            // A finger back on the pad stops the list where it is. Adding to a
+            // target the fling has not reached yet would jump the view forward
+            // by however much of the fling was left.
+            self.target = self.offset;
+            self.flinging = false;
+        }
+        let before = self.target;
         self.target = (self.target + delta).clamp(0.0, self.max);
         if precise {
             self.offset = self.target;
+            // The distance actually travelled rather than the one asked for, so
+            // a flick against the end of the list carries no velocity into a
+            // fling that could not move anyway.
+            self.sample(self.target - before, at);
         }
+    }
+
+    /// The fingers left the touchpad. Starts a fling if they were still moving.
+    ///
+    /// **A finger that came to rest before it left is not a flick.** Nothing is
+    /// sent while a finger rests, so the last velocity this saw can be seconds
+    /// old and pointing anywhere; it is decayed by the age of the sample it came
+    /// from, which takes 63% of it away over one [`VELOCITY_TAU`] and all but 2%
+    /// over four.
+    pub fn released(&mut self, at: u32) {
+        self.pending = 0.0;
+        let Some(last) = self.sampled.take() else {
+            // No sample means no gesture *here*: a lift belonging to a panel
+            // that took the wheel, or a second `axis_stop` for the same finger.
+            // Without this the velocity of the last real flick is still on hand
+            // and the list throws itself again, under whatever is covering it.
+            self.velocity = 0.0;
+            return;
+        };
+        let idle = at.wrapping_sub(last) as f32 / 1_000.0;
+        self.velocity *= (-idle / VELOCITY_TAU).exp();
+        if self.velocity.abs() < FLING_MIN {
+            self.velocity = 0.0;
+            return;
+        }
+        self.target = (self.offset + self.velocity * FLING_TAU).clamp(0.0, self.max);
+        self.flinging = true;
     }
 
     /// Jumps without easing, for `Home`, `End` and a scrollbar drag.
     pub fn to(&mut self, offset: f32) {
         self.target = offset.clamp(0.0, self.max);
         self.offset = self.target;
+        // A keystroke or a grabbed thumb outranks a fling: the list goes where it
+        // was sent and does not carry on afterwards.
+        self.flinging = false;
+    }
+
+    /// Folds one precise delta into the velocity estimate.
+    ///
+    /// Weighted by how much of the averaging window the sample covers, so a 2 ms
+    /// event and a 20 ms one do not carry the same authority. The first sample of
+    /// a gesture only starts the clock: one event is a distance, not a speed.
+    fn sample(&mut self, moved: f32, at: u32) {
+        self.pending += moved;
+        let Some(last) = self.sampled else {
+            // The first sample of a gesture only starts the clock, and the
+            // gesture before it does not get to lend it a speed: two flicks in a
+            // row would otherwise compound into a third the finger never made.
+            self.sampled = Some(at);
+            self.velocity = 0.0;
+            self.pending = 0.0;
+            return;
+        };
+        let elapsed = at.wrapping_sub(last);
+        if elapsed == 0 {
+            // No span to divide by. `pending` keeps the distance for the next
+            // event that has one.
+            return;
+        }
+        self.sampled = Some(at);
+        let span = elapsed as f32 / 1_000.0;
+        // **Clamped at one, which is what makes a stale sample harmless.** Any
+        // span of a whole [`VELOCITY_TAU`] or more replaces the velocity outright
+        // instead of averaging with it, so a gesture the display server never
+        // ended — X11 sends no stop at all — cannot lend its speed to the next
+        // one however long the window sat idle in between.
+        let weight = (span / VELOCITY_TAU).min(1.0);
+        self.velocity += (std::mem::take(&mut self.pending) / span - self.velocity) * weight;
+    }
+
+    /// The time constant in flight: a wheel notch is a jump to smooth over and a
+    /// fling is a velocity to spend.
+    const fn tau(&self) -> f32 {
+        if self.flinging { FLING_TAU } else { TAU }
+    }
+
+    /// How close is close enough for the animation in flight.
+    const fn settled(&self) -> f32 {
+        if self.flinging { FLING_SETTLED } else { SETTLED }
     }
 
     /// Scrolls the least amount that brings `top..bottom` fully into view.
@@ -125,13 +281,13 @@ impl Scroll {
     /// running.
     pub fn advance(&mut self, elapsed: f32) -> bool {
         let remaining = self.target - self.offset;
-        if remaining.abs() <= SETTLED {
+        if remaining.abs() <= self.settled() {
             self.offset = self.target;
             return false;
         }
         // Exponential approach, framed in real time so that a 4 ms frame and a
         // 40 ms frame land in the same place.
-        self.offset += remaining * (1.0 - (-elapsed / TAU).exp());
+        self.offset += remaining * (1.0 - (-elapsed / self.tau()).exp());
         true
     }
 }
@@ -188,7 +344,24 @@ pub fn visible_rows(offset: f32, height: f32, row_height: f32, rows: usize) -> R
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Scroll, visible_rows};
+    use super::{FLING_TAU, Scroll, visible_rows};
+
+    /// The device clock the tests start from, chosen to be a long way into the
+    /// 49-day wrap so that nothing here depends on an origin of zero.
+    const T0: u32 = 4_000_000_000;
+
+    /// One touchpad event every 8 ms, which is what a 125 Hz pad sends, followed
+    /// by the lift. Returns the scroll and the millisecond the fingers left at.
+    fn flick(speed: f32, events: u32) -> (Scroll, u32) {
+        let mut scroll = Scroll::default();
+        scroll.set_extent(100_000.0, 500.0);
+        for index in 1..=events {
+            scroll.by(speed * 0.008, true, T0.wrapping_add(index * 8));
+        }
+        let lifted = T0.wrapping_add(events * 8);
+        scroll.released(lifted);
+        (scroll, lifted)
+    }
 
     /// A range whose start is past its end is a panic waiting for its first
     /// caller that slices rather than iterates.
@@ -229,11 +402,11 @@ mod tests {
     fn a_touchpad_delta_lands_immediately_and_a_wheel_delta_eases() {
         let mut scroll = Scroll::default();
         scroll.set_extent(10_000.0, 500.0);
-        scroll.by(100.0, true);
+        scroll.by(100.0, true, T0);
         assert!((scroll.offset() - 100.0).abs() < f32::EPSILON, "a touchpad tracks 1:1");
         assert!(!scroll.animating());
 
-        scroll.by(100.0, false);
+        scroll.by(100.0, false, T0);
         assert!((scroll.offset() - 100.0).abs() < f32::EPSILON, "a wheel has not moved yet");
         assert!(scroll.animating());
     }
@@ -243,7 +416,7 @@ mod tests {
         let settle = |steps: u32, step: f32| {
             let mut scroll = Scroll::default();
             scroll.set_extent(10_000.0, 500.0);
-            scroll.by(240.0, false);
+            scroll.by(240.0, false, T0);
             for _ in 0..steps {
                 scroll.advance(step);
             }
@@ -259,7 +432,7 @@ mod tests {
     fn an_animation_ends_rather_than_asymptotically_requesting_frames() {
         let mut scroll = Scroll::default();
         scroll.set_extent(10_000.0, 500.0);
-        scroll.by(240.0, false);
+        scroll.by(240.0, false, T0);
         let mut frames = 0;
         while scroll.advance(0.008) {
             frames += 1;
@@ -290,6 +463,209 @@ mod tests {
         assert!((scroll.offset() - 226.0).abs() < f32::EPSILON, "scrolled by exactly the overflow");
         scroll.reveal(0.0, 26.0, 500.0);
         assert!((scroll.offset() - 0.0).abs() < f32::EPSILON);
+    }
+
+    /// The reach of a flick is its velocity times the time constant, and it is
+    /// proportional to the speed of the finger rather than to the number of
+    /// events the pad happened to send.
+    #[test]
+    fn a_finger_that_leaves_while_moving_throws_the_list() {
+        let (slow, _) = flick(2_000.0, 20);
+        let reach = slow.target() - slow.offset();
+        assert!(reach > 300.0 && reach < 600.0, "2,000 px/s threw the list {reach} px");
+
+        let (fast, _) = flick(4_000.0, 20);
+        let further = fast.target() - fast.offset();
+        assert!(
+            (further / reach - 2.0).abs() < 0.05,
+            "twice the speed threw it {} times as far",
+            further / reach
+        );
+        // Both are still animating, or nothing was thrown at all.
+        assert!(slow.animating() && fast.animating());
+    }
+
+    /// **The case that makes a fling feel possessed.** Nothing is sent while a
+    /// finger rests on the pad, so the last velocity seen can be arbitrarily old;
+    /// a lift after a pause has to fling by nothing at all.
+    #[test]
+    fn a_finger_that_came_to_rest_before_it_left_throws_nothing() {
+        let mut scroll = Scroll::default();
+        scroll.set_extent(100_000.0, 500.0);
+        for index in 1..=20 {
+            scroll.by(16.0, true, T0.wrapping_add(index * 8));
+        }
+        let settled = scroll.offset();
+        // The fingers sat still for 300 ms and then left.
+        scroll.released(T0.wrapping_add(20 * 8 + 300));
+        assert!(!scroll.animating(), "a rest of 300 ms still threw the list");
+        assert!((scroll.target() - settled).abs() < f32::EPSILON);
+    }
+
+    /// One event is a distance, not a speed.
+    #[test]
+    fn one_event_and_a_lift_is_not_a_flick() {
+        let (scroll, _) = flick(4_000.0, 1);
+        assert!(!scroll.animating(), "a single event threw the list");
+    }
+
+    /// A finger back on the pad stops the list where it is.
+    ///
+    /// Adding to a target the fling had not reached would jump the view forward
+    /// by whatever was left of it, and it moves from where it stands instead.
+    #[test]
+    fn a_finger_back_on_the_pad_stops_a_fling_where_it_stands() {
+        let (mut scroll, lifted) = flick(3_000.0, 20);
+        for _ in 0..6 {
+            scroll.advance(0.008);
+        }
+        let standing = scroll.offset();
+        assert!(scroll.target() - standing > 100.0, "the fling had somewhere left to go");
+
+        scroll.by(9.0, true, lifted.wrapping_add(100));
+        assert!(
+            (scroll.offset() - (standing + 9.0)).abs() < 0.01,
+            "the list jumped to {} instead of {}",
+            scroll.offset(),
+            standing + 9.0
+        );
+        assert!(!scroll.animating(), "and it is following the finger, not coasting");
+    }
+
+    /// A fling into the end of the list stops at the end, and stops asking for
+    /// frames — the same hole in "zero CPU at idle" that [`super::SETTLED`]
+    /// exists to close.
+    #[test]
+    fn a_fling_into_the_end_of_a_short_listing_settles_there() {
+        let mut scroll = Scroll::default();
+        scroll.set_extent(900.0, 500.0);
+        for index in 1..=20 {
+            scroll.by(48.0, true, T0.wrapping_add(index * 8));
+        }
+        scroll.released(T0.wrapping_add(20 * 8));
+        let mut frames = 0;
+        while scroll.advance(0.008) {
+            frames += 1;
+            assert!(frames < 1_000, "the fling never settled");
+        }
+        assert!((scroll.offset() - 400.0).abs() < f32::EPSILON, "at {}", scroll.offset());
+    }
+
+    /// **A fling that has landed is over.** The time constant is the only thing
+    /// that differs between the two animations, so a flag left set after one
+    /// settles would ease the next wheel notch over eight times too long.
+    #[test]
+    fn a_landed_fling_leaves_the_next_wheel_notch_eased_as_a_wheel_notch() {
+        let (mut scroll, _) = flick(3_000.0, 20);
+        while scroll.advance(0.008) {}
+        assert!(!scroll.animating());
+
+        let from = scroll.offset();
+        scroll.by(66.0, false, T0.wrapping_add(9_000));
+        scroll.advance(FLING_TAU);
+        // One fling time constant covers 63% of a fling and all but a rounding
+        // error of a wheel notch, which is eight wheel time constants long.
+        let covered = (scroll.offset() - from) / 66.0;
+        assert!(covered > 0.99, "a notch was only {}% delivered in {FLING_TAU} s", covered * 100.0);
+    }
+
+    /// **Milliseconds are what both display servers report**, and a pad that
+    /// reports faster than one has events that share a timestamp. Dropping their
+    /// distance rather than carrying it to the next event with a span would make
+    /// a 2,000 Hz pad measure half the speed a 125 Hz one does.
+    #[test]
+    fn a_pad_reporting_twice_a_millisecond_measures_the_speed_a_slower_one_does() {
+        let (coarse, _) = flick(2_000.0, 20);
+        let by_eights = coarse.target() - coarse.offset();
+
+        // The same 160 ms at the same 2,000 px/s, from a pad reporting every half
+        // millisecond: every second event shares a timestamp with the one before.
+        let mut scroll = Scroll::default();
+        scroll.set_extent(100_000.0, 500.0);
+        for index in 1..=320_u32 {
+            scroll.by(1.0, true, T0.wrapping_add(index / 2));
+        }
+        scroll.released(T0.wrapping_add(160));
+        let by_halves = scroll.target() - scroll.offset();
+        assert!(
+            (by_halves / by_eights - 1.0).abs() < 0.05,
+            "a half-millisecond pad threw {by_halves} where an eight-millisecond one threw {by_eights}"
+        );
+    }
+
+    /// **A gesture nobody ended does not join the next one.** X11 reports no
+    /// source and no stop, and a compositor need not send one either, so the
+    /// sample from a gesture that was never lifted is still on hand when the next
+    /// one starts. What holds this is the weight clamp in `sample`: a span of a
+    /// whole averaging window or more replaces the velocity rather than blending
+    /// with it, and the gap between two gestures is always longer than that.
+    #[test]
+    fn a_gesture_with_no_lift_under_it_does_not_bleed_into_the_next() {
+        let mut scroll = Scroll::default();
+        scroll.set_extent(100_000.0, 500.0);
+        // A hard flick, and no lift reported at the end of it.
+        for index in 1..=20 {
+            scroll.by(32.0, true, T0.wrapping_add(index * 8));
+        }
+        // Two seconds later, three slow events and a lift.
+        let later = T0.wrapping_add(2_000);
+        for index in 1..=3 {
+            scroll.by(4.0, true, later.wrapping_add(index * 8));
+        }
+        scroll.released(later.wrapping_add(3 * 8));
+        assert!(
+            !scroll.animating(),
+            "the flick before it threw the list {} px",
+            scroll.target() - scroll.offset()
+        );
+    }
+
+    /// A lift that belongs to something else — a panel that took the wheel, or a
+    /// second stop for the same finger — throws nothing, however hard the last
+    /// real flick was.
+    #[test]
+    fn a_lift_with_no_gesture_under_it_throws_nothing() {
+        let (mut scroll, lifted) = flick(4_000.0, 20);
+        while scroll.advance(0.008) {}
+        let landed = scroll.offset();
+
+        scroll.released(lifted.wrapping_add(3_000));
+        assert!(!scroll.animating(), "a stray lift threw the list again");
+        assert!((scroll.offset() - landed).abs() < f32::EPSILON);
+    }
+
+    /// **A gesture is thrown by its own speed.** A velocity carried over from
+    /// the flick before it turns a slow drag that should not fling at all into a
+    /// throw of several hundred pixels, in whatever direction the last flick went.
+    #[test]
+    fn a_slow_drag_after_a_hard_flick_throws_nothing() {
+        let (mut scroll, _) = flick(4_000.0, 20);
+        while scroll.advance(0.008) {}
+
+        // Three events at 500 px/s: too slow and too short to be a flick.
+        let base = T0.wrapping_add(10_000);
+        for index in 1..=3 {
+            scroll.by(4.0, true, base.wrapping_add(index * 8));
+        }
+        scroll.released(base.wrapping_add(3 * 8));
+        assert!(
+            !scroll.animating(),
+            "a slow drag threw the list {} px",
+            scroll.target() - scroll.offset()
+        );
+    }
+
+    /// A zero-valued axis frame is not a finger, and a fling in flight must
+    /// survive one. Without the guard it takes the same path a returning finger
+    /// does and stops the list dead, one frame after it was thrown.
+    #[test]
+    fn a_zero_delta_does_not_cancel_a_fling_in_flight() {
+        let (mut scroll, lifted) = flick(2_000.0, 20);
+        let thrown = scroll.target();
+        scroll.advance(0.008);
+        scroll.by(0.0, true, lifted.wrapping_add(8));
+        assert!((scroll.target() - thrown).abs() < f32::EPSILON, "the zero frame stopped it");
+        assert!(scroll.animating());
     }
 
     #[test]

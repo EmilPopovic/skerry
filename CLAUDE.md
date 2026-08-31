@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 576
-tests, 99 GUI scenarios **on both Wayland and X11**, thirty-five golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 593
+tests, 100 GUI scenarios **on both Wayland and X11**, thirty-seven golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
@@ -33,6 +33,10 @@ replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and 
 be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
 result at **0.7 ms over 817,288 entries**, and `Ctrl+Enter` puts every result
 into the pane as rows that can be selected, dragged and trashed where they are;
+scrolling belongs to the pane under the
+pointer and a touchpad **flick throws the list** and coasts to a stop, which is
+where the frame loop learned that an animation is a wake-up with an owner
+([12](docs/12-measurement.md#an-accessor-written-for-a-caller-that-never-arrived));
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —
