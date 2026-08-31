@@ -2681,9 +2681,7 @@ fn ancestor_columns(
         }
         painter.vline(area.right(), area.y, area.height, theme.palette.divider);
         let rows = level.dir.listing.rows();
-        // No bands: a trail column is never grouped, because grouping is one of
-        // the decisions a level deliberately has no field for.
-        let cells = crate::groups::Bands::new(Mode::Columns, area, metrics.row_height, &[], rows);
+        let cells = crate::trail::cells_of(level, area, metrics.row_height);
         for row in cells.visible(level.scroll.offset()) {
             let Some(id) = level.dir.listing.at(row) else { continue };
             let top = cells.at(row, level.scroll.offset()).y;

@@ -242,9 +242,24 @@ fn mark(levels: &mut [Level], path: &Path) {
 /// `reveal` moves the least it can, so a run that already fits does not move at
 /// all and a person who has scrolled back to look at an ancestor is not dragged
 /// forward again.
-pub(crate) fn follow(across: &mut sk_ui::Scroll, levels: usize, width: f32) {
+pub(crate) fn follow(
+    across: &mut sk_ui::Scroll,
+    revealed: &mut (usize, f32),
+    levels: usize,
+    width: f32,
+) {
     let span = span(levels);
     across.set_extent(span, width);
+    // **Only when a column has appeared or gone, or the pane was resized under
+    // it.** This ran every frame, and `Scroll::reveal` moves the least it can
+    // *towards* what it was asked to show — so scrolling left to look at an
+    // ancestor was undone on the next frame, and on every frame after it. The
+    // guard is here rather than at the caller because a reveal without it is the
+    // bug, and one place is where that can be true.
+    if *revealed == (levels, width) {
+        return;
+    }
+    *revealed = (levels, width);
     let last = span - WIDTH;
     across.reveal(last, last + WIDTH, width);
 }
@@ -289,10 +304,27 @@ pub(crate) fn settled(
     levels
 }
 
-/// The column of `levels` a point is in, and which of its rows, if any.
+/// The ancestor column a point is in, whether or not a row is under it.
 ///
 /// Only the ancestors: the pane's own column is the pane's, and `Cells` answers
 /// for it through [`crate::view::table_of`] like every other mode.
+///
+/// **The area and not a row**, because the two questions have different answers
+/// and both are asked. A press wants the row; the wheel wants the column, and the
+/// empty space below a short column's last row is still that column.
+pub(crate) fn column_at(
+    levels: usize,
+    body: crate::layout::Area,
+    offset: f32,
+    at: sk_plat::Point,
+) -> Option<usize> {
+    areas(body, levels, offset)
+        .enumerate()
+        .take(levels)
+        .find_map(|(depth, area)| area.contains(at.x, at.y).then_some(depth))
+}
+
+/// The column of `levels` a point is in, and which of its rows.
 pub(crate) fn hit(
     levels: &[Level],
     body: crate::layout::Area,
@@ -300,22 +332,55 @@ pub(crate) fn hit(
     row_height: f32,
     at: sk_plat::Point,
 ) -> Option<(usize, usize)> {
-    for (depth, area) in areas(body, levels.len(), offset).enumerate().take(levels.len()) {
-        if !area.contains(at.x, at.y) {
-            continue;
-        }
-        let level = &levels[depth];
-        let cells = crate::groups::Bands::new(
-            crate::cells::Mode::Columns,
-            area,
-            row_height,
-            &[],
-            level.dir.listing.rows(),
-        );
-        let row = cells.index_at(at.x, at.y, level.scroll.offset())?;
-        return Some((depth, row));
+    let depth = column_at(levels.len(), body, offset, at)?;
+    let area = areas(body, levels.len(), offset).nth(depth)?;
+    let level = levels.get(depth)?;
+    let row = cells_of(level, area, row_height).index_at(at.x, at.y, level.scroll.offset())?;
+    Some((depth, row))
+}
+
+/// One column's geometry. Never grouped, because grouping is one of the decisions
+/// a level deliberately has no field for.
+pub(crate) fn cells_of(
+    level: &Level,
+    area: crate::layout::Area,
+    row_height: f32,
+) -> crate::groups::Bands {
+    crate::groups::Bands::new(
+        crate::cells::Mode::Columns,
+        area,
+        row_height,
+        &[],
+        level.dir.listing.rows(),
+    )
+}
+
+/// Gives every column an extent, so one that is not the pane's can be scrolled.
+///
+/// **Once a frame, like the pane's own.** Without it a level's `max` stays zero
+/// and `Scroll::by` clamps every delta to nothing: the wheel over an ancestor
+/// column moved it not because the delta went to the wrong place but because the
+/// column had nowhere to go.
+pub(crate) fn settle(levels: &mut [Level], body: crate::layout::Area, row_height: f32) {
+    let laid: Vec<crate::layout::Area> = areas(body, levels.len(), 0.0).collect();
+    for (level, area) in levels.iter_mut().zip(laid) {
+        let content = cells_of(level, area, row_height).content_height();
+        level.scroll.set_extent(content, body.height);
     }
-    None
+}
+
+/// Advances every column's easing. Whether any of them owes another frame.
+pub(crate) fn advance(levels: &mut [Level], elapsed: f32) -> bool {
+    let mut moved = false;
+    for level in levels {
+        moved |= level.scroll.advance(elapsed);
+    }
+    moved
+}
+
+/// Whether any column owes another frame.
+pub(crate) fn animating(levels: &[Level]) -> bool {
+    levels.iter().any(|level| level.scroll.animating())
 }
 
 /// What the entry at `row` of the column at `depth` is: its directory and its
@@ -473,17 +538,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A column that is not the pane's can be scrolled at all**, which needs an
+    /// extent: `Scroll::by` clamps against `max`, and `max` is zero until somebody
+    /// says how tall the content is. Nothing did, so the wheel over an ancestor
+    /// moved it by nothing — not because the delta went somewhere else but because
+    /// the column had nowhere to go.
+    #[test]
+    fn every_column_gets_an_extent_of_its_own() {
+        let root = std::env::temp_dir().join(format!("skerry-trail-x-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("deep")).expect("fixture");
+        for index in 0..60 {
+            std::fs::write(root.join(format!("file-{index:02}")), b"x").expect("fixture");
+        }
+        let mut levels = super::settled(&root.join("deep"), 1, |at| {
+            sk_fs::names(at, &sk_util::Cancel::new()).expect("read").listing
+        });
+
+        // A body far shorter than sixty rows, so there is somewhere to scroll to.
+        let body = Area { x: 0.0, y: 0.0, width: 900.0, height: 200.0 };
+        let at = 1_000_u32;
+        levels[0].scroll.by(400.0, false, at);
+        assert!(levels[0].scroll.target().abs() < f32::EPSILON, "no extent, no movement");
+
+        super::settle(&mut levels, body, 26.0);
+        levels[0].scroll.by(400.0, false, at.wrapping_add(8));
+        assert!(levels[0].scroll.target() > 300.0, "at {}", levels[0].scroll.target());
+        assert!(super::animating(&levels), "and it owes a frame while it eases");
+        while super::advance(&mut levels, 0.008) {}
+        assert!(!super::animating(&levels), "and stops owing one");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The pane's own column is brought into view whatever the depth, and a run
     /// that already fits is not dragged anywhere.
     #[test]
     fn the_panes_own_column_is_kept_in_view() {
         let mut across = sk_ui::Scroll::default();
-        follow(&mut across, 8, 700.0);
+        let mut revealed = (0, 0.0);
+        follow(&mut across, &mut revealed, 8, 700.0);
         let last = span(8) - WIDTH;
         assert!(across.offset() + 700.0 >= last + WIDTH - 1.0, "the last column is off screen");
 
         let mut fits = sk_ui::Scroll::default();
-        follow(&mut fits, 1, 900.0);
+        let mut at = (0, 0.0);
+        follow(&mut fits, &mut at, 1, 900.0);
         assert!(fits.offset().abs() < f32::EPSILON, "a run that fits was scrolled anyway");
+    }
+
+    /// **A sideways scroll sticks.** The reveal ran on every frame and
+    /// `Scroll::reveal` moves towards what it was asked to show, so scrolling left
+    /// to look at an ancestor was undone before it could be looked at.
+    #[test]
+    fn scrolling_back_to_an_ancestor_survives_the_next_frame() {
+        let mut across = sk_ui::Scroll::default();
+        let mut revealed = (0, 0.0);
+        let width = 700.0;
+        follow(&mut across, &mut revealed, 8, width);
+        let followed = across.offset();
+        assert!(followed > 0.0, "the run is wider than the pane");
+
+        // Back to the shallow end, by hand.
+        across.to(0.0);
+        for _ in 0..30 {
+            follow(&mut across, &mut revealed, 8, width);
+        }
+        assert!(across.offset().abs() < f32::EPSILON, "dragged back to {}", across.offset());
+
+        // A ninth column appears, and *that* brings the pane's own back into view.
+        follow(&mut across, &mut revealed, 9, width);
+        assert!(across.offset() > followed, "a new column did not reveal itself");
     }
 }

@@ -174,6 +174,16 @@ pub struct Pane {
     /// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md) said
     /// it would take — and the fling comes with it for nothing.
     pub across: sk_ui::Scroll,
+    /// The trail depth and viewport width the horizontal scroll was last brought
+    /// into view for.
+    ///
+    /// **So a person can scroll sideways and have it stay.** The reveal that keeps
+    /// the pane's own column on screen ran every frame, and `Scroll::reveal` moves
+    /// the least it can *towards* what it was asked to show — so scrolling left to
+    /// look at an ancestor was undone on the next frame, every frame. It runs when
+    /// the depth changes, which is when a column has appeared or gone, and when
+    /// the width does, which is when the pane was resized under it.
+    pub(crate) revealed: (usize, f32),
     /// The ancestor columns, shallowest first, and empty in every other mode.
     ///
     /// The pane is the column *after* the last of these. Kept equal to the
@@ -371,6 +381,7 @@ impl Pane {
             selection: Selection::default(),
             scroll: sk_ui::Scroll::default(),
             across: sk_ui::Scroll::default(),
+            revealed: (0, 0.0),
             trail: Vec::new(),
             sort: Sort::default(),
             mode: crate::cells::Mode::default(),

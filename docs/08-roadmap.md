@@ -269,10 +269,15 @@ the one that moves rather than the one that looks.
 
 **The column view is built**, and the switcher's third mark is it. One column per
 level of the path, the pane's own rightmost, each ancestor showing which of its
-entries the next column came from, and a press in one of them navigating. It
-scrolls sideways and keeps the pane's own column in view at any depth, and the
-wheel's horizontal delta — dropped everywhere until there was a mode that could
-use it — moves along the run.
+entries the next column came from, and a press in one of them navigating.
+
+The wheel scrolls the column under the pointer, ancestors included, and each of
+them has an extent, an easing and a fling of its own. `Shift` and the wheel move
+along the run, which is how every other program is asked to go sideways and the
+only way to reach a deep trail with a mouse; a touchpad's horizontal delta —
+dropped everywhere until there was a mode that could use it — does the same. The
+pane's own column is brought into view when a column appears or goes and **not on
+every frame**, so scrolling back to look at an ancestor stays where it was put.
 
 The shape is [ADR 0015](adr/0015-a-column-is-a-directory-and-a-choice.md)'s, and
 it is the second answer to the question:

@@ -248,7 +248,8 @@ fn column_the_sample(
     let path = pane.path.clone();
     pane.trail = crate::trail::settled(&path, most, |at| session.read_fully(at).0.listing);
     let levels = pane.trail.len();
-    crate::trail::follow(&mut pane.across, levels, width);
+    let crate::pane::Pane { across, revealed, .. } = pane;
+    crate::trail::follow(across, revealed, levels, width);
 }
 
 fn requested_grouping(request: &Capture) -> Option<crate::groups::Grouping> {

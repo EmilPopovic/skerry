@@ -1263,7 +1263,12 @@ impl App {
         // submit blocks on the vertical blank, so the loop is paced by the
         // display and asking for a timer would only pick a worse rate than the
         // one the monitor already has.
-        if self.panes.visible().any(|pane| pane.scroll.animating()) {
+        let owes = |pane: &crate::pane::Pane| {
+            pane.scroll.animating()
+                || pane.across.animating()
+                || crate::trail::animating(&pane.trail)
+        };
+        if self.panes.visible().any(owes) {
             return Some(Duration::ZERO);
         }
         // A read that the floor deferred owes a wake-up, or it would wait for
@@ -1473,6 +1478,10 @@ impl App {
         let mut moved = false;
         for pane in self.panes.visible_mut() {
             moved |= pane.scroll.advance(elapsed);
+            // The other axis and every column, because each of them is a `Scroll`
+            // with an easing and a fling of its own.
+            moved |= pane.across.advance(elapsed);
+            moved |= crate::trail::advance(&mut pane.trail, elapsed);
         }
         self.dirty |= moved;
         if !self.typed.is_empty() && self.typed_at.elapsed() > TYPE_AHEAD_WINDOW {
@@ -1995,6 +2004,7 @@ impl App {
         // **Every leaf, because every leaf can be scrolled.** A pane whose extent
         // is never set clamps every scroll against a `max` of zero, so the wheel
         // over the unfocused half of a split moved nothing whatsoever.
+        let row_height = self.theme.metrics.row_height;
         let leaves = std::mem::take(&mut self.placement.leaves);
         for layout in &leaves {
             let Some(tabs) = self.panes.leaf(layout.id) else { continue };
@@ -2007,13 +2017,18 @@ impl App {
                 // every frame like the vertical extent, because the run grows by
                 // a column every time somebody opens a folder.
                 if columns {
-                    // **The pane's own column stays in view.** Descending past the
-                    // right edge is the normal way to use this mode, so this is
-                    // not an occasional courtesy — it is what makes it work at any
-                    // depth.
-                    crate::trail::follow(&mut pane.across, pane.trail.len(), layout.body.width);
+                    let depth = pane.trail.len();
+                    let width = layout.body.width;
+                    crate::trail::settle(&mut pane.trail, layout.body, row_height);
+                    // **The pane's own column is brought into view when there is a
+                    // new one, and not on every frame.** Descending past the right
+                    // edge is the normal way to use this mode; being dragged back
+                    // there after scrolling left to look at an ancestor is not.
+                    let Pane { across, revealed, .. } = pane;
+                    crate::trail::follow(across, revealed, depth, width);
                 } else {
                     pane.across.set_extent(0.0, layout.body.width);
+                    pane.revealed = (0, 0.0);
                 }
             }
         }
@@ -3116,15 +3131,31 @@ impl App {
                 menu.wheel(delta.y, room);
             }
         } else {
-            let id = self.scrolling_pane();
+            let (id, column) = self.scrolling_column();
+            let sideways = mods.shift;
             if let Some(leaf) = self.panes.leaf_mut(id) {
                 let pane = leaf.showing_mut();
-                pane.scroll.by(delta.y, precise, time);
-                // **The x delta was dropped everywhere until there was a mode
-                // that could use it.** A touchpad reports a hand's sideways drift
-                // on every scroll, so this only reaches a run of columns — where
-                // it is the gesture for moving along one.
-                if pane.mode == crate::cells::Mode::Columns {
+                let columns = pane.mode == crate::cells::Mode::Columns;
+                // **`Shift` and the wheel, which is how every other program moves
+                // sideways.** The x delta below only exists on a touchpad, so
+                // without this a run of columns deeper than the pane is wide could
+                // not be reached with a mouse at all.
+                if columns && sideways {
+                    pane.across.by(delta.y, precise, time);
+                } else if let Some(depth) = column.filter(|_| columns) {
+                    // The column under the pointer, not the pane's own. An
+                    // ancestor is a list like any other and the wheel over it is
+                    // about it.
+                    if let Some(level) = pane.trail.get_mut(depth) {
+                        level.scroll.by(delta.y, precise, time);
+                    }
+                } else {
+                    pane.scroll.by(delta.y, precise, time);
+                }
+                // **The x delta was dropped everywhere until there was a mode that
+                // could use it.** A touchpad reports a hand's sideways drift on
+                // every scroll, so this only reaches a run of columns.
+                if columns && !sideways {
                     pane.across.by(delta.x, precise, time);
                 }
             }
@@ -3139,9 +3170,19 @@ impl App {
     /// rest, and nothing when a panel took the gesture — the pane saw no sample,
     /// so there is no velocity to throw and no guard needed for one.
     fn scroll_released(&mut self, time: u32) {
-        let id = self.scrolling_pane();
+        let (id, column) = self.scrolling_column();
         let thrown = self.panes.leaf_mut(id).is_some_and(|leaf| {
-            let scroll = &mut leaf.showing_mut().scroll;
+            let pane = leaf.showing_mut();
+            // The lift belongs to whatever the gesture was scrolling, which is the
+            // column it was over if there was one.
+            let columns = pane.mode == crate::cells::Mode::Columns;
+            let scroll = match column.filter(|_| columns) {
+                Some(depth) => match pane.trail.get_mut(depth) {
+                    Some(level) => &mut level.scroll,
+                    None => &mut pane.scroll,
+                },
+                None => &mut pane.scroll,
+            };
             scroll.released(time);
             scroll.animating()
         });
@@ -3214,6 +3255,28 @@ impl App {
         self.columns = crate::layout::Columns::default();
         self.relayout();
         self.dirty = true;
+    }
+
+    /// The pane a scroll is about, and which of its ancestor columns if any.
+    ///
+    /// One answer for both halves of a gesture: the wheel and the lift that ends
+    /// it have to reach the same list, and asking twice is two answers that agree
+    /// until the pointer moves between them.
+    fn scrolling_column(&self) -> (crate::panes::PaneId, Option<usize>) {
+        let id = self.scrolling_pane();
+        let Some(leaf) = self.placement.leaves.iter().find(|leaf| leaf.id == id) else {
+            return (id, None);
+        };
+        let Some(pane) = self.panes.leaf(id).map(crate::panes::Tabs::showing) else {
+            return (id, None);
+        };
+        let depth = crate::trail::column_at(
+            pane.trail.len(),
+            leaf.body,
+            pane.across.offset(),
+            self.pointer,
+        );
+        (id, depth)
     }
 
     /// The pane a scroll is about.
@@ -5315,12 +5378,13 @@ pane_body={bodies:?} pane_bar={bars:?}",
         let (crumb_menu, crumb_menu_depth, crumb_menu_active) = self.crumb_menu_state();
         let crumb_menu_aim = self.crumb_menu_aim();
         let bar_report = self.bar_state();
-        let (column_aim, mode_hover) = self.column_state();
+        let (column_aim, mode_hover, column_scroll, column_over) = self.column_state();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
 rows_right={:.1} body_right={:.1} modes_x={:.1} mode_w={:.1} mode_hover={mode_hover} \
-trail={} across={:.1} column_aim={column_aim} \
+trail={} across={:.1} column_aim={column_aim} column_scroll={column_scroll} \
+column_over={column_over} pointer_at={:.1}:{:.1} \
 scrolls={} precise={} lifts={} scroll_time={} flings={} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
 {bar_report} \
@@ -5351,6 +5415,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.modes.first().map_or(0.0, |area| area.width),
             self.panes.focused().trail.len(),
             self.panes.focused().across.offset(),
+            self.pointer.x,
+            self.pointer.y,
             self.scrolls.0,
             self.scrolls.1,
             self.scrolls.2,
@@ -6488,14 +6554,28 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// because a harness made to parse `Some((768.0, 123.0))` would be parsing
     /// Rust's `Debug` rather than a report — and which switcher button the pointer
     /// is on.
-    fn column_state(&self) -> (String, &'static str) {
+    fn column_state(&self) -> (String, &'static str, String, String) {
         let aim =
             self.column_aim().map_or_else(|| "none".to_owned(), |(x, y)| format!("{x:.1}:{y:.1}"));
         let hover = match self.hovered_mode.map(|(_, mode)| mode) {
             Some(mode) => mode.token(),
             None => "none",
         };
-        (aim, hover)
+        // Which column the pointer is over, which is where a scroll would go. The
+        // offsets below say what moved; this says what *should* have.
+        let over =
+            self.scrolling_column().1.map_or_else(|| "none".to_owned(), |depth| depth.to_string());
+        // Every ancestor column's own offset, in order, so a scenario can say
+        // *which* column the wheel reached rather than only that something moved.
+        let offsets = self
+            .panes
+            .focused()
+            .trail
+            .iter()
+            .map(|level| format!("{:.0}/{:.0}", level.scroll.offset(), level.scroll.target()))
+            .collect::<Vec<_>>()
+            .join(",");
+        (aim, hover, offsets, over)
     }
 
     /// The middle of the chosen row in the deepest ancestor column, for a test to

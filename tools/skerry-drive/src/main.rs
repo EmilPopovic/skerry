@@ -238,7 +238,7 @@ display — and can be said outright.
   click right           any of left, right, middle
   double                two clicks inside the double-click window
   drag 10 20 80 90      press at the first point, move to the second, release
-  scroll -3             wheel notches, negative is up
+  scroll -3 [shift]     wheel notches, negative is up; `shift` held across them
   flick 16 20 [HOLD]    a touchpad gesture of EVENTS deltas of PIXELS, then the
                    fingers leave — after resting HOLD ms, if given
   sleep 250             milliseconds";
@@ -317,9 +317,20 @@ fn play(input: &mut dyn Input, actions: &[Action]) {
                 }
                 input.button(Button::Left, false);
             }
-            Action::Scroll { notches } => {
+            Action::Scroll { notches, shift } => {
+                // Held *across* the notches rather than pressed beside them: the
+                // program reads the modifier state on the scroll event, so a chord
+                // sent before it would have been released by the time it mattered.
+                if *shift {
+                    input.key(script::EV_LEFTSHIFT, true);
+                    input.modifiers(script::MOD_SHIFT);
+                }
                 for _ in 0..notches.abs() {
                     input.notch(*notches < 0);
+                }
+                if *shift {
+                    input.modifiers(0);
+                    input.key(script::EV_LEFTSHIFT, false);
                 }
             }
             // **Paced in real time, not only in the timestamps.** The client

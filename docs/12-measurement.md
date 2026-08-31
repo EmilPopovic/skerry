@@ -1635,3 +1635,44 @@ name box worth reading, and it fails against a left edge scaled by two.
 The general form is the one this file keeps arriving at from different directions:
 an instrument nobody has read is not an instrument. A gate nobody has watched fail
 is decoration; a reference nobody has looked at is a photograph of the bug.
+
+## A move to where the pointer already is sends no event
+
+`column-scroll` passed alone, passed alone under twelve spinning processes, and
+failed every time it ran after another scenario.
+
+The diagnostic line said why once it was asked the right question. Four scroll
+events had arrived, all four had gone to a column with no extent, and the window
+believed the pointer was at `0.0:0.0` — the position it starts at, which is a real
+one and not a sentinel.
+
+The scenario before it left the pointer where this one wanted it. The new window
+mapped underneath a pointer that had not moved, this compositor sends no
+`wl_pointer.enter` for that, and a `motion_absolute` to the coordinates the
+pointer is already at is not a change and produces nothing. So the aim did nothing
+at all, every press and every wheel in the scenario landed wherever the pointer had
+been left, and the failure surfaced three steps later as a column that would not
+scroll.
+
+**The harness already knew this.** `point_at` nudges by half a row per attempt and
+then *reads back* what the program says it is hovering, with a comment saying the
+only honest way for a test to know it pointed at what it meant to is to ask. The
+column scenarios aimed and assumed.
+
+They read back now, through `column_over` — which column the window believes the
+pointer is in — and nudge until it agrees. Two things that came with it are worth
+keeping separately.
+
+**A weak assertion hid inside a passing test.** `column-view` pressed the chosen
+row of an ancestor column and asserted the path and the trail were unchanged.
+A press that missed the column entirely and landed on the sidebar leaves both
+unchanged too, so that scenario would have passed with the pointer at the origin —
+and in a sweep, it did. An assertion whose failure mode and whose success mode
+have the same signature is not an assertion. It proves the pointer is in the
+column first now.
+
+**And "passes alone" is not a result.** This suite has now produced three
+different flavours of it: a sleep where a wait belonged, a fixture two tests
+shared, and a pointer another scenario left somewhere. What they have in common is
+that running one scenario is a different experiment from running the suite, and
+only the second one is the claim. Run the sweep.

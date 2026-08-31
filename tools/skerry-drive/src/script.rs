@@ -57,6 +57,9 @@ pub enum Action {
     },
     Scroll {
         notches: i32,
+        /// Whether Shift is held across it, which is how a program is asked to
+        /// scroll sideways.
+        shift: bool,
     },
     /// A two-finger touchpad gesture that ends with the fingers leaving the pad.
     ///
@@ -137,7 +140,12 @@ fn step(verb: &str, rest: &[&str]) -> Result<Vec<Action>, String> {
         "scroll" => {
             let amount = rest.first().ok_or("scroll needs a number")?;
             let notches: i32 = amount.parse().map_err(|_| format!("`{amount}` is not a number"))?;
-            Ok(vec![Action::Scroll { notches }])
+            let shift = match rest.get(1) {
+                None => false,
+                Some(&"shift") => true,
+                Some(other) => return Err(format!("`{other}` is not `shift`")),
+            };
+            Ok(vec![Action::Scroll { notches, shift }])
         }
         "flick" => {
             if rest.len() < 2 || rest.len() > 3 {
@@ -260,13 +268,13 @@ fn character_action(character: char) -> Result<Action, String> {
 
 /// The modifier bits of a standard evdev keymap, in the order xkb assigns them:
 /// Shift, Lock, Control, Mod1 through Mod5.
-const MOD_SHIFT: u32 = 1 << 0;
+pub(crate) const MOD_SHIFT: u32 = 1 << 0;
 const MOD_CONTROL: u32 = 1 << 2;
 const MOD_ALT: u32 = 1 << 3;
 const MOD_SUPER: u32 = 1 << 6;
 
 const EV_LEFTCTRL: u32 = 29;
-const EV_LEFTSHIFT: u32 = 42;
+pub(crate) const EV_LEFTSHIFT: u32 = 42;
 const EV_LEFTALT: u32 = 56;
 const EV_LEFTMETA: u32 = 125;
 
@@ -448,7 +456,13 @@ mod tests {
             sleep 250\n";
         let actions = parse(script).expect("parsed");
         assert!(actions.iter().any(|action| matches!(action, Action::Drag { .. })));
-        assert!(actions.contains(&Action::Scroll { notches: -3 }));
+        assert!(actions.contains(&Action::Scroll { notches: -3, shift: false }));
+        assert_eq!(
+            parse("scroll 4 shift").as_deref(),
+            Ok([Action::Scroll { notches: 4, shift: true }].as_slice()),
+            "Shift is held across the notches, not sent as a chord beside them"
+        );
+        assert!(parse("scroll 4 ctrl").is_err(), "only Shift, because only Shift means an axis");
         assert_eq!(
             parse("flick 16 20").as_deref(),
             Ok([Action::Flick { pixels: 16, events: 20, hold: 0 }].as_slice()),

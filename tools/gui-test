@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 105
+FEWEST_SCENARIOS = 106
 
 
 def scenario(name, fresh: bool = False):
@@ -1541,17 +1541,17 @@ def column_view(run: Run, fixture: Path) -> None:
     # itself: nothing moves, and the selection it would have cleared is still
     # there. Waits for the column's listing, because the aim comes from it.
     for _ in range(40):
-        aim_at = run.state().get("column_aim", "none")
-        if aim_at != "none":
+        if run.state().get("column_aim", "none") != "none":
             break
         run.drive("sleep 150\nkey f12\nsleep 50\n")
     else:
         raise Failure("the ancestor column never reported a chosen row")
-    inside = run.state()
-    x, _, y = aim_at.partition(":")
-    x, y = float(x), float(y)
-    at = aim(run, inside, x, y)
-    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 400\nkey f12\nsleep 200\n")
+    # **Proved to be in the column before the press**, not aimed at and hoped for:
+    # a move to where the pointer already is sends no event, and a press that
+    # landed on the sidebar instead would leave the path and the trail alone too —
+    # which is what this asserts, so it would have passed for the wrong reason.
+    inside = point_at_column(run, run.state(), int(run.state()["trail"]) - 1)
+    run.drive("click\nsleep 400\nkey f12\nsleep 200\n")
     pressed = run.state()
     if pressed["path"] != inside["path"]:
         raise Failure(f"pressing the chosen folder moved to {pressed['path']}")
@@ -1565,6 +1565,108 @@ def column_view(run: Run, fixture: Path) -> None:
         raise Failure(f"going up took the trail to {back['trail']}, not {shallow}")
     if back["mode"] != "columns":
         raise Failure("the mode did not survive a navigation")
+
+
+def point_at_column(run: Run, state: dict[str, str], depth: int) -> dict[str, str]:
+    """Puts the pointer inside ancestor column `depth`, and proves it landed there.
+
+    **A synthetic move to where the pointer already is produces no event**, and
+    that is not a corner case: one scenario leaves the pointer where the next one
+    wants it, the new window maps under it, and this compositor sends no `enter`
+    for a pointer that has not moved. So the window went on believing the pointer
+    was at `0.0:0.0` — the position it starts at, which is a real one — and every
+    aim in the scenario landed on the sidebar. Alone it passed, in a sweep it did
+    not, and the symptom was a wheel that scrolled nothing.
+
+    So: nudge, and read `column_over` back. The same shape `point_at` has for a
+    row, for the same reason — the only honest way for a test to know it pointed at
+    what it meant to is to ask the program.
+    """
+    for attempt in range(6):
+        x, _, y = state["column_aim"].partition(":")
+        step = float(state["row_h"]) / 3.0 * attempt
+        at = aim(run, state, float(x), float(y) + (step if attempt % 2 else -step))
+        run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nkey f12\nsleep 150\n")
+        got = run.state()
+        if got["column_over"] == str(depth):
+            return got
+    last = run.state()
+    raise Failure(
+        f"could not put the pointer in column {depth}: it is over {last['column_over']} "
+        f"at {last['pointer_at']}, aiming at {state['column_aim']}"
+    )
+
+
+@scenario("column-scroll", fresh=True)
+def column_scroll(run: Run, fixture: Path) -> None:
+    """The wheel scrolls the column under the pointer, and `Shift` goes sideways.
+
+    Two things no unit test reaches, because both are about *routing*: which of
+    several lists a delta arrives at, and which of two axes.
+
+    The vertical half is aimed from `column_aim`, the middle of the chosen row in
+    the deepest ancestor column — so the pointer is over that column by
+    construction. `column_scroll` reports every ancestor's own offset in order, so
+    the assertion is which one moved rather than that something did. Before this
+    the delta always went to the pane's own column and an ancestor had no extent to
+    move within anyway.
+
+    The sideways half needs a run wider than the pane, which is why this descends:
+    a fixture under `/tmp` is already several levels deep, and one more makes the
+    trail long enough that the pane's own column is not the only one on screen.
+    """
+    # **The filler goes in the fixture, not in the folder below it.** The pointer
+    # lands on the deepest *ancestor* column, which is this directory once the pane
+    # has descended — and a column with fewer rows than the pane is tall has no
+    # extent, so a wheel over it would move nothing however well it was routed.
+    (fixture / "one").mkdir()
+    for index in range(60):
+        (fixture / f"filler-{index:02}.txt").write_text("x")
+    for _ in range(40):
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+        if int(run.state()["rows"]) >= 60:
+            break
+    else:
+        raise Failure(f"the filler never arrived: {run.state()['rows']} rows")
+
+    run.drive("key ctrl+3\nsleep 500\ntext one\nsleep 300\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    for _ in range(40):
+        state = run.state()
+        if state.get("column_aim", "none") != "none" and int(state["trail"]) > 0:
+            break
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+    else:
+        raise Failure("the ancestor columns never arrived")
+
+    deepest = int(state["trail"]) - 1
+    pointing = point_at_column(run, state, deepest)
+    before = pointing["column_scroll"].split(",")
+    run.drive("scroll 4\nsleep 500\nkey f12\nsleep 200\n")
+    landed = run.state()
+    after = landed["column_scroll"].split(",")
+    if after == before:
+        raise Failure(
+            f"the wheel over column {landed['column_over']} moved nothing: {before}; "
+            f"the pointer is at {landed['pointer_at']}, across={landed['across']}, "
+            f"trail={landed['trail']}, and the window saw {landed['scrolls']} scrolls"
+        )
+    moved = [index for index, (was, now) in enumerate(zip(before, after)) if was != now]
+    if moved != [len(before) - 1]:
+        raise Failure(f"the wheel moved columns {moved} of {len(before)}: {before} -> {after}")
+
+    # And `Shift` moves along the run instead of down a column. The pointer is
+    # already where it needs to be, inside the run.
+    across = float(run.state()["across"])
+    if across <= 0.0:
+        raise Skipped(f"the run of columns fits the pane here, so there is no sideways: {across}")
+    run.drive("scroll -4\nsleep 400\nkey f12\nsleep 200\n")
+    if float(run.state()["across"]) != across:
+        raise Failure("a bare wheel moved the run sideways")
+    run.drive("scroll -4 shift\nsleep 500\nkey f12\nsleep 200\n")
+    if float(run.state()["across"]) >= across:
+        raise Failure(
+            f"Shift and the wheel left the run at {run.state()['across']}, was {across}"
+        )
 
 
 @scenario("view-switcher")
