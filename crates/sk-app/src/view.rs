@@ -1831,7 +1831,7 @@ pub fn name_field(layout: &PaneLayout, metrics: &sk_ui::Metrics, row: usize, off
         // *drawn* size column rather than from a metric, so a size column
         // dragged narrow lends less and one dragged wide lends more.
         width: (layout.name.width + layout.size.width * 0.5)
-            .min(layout.body.right() - layout.name.x + 4.0),
+            .min(layout.rows(crate::cells::Mode::Details).right() - layout.name.x + 4.0),
         height: metrics.row_height - 4.0,
     }
 }
@@ -2303,6 +2303,33 @@ pub fn sort_columns(
     }
 }
 
+/// A rule down each column boundary in the header.
+///
+/// **What makes the boundary a thing to grab.** The band a press takes hold of is
+/// eight logical pixels of nothing, and an invisible affordance is a feature only
+/// somebody who was told about it can use — which is rule 4. It draws the same
+/// three lines the drag reads, from the columns the frame laid out, so the line a
+/// hand aims at is the line the press finds.
+///
+/// Details only: a grid's header is three labels in a strip at the left rather
+/// than three columns, and there is nothing there to divide.
+///
+/// Inset top and bottom, and stopping short of the rule under the header, because
+/// a boundary that met it on both ends would close a box around each label and
+/// the header would read as three fields to type in.
+fn separators(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout, colour: sk_gpu::Color) {
+    if pane.mode != Mode::Details {
+        return;
+    }
+    let inset = 5.0;
+    let height = (layout.header.height - inset * 2.0).max(1.0);
+    for column in [layout.name, layout.size, layout.modified] {
+        if column.width > 0.0 {
+            painter.vline(column.right(), layout.header.y + inset, height, colour);
+        }
+    }
+}
+
 fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -2320,6 +2347,7 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
 
     let baseline = painter.baseline(layout.header.y, layout.header.height, metrics.header_size);
     let columns = sort_columns(layout, &metrics, pane.mode);
+    separators(painter, pane, layout, theme.palette.divider);
 
     for (column, area, align, inset) in columns {
         if area.width <= 0.0 {
@@ -2377,8 +2405,13 @@ fn body(
     // 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
     // Details is a one-column grid, so the loop below is the same loop either way
     // and only the cell's *contents* differ.
-    let cells =
-        crate::groups::Bands::new(pane.mode, layout.body, metrics.row_height, &pane.bands, rows);
+    let cells = crate::groups::Bands::new(
+        pane.mode,
+        layout.rows(pane.mode),
+        metrics.row_height,
+        &pane.bands,
+        rows,
+    );
     for (band, at) in cells.headings(pane.scroll.offset()) {
         heading_at(painter, pane.grouping, band, at);
     }
@@ -2606,7 +2639,7 @@ fn row_at(
         let Some(id) = pane.listing.at(row) else { return };
         let cells = crate::groups::Bands::new(
             pane.mode,
-            layout.body,
+            layout.rows(pane.mode),
             metrics.row_height,
             &pane.bands,
             pane.listing.rows(),
@@ -2623,10 +2656,11 @@ fn row_at(
         // list's width, which was invisible until the sidebar moved the list —
         // and then the pill began under the sidebar and stopped short of the
         // size column by exactly the sidebar's width.
+        let table = layout.rows(pane.mode);
         let pill = painter.rect(
-            layout.body.x + metrics.gutter * 0.5,
+            table.x + metrics.gutter * 0.5,
             top + 1.0,
-            layout.body.width - metrics.gutter,
+            table.width - metrics.gutter,
             metrics.row_height - 2.0,
         );
         let background = theme.row_background(selected, pane.hover == Some(row));
@@ -2768,21 +2802,26 @@ fn metadata_cells(
 
 fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
+    let table = layout.rows(pane.mode);
     let content = crate::groups::Bands::new(
         pane.mode,
-        layout.body,
+        table,
         theme.metrics.row_height,
         &pane.bands,
         pane.listing.rows(),
     )
     .content_height();
-    let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, layout.body.height)
-    else {
+    let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, table.height) else {
         return;
     };
     let width = 8.0;
-    let rect =
-        painter.rect(layout.body.right() - width - 3.0, layout.body.y + position, width, thumb);
+    // **Beside the table, not at the pane's right edge and not inside it.** A
+    // thumb two thousand pixels away from the rows it scrolls belongs to nothing
+    // on screen; one drawn inside the table lands on the rule that closes it. So
+    // it sits just past that rule, and stays inside the pane when the table
+    // reaches the pane's edge, which is every window narrower than the ceiling.
+    let x = (table.right() + 3.0).min(layout.body.right() - width - 3.0);
+    let rect = painter.rect(x, table.y + position, width, thumb);
     painter.list.rect(rect, theme.palette.thumb, painter.px(width / 2.0));
 }
 

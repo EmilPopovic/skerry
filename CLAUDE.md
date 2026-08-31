@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 598
-tests, 102 GUI scenarios **on both Wayland and X11**, thirty-eight golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 601
+tests, 103 GUI scenarios **on both Wayland and X11**, thirty-eight golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
@@ -37,8 +37,9 @@ scrolling belongs to the pane under the
 pointer and a touchpad **flick throws the list** and coasts to a stop, which is
 where the frame loop learned that an animation is a wake-up with an owner
 ([12](docs/12-measurement.md#an-accessor-written-for-a-caller-that-never-arrived));
-the columns have **a ceiling and boundaries that drag**, so an ultrawide window
-packs them left instead of putting a file's size a screen away from its name;
+the columns have **a ceiling and drawn boundaries that drag**, so an ultrawide
+window packs them left into a table with an edge instead of putting a file's size
+a screen away from its name;
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —

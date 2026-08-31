@@ -5196,6 +5196,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
+rows_right={:.1} body_right={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
 {bar_report} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
@@ -5219,6 +5220,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.header.height,
             self.placement.here.modified.x,
             self.placement.here.modified.width,
+            self.placement.here.rows(self.panes.focused().mode).right(),
+            self.placement.here.body.right(),
             self.window_state.maximized,
             self.layout.title.height,
             self.layout.sidebar.width,
@@ -5261,7 +5264,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     ) -> crate::groups::Bands {
         crate::groups::Bands::new(
             pane.mode,
-            layout.body,
+            layout.rows(pane.mode),
             self.theme.metrics.row_height,
             &pane.bands,
             pane.listing.rows(),
@@ -6793,7 +6796,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let (top, height) = self.thumb()?;
         // A generous grab region: the thumb is eight logical pixels wide and a
         // pointer is not, so the hit area is the right edge of the pane.
-        let inside_x = position.x >= self.placement.here.body.right() - 20.0;
+        // The band the frame drew the thumb in, plus room either side: the thumb
+        // is eight logical pixels wide and a pointer is not. Bounded on the right
+        // as well, because the space past the table is not the scrollbar's any
+        // more — it is nothing, and a press in nothing clears the selection.
+        let body = self.placement.here.body;
+        let table = self.placement.here.rows(self.panes.focused().mode);
+        let at = (table.right() + 3.0).min(body.right() - 11.0);
+        let inside_x = position.x >= at - 9.0 && position.x < at + 17.0;
         let inside_y = position.y >= top && position.y < top + height;
         (inside_x && inside_y).then_some(position.y - top)
     }

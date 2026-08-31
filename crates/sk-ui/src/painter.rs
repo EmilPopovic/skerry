@@ -195,6 +195,18 @@ impl Painter<'_> {
         self.list.rect(rect, color, 0.0);
     }
 
+    /// A one-device-pixel vertical rule, for a column boundary.
+    ///
+    /// The sibling of [`Painter::hairline`] and separate from it because the
+    /// snapping goes on the axis the rule is *thin* along: a vertical rule snapped
+    /// on y is two columns of half-grey where one column of the divider colour
+    /// belongs, which at 125% is the difference between a line and a smudge.
+    pub fn vline(&mut self, x: f32, y: f32, height: f32, color: Color) {
+        let top = self.snap(y);
+        let rect = Rect::new(self.snap(x), top, 1.0, self.snap(y + height) - top);
+        self.list.rect(rect, color, 0.0);
+    }
+
     /// A filled triangle inscribed in a logical rectangle.
     ///
     /// For an arrowhead: the one shape a rectangle cannot make, and the

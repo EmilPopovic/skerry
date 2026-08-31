@@ -640,6 +640,27 @@ pub(crate) struct PaneLayout {
 }
 
 impl PaneLayout {
+    /// The rectangle the rows are drawn in and hit-tested against.
+    ///
+    /// **One value, because the fill and the hit test are the same claim.** A
+    /// selected row filled to the pane's right edge while the columns stopped a
+    /// third of the way across looked like a row that had run off the end of the
+    /// list; a fill that stops where the columns do and a click that does not
+    /// would be the fill lying about the target instead. So both read this.
+    ///
+    /// The body in a grid, whose cells tile it. In Details the last column's right
+    /// edge plus the same gutter the first column is inset by — derived from the
+    /// icon column's own offset rather than passed in, so this needs no metrics
+    /// and cannot disagree with the inset it mirrors.
+    pub(crate) fn rows(&self, mode: crate::cells::Mode) -> Area {
+        if mode != crate::cells::Mode::Details {
+            return self.body;
+        }
+        let gutter = self.icon.x - self.body.x;
+        let right = (self.modified.right() + gutter).min(self.body.right());
+        Area { width: (right - self.body.x).max(0.0), ..self.body }
+    }
+
     /// The navigation button at a point, if any.
     ///
     /// The rectangles the frame drew from, so the dimming, the cursor shape and
@@ -1194,6 +1215,61 @@ mod tests {
         let widths = crate::layout::Columns::default();
         panes.layout(content, &sk_ui::Metrics::default(), widths, &mut leaves, &mut dividers);
         (leaves, dividers)
+    }
+
+    /// **The table stops where its last column does, and the click stops with
+    /// it.** One value answers both, so this is the whole of the agreement: a
+    /// point past the last column is outside the rectangle the fill is drawn in
+    /// and `index_at` refuses it for the same reason.
+    #[test]
+    fn a_point_past_the_last_column_is_no_row_at_all() {
+        let (panes, _waker, jobs, _updates) = tree();
+        drop(jobs);
+        let metrics = sk_ui::Metrics::default();
+        let widths = crate::layout::Columns::default();
+        let mut leaves = Vec::new();
+        let mut dividers = Vec::new();
+        let wide = Area { x: 0.0, y: 0.0, width: 2400.0, height: 600.0 };
+        panes.layout(wide, &metrics, widths, &mut leaves, &mut dividers);
+        let leaf = leaves[0];
+        let table = leaf.rows(crate::cells::Mode::Details);
+
+        assert!(
+            (table.right() - (leaf.modified.right() + metrics.gutter)).abs() < f32::EPSILON,
+            "the table ends a gutter past the last column"
+        );
+        assert!(table.right() < leaf.body.right() - 1_000.0, "and well short of the pane");
+
+        let cells = crate::cells::Cells::new(crate::cells::Mode::Details, table, 26.0, 40);
+        let y = table.y + 13.0;
+        assert_eq!(cells.index_at(table.x + 20.0, y, 0.0), Some(0), "inside the table is row 0");
+        assert_eq!(cells.index_at(table.right() + 40.0, y, 0.0), None, "past it is nothing");
+        assert_eq!(cells.index_at(leaf.body.right() - 5.0, y, 0.0), None, "and so is the far edge");
+    }
+
+    /// A grid's cells tile the whole body, so the body is the table — and a pane
+    /// narrower than the name column's ceiling has nothing spare either way.
+    #[test]
+    fn a_grid_and_a_narrow_pane_both_fill_the_body() {
+        let (panes, _waker, jobs, _updates) = tree();
+        drop(jobs);
+        let metrics = sk_ui::Metrics::default();
+        let widths = crate::layout::Columns::default();
+        let mut leaves = Vec::new();
+        let mut dividers = Vec::new();
+
+        let wide = Area { x: 0.0, y: 0.0, width: 2400.0, height: 600.0 };
+        panes.layout(wide, &metrics, widths, &mut leaves, &mut dividers);
+        assert_eq!(leaves[0].rows(crate::cells::Mode::Grid), leaves[0].body, "a grid tiles it all");
+
+        let narrow = Area { x: 0.0, y: 0.0, width: 700.0, height: 600.0 };
+        panes.layout(narrow, &metrics, widths, &mut leaves, &mut dividers);
+        let leaf = leaves[0];
+        assert_eq!(
+            leaf.rows(crate::cells::Mode::Details),
+            leaf.body,
+            "under the ceiling the columns already reach the edge"
+        );
     }
 
     #[test]

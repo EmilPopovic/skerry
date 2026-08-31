@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 102
+FEWEST_SCENARIOS = 103
 
 
 def scenario(name, fresh: bool = False):
@@ -1496,6 +1496,36 @@ def pointer_scroll(run: Run, fixture: Path) -> None:
     run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 500\nkey f12\nsleep 200\n")
     if float(run.state()["scroll"]) >= after:
         raise Failure("scrolling up moved nothing")
+
+
+@scenario("click-past-the-columns")
+def click_past_the_columns(run: Run, fixture: Path) -> None:
+    """The space past the last column is not part of the row.
+
+    **The fill and the click are one value**, `PaneLayout::rows`, so this is that
+    agreement end to end: a selected row is drawn to the table's right edge, and a
+    press past it clears the selection the way a press below the last row does.
+    Before the ceiling there was no space past the columns to press in.
+
+    Skips rather than passes where the table reaches the pane's edge, which is
+    every window narrower than the name column's ceiling — there is nothing there
+    to click and a green result would mean nothing.
+    """
+    run.drive("key down\nsleep 250\nkey f12\nsleep 150\n")
+    chosen = run.state()
+    if chosen["selected"] == "0":
+        raise Failure("the keyboard selected nothing to begin with")
+    edge = float(chosen["rows_right"])
+    pane = float(chosen["body_right"])
+    if pane - edge < 24.0:
+        raise Skipped(f"the table reaches the pane's edge here: {edge:.0f} of {pane:.0f}")
+
+    y = float(chosen["body_top"]) + float(chosen["row_h"]) / 2.0
+    at = aim(run, chosen, (edge + pane) / 2.0, y)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 300\nkey f12\nsleep 200\n")
+    after = run.state()
+    if after["selected"] != "0":
+        raise Failure(f"a click {pane - edge:.0f} px past the columns selected {after['selected']}")
 
 
 @scenario("column-drag")
