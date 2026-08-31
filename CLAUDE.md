@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 575
-tests, 98 GUI scenarios **on both Wayland and X11**, thirty-four golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 573
+tests, 98 GUI scenarios **on both Wayland and X11**, thirty-five golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a

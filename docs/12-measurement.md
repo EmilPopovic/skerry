@@ -1145,6 +1145,54 @@ failing on, three assertions later and under a message about the *window* rather
 than about the wait. The sleeps stay: they are also what gives a pointer motion
 time to be drawn, and a motion has nothing to print.
 
+## A default is not the same answer as "no answer", and one of them leaks
+
+Per-folder view settings looked right in every unit test and were unusable in a
+window. `Views::for_path` answered `Option<View>`, and `None` — for a folder
+nobody had chosen a layout for — was documented as *leave the pane alone*. The
+reasoning was sound: a pane restored from a session already has a layout, and
+overwriting it with a default would throw away what was restored.
+
+What "leave it alone" actually leaves the pane with is **the previous folder's
+layout**. So:
+
+    set Downloads grouped        →  Downloads has a record
+    walk into Pictures           →  no record, pane left alone, Pictures grouped
+    un-group Pictures            →  already its answer, nothing recorded
+    Downloads, then Pictures     →  no record, pane left alone, grouped again
+
+Every step is the code doing exactly what it says. The defect is that a folder
+with no opinion and a folder whose opinion is the default were the same value, and
+the honest answer to "how should this folder look" is never "however the last one
+did". `for_path` returns a `View` now and the default is a real answer.
+
+The session had to give up its copy for the same reason. It carried the mode and
+the grouping per tab, and the folder store carried them per path; two files that
+can disagree about one thing is the shape of "state does not survive normal use",
+whichever of them happens to win. The folder owns it, the session skips the tokens
+it used to write, and a file from the two builds that wrote them still restores
+its tabs.
+
+**The general rule: an `Option` whose `None` means "inherit from whatever was
+there before" is not an absence, it is a hidden read of mutable state.** If the
+caller cannot name what `None` resolves to, it will resolve to something nobody
+chose.
+
+Two more from the same feature, both invisible to the tests that existed:
+
+- The band of an entry came from `mtime`, which `getdents64` does not report, and
+  a *name* sort was the one order that never asked for the metadata pass to redo
+  it. So a grouped folder banded every entry on 1970 and put the lot under
+  *Older*, permanently. The first test written for it asserted the bands and
+  passed without the fix, because it recomputed them from metadata that had since
+  landed; what breaks is the display *order*, and asserting that the band never
+  goes backwards down the rows reproduces it.
+- A heading's rule was drawn from `Painter::baseline`, which returns **device**
+  pixels, through `Painter::hairline`, which takes **logical** and scales for
+  itself. Right at 100% and 1.56× out at 125%. This page already carries that
+  lesson under a different feature; the reason it recurred is that neither
+  function's *name* says which space it speaks, and the call compiles either way.
+
 ## A gate whose premise is occasionally false is a gate that occasionally lies
 
 `no-cpu-when-idle` is rule 1's gate: three seconds of a window nobody is

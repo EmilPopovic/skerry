@@ -4294,10 +4294,10 @@ search_active={active:?}",
             if !std::mem::take(&mut pane.view_owed) {
                 continue;
             }
-            // Nothing for this folder means nothing to say about it: a pane
-            // restored from a session keeps the layout it came back with rather
-            // than being reset to the default.
-            let Some(view) = self.views.for_path(&pane.path) else { continue };
+            // Every folder gets an answer, its own or an ancestor's or the
+            // default — the one thing this must not do is leave the pane showing
+            // the *previous* folder's layout, which is how the setting leaked.
+            let view = self.views.for_path(&pane.path);
             if pane.mode != view.mode || pane.grouping != view.grouping {
                 pane.mode = view.mode;
                 pane.grouping = view.grouping;
@@ -5035,17 +5035,23 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// numbers per frame is what buys that, and the alternative is a timer, which
     /// [rule 1](../../../docs/03-principles.md) does not allow.
     fn rebandif_needed(&mut self) {
-        let wanted = match self.panes.focused().grouping {
-            crate::groups::Grouping::None => sk_model::Banding::default(),
-            crate::groups::Grouping::Time => {
-                sk_model::Banding::new(&sk_ui::format::day_bands(clock_seconds()))
+        // **Every pane, not the focused one.** A split shows two folders and each
+        // has its own grouping; banding only the focused half left the other one
+        // grouped with no bands, which draws no headings at all — the setting
+        // looked like it had been forgotten by walking into the other pane.
+        let edges = sk_ui::format::day_bands(clock_seconds());
+        let Self { panes, jobs, .. } = self;
+        for pane in panes.every_mut() {
+            let wanted = match pane.grouping {
+                crate::groups::Grouping::None => sk_model::Banding::default(),
+                crate::groups::Grouping::Time => sk_model::Banding::new(&edges),
+            };
+            if pane.sort.bands == wanted {
+                continue;
             }
-        };
-        if self.panes.focused().sort.bands == wanted {
-            return;
+            pane.sort.bands = wanted;
+            pane.reorder(jobs);
         }
-        self.panes.focused_mut().sort.bands = wanted;
-        self.panes.focused_mut().reorder(&self.jobs);
     }
 
     fn reveal_cursor(&mut self) {

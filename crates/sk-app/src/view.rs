@@ -2403,10 +2403,16 @@ fn heading_at(painter: &mut Painter<'_>, band: u8, at: Area) {
     let advance = line(painter, label, style, at.x + metrics.gutter, width, baseline);
     // A rule from the end of the label to the pane's edge, which is what says the
     // heading covers everything under it without drawing a box around it.
+    //
+    // **In logical pixels.** `hairline` takes logical and snaps for itself, while
+    // `baseline` above returns *device* — so `snap(baseline - 4)` scaled an
+    // already-scaled number and put the rule at 1.56× its y at 125%, correct at
+    // 100% and wrong at every other scale. The heading's own rectangle is
+    // logical, so its middle is the honest way to ask.
     let from = at.x + metrics.gutter + advance + metrics.gutter;
     let to = at.right() - metrics.gutter;
     if to > from {
-        painter.hairline(from, painter.snap(baseline - 4.0), to - from, theme.palette.divider);
+        painter.hairline(from, at.y + at.height * 0.5, to - from, theme.palette.divider);
     }
 }
 

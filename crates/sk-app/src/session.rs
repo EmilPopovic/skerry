@@ -94,10 +94,6 @@ pub struct Tab {
     pub path: PathBuf,
     /// The order it was in.
     pub sort: Sort,
-    /// How it was laid out.
-    pub mode: crate::cells::Mode,
-    /// How it was cut into headings.
-    pub grouping: crate::groups::Grouping,
     /// How far down the list it was, in logical pixels.
     pub scroll: f32,
 }
@@ -183,10 +179,8 @@ fn write_node(node: &Node, depth: usize, out: &mut String) {
             for tab in tabs {
                 let _ = writeln!(
                     out,
-                    "{pad}  tab {} {} {} {} {}",
+                    "{pad}  tab {} {} {}",
                     sort_token(tab.sort),
-                    tab.mode.token(),
-                    tab.grouping.token(),
                     tab.scroll.round() as i64,
                     tab.path.display()
                 );
@@ -361,24 +355,16 @@ fn read_node(lines: &[&str], at: usize, depth: u32) -> Option<(Node, usize)> {
 /// never parses as a number.
 fn read_tab(rest: &str) -> Option<Tab> {
     let (sort, rest) = rest.split_once(' ')?;
-    // **Optional tokens, taken in the order the format grew them.** Each is
-    // consumed only where it is actually there, so every arity this file has ever
-    // been written in still parses: sort and scroll, or with a mode, or with a
-    // mode and a grouping. A mode word and a grouping word never parse as a
-    // number, which is what makes that unambiguous.
+    // **A view mode and a grouping were written here for two commits**, and are
+    // skipped rather than refused: the layout of a folder belongs to the folder
+    // now — see [`crate::views`] — and two files that could disagree about it is
+    // the thing that made the setting feel unreliable. A file written by those
+    // builds still restores its tabs; only the tokens they carried are ignored.
     let mut rest = rest;
-    let mut mode = crate::cells::Mode::default();
-    let mut grouping = crate::groups::Grouping::default();
-    if let Some((token, tail)) = rest.split_once(' ')
-        && let Some(found) = crate::cells::Mode::from_token(token)
+    while let Some((token, tail)) = rest.split_once(' ')
+        && (crate::cells::Mode::from_token(token).is_some()
+            || crate::groups::Grouping::from_token(token).is_some())
     {
-        mode = found;
-        rest = tail;
-    }
-    if let Some((token, tail)) = rest.split_once(' ')
-        && let Some(found) = crate::groups::Grouping::from_token(token)
-    {
-        grouping = found;
         rest = tail;
     }
     let (scroll, path) = rest.split_once(' ')?;
@@ -388,8 +374,6 @@ fn read_tab(rest: &str) -> Option<Tab> {
     }
     Some(Tab {
         sort: read_sort(sort)?,
-        mode,
-        grouping,
         scroll: scroll.parse::<f32>().ok()?.max(0.0),
         path: path.to_path_buf(),
     })
@@ -408,77 +392,34 @@ mod tests {
         Tab {
             path: PathBuf::from(path),
             sort: Sort { column, descending: column == SortColumn::Size, ..Sort::default() },
-            mode: crate::cells::Mode::default(),
-            grouping: crate::groups::Grouping::default(),
             scroll,
         }
     }
 
-    /// A file written before the view mode existed still restores its layout.
+    /// Every arity this file has ever been written in still restores its tabs.
     ///
-    /// The reason ADR 0013 put the mode on the tab line instead of bumping the
-    /// version: a bump discards the file, and the file is somebody's arrangement
-    /// of windows.
+    /// The view mode and the grouping were written on this line for two commits
+    /// and belong to the folder now, so those tokens are skipped rather than
+    /// refused — a person who ran those builds keeps their splits and their tabs.
     #[test]
-    fn a_tab_line_without_a_mode_still_parses_and_defaults() {
-        let old = "skerry 1\nleaf 0\ntab name+ 120 /tmp/notes\n";
-        let session = parse(old).expect("the three-field form was refused");
-        let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
-        assert_eq!(tabs.len(), 1);
-        assert_eq!(tabs[0].path, PathBuf::from("/tmp/notes"));
-        assert!((tabs[0].scroll - 120.0).abs() < 0.01);
-        assert_eq!(tabs[0].mode, crate::cells::Mode::Details, "the default is Details");
-    }
-
-    /// Every arity the file has been written in still parses.
-    ///
-    /// Three tokens, four, and five — the format grew a mode and then a grouping,
-    /// and a bump would have discarded somebody's window arrangement each time.
-    #[test]
-    fn every_arity_the_format_has_ever_had_still_loads() {
+    fn every_arity_the_format_has_ever_had_still_restores_its_tabs() {
         let cases = [
-            ("skerry 1\nleaf 0\ntab name+ 120 /tmp/a\n", "details", "flat"),
-            ("skerry 1\nleaf 0\ntab name+ grid 120 /tmp/a\n", "grid", "flat"),
-            ("skerry 1\nleaf 0\ntab name+ grid by-time 120 /tmp/a\n", "grid", "by-time"),
-            ("skerry 1\nleaf 0\ntab name+ by-time 120 /tmp/a\n", "details", "by-time"),
+            "skerry 1\nleaf 0\ntab name+ 120 /tmp/my notes\n",
+            "skerry 1\nleaf 0\ntab name+ grid 120 /tmp/my notes\n",
+            "skerry 1\nleaf 0\ntab name+ grid by-time 120 /tmp/my notes\n",
+            "skerry 1\nleaf 0\ntab name+ by-time 120 /tmp/my notes\n",
         ];
-        for (text, mode, grouping) in cases {
+        for text in cases {
             let session = parse(text).unwrap_or_else(|| panic!("refused {text:?}"));
             let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
-            assert_eq!(tabs[0].mode.token(), mode, "{text:?}");
-            assert_eq!(tabs[0].grouping.token(), grouping, "{text:?}");
+            assert_eq!(tabs.len(), 1, "{text:?}");
             assert!((tabs[0].scroll - 120.0).abs() < 0.01, "{text:?}");
-            assert_eq!(tabs[0].path, PathBuf::from("/tmp/a"), "{text:?}");
-        }
-    }
-
-    /// And the four-field form carries the mode both ways.
-    #[test]
-    fn a_mode_survives_being_written_and_read_back() {
-        let written = "skerry 1\nleaf 0\ntab name+ grid 40 /tmp/pictures\n";
-        let session = parse(written).expect("the four-field form was refused");
-        let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
-        assert_eq!(tabs[0].mode, crate::cells::Mode::Grid);
-        assert!((tabs[0].scroll - 40.0).abs() < 0.01);
-        // Rendered again, it comes out in the four-field form and re-parses.
-        let again = render(&session);
-        assert!(again.contains("tab name+ grid flat 40 /tmp/pictures"), "{again}");
-        let round = parse(&again).expect("what we wrote we cannot read");
-        let Node::Leaf { tabs, .. } = &round.tree else { panic!("not a leaf") };
-        assert_eq!(tabs[0].mode, crate::cells::Mode::Grid);
-    }
-
-    /// A path with a space in it still lands, in both arities.
-    #[test]
-    fn a_path_with_spaces_survives_either_arity() {
-        for text in [
-            "skerry 1\nleaf 0\ntab name+ 0 /tmp/my notes\n",
-            "skerry 1\nleaf 0\ntab name+ grid 0 /tmp/my notes\n",
-        ] {
-            let session = parse(text).unwrap_or_else(|| panic!("refused {text:?}"));
-            let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
+            // The path is the rest of the line, so a space in it survives.
             assert_eq!(tabs[0].path, PathBuf::from("/tmp/my notes"), "{text:?}");
         }
+        // And what this build writes is the three-token form.
+        let session = parse(cases[2]).expect("refused");
+        assert!(render(&session).contains("tab name+ 120 /tmp/my notes"), "{}", render(&session));
     }
 
     fn nested() -> Session {

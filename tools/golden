@@ -150,6 +150,11 @@ FRAMES = [
     # meet differently in each.
     ("grouped", ["--size", "900x520", "--scale", "125", "--grouped"]),
     ("grouped-grid", ["--size", "900x520", "--scale", "125", "--grid", "--grouped"]),
+    # At 200%, because a heading's rule was drawn from a device-pixel baseline
+    # through a logical-pixel API — arithmetic that is right at 100% and wrong at
+    # every other scale, which is the one class of defect only a second scale
+    # catches.
+    ("grouped-200", ["--size", "900x520", "--scale", "200", "--grouped"]),
     # The subtree search: results from three different folders, each with the
     # folder it is in beside it, over a summary that says the walk is still
     # going. The only frame whose rows are not one directory's.
