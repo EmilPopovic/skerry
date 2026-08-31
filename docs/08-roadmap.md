@@ -242,6 +242,15 @@ the session: the mode and the grouping are a decision about a folder rather than
 about a window, so they are keyed by path and a folder with no record of its own
 takes the nearest ancestor's.
 
+**The Details columns have a ceiling and boundaries that drag.** The name column
+took whatever was left over, which on a 2,878-pixel window was two thousand of
+them with a file's size at the far right of the screen; it stops at a width the
+person sets by dragging the boundary in the header, and the two metadata columns
+then pack against it rather than against the pane's edge. The widths are the
+window's rather than the folder's — a width is a decision about how much of a
+name somebody wants to read — and they live in the session file beside the tabs
+and the splits, on a line an older file simply does not have.
+
 **Still owed here:** middle-click to split, the **List** columns — and the inline
 **Tree**,
 which ADR 0013 explicitly does not reach: it is not a listing laid out

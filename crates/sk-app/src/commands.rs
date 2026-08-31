@@ -729,6 +729,17 @@ fn grouping(registry: &mut Registry<App>) {
             enabled: |_| true,
             run: |app: &mut App| app.set_grouping(crate::groups::Grouping::Kind),
         },
+        // `Ctrl+Shift+0` beside `view.zoom_reset`'s `Ctrl+0`: both put a piece of
+        // the layout back to what it ships as, and a column dragged to its floor
+        // leaves a four-pixel grab band as the only other way out of it.
+        CommandSpec {
+            id: "view.columns_reset",
+            name: "action.columns_reset",
+            group: Group::View,
+            keys: &["ctrl+shift+0"],
+            enabled: |_| true,
+            run: App::reset_columns,
+        },
     ] {
         registry.add(spec);
     }

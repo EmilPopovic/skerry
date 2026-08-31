@@ -596,12 +596,13 @@ impl Panes {
         &self,
         content: Area,
         metrics: &Metrics,
+        columns: crate::layout::Columns,
         leaves: &mut Vec<PaneLayout>,
         dividers: &mut Vec<Divider>,
     ) {
         leaves.clear();
         dividers.clear();
-        walk(&self.root, content, metrics, leaves, dividers);
+        walk(&self.root, content, metrics, columns, leaves, dividers);
     }
 }
 
@@ -710,7 +711,8 @@ pub(crate) struct Single {
 pub(crate) fn single(pane: Pane, content: Area, metrics: &Metrics) -> Single {
     let panes = Panes::new(pane);
     let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
-    panes.layout(content, metrics, &mut leaves, &mut dividers);
+    let columns = crate::layout::Columns::default();
+    panes.layout(content, metrics, columns, &mut leaves, &mut dividers);
     let here = leaves.first().copied().unwrap_or_default();
     Single { panes, leaves, dividers, here }
 }
@@ -859,16 +861,17 @@ fn walk(
     node: &Node,
     area: Area,
     metrics: &Metrics,
+    columns: crate::layout::Columns,
     leaves: &mut Vec<PaneLayout>,
     dividers: &mut Vec<Divider>,
 ) {
     match node {
-        Node::Leaf(tabs) => leaves.push(leaf_layout(tabs, area, metrics)),
+        Node::Leaf(tabs) => leaves.push(leaf_layout(tabs, area, metrics, columns)),
         Node::Split { id, axis, ratio, first, second } => {
             let (one, two, band) = divide(area, *axis, *ratio);
             dividers.push(Divider { id: *id, axis: *axis, area: band });
-            walk(first, one, metrics, leaves, dividers);
-            walk(second, two, metrics, leaves, dividers);
+            walk(first, one, metrics, columns, leaves, dividers);
+            walk(second, two, metrics, columns, leaves, dividers);
         }
     }
 }
@@ -895,7 +898,12 @@ fn divide(area: Area, axis: Axis, ratio: f32) -> (Area, Area, Area) {
     }
 }
 
-fn leaf_layout(tabs: &Tabs, area: Area, metrics: &Metrics) -> PaneLayout {
+fn leaf_layout(
+    tabs: &Tabs,
+    area: Area,
+    metrics: &Metrics,
+    columns: crate::layout::Columns,
+) -> PaneLayout {
     // **Always, even for one tab.** A strip that appears with the second tab is
     // a strip whose arrival shifts the list under the pointer, and it hides the
     // one control that opens a tab at all until somebody has already opened one.
@@ -925,7 +933,7 @@ fn leaf_layout(tabs: &Tabs, area: Area, metrics: &Metrics) -> PaneLayout {
     let header = Area { y: bar.bottom(), height: metrics.header_height, ..area };
     let body =
         Area { y: header.bottom(), height: (area.bottom() - header.bottom()).max(0.0), ..area };
-    let (icon, name, size, modified) = crate::layout::columns(body, metrics);
+    let (icon, name, size, modified) = crate::layout::columns(body, metrics, columns);
     PaneLayout {
         id: tabs.id,
         area,
@@ -1183,7 +1191,8 @@ mod tests {
         let mut leaves = Vec::new();
         let mut dividers = Vec::new();
         let content = Area { x: 0.0, y: 100.0, width: 1000.0, height: 500.0 };
-        panes.layout(content, &sk_ui::Metrics::default(), &mut leaves, &mut dividers);
+        let widths = crate::layout::Columns::default();
+        panes.layout(content, &sk_ui::Metrics::default(), widths, &mut leaves, &mut dividers);
         (leaves, dividers)
     }
 
@@ -1357,7 +1366,8 @@ mod tests {
         let mut leaves = Vec::new();
         let mut dividers = Vec::new();
         let narrow = Area { x: 0.0, y: 0.0, width: 200.0, height: 500.0 };
-        panes.layout(narrow, &sk_ui::Metrics::default(), &mut leaves, &mut dividers);
+        let widths = crate::layout::Columns::default();
+        panes.layout(narrow, &sk_ui::Metrics::default(), widths, &mut leaves, &mut dividers);
         assert!(leaves[0].tools.iter().all(|tool| tool.width <= 0.0));
         assert!((leaves[0].path.width - 200.0).abs() < f32::EPSILON);
     }

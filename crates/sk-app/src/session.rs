@@ -16,9 +16,10 @@
 //! hidden off            on | off
 //! zoom 2                an index into App::ZOOM
 //! window 1100x720       logical pixels
+//! columns 520 96 128    name, size and modified widths, in logical pixels
 //! split beside 0.5      beside | below, then a ratio
 //!   leaf 1              the index of the showing tab
-//!     tab /home name+ 0     a sort, a scroll offset, and the path last
+//!     tab name+ 0 /home     a sort, a scroll offset, and the path last
 //! ```
 //!
 //! A `split` is followed by its two children in order, which is what makes the
@@ -60,6 +61,15 @@ pub struct Session {
     pub zoom: usize,
     /// The window's logical size.
     pub window: (u32, u32),
+    /// How wide the list's columns were dragged to.
+    ///
+    /// **A line an older file does not have, and no version bump for it.** A bump
+    /// discards the file and the file is somebody's window arrangement, which is
+    /// the whole thing [ADR
+    /// 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md)
+    /// exists to preserve. A file without the line restores the defaults, which
+    /// is exactly what a person who has never dragged a column expects.
+    pub columns: crate::layout::Columns,
     /// The pane tree.
     pub tree: Node,
 }
@@ -115,6 +125,25 @@ pub fn path() -> Option<PathBuf> {
     Some(state.join("skerry").join("session"))
 }
 
+/// The three column widths on a `columns` line, defaulting any that is missing
+/// or unreadable.
+///
+/// **Per field, not per line.** A line that has grown a fourth number in a later
+/// build still yields three, and one truncated to two yields two and a default —
+/// where refusing the line whole would throw away a width somebody dragged
+/// because of a field they never touched.
+fn read_columns(value: &str) -> crate::layout::Columns {
+    let mut widths = value.split_whitespace();
+    let default = crate::layout::Columns::default();
+    let mut next = |fallback: f32| widths.next().and_then(|it| it.parse().ok()).unwrap_or(fallback);
+    crate::layout::Columns {
+        name: next(default.name),
+        size: next(default.size),
+        modified: next(default.modified),
+    }
+    .clamped()
+}
+
 /// Reads the file, or nothing if there is not one this build understands.
 ///
 /// **Runs before the frame loop starts**, which is the one place a filesystem
@@ -167,6 +196,16 @@ pub fn render(session: &Session) -> String {
     out.push_str(if session.hidden { "hidden on\n" } else { "hidden off\n" });
     let _ = writeln!(out, "zoom {}", session.zoom);
     let _ = writeln!(out, "window {}x{}", session.window.0, session.window.1);
+    // Rounded, because a width comes from a pointer position and the file is a
+    // thing a person reads. Half a logical pixel of a column boundary is not a
+    // decision anybody made.
+    let _ = writeln!(
+        out,
+        "columns {} {} {}",
+        session.columns.name.round(),
+        session.columns.size.round(),
+        session.columns.modified.round()
+    );
     write_node(&session.tree, 0, &mut out);
     out
 }
@@ -254,6 +293,7 @@ pub fn parse(text: &str) -> Option<Session> {
         hidden: false,
         zoom: crate::app::ZOOM_DEFAULT,
         window: (1100, 720),
+        columns: crate::layout::Columns::default(),
         tree: Node::Leaf { active: 0, tabs: Vec::new() },
     };
     let rest: Vec<&str> = lines.collect();
@@ -266,6 +306,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "sidebar" => session.sidebar = value == "on",
             "hidden" => session.hidden = value == "on",
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
+            "columns" => session.columns = read_columns(value),
             "window" => {
                 if let Some(size) = read_size(value) {
                     session.window = size;
@@ -429,6 +470,7 @@ mod tests {
             hidden: true,
             zoom: 4,
             window: (1440, 900),
+            columns: crate::layout::Columns::default(),
             tree: Node::Split {
                 axis: Axis::Below,
                 ratio: 0.375,
@@ -476,6 +518,48 @@ mod tests {
         let read = parse(&render(&session)).expect("refused");
         let Node::Leaf { tabs, .. } = &read.tree else { panic!("not a leaf") };
         assert_eq!(tabs[0].path, PathBuf::from(odd));
+    }
+
+    /// **A file written before column widths existed is still that person's
+    /// window.**
+    ///
+    /// The alternative was a version bump, which discards the file whole — the
+    /// one thing ADR 0011 exists to prevent — so the line is additive and its
+    /// absence means the defaults.
+    #[test]
+    fn a_file_with_no_columns_line_restores_the_defaults() {
+        let older = "skerry 1\n\
+             theme dark\n\
+             sidebar on\n\
+             hidden off\n\
+             zoom 2\n\
+             window 1100x720\n\
+             leaf 0\n\
+             tab name+ 0 /home/emil\n";
+        let session = parse(older).expect("an older file is not a broken one");
+        assert_eq!(session.columns, crate::layout::Columns::default());
+        assert_eq!(session.window, (1100, 720), "and the rest of it still read");
+    }
+
+    /// Three widths out and the same three back.
+    ///
+    /// And a width the file should not be able to hold is held inside the range
+    /// rather than refused along with the tab tree that shared the file with it.
+    #[test]
+    fn the_column_widths_survive_a_round_trip_and_a_corrupt_one_is_clamped() {
+        let mut session = nested();
+        session.columns = crate::layout::Columns { name: 331.0, size: 72.0, modified: 150.0 };
+        let text = render(&session);
+        assert!(text.contains("columns 331 72 150"), "{text}");
+        assert_eq!(parse(&text).expect("round trip").columns, session.columns);
+
+        let broken = text.replace("columns 331 72 150", "columns 0 nonsense");
+        let read = parse(&broken).expect("a bad line is not a bad file");
+        assert!((read.columns.name - crate::layout::Columns::LEAST).abs() < f32::EPSILON);
+        let default = crate::layout::Columns::default();
+        assert!((read.columns.size - default.size).abs() < f32::EPSILON, "unreadable took default");
+        assert!((read.columns.modified - default.modified).abs() < f32::EPSILON, "missing field");
+        assert_eq!(read.tree, session.tree, "and the tree on the same file survived it");
     }
 
     /// A version this build does not know is ignored in full, not half-read.

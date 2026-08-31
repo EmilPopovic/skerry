@@ -105,6 +105,26 @@ struct FilesDrag {
     sprung_at: Option<Point>,
 }
 
+/// Which column boundary a drag on a header has hold of.
+///
+/// Named by the column *left* of the line, because that is the one whose width
+/// the drag sets: everything right of it shifts to follow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ColumnEdge {
+    Name,
+    Size,
+    Modified,
+}
+
+/// How far either side of a column boundary a press takes hold of it.
+///
+/// Four logical pixels each way, which is eight of target — the same band the
+/// pane divider uses, and narrow enough that the middle of a header label is
+/// still a press that sorts. A boundary is aimed at deliberately; a header is
+/// clicked in passing, and the click that sorts must not become a drag that
+/// resizes because the pointer was three pixels off.
+const COLUMN_GRAB: f32 = 4.0;
+
 /// A permanent deletion waiting for an answer.
 ///
 /// Holds the paths rather than re-reading the selection when the answer comes:
@@ -841,6 +861,18 @@ pub struct App {
     filtering: bool,
     typed_at: Instant,
     pointer: Point,
+    /// How wide the list's columns are, and what a drag on a header boundary
+    /// changes.
+    ///
+    /// **One set for the window, not one per pane.** A width is a decision about
+    /// how much of a name a person wants to read, and it does not change because
+    /// they looked at a different folder — the per-folder file holds what a view
+    /// *is* (a grid, a grouping) and this is how the chrome around it is sized.
+    /// Kept in the session, so a drag survives the process like every other part
+    /// of the layout.
+    columns: crate::layout::Columns,
+    /// The column boundary being dragged, and the leaf whose header it started in.
+    column_drag: Option<(crate::panes::PaneId, ColumnEdge)>,
     /// Where a rubber band started, and where it is now.
     band: Option<(Point, Point)>,
     /// A press on an already-selected row that may become a drag of files.
@@ -913,6 +945,7 @@ impl App {
         }
         self.sidebar.open = options.sidebar.unwrap_or(session.sidebar);
         self.zoom = session.zoom.min(ZOOM.len() - 1);
+        self.columns = session.columns.clamped();
         self.panes = crate::panes::Panes::restore(&session.tree, &self.jobs);
         for pane in self.panes.every_mut() {
             pane.show_hidden = session.hidden;
@@ -931,6 +964,7 @@ impl App {
             hidden: self.panes.focused().show_hidden,
             zoom: self.zoom,
             window: (self.logical.width as u32, self.logical.height as u32),
+            columns: self.columns,
             tree: self.panes.describe(),
         }
     }
@@ -1086,6 +1120,8 @@ impl App {
             filtering: false,
             typed_at: now,
             pointer: Point::default(),
+            columns: crate::layout::Columns::default(),
+            column_drag: None,
             band: None,
             files_drag: None,
             dropped: false,
@@ -2993,6 +3029,71 @@ impl App {
         self.dirty |= thrown;
     }
 
+    /// The column boundary under `position`, and the leaf whose header it is in.
+    ///
+    /// **Any leaf's header, not the focused one's.** The widths are the window's,
+    /// so a boundary in a split's other half sets the same three numbers — and a
+    /// hit test that only looked at the focused pane would give one of two
+    /// identical headers a grab band and the other none.
+    ///
+    /// Details only. A grid's header is three labels in a strip at the left, not
+    /// three columns, and there is no boundary there to take hold of.
+    fn column_edge_at(&self, position: Point) -> Option<(crate::panes::PaneId, ColumnEdge)> {
+        let leaf = self
+            .placement
+            .leaves
+            .iter()
+            .find(|leaf| leaf.header.contains(position.x, position.y))?;
+        if self.panes.leaf(leaf.id)?.showing().mode != crate::cells::Mode::Details {
+            return None;
+        }
+        let edges = [
+            (ColumnEdge::Name, leaf.name),
+            (ColumnEdge::Size, leaf.size),
+            (ColumnEdge::Modified, leaf.modified),
+        ];
+        edges.into_iter().find_map(|(edge, area)| {
+            (area.width > 0.0 && (position.x - area.right()).abs() <= COLUMN_GRAB)
+                .then_some((leaf.id, edge))
+        })
+    }
+
+    /// Moves the column boundary being dragged to where the pointer is.
+    ///
+    /// Measured from the column's own left edge in the leaf the drag started in,
+    /// so a drag that wanders into the other half of a split keeps setting the
+    /// width it took hold of rather than jumping to whatever the pointer is over.
+    fn drag_the_column(&mut self, id: crate::panes::PaneId, edge: ColumnEdge, position: Point) {
+        let Some(leaf) = self.placement.leaves.iter().find(|leaf| leaf.id == id) else { return };
+        let from = match edge {
+            ColumnEdge::Name => leaf.name.x,
+            ColumnEdge::Size => leaf.size.x,
+            ColumnEdge::Modified => leaf.modified.x,
+        };
+        let width = position.x - from;
+        let widths = &mut self.columns;
+        match edge {
+            ColumnEdge::Name => widths.name = width,
+            ColumnEdge::Size => widths.size = width,
+            ColumnEdge::Modified => widths.modified = width,
+        }
+        self.columns = self.columns.clamped();
+        self.relayout();
+        self.dirty = true;
+    }
+
+    /// Puts the column widths back to what they ship as.
+    ///
+    /// **The way out of a drag nobody meant.** A boundary dragged to its floor
+    /// leaves a column of ellipses, and the grab band for widening it again is
+    /// four pixels wide — so the reset is a command, in the registry with
+    /// everything else, and therefore in the palette and the menu.
+    pub(crate) fn reset_columns(&mut self) {
+        self.columns = crate::layout::Columns::default();
+        self.relayout();
+        self.dirty = true;
+    }
+
     /// The pane a scroll is about.
     ///
     /// **The one under the pointer, whichever pane holds the keyboard.** That is
@@ -4542,10 +4643,11 @@ search_active={active:?}",
     /// does — and running the wrong one leaves a pane drawing where it no longer
     /// is, which is a click that lands one pane over.
     fn divide(&mut self) {
-        let Self { panes, layout, theme, placement, .. } = self;
+        let Self { panes, layout, theme, placement, columns, .. } = self;
         panes.layout(
             layout.content,
             &theme.metrics,
+            *columns,
             &mut placement.leaves,
             &mut placement.dividers,
         );
@@ -5093,6 +5195,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
         let bar_report = self.bar_state();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
+header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
 {bar_report} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
@@ -5112,6 +5215,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.name.x,
             self.placement.here.size.x,
             self.placement.here.size.width,
+            self.placement.here.header.y,
+            self.placement.here.header.height,
+            self.placement.here.modified.x,
+            self.placement.here.modified.width,
             self.window_state.maximized,
             self.layout.title.height,
             self.layout.sidebar.width,
@@ -5289,6 +5396,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // The tree before the header and the list, because both of those are
         // questions about *which* pane — and the answer can change here.
         if self.press_in_the_tree(position, clicks, commands) {
+            return;
+        }
+        // **Before the sort**, because a boundary sits inside the header of the
+        // column left of it: without this, every press that took hold of a line
+        // also sorted by whatever label the line was at the end of.
+        if let Some((id, edge)) = self.column_edge_at(position) {
+            self.focus_pane(id);
+            self.column_drag = Some((id, edge));
             return;
         }
         if self.placement.here.header.contains(position.x, position.y) {
@@ -5759,11 +5874,15 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
         let divided = self.placement.dragging.take().is_some();
+        // A width is part of the layout, so letting go of one is a thing to save.
+        // The session is compared rather than tracked, so this only has to make
+        // the frame happen.
+        let sized = self.column_drag.take().is_some();
         // A press on the title bar that never moved is a click on a title bar,
         // and a title bar holds nothing to click: the path moved into the panes,
         // so there is nothing here for a press to be about.
         self.title_press = None;
-        if ended || released || dragged || divided {
+        if ended || released || dragged || divided || sized {
             self.dirty = true;
         }
     }
@@ -5840,6 +5959,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // Over a button that is drawn and dimmed, and nothing else is under it.
         if over_tool == Some(false) {
             return sk_plat::Cursor::Arrow;
+        }
+        // Before the header's hand, for the same reason the press is: the
+        // boundary is inside the header and is the more specific thing there.
+        if self.column_drag.is_some() || self.column_edge_at(position).is_some() {
+            return sk_plat::Cursor::Divider { horizontal: true };
         }
         if self.placement.here.header.contains(position.x, position.y)
             && self.column_at(position.x).is_some()
@@ -6517,6 +6641,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 // looked like anyway.
                 let _ = self.window.start_move();
             }
+            return;
+        }
+        // A column boundary that has been taken hold of keeps the pointer until
+        // the button comes up, wherever it wanders — including out of the header
+        // and into the list, which is where a hand ends up when it is dragging a
+        // line rather than aiming at one.
+        if let Some((id, edge)) = self.column_drag {
+            self.drag_the_column(id, edge, position);
             return;
         }
         // A drag inside a field selects text. Before the palette's branch, because

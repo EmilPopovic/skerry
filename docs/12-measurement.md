@@ -1461,3 +1461,35 @@ after resting 300 ms, with only the first allowed to coast. A compositor decides
 what a finger's delta is worth, so an absolute number there would be a test of
 Hyprland's configuration — but the *ratio* between a lift at speed and a lift at
 rest is entirely this code's, and it is 1.0 when the feature is missing.
+
+## Thirty-seven golden frames, one window size
+
+Capping the name column changes the Details view's geometry on any pane wide
+enough to hit the cap. Thirty-seven golden frames cover that view — two scales of
+it, a light palette, a split, a grid, four groupings, a search, eight panels —
+and **two of them changed**, both because a command had been added to a list.
+
+The layout change was invisible to all of them. Every frame but one renders at
+**900×520 logical pixels**, and at that width the name column has 410 pixels to
+take and takes them: the ceiling is 520, so nothing was ever near it. The frames
+are not wrong, and neither is the size — 900×520 is a real window and it is small
+enough to keep a reference PNG cheap. What is wrong is that thirty-seven frames
+share one premise, so a whole class of change is outside what any of them can see.
+
+The class is specific and worth naming: **anything that only happens past a
+threshold in a dimension the fixture holds constant.** A name column that stops
+growing, a tab strip that starts scrolling, a column that sheds, a grid that adds
+a sixth cell to a row — each is a branch that a fixture on one side of the
+threshold cannot reach. Coverage of the *view* is not coverage of the *branch*.
+
+Two frames of the same window at two sizes are cheap and would have caught this;
+the suite already does exactly that for scale, where `scale-100` through
+`scale-200` exist because arithmetic that is right at one scale is wrong at
+another. Width had no such pair. It has one now — `wide-columns` at 1600×520,
+whose only job is to be wide enough for the ceiling to bite.
+
+The rule: **when a feature has a threshold, a fixture on each side of it, or the
+feature is untested and the suite will not say so.** The suite reported 35 passes
+while the thing under change was drawn nowhere. A green sweep is a statement about
+the premises the fixtures encode, and the premises are as much a part of the
+instrument as the assertions are.

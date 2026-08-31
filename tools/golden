@@ -101,6 +101,13 @@ FRAMES = [
     ("scale-125", ["--size", "900x520", "--scale", "125"]),
     ("scale-150", ["--size", "900x520", "--scale", "150"]),
     ("scale-200", ["--size", "760x440", "--scale", "200"]),
+    # **The only frame wide enough for the name column to reach its ceiling.**
+    # Every other frame here is 900 logical pixels, where the name still takes
+    # everything going — so the ceiling that stops a 2,878-pixel window putting a
+    # file's size a screen-width from its name is invisible in all of them. What
+    # this shows is the two metadata columns packed against the name instead of
+    # against the pane's right edge, and the empty space past them.
+    ("wide-columns", ["--size", "1600x520", "--scale", "100"]),
     ("light", ["--size", "900x520", "--scale", "125", "--light"]),
     ("keyboard-overlay", ["--size", "900x520", "--scale", "125", "--keys"]),
     # **Not the statistics overlay.** Its content is job counts and cache

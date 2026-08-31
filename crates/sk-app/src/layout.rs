@@ -93,17 +93,79 @@ pub struct Layout {
     pub resize_border: f32,
 }
 
+/// How wide the list's columns are, in logical pixels.
+///
+/// **`name` is a maximum; the other two are exact.** A filename is the only cell
+/// whose useful length is unbounded, so the name is the column that takes what is
+/// left over — and past a certain width it stops taking it, which is the whole
+/// point: without a ceiling, a 2,800-pixel window puts a file's size fifteen
+/// hundred pixels from its name and the eye has to cross a desert to pair them.
+/// The other two columns then sit immediately after the name rather than against
+/// the pane's right edge, and the space past them is empty.
+///
+/// **Not in [`Metrics`], where zoom scales every field.** These are what somebody
+/// dragged the boundaries to, and a width that changed underneath them when they
+/// pressed `Ctrl+=` would be a setting the program overruled.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Columns {
+    /// The widest the name column is drawn.
+    pub name: f32,
+    /// The size column.
+    pub size: f32,
+    /// The modified column.
+    pub modified: f32,
+}
+
+impl Columns {
+    /// The narrowest a column may be dragged.
+    ///
+    /// Forty-eight logical pixels holds `9.9 MiB` and the header label above it.
+    /// Narrower is a column whose every cell is an ellipsis, which is a column
+    /// that has been turned off by a person who was trying to make it small.
+    pub const LEAST: f32 = 48.0;
+
+    /// The widest, which only the name is ever near.
+    ///
+    /// Nine hundred is about a hundred and forty characters at the body text
+    /// size. Past that a name is not being read, it is being scrolled past, and
+    /// the ceiling stops a drag off the edge of an ultrawide from parking every
+    /// other column out of sight.
+    pub const MOST: f32 = 900.0;
+
+    /// The same widths, inside the range a drag is allowed to reach.
+    ///
+    /// Applied on the way in from the session file as well as on the way out of a
+    /// drag: the file is a thing that can arrive corrupt, and a `name` of zero in
+    /// it would be a list with no names in it and no way to get them back.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        let hold = |width: f32| {
+            if width.is_finite() { width.clamp(Self::LEAST, Self::MOST) } else { Self::LEAST }
+        };
+        Self { name: hold(self.name), size: hold(self.size), modified: hold(self.modified) }
+    }
+}
+
+impl Default for Columns {
+    fn default() -> Self {
+        // 520 is about eighty characters at the 13 px body size, which is past
+        // the long tail of real filenames — and it puts the size column a third of
+        // the way across a wide pane instead of against its far edge. 96 holds
+        // `123.4 MiB` and 128 holds `12 September 2025`.
+        Self { name: 520.0, size: 96.0, modified: 128.0 }
+    }
+}
+
 /// The icon, name, size and modified columns for a list of `body`'s width.
 ///
-/// The two metadata columns keep their width and the name takes what is left,
-/// because a filename is the only cell whose useful length is unbounded. Below
-/// the width where the name would fall under a hundred logical pixels the
-/// metadata columns give way instead, widest first.
-pub(crate) fn columns(body: Area, metrics: &Metrics) -> (Area, Area, Area, Area) {
+/// The two metadata columns keep their width and the name takes what is left up
+/// to [`Columns::name`]. Below the width where the name would fall under a
+/// hundred logical pixels the metadata columns give way instead, widest first.
+pub(crate) fn columns(body: Area, metrics: &Metrics, widths: Columns) -> (Area, Area, Area, Area) {
     let gutter = metrics.gutter;
     let available = body.width - gutter * 2.0;
-    let mut size_width = metrics.size_column;
-    let mut modified_width = metrics.modified_column;
+    let mut size_width = widths.size;
+    let mut modified_width = widths.modified;
     if available - metrics.icon_column - size_width - modified_width < 100.0 {
         modified_width = 0.0;
     }
@@ -113,7 +175,8 @@ pub(crate) fn columns(body: Area, metrics: &Metrics) -> (Area, Area, Area, Area)
 
     let icon = Area { x: body.x + gutter, y: 0.0, width: metrics.icon_column, height: 0.0 };
     let name_x = icon.right();
-    let name_width = (body.right() - gutter - size_width - modified_width - name_x).max(0.0);
+    let fits = (body.right() - gutter - size_width - modified_width - name_x).max(0.0);
+    let name_width = fits.min(widths.name);
     (
         icon,
         Area { x: name_x, y: 0.0, width: name_width, height: 0.0 },
@@ -340,7 +403,7 @@ impl Layout {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Button, Frame, Layout, Tool};
+    use super::{Area, Button, Columns, Frame, Layout, Tool, columns};
     use sk_plat::{Edge, Size};
     use sk_ui::Metrics;
 
@@ -349,7 +412,7 @@ mod tests {
     fn one_leaf(layout: &Layout, metrics: &Metrics) -> crate::panes::PaneLayout {
         let panes = crate::panes::Panes::new(crate::pane::Pane::new(std::path::PathBuf::from("/")));
         let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
-        panes.layout(layout.content, metrics, &mut leaves, &mut dividers);
+        panes.layout(layout.content, metrics, Columns::default(), &mut leaves, &mut dividers);
         leaves.first().copied().unwrap_or_default()
     }
 
@@ -508,16 +571,85 @@ mod tests {
         assert!((pane.body.bottom() - layout.content.bottom()).abs() < f32::EPSILON);
     }
 
+    /// The four columns touch, in order, whatever the width.
     #[test]
-    fn the_columns_tile_the_row_and_the_name_takes_what_is_left() {
+    fn the_columns_pack_from_the_left_with_no_gap_between_them() {
         let metrics = Metrics::default();
-        let window = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        for width in [420.0, 700.0, 1100.0, 2878.0] {
+            let window =
+                Layout::compute_with(Size::new(width, 720.0), &metrics, Frame::None, false);
+            let layout = one_leaf(&window, &metrics);
+            assert!((layout.icon.right() - layout.name.x).abs() < f32::EPSILON, "at {width}");
+            assert!((layout.name.right() - layout.size.x).abs() < f32::EPSILON, "at {width}");
+            assert!((layout.size.right() - layout.modified.x).abs() < f32::EPSILON, "at {width}");
+        }
+    }
+
+    /// **The whole reason there is a ceiling.** Without one, a 2,878-pixel window
+    /// gave the name column two thousand of them and put every file's size at the
+    /// far right of the screen, a screen-width away from the name it belonged to.
+    #[test]
+    fn an_ultrawide_pane_stops_the_name_at_its_ceiling() {
+        let metrics = Metrics::default();
+        let widths = Columns::default();
+        let window = Layout::compute_with(Size::new(2878.0, 720.0), &metrics, Frame::None, false);
         let layout = one_leaf(&window, &metrics);
-        assert!((layout.icon.right() - layout.name.x).abs() < f32::EPSILON);
-        assert!((layout.name.right() - layout.size.x).abs() < f32::EPSILON);
-        assert!((layout.size.right() - layout.modified.x).abs() < f32::EPSILON);
-        assert!((layout.modified.right() - (1100.0 - metrics.gutter)).abs() < f32::EPSILON);
-        assert!(layout.name.width > 700.0, "{}", layout.name.width);
+        assert!((layout.name.width - widths.name).abs() < f32::EPSILON, "{}", layout.name.width);
+        // And the space past the last column is empty rather than shared out.
+        let past = 2878.0 - metrics.gutter - layout.modified.right();
+        assert!(past > 1_900.0, "only {past} left over");
+    }
+
+    /// Under the ceiling the name still takes everything going, because a pane
+    /// this size has nothing to spare and a ceiling is not a target.
+    #[test]
+    fn a_pane_narrower_than_the_ceiling_gives_the_name_what_is_left() {
+        let metrics = Metrics::default();
+        let window = Layout::compute_with(Size::new(700.0, 720.0), &metrics, Frame::None, false);
+        let layout = one_leaf(&window, &metrics);
+        assert!(layout.name.width < Columns::default().name, "{}", layout.name.width);
+        assert!((layout.modified.right() - (700.0 - metrics.gutter)).abs() < f32::EPSILON);
+    }
+
+    /// **The boundary a drag lets go of is the boundary the next frame draws.**
+    ///
+    /// `App::drag_the_column` sets a width to the distance from the column's own
+    /// left edge to the pointer, and this is the other half of that round trip:
+    /// the line comes back at the point it was dropped on, and the columns right
+    /// of it follow. A drag that set the width from the *pane's* left edge, or
+    /// from the previous boundary, would put the line somewhere near the pointer
+    /// at one window width and nowhere near it at another.
+    #[test]
+    fn a_boundary_dragged_to_a_point_comes_back_at_that_point() {
+        let metrics = Metrics::default();
+        let body = Area { x: 40.0, y: 0.0, width: 1600.0, height: 500.0 };
+        let widths = Columns::default();
+        let (_, name, ..) = columns(body, &metrics, widths);
+
+        for dropped_on in [420.0, 300.0, 700.0] {
+            let dragged = Columns { name: dropped_on - name.x, ..widths }.clamped();
+            let (_, moved, size, modified) = columns(body, &metrics, dragged);
+            assert!(
+                (moved.right() - dropped_on).abs() < f32::EPSILON,
+                "dropped on {dropped_on}, landed at {}",
+                moved.right()
+            );
+            assert!((size.x - dropped_on).abs() < f32::EPSILON, "the size column did not follow");
+            assert!((modified.x - size.right()).abs() < f32::EPSILON);
+        }
+    }
+
+    /// A width off the end of a drag, or out of a file that arrived corrupt, is
+    /// held inside the range rather than refused: a `name` of zero is a list with
+    /// no names in it and no boundary left to drag back.
+    #[test]
+    fn a_width_outside_the_range_is_held_inside_it() {
+        let wild = Columns { name: 40_000.0, size: 0.0, modified: f32::NAN }.clamped();
+        assert!((wild.name - Columns::MOST).abs() < f32::EPSILON);
+        assert!((wild.size - Columns::LEAST).abs() < f32::EPSILON);
+        assert!((wild.modified - Columns::LEAST).abs() < f32::EPSILON, "NaN fell through");
+        let kept = Columns { name: 300.0, size: 80.0, modified: 100.0 };
+        assert_eq!(kept.clamped(), kept, "a width already inside the range is untouched");
     }
 
     #[test]

@@ -106,10 +106,6 @@ pub struct Metrics {
     pub path_size: f32,
     /// Corner radius of a selection or hover shape.
     pub radius: f32,
-    /// Width of the size column.
-    pub size_column: f32,
-    /// Width of the modified column.
-    pub modified_column: f32,
     /// Width of the icon column, including its trailing space.
     pub icon_column: f32,
     /// Width of the sidebar, in logical pixels.
@@ -154,8 +150,6 @@ impl Default for Metrics {
             header_size: 11.0,
             path_size: 13.5,
             radius: 6.0,
-            size_column: 96.0,
-            modified_column: 128.0,
             icon_column: 26.0,
             sidebar_width: 220.0,
             sidebar_row: 30.0,
@@ -193,8 +187,6 @@ impl Metrics {
             row_height: scale(self.row_height),
             text_size: self.text_size * factor,
             icon_column: scale(self.icon_column),
-            size_column: scale(self.size_column),
-            modified_column: scale(self.modified_column),
             gutter: scale(self.gutter),
             radius: self.radius * factor,
             ..self

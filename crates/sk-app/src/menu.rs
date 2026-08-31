@@ -42,7 +42,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
         "view.group_size",
         "view.group_kind",
     ],
-    &["view.hidden", "view.theme", "view.sidebar"],
+    &["view.columns_reset", "view.hidden", "view.theme", "view.sidebar"],
     &["tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],
     &["file.terminal", "view.path_entry", "file.paste_location", "go.reload"],

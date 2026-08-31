@@ -262,6 +262,7 @@ action.group_none = No grouping
 action.group_time = Group by time
 action.group_size = Group by size
 action.group_kind = Group by kind
+action.columns_reset = Reset column widths
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday

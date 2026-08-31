@@ -706,7 +706,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         // which is where a rule drawn from the window's left edge instead of the
         // header's own crosses the sidebar — a line nothing else would catch.
         split_the_sample(&mut panes, &session, request);
-        panes.layout(layout.content, &theme.metrics, &mut leaves, &mut dividers);
+        let widths = crate::layout::Columns::default();
+        panes.layout(layout.content, &theme.metrics, widths, &mut leaves, &mut dividers);
         here = leaves.first().copied().unwrap_or_default();
     }
     // The tab `split_the_sample` left *behind* in the lower half, which is the

@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 100
+FEWEST_SCENARIOS = 102
 
 
 def scenario(name, fresh: bool = False):
@@ -1496,6 +1496,62 @@ def pointer_scroll(run: Run, fixture: Path) -> None:
     run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 500\nkey f12\nsleep 200\n")
     if float(run.state()["scroll"]) >= after:
         raise Failure("scrolling up moved nothing")
+
+
+@scenario("column-drag")
+def column_drag(run: Run, fixture: Path) -> None:
+    """A drag on the Name/Size boundary sets the name column's width.
+
+    **The aim comes from the boundary itself.** `size_x` *is* the line between
+    the two columns — the name's right edge and the size's left edge are one
+    number — and `header_y` and `header_h` are the strip it runs down. Nothing
+    here is a fraction of the window, which is the rule docs/12-measurement.md
+    records after a chrome aim taken from a neighbour moved without it.
+
+    Then `Ctrl+Shift+0`, because a boundary dragged to its floor leaves a
+    four-pixel grab band as the only other way back and the reset is the command
+    that exists for it.
+    """
+    state = listed(run)
+    before = float(state["size_x"])
+    middle = float(state["header_y"]) + float(state["header_h"]) / 2.0
+    grab = aim(run, state, before, middle)
+    drop = aim(run, state, before - 140.0, middle)
+    run.drive(
+        f"move {grab[0]:.2f} {grab[1]:.2f}\nsleep 200\npress\nsleep 120\n"
+        f"move {drop[0]:.2f} {drop[1]:.2f}\nsleep 250\nrelease\nsleep 250\n"
+        "key f12\nsleep 200\n"
+    )
+    after = float(run.state()["size_x"])
+    if after > before - 100.0:
+        raise Failure(f"a 140 px drag moved the boundary from {before} to {after}")
+
+    run.drive("key ctrl+shift+0\nsleep 300\nkey f12\nsleep 200\n")
+    back = float(run.state()["size_x"])
+    if abs(back - before) > 1.0:
+        raise Failure(f"the reset left the boundary at {back}, not {before}")
+
+
+@scenario("column-sort-not-resize")
+def column_sort_not_resize(run: Run, fixture: Path) -> None:
+    """A press in the middle of a header label still sorts.
+
+    The grab band is inside the header of the column left of it, so the two
+    gestures share a strip. Eight pixels of it take hold of the line and the rest
+    sorts — and a header that had become undraggable-but-also-unsortable would
+    pass every unit test there is.
+    """
+    state = listed(run)
+    label = float(state["size_x"]) + float(state["size_w"]) / 2.0
+    middle = float(state["header_y"]) + float(state["header_h"]) / 2.0
+    at = aim(run, state, label, middle)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 300\nkey f12\nsleep 200\n")
+    sorted_by = run.state()
+    if sorted_by["sort"] != "Size":
+        raise Failure(f"a click on the Size label sorted by {sorted_by['sort']!r}")
+    # And the boundary did not move while that happened.
+    if abs(float(sorted_by["size_x"]) - float(state["size_x"])) > 1.0:
+        raise Failure("sorting moved the column boundary")
 
 
 @scenario("touchpad-flick", fresh=True)

@@ -1826,7 +1826,11 @@ pub fn name_field(layout: &PaneLayout, metrics: &sk_ui::Metrics, row: usize, off
     Area {
         x: layout.name.x - 4.0,
         y: top + 2.0,
-        width: (layout.name.width + metrics.size_column * 0.5)
+        // Half the size column past the name's own right edge, because a name
+        // being typed is usually longer than the one it replaces. Taken from the
+        // *drawn* size column rather than from a metric, so a size column
+        // dragged narrow lends less and one dragged wide lends more.
+        width: (layout.name.width + layout.size.width * 0.5)
             .min(layout.body.right() - layout.name.x + 4.0),
         height: metrics.row_height - 4.0,
     }
@@ -3169,7 +3173,8 @@ mod tests {
         let layout =
             Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, false);
         let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
-        panes.layout(layout.content, &theme.metrics, &mut leaves, &mut dividers);
+        let widths = crate::layout::Columns::default();
+        panes.layout(layout.content, &theme.metrics, widths, &mut leaves, &mut dividers);
         let mut list = DrawList::default();
         list.begin((1250, 775));
         let mut frames = Frames::new();
