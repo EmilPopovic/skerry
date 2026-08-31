@@ -1676,3 +1676,34 @@ different flavours of it: a sleep where a wait belonged, a fixture two tests
 shared, and a pointer another scenario left somewhere. What they have in common is
 that running one scenario is a different experiment from running the suite, and
 only the second one is the claim. Run the sweep.
+
+## Three frames' worth of the same gap, so here is the shape of it
+
+"This folder is empty" had never been visible in the shipping configuration. It
+was drawn ten logical pixels from the left of the *window* rather than of the
+pane, so with the sidebar open — the default — it and every read error were
+underneath it. Forty golden frames covered this view and not one of them could
+have shown it, because **every one of them had a listing to draw**.
+
+That is the third time in this file that a suite went green over a case its
+fixtures could not reach, and the three are worth naming together:
+
+- every golden frame but one rendered at **900 logical pixels wide**, where a name
+  column's ceiling is never reached;
+- the one wide frame's fixture **fitted its window**, so the scrollbar it was added
+  to cover was not drawn in it;
+- and every frame had **a directory with something in it**.
+
+Each was a premise nobody chose. The width, the row count and the readability of
+the directory were not decisions about what to test — they were whatever the
+fixture happened to be, shared by every frame because there is one fixture.
+
+So, alongside "when a feature has a threshold, put a fixture on each side of it":
+**a fixture's incidental properties are premises, and a suite of frames over one
+fixture shares all of them.** The way to find them is to ask what the fixture
+cannot be. It is never empty, never unreadable, never larger than the window,
+never wider than the ceiling — and each of those sentences is a frame that does
+not exist, holding a defect that cannot be seen.
+
+`no-listing` and `no-listing-columns` are two of those sentences. The remaining
+ones are worth writing down when somebody next reaches for this file.

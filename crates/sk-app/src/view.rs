@@ -2563,6 +2563,26 @@ struct CellState {
 /// **No size and no date, because a column has neither.** A trail level fetches no
 /// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
 /// that would be blank while it arrived.
+/// Where the message that stands in for an empty listing goes: its left edge and
+/// how much room it has, both in logical pixels.
+///
+/// **It started at the window's gutter.** Ten pixels from the left of the
+/// *window*, not of the pane — so with the sidebar open, which is the default,
+/// "This folder is empty" and every read error were drawn underneath it and
+/// nobody had ever seen one. A column view made it visible by drawing the message
+/// across the ancestor columns instead of hiding it, which is how it was reported.
+///
+/// From the pane's own table, so it is under the rows it is standing in for in
+/// every mode — the whole table in Details, the body in a grid, the last column of
+/// a trail. It runs to the body's right edge rather than the table's, which in
+/// column mode is the empty space beside the last column and is the only place a
+/// sentence fits; there is no scrollbar to collide with, because a listing with
+/// nothing in it has nothing to scroll.
+fn empty_message(table: Area, body: Area, metrics: &sk_ui::Metrics) -> (f32, f32) {
+    let x = table.x + metrics.gutter;
+    ((x), (body.right() - metrics.gutter - x).max(1.0))
+}
+
 /// The mark in a column row, square.
 const ICON: f32 = 16.0;
 
@@ -2764,11 +2784,11 @@ fn body(
             .problem
             .as_ref()
             .map_or_else(|| i18n::lookup("status.empty").to_owned(), sk_model::Problem::message);
-        let baseline =
-            painter.baseline(layout.body.y + 36.0, metrics.row_height, metrics.path_size);
+        let table = table_of(layout, pane);
+        let (x, width) = empty_message(table, layout.body, &metrics);
+        let baseline = painter.baseline(table.y + 36.0, metrics.row_height, metrics.path_size);
         let style = TextStyle::new(metrics.path_size, theme.palette.dim);
-        let width = layout.body.width - metrics.gutter * 2.0;
-        line(painter, &message, style, metrics.gutter, width, baseline);
+        line(painter, &message, style, x, width, baseline);
     }
 
     if let Some((from, to)) = chrome.band.filter(|_| has_keyboard) {
@@ -3622,6 +3642,33 @@ mod tests {
         }
         while let Ok(message) = updates.try_recv() {
             pane.apply(message, jobs);
+        }
+    }
+
+    /// **The message that stands in for an empty listing is inside the pane.**
+    ///
+    /// It was ten pixels from the left of the *window*, which with the sidebar
+    /// open — the default — put it underneath the sidebar, so nobody had ever seen
+    /// "This folder is empty" or a permission error in the shipping
+    /// configuration. It took a column view drawing it across four other columns
+    /// for anyone to notice it was being drawn at all.
+    #[test]
+    fn the_empty_message_is_inside_the_pane_in_every_mode() {
+        let metrics = sk_ui::Metrics::default();
+        // A body that starts where a sidebar leaves off, which is the case the old
+        // arithmetic could not see.
+        let body = crate::layout::Area { x: 220.0, y: 130.0, width: 880.0, height: 500.0 };
+        let tables = [
+            ("details", crate::layout::Area { width: 869.0, ..body }),
+            ("grid", body),
+            ("columns", crate::trail::pane_area(body, 3, 0.0)),
+        ];
+        for (mode, table) in tables {
+            let (x, width) = super::empty_message(table, body, &metrics);
+            assert!(x >= table.x, "in {mode} the message starts left of the table");
+            assert!(x >= body.x, "in {mode} it starts under the sidebar");
+            assert!(x + width <= body.right(), "in {mode} it runs past the pane");
+            assert!(width > 100.0, "in {mode} a {width} box holds no sentence");
         }
     }
 

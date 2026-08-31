@@ -169,6 +169,18 @@ FRAMES = [
     # and wrong at another is the class of defect a second scale exists to catch.
     ("columns-200", ["--size", "1100x520", "--scale", "200", "--columns",
                      "--at", "documents/deeper"]),
+    # **A directory that cannot be read, with the sidebar open.** The message that
+    # stands in for a listing was drawn ten pixels from the left of the *window*
+    # rather than of the pane, so with the sidebar open — the default, and what
+    # every other frame here shows — it was underneath it, and nobody had ever seen
+    # "This folder is empty" or a permission error in the shipping configuration.
+    # Every frame in this file had a listing to draw, so none of them could.
+    ("no-listing", ["--size", "900x520", "--scale", "125", "--at", "not-here"]),
+    # And the same message where a trail is what is on screen, which is where it
+    # was finally noticed: drawn across four other columns rather than in the one
+    # it belongs to.
+    ("no-listing-columns", ["--size", "1100x520", "--scale", "100", "--columns",
+                            "--at", "documents/not-here"]),
     # Grouping, in both geometries, because orthogonal is the claim: the same
     # headings over rows and over cells, with each band sorted on its own. Two
     # frames rather than one because the heading's rule and the band's first line
