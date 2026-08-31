@@ -47,6 +47,7 @@ mod session;
 mod sidebar;
 mod sizes;
 mod view;
+mod views;
 
 pub use app::{App, Options};
 pub use bench::{Bench, run as bench};

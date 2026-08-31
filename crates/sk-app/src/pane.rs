@@ -144,6 +144,12 @@ pub struct Pane {
     /// midnight and the choice does not — which is why the two are separate
     /// fields rather than one.
     pub grouping: crate::groups::Grouping,
+    /// Whether this pane has arrived somewhere whose view has not been applied.
+    ///
+    /// Raised by every navigation and cleared by the frame loop, which is what
+    /// keeps "apply the folder's remembered layout" in one place rather than at
+    /// the fourteen call sites that open a directory.
+    pub view_owed: bool,
     /// Where the display order's bands begin, recomputed when the order changes.
     ///
     /// **Not per frame.** Working out which band each entry is in is a walk of
@@ -244,6 +250,7 @@ impl Pane {
             sort: Sort::default(),
             mode: crate::cells::Mode::default(),
             grouping: crate::groups::Grouping::default(),
+            view_owed: true,
             bands: Vec::new(),
             filter: String::new(),
             show_hidden: false,
@@ -326,6 +333,11 @@ impl Pane {
 
     /// Resets everything that is about the old directory, then reads the new one.
     fn arrive(&mut self, jobs: &Jobs) {
+        // **The one place a pane's path changes**, so the one place the folder's
+        // remembered view has to be applied. The pane cannot read the store — it
+        // is the window's, not the pane's — so it raises a flag the frame loop
+        // clears. See `App::settle_views`.
+        self.view_owed = true;
         self.listing = Listing::default();
         self.selection = Selection::default();
         self.scroll.to(0.0);
@@ -575,8 +587,17 @@ impl Pane {
                 // filesystem that answers `DT_UNKNOWN` at all — XFS without
                 // `ftype=1`, every 9p mount — nothing grouped first until the
                 // list was re-sorted by hand.
-                self.reorder_owed |=
-                    self.sort.column != SortColumn::Name || (self.sort.dirs_first && kinds_changed);
+                //
+                // **So does grouping by time**, and that one is not a corner
+                // case: the band is derived from `mtime`, `getdents64` does not
+                // report one, and a name sort was the one order that never asked
+                // for the metadata pass. So a grouped folder banded every entry
+                // on a modification time of zero — 1970, which is older than
+                // every edge — and put the whole listing under *Older*, for good,
+                // because nothing ever redid the sort.
+                self.reorder_owed |= self.sort.column != SortColumn::Name
+                    || !self.sort.bands.is_empty()
+                    || (self.sort.dirs_first && kinds_changed);
                 self.meta_done += 1;
                 if self.meta_done >= self.meta_expected {
                     self.loading = false;
@@ -982,6 +1003,92 @@ mod tests {
             names_of(&pane),
             vec!["sub", "to-sub", "parent-one.txt", "parent-three.txt", "parent-two.txt"],
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every navigation asks for the folder's remembered layout.
+    ///
+    /// The flag is the whole mechanism, and it is raised in one place — `arrive`,
+    /// which every one of the fourteen ways into a directory goes through. A
+    /// navigation that did not raise it would silently keep the last folder's
+    /// layout, which looks like the setting not being remembered at all.
+    #[test]
+    fn arriving_anywhere_asks_for_that_folders_view() {
+        let root = fixture("owed");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        // A fresh pane is owed one too: it has arrived somewhere.
+        assert!(pane.view_owed, "a new pane does not ask");
+        pane.view_owed = false;
+
+        pane.open(root.join("sub"), &harness.jobs);
+        assert!(pane.view_owed, "opening a folder does not ask");
+        pane.view_owed = false;
+        harness.settle(&mut pane);
+
+        assert!(pane.go_back(&harness.jobs));
+        assert!(pane.view_owed, "Back does not ask");
+        pane.view_owed = false;
+        harness.settle(&mut pane);
+
+        assert!(pane.go_forward(&harness.jobs));
+        assert!(pane.view_owed, "Forward does not ask");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A grouped folder bands on real modification times, not on zero.
+    ///
+    /// **The defect this covers put an entire Downloads folder under `Older`.**
+    /// `getdents64` reports no modification time, so the band of every entry is
+    /// computed from a zero — 1970, older than every edge — and a *name* sort was
+    /// the one order that never asked for the metadata pass to redo it. The
+    /// listing stayed banded on 1970 for as long as the folder was open.
+    ///
+    /// Driven through a real read so the names pass and the metadata pass happen
+    /// in the order they happen in a window, which is the whole of what went
+    /// wrong.
+    #[test]
+    fn a_grouped_folder_bands_on_the_times_the_metadata_pass_brings() {
+        let root = fixture("bands");
+        let now = std::time::SystemTime::now();
+        let seconds = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |it| i64::try_from(it.as_secs()).unwrap_or(0));
+        // Two files pushed a week back, so the fixture spans two bands. Names
+        // chosen so the *name* order interleaves them with the recent ones —
+        // which is what makes the display order tell whether the sort was redone.
+        let old = now - std::time::Duration::from_secs(7 * 86_400);
+        for name in ["parent-one.txt", "parent-three.txt"] {
+            let handle = std::fs::File::options().write(true).open(root.join(name)).unwrap();
+            let times = std::fs::FileTimes::new().set_modified(old);
+            if handle.set_times(times).is_err() {
+                return;
+            }
+        }
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        // One edge a day back: band 1 is the last day, band 2 everything before.
+        pane.sort.bands = sk_model::Banding::new(&[seconds + 86_400, seconds - 86_400]);
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+
+        let bands: Vec<u8> = (0..pane.listing.rows())
+            .filter_map(|row| pane.listing.at(row))
+            .map(|id| pane.sort.bands.band_of(pane.listing.mtime(id)))
+            .collect();
+        assert!(bands.len() >= 4, "the fixture read too little: {bands:?}");
+        assert!(bands.contains(&1) && bands.contains(&2), "one band only: {bands:?}");
+        // **The invariant grouping rests on**: the display order is banded, so
+        // the band never goes backwards as you read down the rows. Without the
+        // re-sort the order is the name order over real times, and the bands
+        // interleave.
+        assert!(
+            bands.windows(2).all(|pair| pair[0] <= pair[1]),
+            "the display order is not banded, so the sort was not redone: {bands:?}",
+        );
+        // And the runs the layout reads are contiguous rather than one per entry.
+        pane.reband();
+        assert_eq!(pane.bands.len(), 2, "{:?}", pane.bands);
         let _ = std::fs::remove_dir_all(&root);
     }
 

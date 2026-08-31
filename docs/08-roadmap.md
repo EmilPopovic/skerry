@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 567 tests, 98 GUI scenarios on two display servers and thirty-four golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 575 tests, 98 GUI scenarios on two display servers and thirty-four golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -235,8 +235,13 @@ rather than inside it, so the same headings work in both views, and as a sort
 prefix rather than a second pass, so each band is ordered by whatever the pane is
 sorted by. Time only — by kind and by size are the same seam.
 
-**Still owed here:** middle-click to split, per-folder settings with subtree
-inheritance, the **List** columns — and the inline **Tree**,
+**Per-folder view settings landed with subtree inheritance**, in a file beside
+the session: the mode and the grouping are a decision about a folder rather than
+about a window, so they are keyed by path and a folder with no record of its own
+takes the nearest ancestor's.
+
+**Still owed here:** middle-click to split, the **List** columns — and the inline
+**Tree**,
 which ADR 0013 explicitly does not reach: it is not a listing laid out
 differently but a listing whose rows come from several directories at varying
 depth, with an expansion state nothing models yet.

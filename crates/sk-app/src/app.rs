@@ -773,6 +773,10 @@ pub struct App {
     search: Option<crate::search::Search>,
     /// The persistent index this window has loaded, and any build in flight.
     indexes: crate::indexing::Indexes,
+    /// How each folder was last laid out.
+    views: crate::views::Views,
+    /// The file as last written, so a save that would change nothing does not.
+    views_text: String,
     /// The Properties panel, while it is open.
     properties: Option<crate::properties::Properties>,
     /// The Open With list, while it is open.
@@ -1064,6 +1068,8 @@ impl App {
             palette: None,
             search: None,
             indexes: crate::indexing::Indexes::default(),
+            views: crate::views::load(),
+            views_text: String::new(),
             properties: None,
             openers: None,
             tab_press: None,
@@ -1871,6 +1877,7 @@ impl App {
     /// keyed by path rather than by row, so a new listing shows what is already
     /// known instead of starting again.
     fn settle_rows(&mut self) {
+        self.settle_views();
         self.rebandif_needed();
         let cells = self.cells();
         self.panes
@@ -4276,6 +4283,50 @@ search_active={active:?}",
         self.reveal_cursor();
     }
 
+    /// Applies each pane's folder view where it has just arrived somewhere.
+    ///
+    /// Every pane, not the focused one: a split shows two folders and both are
+    /// entitled to their own layout, which is the whole reason the store is keyed
+    /// by path rather than held on the tab.
+    fn settle_views(&mut self) {
+        let mut moved = false;
+        for pane in self.panes.every_mut() {
+            if !std::mem::take(&mut pane.view_owed) {
+                continue;
+            }
+            // Nothing for this folder means nothing to say about it: a pane
+            // restored from a session keeps the layout it came back with rather
+            // than being reset to the default.
+            let Some(view) = self.views.for_path(&pane.path) else { continue };
+            if pane.mode != view.mode || pane.grouping != view.grouping {
+                pane.mode = view.mode;
+                pane.grouping = view.grouping;
+                moved = true;
+            }
+        }
+        if moved {
+            self.dirty = true;
+        }
+    }
+
+    /// Records the focused pane's layout against the folder it is showing.
+    fn remember_view(&mut self) {
+        let pane = self.panes.focused();
+        let view = crate::views::View { mode: pane.mode, grouping: pane.grouping };
+        let path = pane.path.clone();
+        if !self.views.remember(&path, view) {
+            return;
+        }
+        let text = self.views.render();
+        if text == self.views_text {
+            return;
+        }
+        self.views_text.clone_from(&text);
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            crate::views::write(&text);
+        });
+    }
+
     /// Lays the focused pane out the other way.
     ///
     /// **The cursor is revealed afterwards**, because the same entry is at a
@@ -4287,6 +4338,7 @@ search_active={active:?}",
             return;
         }
         self.panes.focused_mut().mode = mode;
+        self.remember_view();
         let cells = self.cells();
         let body = self.placement.here.body.height;
         self.panes.focused_mut().scroll.set_extent(cells.content_height(), body);
@@ -4436,11 +4488,12 @@ search_active={active:?}",
         let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
         let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
         format!(
-            "mode={} grouping={} bands={} columns={} cell={:.1}x{:.1} \
+            "mode={} grouping={} bands={} remembered={} columns={} cell={:.1}x{:.1} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
             cells.count(),
+            self.views.len(),
             cells.columns(),
             cells.cell().0,
             cells.cell().1,
@@ -4968,6 +5021,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
         self.panes.focused_mut().grouping = grouping;
+        self.remember_view();
         self.rebandif_needed();
         self.reveal_cursor();
         self.dirty = true;
