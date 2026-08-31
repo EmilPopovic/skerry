@@ -74,6 +74,8 @@ pub struct Capture {
     pub indexing: bool,
     /// Whether to lay the pane out as a grid instead of a details list.
     pub grid: bool,
+    /// Whether to cut the pane into time headings, which is orthogonal to `grid`.
+    pub grouped: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -148,6 +150,37 @@ fn sample_row_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu>
         })?;
     menu.step(true);
     Some(menu)
+}
+
+/// Cuts the sample pane into time headings.
+///
+/// **The fixture's files all share one mtime**, so no set of edges can band them
+/// and the first version of this frame drew one heading over everything. The
+/// times are spread here rather than on disk: every other frame reads the same
+/// fixture, and a Modified column that moved would re-bless all of them.
+///
+/// The edges come from the fixture rather than from the clock, so the frame means
+/// the same thing tomorrow.
+fn group_the_sample(pane: &mut Pane) {
+    const DAY: i64 = 86_400;
+    pane.grouping = crate::groups::Grouping::Time;
+    let base = (0..pane.listing.rows())
+        .filter_map(|row| pane.listing.at(row))
+        .map(|id| pane.listing.mtime(id))
+        .max()
+        .unwrap_or_default();
+    let spread = [0i64, -1, -2, -4];
+    let ids: Vec<_> = (0..pane.listing.rows()).filter_map(|row| pane.listing.at(row)).collect();
+    for (at, id) in ids.iter().enumerate() {
+        let size = pane.listing.size(*id);
+        let days = spread[at % spread.len()];
+        pane.listing.set_meta(*id, size, base + days * DAY, sk_model::Flags::NONE);
+    }
+    // Four bands: today, yesterday, earlier this week, earlier this month.
+    pane.sort.bands =
+        sk_model::Banding::new(&[base + DAY, base, base - DAY, base - 2 * DAY, base - 7 * DAY]);
+    pane.listing.reorder(pane.sort, pane.show_hidden, &pane.filter);
+    pane.reband();
 }
 
 /// Whichever of the two context menus was asked for.
@@ -625,6 +658,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         crate::panes::single(pane, layout.content, &theme.metrics);
     if request.grid {
         panes.focused_mut().mode = crate::cells::Mode::Grid;
+    }
+    if request.grouped {
+        group_the_sample(panes.focused_mut());
     }
     if request.split {
         // **Stacked, and two tabs in the lower half.** A `Below` split is the

@@ -144,6 +144,12 @@ FRAMES = [
     ("grid", ["--size", "900x520", "--scale", "125", "--grid"]),
     ("grid-200", ["--size", "900x520", "--scale", "200", "--grid"]),
     ("grid-narrow", ["--size", "560x420", "--scale", "100", "--grid"]),
+    # Grouping, in both geometries, because orthogonal is the claim: the same
+    # headings over rows and over cells, with each band sorted on its own. Two
+    # frames rather than one because the heading's rule and the band's first line
+    # meet differently in each.
+    ("grouped", ["--size", "900x520", "--scale", "125", "--grouped"]),
+    ("grouped-grid", ["--size", "900x520", "--scale", "125", "--grid", "--grouped"]),
     # The subtree search: results from three different folders, each with the
     # folder it is in beside it, over a summary that says the walk is still
     # going. The only frame whose rows are not one directory's.

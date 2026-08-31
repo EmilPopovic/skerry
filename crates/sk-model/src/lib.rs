@@ -38,4 +38,4 @@ pub use listing::{EntryId, Flags, Listing, contains_folded};
 pub use problem::{Problem, ProblemKind};
 pub use radix::KeySet;
 pub use selection::Selection;
-pub use sort::{Sort, SortColumn};
+pub use sort::{Banding, Sort, SortColumn};

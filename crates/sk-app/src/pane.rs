@@ -138,6 +138,18 @@ pub struct Pane {
     pub scroll: sk_ui::Scroll,
     /// In what order.
     pub sort: Sort,
+    /// How the entries are cut into headings.
+    ///
+    /// The user's choice. `sort.bands` is derived from it — the edges move at
+    /// midnight and the choice does not — which is why the two are separate
+    /// fields rather than one.
+    pub grouping: crate::groups::Grouping,
+    /// Where the display order's bands begin, recomputed when the order changes.
+    ///
+    /// **Not per frame.** Working out which band each entry is in is a walk of
+    /// the whole order, and at two hundred thousand entries a frame that did it
+    /// would be the frame. The bands only move when the order does.
+    pub bands: Vec<(u8, usize)>,
     /// How the entries are laid out.
     ///
     /// Per pane rather than per window, because two panes side by side are two
@@ -231,6 +243,8 @@ impl Pane {
             scroll: sk_ui::Scroll::default(),
             sort: Sort::default(),
             mode: crate::cells::Mode::default(),
+            grouping: crate::groups::Grouping::default(),
+            bands: Vec::new(),
             filter: String::new(),
             show_hidden: false,
             loading: false,
@@ -343,6 +357,7 @@ impl Pane {
         self.results = Some(query);
         self.listing = listing;
         self.listing.reorder(self.sort, self.show_hidden, &self.filter);
+        self.reband();
         self.selection.clear();
         self.selection.set_cursor(self.listing.at(0));
         self.scroll.want(0.0);
@@ -519,6 +534,9 @@ impl Pane {
             Update::Names { listing, names, elapsed_us, sort_us, view, lane } => {
                 self.carry_selection(&listing);
                 self.listing = *listing;
+                // The order arrived with the listing — the job sorts before it
+                // sends — so the bands have to be worked out for it here.
+                self.reband();
                 self.names_us = elapsed_us;
                 self.sort_us = sort_us;
                 self.lane = lane;
@@ -580,6 +598,7 @@ impl Pane {
                 self.sorting = false;
                 self.sort_us = elapsed_us;
                 self.listing.set_order(order);
+                self.reband();
                 self.restore_cursor();
                 self.forget_hidden_cursor();
                 // A request that arrived while this one was running.
@@ -595,6 +614,14 @@ impl Pane {
         true
     }
 
+    /// Recomputes where the display order's bands begin.
+    ///
+    /// Called wherever the order changes and nowhere else. A walk of the whole
+    /// order, which is why it is not per frame — see [`Self::bands`].
+    pub fn reband(&mut self) {
+        self.bands = crate::groups::runs_of(&self.listing, self.sort.bands);
+    }
+
     /// Rebuilds the display order, on this thread or on a job.
     ///
     /// Inline below [`SORT_INLINE`] entries and on a job above it. The threshold
@@ -605,6 +632,7 @@ impl Pane {
         if self.listing.rows() <= SORT_INLINE && self.listing.len() <= SORT_INLINE {
             let started = std::time::Instant::now();
             self.listing.reorder(self.sort, self.show_hidden, &self.filter);
+            self.reband();
             self.sort_us = started.elapsed().as_micros() as u64;
             self.forget_hidden_cursor();
             return;

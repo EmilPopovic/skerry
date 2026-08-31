@@ -139,6 +139,11 @@ impl Cells {
         self.cell
     }
 
+    /// How many entries it places.
+    pub(crate) const fn len(&self) -> usize {
+        self.count
+    }
+
     /// How many rows of cells the entries make.
     pub(crate) const fn lines(&self) -> usize {
         self.count.div_ceil(self.columns)
@@ -176,57 +181,29 @@ impl Cells {
 
     /// The entry at a point, if there is one there.
     ///
-    /// `None` outside the body, past the last line, or in the ragged tail of the
-    /// last line — a click to the right of the final cell is a click on nothing,
-    /// which is what clears a selection.
+    /// `None` outside these cells, past the last line, or in the ragged tail of
+    /// the last line — a click to the right of the final cell is a click on
+    /// nothing, which is what clears a selection.
+    ///
+    /// **Bounded by the content, not by a viewport.** It used to refuse any point
+    /// outside `body`, which is right while `body` is the pane and wrong the
+    /// moment it is a band's strip: a strip is positioned in *content*
+    /// coordinates and the point arrives in screen ones, so the check compared
+    /// two different spaces and lost every entry that was scrolled. Whether the
+    /// point is on screen at all is [`crate::groups::Bands`]'s question, and it
+    /// asks it once for the pane rather than once per band.
     pub(crate) fn index_at(&self, x: f32, y: f32, offset: f32) -> Option<usize> {
-        if !self.body.contains(x, y) {
+        if x < self.body.x || x >= self.body.right() {
             return None;
         }
         let line = ((y - self.body.y + offset) / self.cell.1).floor();
-        if line < 0.0 {
+        if line < 0.0 || line >= self.lines() as f32 {
             return None;
         }
         let column =
             ((x - self.body.x) / self.cell.0).floor().clamp(0.0, self.columns as f32 - 1.0);
         let index = line as usize * self.columns + column as usize;
         (index < self.count).then_some(index)
-    }
-
-    /// How many entries a page key moves.
-    ///
-    /// A whole screen of lines, times the columns, and never zero — a pane one
-    /// pixel taller than a cell still pages by something.
-    pub(crate) fn page(&self) -> usize {
-        let lines = (self.body.height / self.cell.1).floor().max(1.0) as usize;
-        (lines * self.columns).max(1)
-    }
-
-    /// Where a direction key goes from `from`.
-    ///
-    /// **Clamped at every edge rather than wrapping.** Down on the last line
-    /// stays, which is what a list does everywhere; Right on the last entry stays
-    /// for the same reason. In Details `columns` is 1, so Left and Right are
-    /// previous and next and Up and Down are the same thing — which is exactly
-    /// what a one-column grid should do and is why neither needs a mode-dependent
-    /// binding.
-    pub(crate) fn step(&self, from: usize, step: Step) -> usize {
-        if self.count == 0 {
-            return 0;
-        }
-        let last = self.count - 1;
-        let from = from.min(last);
-        match step {
-            Step::Left => from.saturating_sub(1),
-            Step::Right => (from + 1).min(last),
-            Step::Up => {
-                // Off the top line goes nowhere rather than to the end.
-                if from < self.columns { from } else { from - self.columns }
-            }
-            // Onto a ragged last line, the last entry: moving down from a column
-            // the final line does not reach must not be a move to nothing.
-            Step::Down => (from + self.columns).min(last),
-        }
     }
 
     /// Every entry whose cell the rectangle touches, in index order.
@@ -243,6 +220,13 @@ impl Cells {
         }
         let top = rect.y - self.body.y + offset;
         let bottom = rect.bottom() - self.body.y + offset;
+        // **Nothing at all when the rectangle misses.** Without this a band whose
+        // strip is entirely above the band clamped `top` to zero and handed back
+        // its first line, so a rubber band over one band selected a row from
+        // every band below it.
+        if bottom < 0.0 || top > self.content_height() {
+            return;
+        }
         let first_line = (top / self.cell.1).floor().max(0.0) as usize;
         let last_line = (bottom / self.cell.1).floor().max(0.0) as usize;
         let left = ((rect.x - self.body.x) / self.cell.0).floor().max(0.0) as usize;
@@ -256,23 +240,11 @@ impl Cells {
             }
         }
     }
-
-    /// The entries that are on screen at this offset.
-    pub(crate) fn visible(&self, offset: f32) -> std::ops::Range<usize> {
-        if self.count == 0 {
-            return 0..0;
-        }
-        let first_line = (offset / self.cell.1).floor().max(0.0) as usize;
-        let lines_shown = (self.body.height / self.cell.1).ceil() as usize + 1;
-        let from = first_line * self.columns;
-        let to = ((first_line + lines_shown) * self.columns).min(self.count);
-        from.min(self.count)..to
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Cells, Mode, Step};
+    use super::{Cells, Mode};
     use crate::layout::Area;
 
     fn body() -> Area {
@@ -400,79 +372,15 @@ mod tests {
         assert_eq!(cells.index_at(200.0, top, 200.0), Some(10));
     }
 
-    /// Every direction clamps at its edge rather than wrapping.
-    #[test]
-    fn the_direction_keys_clamp_at_every_edge() {
-        let columns = grid(0).columns();
-        // Two more than one line, so the last line is ragged.
-        let last = columns + 1;
-        let cells = grid(columns + 2);
-        // Up from the top line stays put; down from the last entry stays put.
-        assert_eq!(cells.step(2, Step::Up), 2);
-        assert_eq!(cells.step(last, Step::Down), last);
-        assert_eq!(cells.step(0, Step::Left), 0);
-        assert_eq!(cells.step(last, Step::Right), last);
-        // And the ordinary moves.
-        assert_eq!(cells.step(0, Step::Right), 1);
-        assert_eq!(cells.step(1, Step::Left), 0);
-        assert_eq!(cells.step(0, Step::Down), columns);
-        assert_eq!(cells.step(columns, Step::Up), 0);
-        // Down from a column the ragged last line does not reach lands on the
-        // last entry rather than off the end.
-        assert_eq!(cells.step(columns - 1, Step::Down), last, "that column has no second line");
-    }
-
-    /// In Details, Left and Right are Up and Down, which is what one column means.
-    #[test]
-    fn one_column_makes_the_four_directions_two() {
-        let cells = details(10);
-        for from in [0usize, 4, 9] {
-            assert_eq!(cells.step(from, Step::Left), cells.step(from, Step::Up));
-            assert_eq!(cells.step(from, Step::Right), cells.step(from, Step::Down));
-        }
-    }
-
     /// An empty listing answers every question without dividing by zero.
     #[test]
     fn an_empty_listing_has_no_cells_and_no_arithmetic_faults() {
         for cells in [details(0), grid(0)] {
             assert_eq!(cells.lines(), 0);
             assert!(cells.content_height().abs() < 0.01);
-            assert_eq!(cells.visible(0.0), 0..0);
-            assert_eq!(cells.step(0, Step::Down), 0);
             assert_eq!(cells.index_at(200.0, body().y + 2.0, 0.0), None);
-            assert!(cells.page() >= 1);
+            assert_eq!(cells.lines(), 0);
         }
-    }
-
-    /// A page is a screen of lines, and never nothing.
-    #[test]
-    fn a_page_is_a_screenful_and_at_least_one_entry() {
-        // 400 tall over 20-pixel rows is twenty rows, one column.
-        assert_eq!(details(100).page(), 20);
-        // The grid pages by lines times columns.
-        let cells = grid(100);
-        let lines = (400.0 / cells.cell().1).floor() as usize;
-        assert_eq!(cells.page(), lines * cells.columns());
-        // A body shorter than one cell still pages.
-        let squat = Area { x: 0.0, y: 0.0, width: 800.0, height: 4.0 };
-        assert!(Cells::new(Mode::Details, squat, 20.0, 50.0 as usize).page() >= 1);
-    }
-
-    /// What is visible covers the screen and no more than a line either side.
-    #[test]
-    fn the_visible_range_covers_the_screen_and_overdraws_by_one_line() {
-        let cells = details(1000);
-        let range = cells.visible(0.0);
-        assert_eq!(range.start, 0);
-        // Twenty rows fit; twenty-one are drawn so a part-row at the bottom is
-        // not a strip of background.
-        assert_eq!(range.end, 21);
-        let scrolled = cells.visible(200.0);
-        assert_eq!(scrolled.start, 10);
-        assert!(scrolled.end > scrolled.start);
-        // Never past the end of the listing.
-        assert!(cells.visible(1_000_000.0).end <= 1000);
     }
 
     /// A band over Details picks a run; the same band over a grid picks a block.

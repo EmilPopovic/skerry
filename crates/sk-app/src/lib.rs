@@ -31,6 +31,7 @@ mod crumbs;
 mod edit;
 mod field;
 mod frames;
+mod groups;
 mod headless;
 mod indexing;
 mod keys;

@@ -11,7 +11,7 @@ use sk_plat::{Point, WindowState};
 use sk_text::Weight;
 use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format};
 
-use crate::cells::{Cells, Mode};
+use crate::cells::Mode;
 
 use crate::edit::Naming;
 use crate::field::Field;
@@ -2324,7 +2324,11 @@ fn body(
     // 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
     // Details is a one-column grid, so the loop below is the same loop either way
     // and only the cell's *contents* differ.
-    let cells = Cells::new(pane.mode, layout.body, metrics.row_height, rows);
+    let cells =
+        crate::groups::Bands::new(pane.mode, layout.body, metrics.row_height, &pane.bands, rows);
+    for (band, at) in cells.headings(pane.scroll.offset()) {
+        heading_at(painter, band, at);
+    }
     for row in cells.visible(pane.scroll.offset()) {
         let context = RowContext {
             types: chrome.types,
@@ -2379,6 +2383,33 @@ struct RowContext<'a> {
     drop_row: Option<usize>,
 }
 
+/// One band's heading: the name of a stretch of time, over a rule.
+///
+/// **Not a row.** It carries no selection, no hover and no cursor ring, because
+/// it is not an entry and a click on it selects nothing — which is what
+/// [`crate::groups::Bands::index_at`] answers and what this has to look like.
+fn heading_at(painter: &mut Painter<'_>, band: u8, at: Area) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let label = i18n::lookup(crate::groups::time_label(band));
+    let baseline = painter.baseline(at.y, at.height, metrics.header_size);
+    let style = TextStyle {
+        weight: Weight::Bold,
+        size: metrics.header_size,
+        color: theme.palette.heading,
+        align: Align::Left,
+    };
+    let width = (at.width - metrics.gutter * 2.0).max(1.0);
+    let advance = line(painter, label, style, at.x + metrics.gutter, width, baseline);
+    // A rule from the end of the label to the pane's edge, which is what says the
+    // heading covers everything under it without drawing a box around it.
+    let from = at.x + metrics.gutter + advance + metrics.gutter;
+    let to = at.right() - metrics.gutter;
+    if to > from {
+        painter.hairline(from, painter.snap(baseline - 4.0), to - from, theme.palette.divider);
+    }
+}
+
 /// One grid cell: its shape, a large mark, and the name under it.
 ///
 /// The same three states a row draws — selected, cursor, drop target — because
@@ -2393,7 +2424,7 @@ fn cell_at(
     painter: &mut Painter<'_>,
     pane: &Pane,
     layout: &PaneLayout,
-    cells: &Cells,
+    cells: &crate::groups::Bands,
     row: usize,
     context: RowContext<'_>,
 ) {
@@ -2520,7 +2551,13 @@ fn row_at(
 
     {
         let Some(id) = pane.listing.at(row) else { return };
-        let cells = Cells::new(pane.mode, layout.body, metrics.row_height, pane.listing.rows());
+        let cells = crate::groups::Bands::new(
+            pane.mode,
+            layout.body,
+            metrics.row_height,
+            &pane.bands,
+            pane.listing.rows(),
+        );
         let top = cells.at(row, pane.scroll.offset()).y;
         let flags = pane.listing.flags(id);
         let selected = pane.selection.contains(id);
@@ -2678,8 +2715,14 @@ fn metadata_cells(
 
 fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
-    let content = Cells::new(pane.mode, layout.body, theme.metrics.row_height, pane.listing.rows())
-        .content_height();
+    let content = crate::groups::Bands::new(
+        pane.mode,
+        layout.body,
+        theme.metrics.row_height,
+        &pane.bands,
+        pane.listing.rows(),
+    )
+    .content_height();
     let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, layout.body.height)
     else {
         return;

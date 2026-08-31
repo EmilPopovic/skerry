@@ -27,6 +27,7 @@ pub fn registry() -> Registry<App> {
     select(&mut registry);
     directions(&mut registry);
     view(&mut registry);
+    grouping(&mut registry);
     zoom(&mut registry);
     file(&mut registry);
     edit(&mut registry);
@@ -676,6 +677,39 @@ fn view(registry: &mut Registry<App>) {
             keys: &["alt+3"],
             enabled: |_| true,
             run: |app: &mut App| app.sort_by(SortColumn::Modified),
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// The grouping, which is its own axis and is why `view` was two functions.
+///
+/// Orthogonal to the geometry the two above pick: [ADR
+/// 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md)
+/// puts grouping over the cell geometry rather than inside it, and these two
+/// commands are that seam at the registry.
+fn grouping(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "view.group_none",
+            name: "action.group_none",
+            group: Group::View,
+            // **Not `Ctrl+0`**, which is Reset zoom here as it is in every
+            // browser — the registry's own conflict check said so. The grouping
+            // is a second axis to the `Ctrl+1` / `Ctrl+2` that pick a geometry,
+            // so it takes the far end of the same row of digits.
+            keys: &["ctrl+8"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_grouping(crate::groups::Grouping::None),
+        },
+        CommandSpec {
+            id: "view.group_time",
+            name: "action.group_time",
+            group: Group::View,
+            keys: &["ctrl+9"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_grouping(crate::groups::Grouping::Time),
         },
     ] {
         registry.add(spec);

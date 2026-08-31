@@ -85,6 +85,7 @@ fn describe_node(node: &Node) -> crate::session::Node {
                     path: pane.path.clone(),
                     sort: pane.sort,
                     mode: pane.mode,
+                    grouping: pane.grouping,
                     scroll: pane.scroll.offset(),
                 })
                 .collect(),
@@ -109,6 +110,7 @@ fn restore_node(described: &crate::session::Node, next: &mut u32, jobs: &Jobs) -
                     let mut pane = Pane::new(tab.path.clone());
                     pane.sort = tab.sort;
                     pane.mode = tab.mode;
+                    pane.grouping = tab.grouping;
                     pane.scroll_when_loaded(tab.scroll);
                     pane.reload(jobs);
                     pane

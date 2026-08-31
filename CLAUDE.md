@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 551
-tests, 98 GUI scenarios **on both Wayland and X11**, thirty-two golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 567
+tests, 98 GUI scenarios **on both Wayland and X11**, thirty-four golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
@@ -32,7 +32,9 @@ result at **0.7 ms over 817,288 entries**, and `Ctrl+Enter` puts every result
 into the pane as rows that can be selected, dragged and trashed where they are;
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
-that every future view plugs into;
+that every future view plugs into, and **groups by time** — today, yesterday,
+earlier this week — orthogonally to either, with each band sorted on its own
+because the band is a prefix byte ahead of the sort's column;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and

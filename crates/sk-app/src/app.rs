@@ -1871,6 +1871,7 @@ impl App {
     /// keyed by path rather than by row, so a new listing shows what is already
     /// known instead of starting again.
     fn settle_rows(&mut self) {
+        self.rebandif_needed();
         let cells = self.cells();
         self.panes
             .focused_mut()
@@ -4435,9 +4436,11 @@ search_active={active:?}",
         let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
         let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
         format!(
-            "mode={} columns={} cell={:.1}x{:.1} index={index} indexing={indexing} \
-search_indexed={searched}",
+            "mode={} grouping={} bands={} columns={} cell={:.1}x{:.1} \
+index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
+            self.panes.focused().grouping.token(),
+            cells.count(),
             cells.columns(),
             cells.cell().0,
             cells.cell().1,
@@ -4934,22 +4937,61 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// [ADR 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md):
     /// nothing outside [`crate::cells`] computes an entry's position, so every
     /// hit test, reveal, page and band goes through here.
-    pub(crate) fn cells(&self) -> crate::cells::Cells {
+    pub(crate) fn cells(&self) -> crate::groups::Bands {
         self.cells_of(&self.placement.here, self.panes.focused())
     }
 
     /// As [`Self::cells`], for a pane that is not the focused one.
+    ///
+    /// **Bands rather than cells**, because grouping is above the cell geometry
+    /// and every one of these questions has to answer for both — see [ADR
+    /// 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
+    /// An ungrouped pane is one band with no heading, so this is one code path
+    /// rather than a branch at each of the fifteen call sites.
     fn cells_of(
         &self,
         layout: &crate::panes::PaneLayout,
         pane: &crate::pane::Pane,
-    ) -> crate::cells::Cells {
-        crate::cells::Cells::new(
+    ) -> crate::groups::Bands {
+        crate::groups::Bands::new(
             pane.mode,
             layout.body,
             self.theme.metrics.row_height,
+            &pane.bands,
             pane.listing.rows(),
         )
+    }
+
+    /// Cuts the focused pane into headings, or stops.
+    pub(crate) fn set_grouping(&mut self, grouping: crate::groups::Grouping) {
+        if self.panes.focused().grouping == grouping {
+            return;
+        }
+        self.panes.focused_mut().grouping = grouping;
+        self.rebandif_needed();
+        self.reveal_cursor();
+        self.dirty = true;
+    }
+
+    /// Keeps the focused pane's band edges current, re-sorting when they move.
+    ///
+    /// **Called every frame, and it almost never does anything.** The edges come
+    /// from the local calendar, so they move once a day — at midnight, while the
+    /// window is open, "today" has to stop meaning yesterday. Comparing six
+    /// numbers per frame is what buys that, and the alternative is a timer, which
+    /// [rule 1](../../../docs/03-principles.md) does not allow.
+    fn rebandif_needed(&mut self) {
+        let wanted = match self.panes.focused().grouping {
+            crate::groups::Grouping::None => sk_model::Banding::default(),
+            crate::groups::Grouping::Time => {
+                sk_model::Banding::new(&sk_ui::format::day_bands(clock_seconds()))
+            }
+        };
+        if self.panes.focused().sort.bands == wanted {
+            return;
+        }
+        self.panes.focused_mut().sort.bands = wanted;
+        self.panes.focused_mut().reorder(&self.jobs);
     }
 
     fn reveal_cursor(&mut self) {

@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 551 tests, 98 GUI scenarios on two display servers and thirty-two golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 567 tests, 98 GUI scenarios on two display servers and thirty-four golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -151,7 +151,7 @@ defects they exposed.
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle**, on both servers | — |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, Spike E's matrix nightly on four filesystems it builds itself, and **`tools/check` on `aarch64`** — the second architecture [06-portability.md](06-portability.md) claims | Spike E's matrix is still `x86_64` only, and so are the frames: the ARM image's fonts are not the ones the references were blessed on |
-| Thirty-two golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on, compared by **CIE76 ΔE against the just-noticeable difference** — and a second pass over both images blurred by a pixel, which separates a glyph that moved from one that blended differently and says which in the failure | — |
+| Thirty-four golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on, compared by **CIE76 ΔE against the just-noticeable difference** — and a second pass over both images blurred by a pixel, which separates a glyph that moved from one that blended differently and says which in the failure | — |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8). **Deliberately not in CI**: a shared runner's worst frame says more about its neighbours than about this code, and [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded) prices that at 6× |
 
 The two capabilities left are the expensive ones, and Spike D already knows what
@@ -230,8 +230,13 @@ offsets. **A second view mode landed as well** — a Grid, behind the cell geome
 [ADR 0013](adr/0013-one-cell-geometry-behind-every-uniform-view.md) put under
 every uniform view, with the mode saved per tab.
 
+**Group By landed too**, as ADR 0013 said it should: over the cell geometry
+rather than inside it, so the same headings work in both views, and as a sort
+prefix rather than a second pass, so each band is ordered by whatever the pane is
+sorted by. Time only — by kind and by size are the same seam.
+
 **Still owed here:** middle-click to split, per-folder settings with subtree
-inheritance, the **List** columns and **Group By** — and the inline **Tree**,
+inheritance, the **List** columns — and the inline **Tree**,
 which ADR 0013 explicitly does not reach: it is not a listing laid out
 differently but a listing whose rows come from several directories at varying
 depth, with an expansion state nothing models yet.

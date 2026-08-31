@@ -475,7 +475,7 @@ impl Listing {
         let mut order: Vec<EntryId> =
             crate::radix::order(&keys).iter().map(|at| kept[*at as usize]).collect();
         if sort.descending {
-            self.reverse_within_groups(&mut order, sort.dirs_first);
+            self.reverse_within_groups(&mut order, sort);
         }
         order
     }
@@ -487,9 +487,17 @@ impl Listing {
     /// everything and why the reversal below happens inside each group.
     fn write_prefix(&self, id: EntryId, sort: Sort, prefix: &mut [u8; PREFIX_MAX]) -> usize {
         let mut width = 0;
-        if sort.dirs_first {
-            prefix[0] = u8::from(!self.flags[id.index()].has(Flags::DIR));
+        // **Ahead of everything, including directories-first.** The bands are the
+        // outermost grouping: a heading says "today" and everything under it is
+        // today's, folders included. Like `dirs_first` it is not reversed by
+        // `descending` — see `reverse_within_groups`.
+        if !sort.bands.is_empty() {
+            prefix[0] = sort.bands.band_of(self.mtime(id));
             width = 1;
+        }
+        if sort.dirs_first {
+            prefix[width] = u8::from(!self.flags[id.index()].has(Flags::DIR));
+            width += 1;
         }
         let column = match sort.column {
             SortColumn::Name => return width,
@@ -502,31 +510,133 @@ impl Listing {
         width + 8
     }
 
-    /// Reverses each directories-first group in place.
+    /// Reverses each group in place, where a group is a band and a kind.
     ///
     /// `descending` reverses the column and the name tiebreak together, so the
     /// descending order is the ascending one backwards — but only within a group,
-    /// because grouping directories ahead of files is not part of the order the
-    /// user asked to reverse.
-    fn reverse_within_groups(&self, order: &mut [EntryId], dirs_first: bool) {
-        if !dirs_first {
-            order.reverse();
-            return;
+    /// because neither grouping directories ahead of files nor cutting the
+    /// listing into time bands is part of the order the user asked to reverse.
+    /// Reversing across a band would put yesterday's files under today's heading.
+    ///
+    /// The groups are runs, because the order is already sorted by exactly this
+    /// key: the prefix bytes `write_prefix` emits ahead of the column.
+    fn reverse_within_groups(&self, order: &mut [EntryId], sort: Sort) {
+        let key = |id: &EntryId| {
+            let band = if sort.bands.is_empty() { 0 } else { sort.bands.band_of(self.mtime(*id)) };
+            let kind = sort.dirs_first && !self.flags[id.index()].has(Flags::DIR);
+            (band, kind)
+        };
+        let mut from = 0;
+        while from < order.len() {
+            let here = key(&order[from]);
+            let mut to = from + 1;
+            while to < order.len() && key(&order[to]) == here {
+                to += 1;
+            }
+            order[from..to].reverse();
+            from = to;
         }
-        let directories =
-            order.iter().take_while(|id| self.flags[id.index()].has(Flags::DIR)).count();
-        let (dirs, files) = order.split_at_mut(directories);
-        dirs.reverse();
-        files.reverse();
     }
 }
 
-/// Room for the widest sort prefix: one grouping byte and one eight-byte column.
-const PREFIX_MAX: usize = 9;
+/// Room for the widest sort prefix: two grouping bytes — the time band and
+/// directories-first — and one eight-byte column.
+const PREFIX_MAX: usize = 10;
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    /// Bands come out in order, and each one is sorted on its own.
+    ///
+    /// **The claim the whole feature rests on.** Grouping by time is only useful
+    /// if the entries under a heading are ordered by whatever the pane is sorted
+    /// by — otherwise it is two orderings fighting. The band is a prefix byte
+    /// ahead of the column, so this falls out of the radix sort rather than being
+    /// a second pass.
+    #[test]
+    fn each_band_is_sorted_on_its_own_and_the_bands_keep_their_order() {
+        let mut listing = Listing::with_capacity(6);
+        // Two bands of three, deliberately interleaved and out of name order.
+        for (name, mtime) in [
+            ("charlie", 500),
+            ("alpha", 1_500),
+            ("bravo", 500),
+            ("delta", 1_500),
+            ("echo", 500),
+            ("foxtrot", 1_500),
+        ] {
+            let id = listing.push(name, Flags::NONE);
+            listing.set_meta(id, 0, mtime, Flags::NONE);
+        }
+        // One edge at 1,000: band 0 is everything at or after it.
+        let bands = crate::sort::Banding::new(&[1_000]);
+        let sort = Sort { dirs_first: false, bands, ..Sort::default() };
+        listing.reorder(sort, true, "");
+        let names: Vec<&str> = (0..listing.rows())
+            .filter_map(|row| listing.at(row))
+            .map(|id| listing.name(id))
+            .collect();
+        assert_eq!(
+            names,
+            ["alpha", "delta", "foxtrot", "bravo", "charlie", "echo"],
+            "the newest band first, and each sorted by name"
+        );
+
+        // Descending reverses inside each band and never moves a band.
+        let sort = Sort { descending: true, ..sort };
+        listing.reorder(sort, true, "");
+        let names: Vec<&str> = (0..listing.rows())
+            .filter_map(|row| listing.at(row))
+            .map(|id| listing.name(id))
+            .collect();
+        assert_eq!(
+            names,
+            ["foxtrot", "delta", "alpha", "echo", "charlie", "bravo"],
+            "descending reversed across the bands rather than inside them"
+        );
+    }
+
+    /// A band and a kind are two groupings, and neither is reversed.
+    #[test]
+    fn folders_stay_ahead_of_files_inside_every_band() {
+        let mut listing = Listing::with_capacity(4);
+        for (name, mtime, flags) in [
+            ("new-file", 1_500, Flags::NONE),
+            ("new-dir", 1_500, Flags::DIR),
+            ("old-file", 500, Flags::NONE),
+            ("old-dir", 500, Flags::DIR),
+        ] {
+            let id = listing.push(name, flags);
+            listing.set_meta(id, 0, mtime, flags);
+        }
+        let bands = crate::sort::Banding::new(&[1_000]);
+        listing.reorder(Sort { descending: true, bands, ..Sort::default() }, true, "");
+        let names: Vec<&str> = (0..listing.rows())
+            .filter_map(|row| listing.at(row))
+            .map(|id| listing.name(id))
+            .collect();
+        // Band 0's folder, band 0's file, then band 1's folder and file — with
+        // `descending` reversing neither grouping.
+        assert_eq!(names, ["new-dir", "new-file", "old-dir", "old-file"]);
+    }
+
+    /// No banding is one band, and costs the order nothing.
+    #[test]
+    fn an_empty_banding_orders_exactly_as_it_did_before_bands_existed() {
+        let mut listing = Listing::with_capacity(3);
+        for (name, mtime) in [("b", 500), ("a", 1_500), ("c", 900)] {
+            let id = listing.push(name, Flags::NONE);
+            listing.set_meta(id, 0, mtime, Flags::NONE);
+        }
+        assert!(Sort::default().bands.is_empty());
+        listing.reorder(Sort { dirs_first: false, ..Sort::default() }, true, "");
+        let names: Vec<&str> = (0..listing.rows())
+            .filter_map(|row| listing.at(row))
+            .map(|id| listing.name(id))
+            .collect();
+        assert_eq!(names, ["a", "b", "c"], "an unbanded sort is the plain one");
+    }
 
     /// The whole of what makes a flattened view possible: rows that remember
     /// which directory they came from, in the same `Listing` a directory read
@@ -682,7 +792,7 @@ mod tests {
         for column in [SortColumn::Name, SortColumn::Size, SortColumn::Modified] {
             for descending in [false, true] {
                 for dirs_first in [false, true] {
-                    let sort = Sort { column, descending, dirs_first };
+                    let sort = Sort { column, descending, dirs_first, ..Sort::default() };
                     for show_hidden in [false, true] {
                         for filter in ["", "img", "a", "É"] {
                             let wanted = by_comparison(&listing, sort, show_hidden, filter);
@@ -722,7 +832,7 @@ mod tests {
             listing.set_meta(id, index % 97, mtime, Flags::NONE);
         }
         for column in [SortColumn::Name, SortColumn::Size, SortColumn::Modified] {
-            let sort = Sort { column, descending: false, dirs_first: true };
+            let sort = Sort { column, descending: false, dirs_first: true, ..Sort::default() };
             let wanted: Vec<&str> = by_comparison(&listing, sort, true, "")
                 .iter()
                 .map(|id| listing.name(*id))
@@ -851,7 +961,7 @@ mod tests {
     fn a_size_sort_falls_back_to_the_name_so_it_is_reproducible() {
         let mut listing = fixture();
         listing.reorder(
-            Sort { column: SortColumn::Size, dirs_first: false, descending: false },
+            Sort { column: SortColumn::Size, dirs_first: false, ..Sort::default() },
             false,
             "",
         );

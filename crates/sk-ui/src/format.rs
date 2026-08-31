@@ -95,6 +95,61 @@ pub fn how_long(seconds: u64) -> String {
     }
 }
 
+/// The wall clock, for the tests that need a real local date to reason about.
+#[cfg(test)]
+pub(crate) fn now_for_tests() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |it| i64::try_from(it.as_secs()).unwrap_or(0))
+}
+
+/// How many bands [`day_bands`] cuts time into: one more than the edges.
+pub const BANDS: usize = 7;
+
+/// The epoch seconds where "today", "yesterday" and the rest begin, newest first.
+///
+/// **Edges rather than labels, and numbers rather than a calendar.** Deciding
+/// which band a file falls in is a comparison against six numbers, which is what
+/// the sort key wants and what level 0 can do; working the six numbers out needs
+/// a timezone database, which is here because `localtime_r` is here.
+///
+/// Six edges, seven bands: after tomorrow begins is *the future*, then today,
+/// yesterday, this week, this month, this year, and everything before that.
+///
+/// **Non-increasing, forced.** On a Monday "this week" begins today, which is
+/// *after* yesterday — so the raw edges are not in order and the band between
+/// them would be a band that contains impossible times. Each edge is clamped to
+/// the one before it, which collapses that band to nothing and leaves Sunday's
+/// files in "earlier this month", where they belong.
+///
+/// **A day is 86,400 seconds here, and twice a year it is not.** The edges for
+/// yesterday, the week, the month and the year are counted back in whole days
+/// from local midnight, so across a daylight-saving change one of them is an
+/// hour out and a file within that hour of the boundary is filed under the
+/// neighbouring heading. The alternative is civil-date arithmetic for an hour of
+/// error in a heading, twice a year.
+#[must_use]
+pub fn day_bands(now: i64) -> [i64; BANDS - 1] {
+    const DAY: i64 = 86_400;
+    let Some(parts) = local(now) else { return [now; BANDS - 1] };
+    let midnight = now
+        - i64::from(parts.hour) * 3_600
+        - i64::from(parts.minute) * 60
+        - i64::from(parts.second);
+    let mut edges = [
+        midnight + DAY,
+        midnight,
+        midnight - DAY,
+        midnight - i64::from(parts.weekday) * DAY,
+        midnight - (i64::from(parts.day) - 1) * DAY,
+        midnight - i64::from(parts.day_of_year) * DAY,
+    ];
+    for at in 1..edges.len() {
+        edges[at] = edges[at].min(edges[at - 1]);
+    }
+    edges
+}
+
 /// Reads the timezone database, once, wherever it is called.
 ///
 /// glibc initialises the timezone lazily on the first `localtime_r`, and that
@@ -113,6 +168,9 @@ struct Parts {
     day: u8,
     hour: u8,
     minute: u8,
+    second: u8,
+    /// Days since Monday, so week arithmetic is a subtraction.
+    weekday: u8,
     day_of_year: u16,
 }
 
@@ -137,6 +195,10 @@ fn local(epoch_seconds: i64) -> Option<Parts> {
         day: out.tm_mday.clamp(1, 31) as u8,
         hour: out.tm_hour.clamp(0, 23) as u8,
         minute: out.tm_min.clamp(0, 59) as u8,
+        // A leap second is 60 and there is no band edge it could move.
+        second: out.tm_sec.clamp(0, 60) as u8,
+        // `tm_wday` counts from Sunday; a week here starts on Monday.
+        weekday: ((out.tm_wday.clamp(0, 6) + 6) % 7) as u8,
         day_of_year: out.tm_yday.clamp(0, 365) as u16,
     })
 }
@@ -161,6 +223,45 @@ fn month_name(month: u8) -> &'static str {
         "month.dec",
     ];
     i18n::lookup(KEYS[(month as usize).min(11)])
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::{BANDS, day_bands};
+
+    /// The edges run newest first and never climb, whatever day it is.
+    ///
+    /// **Every day of the week, not today's.** The Monday case is the one that
+    /// breaks the ordering — "this week" begins after "yesterday" — and a test
+    /// run on a Wednesday would never see it.
+    #[test]
+    fn the_edges_never_climb_on_any_day_of_the_week() {
+        // A fortnight, hour by hour, which covers every weekday and both sides
+        // of a month boundary on most months this runs in.
+        let now = super::super::format::now_for_tests();
+        for hours in 0..(24 * 14) {
+            let at = now - hours * 3_600;
+            let edges = day_bands(at);
+            assert_eq!(edges.len(), BANDS - 1);
+            for pair in edges.windows(2) {
+                assert!(pair[0] >= pair[1], "edges climb at {at}: {edges:?}");
+            }
+        }
+    }
+
+    /// Now falls in the band called today, and a second before midnight does not.
+    #[test]
+    fn the_present_is_today_and_the_future_is_its_own_band() {
+        let now = super::super::format::now_for_tests();
+        let edges = day_bands(now);
+        let band_of = |at: i64| edges.iter().filter(|edge| at < **edge).count();
+        // Band 0 is the future, band 1 is today.
+        assert_eq!(band_of(now), 1, "now is not in today");
+        assert_eq!(band_of(edges[0]), 0, "tomorrow is not in the future");
+        assert_eq!(band_of(edges[1] - 1), 2, "a second before midnight is not yesterday");
+        // And the far past is the last band, whatever the edges are.
+        assert_eq!(band_of(0), BANDS - 1, "1970 is not in the oldest band");
+    }
 }
 
 #[cfg(test)]
