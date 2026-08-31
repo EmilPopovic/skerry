@@ -1018,6 +1018,35 @@ measurements pretending to be assertions. One deliberately loaded sweep found
 what four quiet sweeps and an hour had not, and a suite that survives one is
 telling the truth about the code rather than about the afternoon.
 
+### And a unit suite is one too — this one found a fixture two tests shared
+
+The rule above was written about the GUI scenarios, where the failures are timing.
+It applies unchanged to `cargo test`, where they are not.
+
+`view.rs` had one `fixture()` helper building a directory of known contents at
+`temp_dir()/skerry-view-{pid}`, and the first thing it does is delete that
+directory. That was correct for as long as it had **one** caller. Adding a second
+test that wanted the same fixture made it a `create_dir_all` racing another
+test's `remove_dir_all`, because `cargo test` runs the tests of one crate on
+threads of one process — so a path keyed by the process id is a path every test
+in the crate shares.
+
+It passed twelve consecutive runs on an idle machine, and failed one run in ten
+with twelve spinning processes beside it. It also failed exactly once in the whole
+session's real work, in a `./tools/check` run whose output was not kept, which is
+the shape this class of bug has: a green suite, a single unexplained red, and
+nothing to look at afterwards.
+
+**A fixture is named after the test that asks for it, not the process that runs
+it.** The process id keeps two concurrent `cargo test` invocations apart; only the
+test's own name keeps the tests inside one invocation apart. Fourteen loaded runs
+after the fix, zero failures.
+
+The general form is the same as everywhere else in this file: a helper that was
+correct with one caller became a race with two, and nothing in the type system,
+the review or the quiet suite could say so. Load was the only instrument that
+could.
+
 ## The received wisdom about a library is worth one probe
 
 "Do not feed modifier keysyms to `xkb_compose_state_feed`" is advice that appears

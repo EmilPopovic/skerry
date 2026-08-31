@@ -3254,8 +3254,16 @@ mod tests {
         }
     }
 
-    fn fixture() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("skerry-view-{}", std::process::id()));
+    /// A directory of known contents, named after the test that asked for it.
+    ///
+    /// **Per test, not per process.** `cargo test` runs the tests of one crate on
+    /// threads of one process, so a path keyed by the process id alone is a path
+    /// two tests share — and the first thing this does is delete it. With two
+    /// callers that is a `create_dir_all` racing another test's `remove_dir_all`,
+    /// which failed one run in ten under load and none at all on an idle machine.
+    /// See docs/12-measurement.md.
+    fn fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("skerry-view-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("sub")).unwrap();
         for name in ["alpha-parent.txt", "beta-parent.txt", "gamma-parent.txt"] {
@@ -3310,7 +3318,7 @@ mod tests {
     #[test]
     fn each_pane_bar_records_its_own_targets_against_its_own_pane() {
         let Ok(mut fonts) = Fonts::discover() else { return };
-        let root = fixture();
+        let root = fixture("pane-bars");
         let waker = Waker::new().expect("eventfd");
         let (sender, updates) = mpsc::channel();
         let jobs = Jobs {
@@ -3364,7 +3372,7 @@ mod tests {
     #[test]
     fn a_warm_cache_draws_the_same_frame_as_a_cold_one_after_navigating() {
         let Ok(mut fonts) = Fonts::discover() else { return };
-        let root = fixture();
+        let root = fixture("warm-cache");
         let waker = Waker::new().expect("eventfd");
         let (sender, updates) = mpsc::channel();
         let jobs = Jobs {
