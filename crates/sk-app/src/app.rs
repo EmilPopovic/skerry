@@ -2945,6 +2945,11 @@ impl App {
 
     /// A wheel notch or a touchpad delta, wherever it belongs.
     fn scrolled(&mut self, delta: Point, precise: bool, time: u32, mods: sk_plat::Modifiers) {
+        // **Before anything decides what the scroll is for**, so that the list,
+        // the palette and a tall menu all move at one sensitivity. `Ctrl` and a
+        // wheel read the sign only, and a sign does not scale.
+        let gain = sk_ui::SCROLL_GAIN;
+        let delta = Point::new(delta.x * gain, delta.y * gain);
         // The palette takes the wheel while it is open. Without this the twelfth
         // result of fifty is unreachable by pointer alone, and the listing
         // scrolls behind a panel covering it.

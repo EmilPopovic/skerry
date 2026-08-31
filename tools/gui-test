@@ -1466,19 +1466,35 @@ def fill_until_scrollable(run: Run, fixture: Path) -> dict:
 
 @scenario("pointer-scroll", fresh=True)
 def pointer_scroll(run: Run, fixture: Path) -> None:
-    """A wheel notch scrolls the list, and its own fixture gives it somewhere to
-    scroll to."""
-    run.drive("sleep 400\nkey f12\nsleep 100\n")
-    start = run.state()
-    fill_until_scrollable(run, fixture)
+    """One wheel notch travels four rows or more, and the list comes back up.
 
-    run.drive("move 50 50\nsleep 150\nscroll 5\nsleep 400\nkey f12\nsleep 200\n")
-    after = run.state()
-    if float(after["scroll"]) <= float(start["scroll"]):
-        raise Failure(f"a wheel scroll moved nothing: {after['scroll']}")
+    **A distance, not a direction.** This asserted only that the offset had grown,
+    which passed for a notch of three rows, for a notch that jumped its whole
+    distance with no easing, and for a fling that coasted three per cent and
+    stopped. A notch is `WHEEL_NOTCH` times `sk_ui::SCROLL_GAIN` — 132 logical
+    pixels, a little over five rows at the default height — and the notch count
+    wins over any distance the compositor also sends, so the number is this code's
+    rather than the nested compositor's. Four rows is the floor because the value
+    before the sensitivity moved was three. See docs/12-measurement.md.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    filled = fill_until_scrollable(run, fixture)
+    row = float(filled["row_h"])
+
+    run.drive("key home\nsleep 250\nkey f12\nsleep 150\n")
+    start = float(run.state()["scroll"])
+    run.drive("move 50 50\nsleep 150\nscroll 1\nsleep 400\nkey f12\nsleep 200\n")
+    one = float(run.state()["scroll"]) - start
+    if one < row * 4.0:
+        raise Failure(f"one notch travelled {one:.1f}, under four {row:.1f} rows")
+
+    run.drive("move 50 50\nsleep 150\nscroll 5\nsleep 500\nkey f12\nsleep 200\n")
+    after = float(run.state()["scroll"])
+    if after <= start + one:
+        raise Failure(f"five more notches moved nothing: {after}")
     # And back up again, because a scroll that only goes one way is half tested.
-    run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 400\nkey f12\nsleep 200\n")
-    if float(run.state()["scroll"]) >= float(after["scroll"]):
+    run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 500\nkey f12\nsleep 200\n")
+    if float(run.state()["scroll"]) >= after:
         raise Failure("scrolling up moved nothing")
 
 

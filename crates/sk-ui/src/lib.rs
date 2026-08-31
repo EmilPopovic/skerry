@@ -20,7 +20,7 @@ pub mod scroll;
 pub mod theme;
 
 pub use painter::{Align, Painter, TextStyle, advance_of, caret_offset};
-pub use scroll::{MIN_THUMB, Scroll, thumb, visible_rows};
+pub use scroll::{GAIN as SCROLL_GAIN, MIN_THUMB, Scroll, thumb, visible_rows};
 pub use sk_gpu::Direction;
 pub use theme::{Kinds, Metrics, Palette, Theme};
 

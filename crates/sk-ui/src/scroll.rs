@@ -3,11 +3,14 @@
 //! Three decisions here are the difference between a list that feels attached to
 //! the input device and one that does not:
 //!
-//! * **A touchpad is tracked exactly and a wheel is eased.** A touchpad sends a
-//!   real distance and the content must follow it 1:1 — any smoothing on top of
-//!   that reads as lag. A wheel sends a notch, which is a jump, and easing the
-//!   jump over about 90 ms is the whole difference between a list that snaps and
-//!   one that moves.
+//! * **A touchpad is tracked without smoothing and a wheel is eased.** A
+//!   touchpad sends a real distance and the content follows it the same frame —
+//!   any easing on top of *that* reads as lag. Scaling it by [`GAIN`] and
+//!   filtering it are different things: a constant factor keeps the content
+//!   moving with the finger, where a filter would make it arrive after the
+//!   finger. A wheel sends a notch, which is a jump, and easing the jump over
+//!   about 90 ms is the whole difference between a list that snaps and one that
+//!   moves.
 //! * **A finger that leaves the pad while still moving throws the list.** The
 //!   distance a flick travels is its velocity when the fingers lifted times
 //!   [`FLING_TAU`], because a velocity decaying as `e^(-t/τ)` covers `v·τ` in
@@ -21,6 +24,27 @@
 //!   otherwise shorten the fling.
 
 use std::ops::Range;
+
+/// How far the list moves per pixel the input device reports.
+///
+/// **The sensitivity, and the only number here that is a preference rather than
+/// a consequence.** At 1.0 a two-finger swipe moves the content exactly as far as
+/// the fingers went, and a wheel notch is `WHEEL_NOTCH`'s three rows: 78 logical
+/// pixels of the six hundred or so a list body has, so eight clicks to pass one
+/// screenful. At 2.0 a notch is a little over five rows and four and a half
+/// clicks pass a screen.
+///
+/// **Applied by the caller, not by [`Scroll`].** Three things in the window
+/// scroll — a pane, the palette and a tall menu — and only the first is a
+/// `Scroll`; multiplying inside it would leave the other two at a different
+/// sensitivity from the list behind them. Everything below this line is in list
+/// pixels and has already been through it.
+///
+/// Not scaled by zoom, which is why it is not in
+/// [`Metrics`](crate::Metrics): zoom changes how tall a row is, and a
+/// sensitivity that changed with it would mean a notch always travelled the same
+/// distance in pixels and a different number of rows.
+pub const GAIN: f32 = 2.0;
 
 /// Time constant of the wheel easing, in seconds.
 ///
@@ -54,6 +78,11 @@ const VELOCITY_TAU: f32 = 0.050;
 ///
 /// 150 px/s would travel 37 px, under a row and a half. Drifting to a stop over
 /// a distance that small reads as the list failing to settle, so it settles.
+///
+/// **A distance the list travels, so it does not scale with [`GAIN`].** The
+/// finger speed it corresponds to halves when the gain doubles, and that is the
+/// right way round: what decides whether a coast is worth animating is how far
+/// the coast goes, not how fast the hand was moving.
 const FLING_MIN: f32 = 150.0;
 
 /// How close a fling has to get before it is over, in logical pixels.
