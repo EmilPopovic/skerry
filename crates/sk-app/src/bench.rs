@@ -128,7 +128,6 @@ fn chrome_of<'a>(
         paused: false,
         pausable: false,
         naming: None,
-        tools: [true, true, true, true],
         filtering: false,
         types: Some(types),
         window: sk_plat::WindowState::default(),

@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 98
+FEWEST_SCENARIOS = 99
 
 
 def scenario(name, fresh: bool = False):
@@ -3353,6 +3353,21 @@ def crumb_row_aim(run: Run, state: dict[str, str], name: str) -> tuple[float, fl
     raise Failure(f"no menu row called {name!r}: {state.get('crumb_menu_aim')!r}")
 
 
+def tool_aim(run: Run, state: dict[str, str], index: int) -> tuple[float, float]:
+    """The middle of one of the four navigation buttons, in the focused pane's bar.
+
+    **Not an offset into the window any more.** The buttons moved into the pane,
+    under its tab strip, so both coordinates come from where the frame put that
+    pane's bar rather than from the window's top-left corner.
+    """
+    width = float(state["tool_w"])
+    if width <= 0.0:
+        raise Failure("the navigation buttons were shed at this window size")
+    x = float(state["tools_x"]) + width * (index + 0.5)
+    y = float(state["bar_y"]) + float(state["bar_h"]) / 2.0
+    return aim(run, state, x, y)
+
+
 def separator_aim(run: Run, state: dict[str, str], depth: int) -> tuple[float, float]:
     """Where to click the breadcrumb separator after component `depth`.
 
@@ -3431,7 +3446,7 @@ def the_last_separator_lists_children(run: Run, fixture: Path) -> None:
     # Over a breadcrumb first, so something *is* lit when the menu opens — the
     # pointer reaches a chevron by crossing the component beside it, and a
     # component left lit under the panel is the same false promise as a row.
-    crumb = aim(run, start, float(start["parent_crumb_x"]), 22.0)
+    crumb = aim(run, start, float(start["parent_crumb_x"]), float(start["parent_crumb_y"]))
     run.drive(f"move {crumb[0]:.1f} {crumb[1]:.1f}\nsleep 250\nkey f12\nsleep 200\n")
     if run.state()["crumb_hover"] == "-1":
         raise Failure("the breadcrumb did not light, so nothing is being covered")
@@ -3614,7 +3629,8 @@ def two_fields_never_open_at_once(run: Run, fixture: Path) -> None:
     expect(run.state(), filtering="false", path_entry=str(fixture))
 
     # A secondary click in the field leaves it open and opens no menu at all.
-    inside = aim(run, swapped, float(swapped["name_x"]) - 100.0, 22.0)
+    field_box = [float(value) for value in swapped["path_field"].split(",")]
+    inside = aim(run, swapped, field_box[0] + field_box[2] / 3.0, field_box[1] + field_box[3] / 2.0)
     run.drive(
         f"move {inside[0]:.1f} {inside[1]:.1f}\n"
         "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 200\n"
@@ -3815,12 +3831,10 @@ def navigation_buttons(run: Run, fixture: Path) -> None:
     """
     run.drive("sleep 400\nkey f12\nsleep 200\n")
     state = run.state()
-    width = float(state["tool_w"])
-    if width <= 0.0:
+    if float(state["tool_w"]) <= 0.0:
         raise Failure("the navigation buttons were shed at this window size")
-    middle = float(state["body_top"]) / 4.0
     at = {
-        name: aim(run, state, width * index + width / 2.0, middle)
+        name: tool_aim(run, state, index)
         for index, name in enumerate(("back", "forward", "parent", "reload"))
     }
 
@@ -3886,7 +3900,7 @@ def breadcrumb_navigation(run: Run, fixture: Path) -> None:
     # late resize can re-flow the breadcrumbs — and then the click lands on the
     # crumb *beside* the one the hover just confirmed, which is what a full sweep
     # under load produced: it went to the grandparent.
-    x, y = aim(run, state, float(state["parent_crumb_x"]), float(state["body_top"]) / 4.0)
+    x, y = aim(run, state, float(state["parent_crumb_x"]), float(state["parent_crumb_y"]))
     run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 150\nclick\nsleep 200\n")
     hovered = run.states()[-1]["crumb_hover"]
     if hovered != str(deep - 2):
@@ -3911,8 +3925,8 @@ def own_frame_close_button(run: Run, fixture: Path) -> None:
         state = own.state()
         expect(state, frame="own", frame_hover="none")
 
-        # The middle of the title strip: the path bar is the title bar here.
-        x, y = aim(own, state, float(state["close_x"]), float(state["body_top"]) / 4.0)
+        # The middle of the title strip, which is all the window draws for itself.
+        x, y = aim(own, state, float(state["close_x"]), float(state["title_h"]) / 2.0)
         own.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 200\n")
         if own.state()["frame_hover"] != "close":
             raise Failure(
@@ -3959,8 +3973,8 @@ def cursor_shapes(run: Run, fixture: Path) -> None:
             (width / 2.0, 1.0),                          # top edge
             (1.0, height / 2.0),                         # left edge
             (width - 1.0, height - 1.0),                 # bottom right corner
-            (float(state["parent_crumb_x"]), float(state["body_top"]) / 4.0),
-            (float(state["close_x"]), float(state["body_top"]) / 4.0),
+            (float(state["parent_crumb_x"]), float(state["parent_crumb_y"])),
+            (float(state["close_x"]), float(state["title_h"]) / 2.0),
             (float(state["size_x"]) + 4.0, float(state["body_top"]) - 8.0),
             (width / 2.0, float(state["body_top"]) + float(state["row_h"]) * 2.0),
         ]
@@ -3975,9 +3989,9 @@ def cursor_shapes(run: Run, fixture: Path) -> None:
 
         # The one place the hit-testing behind the shapes is observable at this
         # size — a floating window here is 320x240, which is the toplevel's own
-        # minimum, and its path bar is too narrow for a breadcrumb to be a
-        # reliable target. `breadcrumb-navigation` covers that one at full size.
-        x, y = aim(own, state, float(state["close_x"]), float(state["body_top"]) / 4.0)
+        # minimum, and its bar is too narrow for a breadcrumb to be a reliable
+        # target. `breadcrumb-navigation` covers that one at full size.
+        x, y = aim(own, state, float(state["close_x"]), float(state["title_h"]) / 2.0)
         own.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 150\n")
         expect(own.state(), frame_hover="close")
         if "went away" in own.err.read_text():
@@ -3999,14 +4013,12 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
     (fixture / "photo.png").write_bytes(bytes(range(256)) * 8)
     run.drive("sleep 700\nkey f12\nsleep 150\n")
     state = run.state()
-    step = float(state["tool_w"])
-    if step <= 0.0:
+    if float(state["tool_w"]) <= 0.0:
         raise Skipped("this window is too narrow for the navigation buttons")
-    middle = float(state["body_top"]) / 4.0
 
     # Back, which has nowhere to go, and Reload, which always does.
     for index, wanted, name in [(0, "arrow", "back"), (3, "hand", "reload")]:
-        x, y = aim(run, state, step * (index + 0.5), middle)
+        x, y = tool_aim(run, state, index)
         run.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 150\n")
         over = run.state()
         expect(over, tool_hover=name)
@@ -4063,7 +4075,8 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
     typing = run.state()
     if not typing["path_entry"]:
         raise Failure("Ctrl+L opened no path field")
-    x, y = aim(run, typing, float(typing["name_x"]) + 20.0, float(typing["body_top"]) / 4.0)
+    box = [float(value) for value in typing["path_field"].split(",")]
+    x, y = aim(run, typing, box[0] + box[2] / 3.0, box[1] + box[3] / 2.0)
     run.drive(f"move {x:.2f} {y:.2f}\nsleep 250\nkey f12\nsleep 150\n")
     over = run.state()
     if over["pointer"] != "text":
@@ -4957,6 +4970,47 @@ def splits(run: Run, fixture: Path) -> None:
     expect(run.state(), panes="1")
 
 
+@scenario("a-pane-bar-belongs-to-its-own-pane")
+def a_pane_bar_belongs_to_its_own_pane(run: Run, fixture: Path) -> None:
+    """Two panes, two path bars, and a button in one acts on the pane it is in.
+
+    **The half a golden frame cannot see.** The frame proves each bar draws its
+    own pane's path; only a click proves the press routes there. F3 leaves the
+    keyboard in the *new* half, so the button pressed here is in the half that
+    does not have it — which is exactly where a press that acted on the focused
+    pane instead would be wrong and invisible.
+
+    Aimed from the rectangle the frame reports for that leaf, because `bar_y` and
+    `tools_x` answer about the focused pane and would put this click in the other
+    half. The buttons start at the bar's own left edge, so the third one is two
+    and a half widths in — arithmetic over a metric rather than over shaped text,
+    which is what makes this a reliable target where the far end of a bar full of
+    breadcrumbs is not.
+    """
+    run.drive("sleep 500\nkey f3\nsleep 800\nkey f12\nsleep 300\n")
+    split = run.state()
+    expect(split, panes="2", pane_focus="1")
+    width = float(split["tool_w"])
+    if width <= 0.0:
+        raise Skipped("the halves of this window are too narrow for their buttons")
+
+    x, y, _, height = (float(part) for part in split["pane_bar"].split(",")[0].split(":"))
+    where = aim(run, split, x + width * 2.5, y + height / 2.0)
+    run.drive(
+        f"move {where[0]:.1f} {where[1]:.1f}\n"
+        "sleep 250\nkey f12\nsleep 150\nclick\nsleep 250\n"
+    )
+    hovered = run.states()[-1]["tool_hover"]
+    if hovered != "parent":
+        raise Failure(f"aimed at the first pane's Parent button and hit {hovered!r}")
+
+    moved = until(run, pane_focus="0", panes="2")
+    # The half that was clicked went up; the half that had the keyboard did not.
+    wanted = f"{fixture.parent.name},{fixture.name}"
+    if moved["pane_paths"] != wanted:
+        raise Failure(f"the panes hold {moved['pane_paths']!r}, wanted {wanted!r}")
+
+
 @scenario("each-pane-watches-its-own-directory", fresh=True)
 def per_pane_watch(run: Run, fixture: Path) -> None:
     """A change in one pane's directory reaches *that* pane, unfocused or not.
@@ -5449,7 +5503,7 @@ def own_frame_maximize(run: Run, fixture: Path) -> None:
         # test does not carry a copy of the metric it is testing.
         button_width = (float(state["logical"].split("x")[0]) - float(state["close_x"])) * 2.0
         maximize_x = float(state["close_x"]) - button_width
-        x, y = aim(own, state, maximize_x, float(state["body_top"]) / 4.0)
+        x, y = aim(own, state, maximize_x, float(state["title_h"]) / 2.0)
         own.drive(f"move {x:.2f} {y:.2f}\nsleep 200\nkey f12\nsleep 200\n")
         if own.state()["frame_hover"] != "maximize":
             raise Failure(f"aimed at maximise and hit {own.state()['frame_hover']!r}")

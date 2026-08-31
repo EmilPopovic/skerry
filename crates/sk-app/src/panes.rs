@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::layout::Area;
+use crate::layout::{Area, Tool};
 use crate::pane::{Jobs, Pane};
 use sk_ui::Metrics;
 
@@ -611,15 +611,44 @@ pub(crate) struct PaneLayout {
     pub(crate) id: PaneId,
     /// The whole leaf, tab strip included.
     pub(crate) area: Area,
-    /// The tab strip. Zero height when the leaf holds one tab, because a strip
-    /// that names the one thing on screen is a row of pixels that says nothing.
+    /// The tab strip, above everything else in the leaf.
     pub(crate) tabs: Area,
+    /// This pane's own path bar: the four navigation buttons and the
+    /// breadcrumbs, or the field the path is typed into.
+    ///
+    /// **Per leaf, not per window.** A pane has a path, a history and a folder
+    /// it can be reloaded from; a window has as many of each as it has panes,
+    /// and one bar describing whichever pane last took the keyboard makes the
+    /// other half of a split a listing with no address. Below the tabs, because
+    /// the tabs choose which path the bar is describing.
+    pub(crate) bar: Area,
+    /// Back, forward, parent and reload, at the left of `bar`.
+    ///
+    /// All four empty where the bar is too narrow to hold them and a path both,
+    /// which is the rule the metadata columns follow: a bar with buttons and no
+    /// path is worse than either alone.
+    pub(crate) tools: [Area; 4],
+    /// The breadcrumbs, which take what the buttons leave.
+    pub(crate) path: Area,
     pub(crate) header: Area,
     pub(crate) body: Area,
     pub(crate) icon: Area,
     pub(crate) name: Area,
     pub(crate) size: Area,
     pub(crate) modified: Area,
+}
+
+impl PaneLayout {
+    /// The navigation button at a point, if any.
+    ///
+    /// The rectangles the frame drew from, so the dimming, the cursor shape and
+    /// the click cannot disagree about where a button is.
+    pub(crate) fn tool_at(&self, x: f32, y: f32) -> Option<Tool> {
+        Tool::ALL
+            .into_iter()
+            .zip(self.tools)
+            .find_map(|(tool, area)| (area.width > 0.0 && area.contains(x, y)).then_some(tool))
+    }
 }
 
 impl PaneId {
@@ -871,11 +900,46 @@ fn leaf_layout(tabs: &Tabs, area: Area, metrics: &Metrics) -> PaneLayout {
     // a strip whose arrival shifts the list under the pointer, and it hides the
     // one control that opens a tab at all until somebody has already opened one.
     let strip = Area { height: metrics.tab_height.min(area.height), ..area };
-    let header = Area { y: strip.bottom(), height: metrics.header_height, ..area };
+    let bar = Area {
+        y: strip.bottom(),
+        height: metrics.path_height.min((area.bottom() - strip.bottom()).max(0.0)),
+        ..area
+    };
+    // The buttons come off the left of the bar and the breadcrumbs start after
+    // them. Shed together below the width where the path would have nothing
+    // left, the same way the metadata columns shed.
+    let tools_width = metrics.tool_width * 4.0;
+    let tools = std::array::from_fn(|index| {
+        if bar.width - tools_width < 120.0 {
+            return Area::default();
+        }
+        Area {
+            x: bar.x + metrics.tool_width * index as f32,
+            y: bar.y,
+            width: metrics.tool_width,
+            height: bar.height,
+        }
+    });
+    let toolbar = tools.iter().map(|tool| tool.width).sum::<f32>();
+    let path = Area { x: bar.x + toolbar, width: (bar.width - toolbar).max(0.0), ..bar };
+    let header = Area { y: bar.bottom(), height: metrics.header_height, ..area };
     let body =
         Area { y: header.bottom(), height: (area.bottom() - header.bottom()).max(0.0), ..area };
     let (icon, name, size, modified) = crate::layout::columns(body, metrics);
-    PaneLayout { id: tabs.id, area, tabs: strip, header, body, icon, name, size, modified }
+    PaneLayout {
+        id: tabs.id,
+        area,
+        tabs: strip,
+        bar,
+        tools,
+        path,
+        header,
+        body,
+        icon,
+        name,
+        size,
+        modified,
+    }
 }
 
 /// Whether `focus` is somewhere under `node`.
@@ -1142,8 +1206,8 @@ mod tests {
         let strip = leaves[0].tabs;
         assert!(strip.height > 0.0, "one tab drew no strip");
         assert!(
-            (leaves[0].header.y - strip.bottom()).abs() < f32::EPSILON,
-            "the header is not under the strip"
+            (leaves[0].bar.y - strip.bottom()).abs() < f32::EPSILON,
+            "the pane's own path bar is not under the strip"
         );
         assert!(leaves[0].body.bottom() <= leaves[0].area.bottom());
 
@@ -1259,6 +1323,76 @@ mod tests {
         let only = panes.focus();
         assert!(panes.take_tab(only, 0).is_some());
         assert!(panes.take_tab(only, 0).is_none(), "the last tab was taken");
+    }
+
+    /// The four navigation buttons come off the left of the pane's own bar, the
+    /// breadcrumbs start after them, and both shed at the same width — a bar
+    /// with buttons and no path is worse than either alone.
+    #[test]
+    fn the_navigation_buttons_take_the_left_of_a_pane_bar_and_shed_together() {
+        let (panes, _waker, _jobs, _updates) = tree();
+        let (leaves, _) = geometry(&panes);
+        let wide = leaves[0];
+        assert!(wide.tools.iter().all(|tool| tool.width > 0.0));
+        assert!(
+            (wide.tools[0].x - wide.bar.x).abs() < f32::EPSILON,
+            "they start at the bar's edge"
+        );
+        for pair in wide.tools.windows(2) {
+            assert!((pair[0].right() - pair[1].x).abs() < f32::EPSILON, "a gap in the row");
+        }
+        assert!(
+            (wide.tools[3].right() - wide.path.x).abs() < f32::EPSILON,
+            "the path does not start where the buttons end"
+        );
+        assert!((wide.path.right() - wide.bar.right()).abs() < f32::EPSILON);
+
+        // Narrow enough that the path would have nothing left. A pane gets this
+        // narrow long before a window does, which is the reason the rule moved
+        // down here with the buttons.
+        let mut leaves = Vec::new();
+        let mut dividers = Vec::new();
+        let narrow = Area { x: 0.0, y: 0.0, width: 200.0, height: 500.0 };
+        panes.layout(narrow, &sk_ui::Metrics::default(), &mut leaves, &mut dividers);
+        assert!(leaves[0].tools.iter().all(|tool| tool.width <= 0.0));
+        assert!((leaves[0].path.width - 200.0).abs() < f32::EPSILON);
+    }
+
+    /// Each button is found by the rectangle it is drawn from — rule 2, so the
+    /// dimming and the click agree about where it is.
+    #[test]
+    fn a_press_on_a_navigation_button_finds_that_button() {
+        let (panes, _waker, _jobs, _updates) = tree();
+        let (leaves, _) = geometry(&panes);
+        let leaf = leaves[0];
+        for (tool, area) in crate::layout::Tool::ALL.into_iter().zip(leaf.tools) {
+            let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+            assert_eq!(leaf.tool_at(x, y), Some(tool));
+        }
+        let middle = leaf.path.x + leaf.path.width / 2.0;
+        assert_eq!(leaf.tool_at(middle, leaf.bar.y + 4.0), None, "a breadcrumb is not a button");
+    }
+
+    /// Two panes, two bars: each half of a split says where *it* is, which is
+    /// the whole reason the bar moved into the leaf.
+    #[test]
+    fn every_leaf_gets_a_bar_of_its_own_under_its_own_tabs() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.split(Axis::Beside, &jobs);
+        let (leaves, _) = geometry(&panes);
+        assert_eq!(leaves.len(), 2);
+        for leaf in &leaves {
+            assert!(leaf.bar.height > 0.0, "a pane drew no path bar");
+            assert!(
+                (leaf.tabs.bottom() - leaf.bar.y).abs() < f32::EPSILON,
+                "the tabs are not above"
+            );
+            assert!((leaf.bar.bottom() - leaf.header.y).abs() < f32::EPSILON);
+            assert!(leaf.bar.width <= leaf.area.width + f32::EPSILON);
+        }
+        assert!(leaves[0].bar.right() <= leaves[1].bar.x, "the two bars overlap");
+        // Side by side, so the second bar costs no height at all.
+        assert!((leaves[0].body.y - leaves[1].body.y).abs() < f32::EPSILON);
     }
 
     #[test]

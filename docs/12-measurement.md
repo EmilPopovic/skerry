@@ -1341,3 +1341,36 @@ The rule that survives both: **a wait that can time out must return whether it
 timed out, and the caller decides what that means.** A `bool` nobody reads is a
 latent stale read at every call site; a `raise` nobody can catch is a flaky
 suite.
+
+## A harness coordinate derived from another region is a coordinate that moves
+
+Moving the four navigation buttons and the breadcrumbs out of one window-wide
+strip and into each pane's own bar broke no test in `cargo test` and no golden
+frame's *logic* — and it silently invalidated nine aim points in
+`tools/gui-test`, each of which would have gone on producing a plausible answer.
+
+They all read some variation of `body_top / 4`: a quarter of the way from the top
+of the window to the top of the list. That was never a coordinate of anything. It
+was a proxy for "somewhere in the chrome above the list", correct only while the
+chrome above the list was exactly one strip. With a tab strip and a pane bar up
+there instead, the same arithmetic lands in the tab strip — where a click
+switches tabs, a hover reports nothing, and `tool_hover` reads `none`. The
+scenario would have failed with "aimed at back and hit `None`", which reads as a
+hit-testing bug in the code under test.
+
+The harness already had the right pattern and used it everywhere else: `tab_aim`,
+`divider_aim`, `separator_aim`, `menu_aim`, `plus_aim` and `erase_aim` all take
+their coordinates from the rectangle the frame *drew*, reported on the diagnostic
+line. Those needed no change at all, because a rectangle that moves reports that
+it moved.
+
+**A harness may compute an aim from the geometry of the thing it is aiming at,
+and from nothing else.** Not from a neighbour, not from a fraction of the window,
+not from a constant that happened to be inside the target when it was written.
+The three chrome regions this change touched now report `bar_y`, `bar_h`,
+`tools_x`, `title_h`, `parent_crumb_y` and `pane_bar`, and every aim that used to
+be a fraction reads one of them.
+
+The general form, which is the same shape as every other rule in this file: an
+instrument that reports the right answer for the wrong reason is not an
+instrument. It is a coincidence with a test name.

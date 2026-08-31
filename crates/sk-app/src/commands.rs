@@ -9,6 +9,7 @@ use sk_cmd::{CommandSpec, Group, Registry};
 use sk_model::SortColumn;
 
 use crate::app::App;
+use crate::layout::Tool;
 
 /// Builds the registry.
 ///
@@ -87,7 +88,7 @@ fn navigate(registry: &mut Registry<App>) {
             // Both, because both are somebody's muscle memory: `Backspace` from
             // every file manager, `Alt ↑` from every browser and from GTK.
             keys: &["backspace", "alt+up"],
-            enabled: |app: &App| app.panes.focused().path.parent().is_some(),
+            enabled: |app: &App| app.panes.focused().allows(Tool::Parent),
             run: App::go_up,
         },
         CommandSpec {
@@ -95,7 +96,7 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.back",
             group: Group::Navigate,
             keys: &["alt+left"],
-            enabled: |app: &App| app.panes.focused().can_go().0,
+            enabled: |app: &App| app.panes.focused().allows(Tool::Back),
             run: App::go_back,
         },
         CommandSpec {
@@ -103,7 +104,7 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.forward",
             group: Group::Navigate,
             keys: &["alt+right"],
-            enabled: |app: &App| app.panes.focused().can_go().1,
+            enabled: |app: &App| app.panes.focused().allows(Tool::Forward),
             run: App::go_forward,
         },
         CommandSpec {
@@ -153,7 +154,7 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.reload",
             group: Group::Navigate,
             keys: &["f5"],
-            enabled: |_| true,
+            enabled: |app: &App| app.panes.focused().allows(Tool::Reload),
             run: App::reload,
         },
     ] {
@@ -847,8 +848,8 @@ fn help(registry: &mut Registry<App>) {
 #[cfg(test)]
 fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     let mut reach: Vec<(&'static str, &'static str)> = Vec::new();
-    for tool in crate::layout::Tool::ALL {
-        reach.push((tool.command(), "a navigation button"));
+    for tool in Tool::ALL {
+        reach.push((tool.command(), "a navigation button in the pane's own bar"));
     }
     for button in crate::layout::Button::ALL {
         reach.push((button.command(), "a window button"));
@@ -861,7 +862,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("select.none", "a click on empty space"));
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
-    reach.push(("view.path_entry", "a click on the path strip beside the breadcrumbs"));
+    reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));
     reach.push(("tab.close", "the cross on a tab, or a double click on it"));
     for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND] {
         for id in groups.iter().flat_map(|group| group.iter()) {

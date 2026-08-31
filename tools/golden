@@ -208,14 +208,17 @@ FRAMES = [
     # caret, underlined, and is not part of the name yet. The only frame that
     # would catch the rule drawing through the glyphs instead of under them.
     ("composing", ["--size", "900x400", "--scale", "125", "--composing"]),
-    # Two panes stacked, the lower one with two tabs. The only frame that sees a
-    # second column header halfway down the window — where a rule drawn from the
-    # window's left edge rather than the header's own cuts through the sidebar.
+    # Two panes stacked on two different directories, the lower one with two
+    # tabs. Two of everything a pane owns: the only frame that sees a second
+    # column header halfway down the window — where a rule drawn from the
+    # window's left edge rather than the header's own cuts through the sidebar —
+    # and the only one where a bar reading the *focused* pane's path instead of
+    # its own would be visible, because the two paths differ.
     ("split", ["--size", "900x620", "--scale", "125", "--split"]),
-    # The same two panes with a drag of files resting on the lower half's second
-    # tab: the mark that says a drop lands in the directory *that tab* holds and
-    # not the one its leaf is showing. The only frame with a tab marked by
-    # anything but the keyboard.
+    # The same two panes with a drag of files resting on the lower half's first
+    # tab, which is not the tab it is showing: the mark says a drop lands in the
+    # directory *that tab* holds. The only frame with a tab marked by anything
+    # but the keyboard.
     ("tab-drop", ["--size", "900x620", "--scale", "125", "--split", "--tab-drop"]),
     ("narrow", ["--size", "340x300", "--scale", "125"]),
     # The frame GNOME requires. A capture has no compositor to ask, so

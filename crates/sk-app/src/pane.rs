@@ -324,6 +324,25 @@ impl Pane {
         (!self.back.is_empty(), !self.forward.is_empty())
     }
 
+    /// Whether one of the four navigation buttons can run against this pane.
+    ///
+    /// **One predicate, two readers.** The command registry asks it about the
+    /// focused pane, and the frame asks it about every pane, because every pane
+    /// draws its own four buttons. Rule 2 — the button and the chord are the
+    /// same action — survives a bar per pane only if there is a single answer to
+    /// ask, and a second copy of "is there anywhere to go back to" is a second
+    /// copy that drifts.
+    #[must_use]
+    pub fn allows(&self, tool: crate::layout::Tool) -> bool {
+        use crate::layout::Tool;
+        match tool {
+            Tool::Back => self.can_go().0,
+            Tool::Forward => self.can_go().1,
+            Tool::Parent => self.path.parent().is_some(),
+            Tool::Reload => true,
+        }
+    }
+
     /// Goes to `$HOME`, or does nothing if the environment has none.
     pub fn go_home(&mut self, jobs: &Jobs) {
         if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {

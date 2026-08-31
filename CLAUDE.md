@@ -6,13 +6,16 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 573
-tests, 98 GUI scenarios **on both Wayland and X11**, thirty-five golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 576
+tests, 99 GUI scenarios **on both Wayland and X11**, thirty-five golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
-under inotify, with folder totals, Back and Forward, a sidebar, **tabs and a
+under inotify, with folder totals, a sidebar, **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
-where a tab dragged to a pane's edge splits it, a command registry
+where a tab dragged to a pane's edge splits it, **each pane carrying its own
+tab strip and, under it, its own Back / Forward / Parent / Reload and its own
+breadcrumbs** — so the window draws a title bar only where the compositor draws
+no frame — a command registry
 behind every key, a context menu and a fuzzy palette over the same registry,
 new-folder / rename / **copy / cut / paste / duplicate / Move to Trash** with one
 undo stack over all of it — and **delete for good**, which asks in a panel that names what goes and says

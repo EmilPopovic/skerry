@@ -413,23 +413,6 @@ fn report_globals(window: &Window) {
     }
 }
 
-/// Whether each navigation button can run, in `Tool::ALL`'s order.
-///
-/// From the registry, because the button and the chord are the same action and a
-/// second copy of "is there anywhere to go back to" is a second copy that drifts.
-fn tool_state(commands: &Registry<App>, app: &App) -> [bool; 4] {
-    crate::layout::Tool::ALL.map(|tool| runnable(commands, app, tool.command()))
-}
-
-/// Whether the command behind a pointer target can run right now.
-///
-/// The one question behind both halves of a dimmed control: what it looks like,
-/// and what the pointer says about it. Asking it twice in two places is how an
-/// interface comes to disagree with itself.
-fn runnable(commands: &Registry<App>, app: &App, id: &str) -> bool {
-    commands.find(id).is_some_and(|command| commands.enabled(command, app))
-}
-
 /// `~` and `~/x` to a path under `$HOME`, or `None` for anything else.
 ///
 /// Only the current user's home: `~other` is a shell feature that needs
@@ -710,7 +693,7 @@ pub struct App {
     /// The window button under the pointer.
     hovered_button: Option<crate::layout::Button>,
     /// The path component under the pointer.
-    hovered_crumb: Option<usize>,
+    hovered_crumb: Option<(crate::panes::PaneId, usize)>,
     /// The last command a chord resolved to and could not run.
     refused: Option<&'static str>,
     /// The last key the window was given, as the registry sees it.
@@ -724,14 +707,14 @@ pub struct App {
     /// wrong.
     last_key: String,
     /// The breadcrumb separator under the pointer.
-    hovered_separator: Option<usize>,
+    hovered_separator: Option<(crate::panes::PaneId, usize)>,
     /// The sibling menu a separator opened, once its directory has been read.
     crumb_menu: Option<crate::crumbs::CrumbMenu>,
     /// A separator whose directory is still being read, so a second press on it
     /// does not queue a second read.
     crumb_pending: Option<usize>,
     /// The navigation button under the pointer.
-    hovered_tool: Option<crate::layout::Tool>,
+    hovered_tool: Option<(crate::panes::PaneId, crate::layout::Tool)>,
     /// How far the list is zoomed, as a step on [`ZOOM`].
     ///
     /// A step rather than a factor, so `Ctrl +` and a pinch land on the same
@@ -868,14 +851,11 @@ pub struct App {
     /// Where a press on the window's own title bar landed, until it is decided.
     ///
     /// **The same press is a drag and a click**, and which one it is is not known
-    /// until the pointer either moves or comes up: moving starts the compositor's
-    /// window move, and coming up opens the path for typing. `xdg_toplevel.move`
-    /// takes the last button serial, which is still this press's, so starting the
-    /// move a few milliseconds later is the same grab.
+    /// until the pointer moves: moving starts the compositor's window move, and
+    /// coming up without moving is a click on a title bar, which does nothing.
+    /// `xdg_toplevel.move` takes the last button serial, which is still this
+    /// press's, so starting the move a few milliseconds later is the same grab.
     title_press: Option<Point>,
-    /// Whether the path field was opened by the click that just happened on the
-    /// title bar, so the second click of a double click can take it back.
-    path_from_title: bool,
     last_frame: Instant,
     started: Instant,
     first_frame_reported: bool,
@@ -1100,7 +1080,6 @@ impl App {
             thumb_grab: None,
             text_drag: None,
             title_press: None,
-            path_from_title: false,
             last_frame: now,
             started: options.started,
             first_frame_reported: false,
@@ -1443,7 +1422,7 @@ impl App {
             Event::CloseRequested => self.closing = true,
             Event::Focused(_) => self.dirty = true,
             Event::KeyDown(key) => self.key(key, commands),
-            Event::PointerMoved { position, .. } => self.moved(*position, commands),
+            Event::PointerMoved { position, .. } => self.moved(*position),
             // A drag from somewhere else — or from here, because a drag that
             // starts in this window and stays in it comes back through the same
             // events as anybody else's.
@@ -1459,11 +1438,13 @@ impl App {
             Event::PointerLeft => {
                 // Every hover, and each of them taken: `||` short-circuits, so a
                 // pointer leaving a row left a breadcrumb lit and a window button
-                // shaded until it came back.
+                // shaded until it came back. The chevron was missing from this
+                // list and stayed lit for the same reason.
                 let gone = [
                     self.panes.focused_mut().hover.take().is_some(),
                     self.hovered_button.take().is_some(),
                     self.hovered_crumb.take().is_some(),
+                    self.hovered_separator.take().is_some(),
                     self.hovered_tool.take().is_some(),
                     self.sidebar.hover.take().is_some(),
                 ];
@@ -1570,10 +1551,6 @@ impl App {
     }
 
     fn key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) {
-        // Any key ends the double-click window: a field opened with `Ctrl+L` was
-        // not opened by a click on the title bar, and a double click in it belongs
-        // to the caret.
-        self.path_from_title = false;
         // An open menu takes the keyboard first, and gives back everything it
         // has no use for.
         if self.menu.is_some() && self.menu_key(event, commands) {
@@ -1891,36 +1868,88 @@ impl App {
 
     /// Puts the caret where a click in the path field landed.
     fn place_path_caret(&mut self, x: f32) {
-        let area = crate::view::path_field(&self.layout, &self.theme.metrics);
+        let area = crate::view::path_field(&self.placement.here, &self.theme.metrics);
         let size = self.theme.metrics.path_size;
         self.place_caret_in(Claim::Path, area, size, crate::view::PATH_INSET, x);
     }
 
-    /// A press on the path strip, beside the breadcrumbs. Returns whether it was.
+    /// A press on the strip the window draws for itself. Whether it was one.
     ///
-    /// Two answers, because the same strip is two things. **Where the window draws
-    /// its own frame** it is the title bar, and the press waits: the compositor
-    /// takes the pointer the moment `start_move` is asked, so asking on the press
-    /// would make every click a drag. **Where the compositor draws the frame**
-    /// there is no drag region and nothing else wants the press, so it opens the
-    /// path for typing straight away — which the address bar in every browser
-    /// does, and which the breadcrumbs beside it already did.
-    fn press_on_the_path_strip(&mut self, position: Point, clicks: u8) -> bool {
-        if self.layout.drag.contains(position.x, position.y) {
-            // A double click on a title bar toggles maximize everywhere else, so
-            // it does here.
-            if clicks >= 2 {
-                self.toggle_maximized();
-            } else {
-                self.title_press = Some(position);
+    /// **The press waits.** The compositor takes the pointer the moment
+    /// `start_move` is asked, so asking here would make every click a drag; what
+    /// starts the move is the first movement past the threshold. Nothing is
+    /// drawn in this strip where the compositor draws the frame, and it has no
+    /// height there either.
+    fn press_on_the_title_bar(&mut self, position: Point, clicks: u8) -> bool {
+        if !self.layout.drag.contains(position.x, position.y) {
+            return false;
+        }
+        // A double click on a title bar toggles maximize everywhere else, so it
+        // does here.
+        if clicks >= 2 {
+            self.toggle_maximized();
+        } else {
+            self.title_press = Some(position);
+        }
+        true
+    }
+
+    /// A press in a pane's own path bar. Whether it was one.
+    ///
+    /// A chevron, a component, one of the four buttons, or the space beside them
+    /// — which opens the path for typing, the way the address bar in every
+    /// browser does. **Every route moves the keyboard into that pane first**,
+    /// because all four act on a pane and the one they act on is the one that
+    /// was clicked, not whichever pane happened to be focused before.
+    fn press_on_a_pane_bar(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+        if let Some((id, depth)) = self.separator_at(position) {
+            self.focus_pane(id);
+            self.open_crumb_menu(depth);
+            return true;
+        }
+        if let Some((id, depth)) = self.crumb_at(position) {
+            self.focus_pane(id);
+            self.go_to_crumb(depth);
+            return true;
+        }
+        // Through the registry, because a dimmed button must do nothing when it
+        // is clicked and `enabled` is the only place that knows it is dimmed.
+        if let Some((id, tool)) = self.tool_at(position) {
+            self.focus_pane(id);
+            if let Some(command) = commands.find(tool.command()) {
+                commands.run(command, self);
             }
+            self.dirty = true;
             return true;
         }
-        if self.layout.path.contains(position.x, position.y) {
-            self.toggle_path_entry();
-            return true;
+        let Some(id) = self.bar_at(position) else { return false };
+        self.focus_pane(id);
+        self.toggle_path_entry();
+        true
+    }
+
+    /// Puts the keyboard in one pane, if it is not there already.
+    fn focus_pane(&mut self, id: crate::panes::PaneId) {
+        if self.panes.focus() != id {
+            self.panes.focus_on(id);
+            self.settle_panes();
         }
-        false
+    }
+
+    /// The navigation button under a point, and whose bar it is in.
+    fn tool_at(&self, position: Point) -> Option<(crate::panes::PaneId, crate::layout::Tool)> {
+        self.placement
+            .leaves
+            .iter()
+            .find_map(|leaf| leaf.tool_at(position.x, position.y).map(|tool| (leaf.id, tool)))
+    }
+
+    /// Which pane's bar a point is in, if any.
+    fn bar_at(&self, position: Point) -> Option<crate::panes::PaneId> {
+        self.placement
+            .leaves
+            .iter()
+            .find_map(|leaf| leaf.bar.contains(position.x, position.y).then_some(leaf.id))
     }
 
     /// A press inside an open text field: the caret goes there and a drag begins.
@@ -1938,7 +1967,7 @@ impl App {
             self.commit_name();
         }
         if self.typing_path.is_some()
-            && crate::view::path_field(&self.layout, &self.theme.metrics)
+            && crate::view::path_field(&self.placement.here, &self.theme.metrics)
                 .contains(position.x, position.y)
         {
             self.place_path_caret(position.x);
@@ -1965,7 +1994,7 @@ impl App {
                 (area, self.theme.metrics.text_size, crate::view::NAME_INSET)
             }
             Claim::Path => (
-                crate::view::path_field(&self.layout, &self.theme.metrics),
+                crate::view::path_field(&self.placement.here, &self.theme.metrics),
                 self.theme.metrics.path_size,
                 crate::view::PATH_INSET,
             ),
@@ -2688,7 +2717,7 @@ impl App {
             return field;
         }
         if self.typing_path.is_some() {
-            return crate::view::path_field(&self.layout, &self.theme.metrics);
+            return crate::view::path_field(&self.placement.here, &self.theme.metrics);
         }
         self.naming_field()
     }
@@ -2707,11 +2736,13 @@ impl App {
         }
     }
 
-    /// A press on the sidebar, a navigation button or a window button.
+    /// A press on the sidebar or a window button.
     ///
-    /// Each goes through the registry rather than through a method: a dimmed
-    /// button must do nothing when clicked, and `enabled` is the only place that
-    /// knows whether it is dimmed.
+    /// A window button goes through the registry rather than through a method: a
+    /// compositor offering no minimise must not be minimised by clicking where
+    /// the button would have been, and `enabled` is the only place that knows.
+    /// The four navigation buttons are a pane's now —
+    /// [`Self::press_on_a_pane_bar`].
     fn press_on_the_chrome(&mut self, position: Point, commands: &Registry<Self>) -> bool {
         if let Some(index) = self.place_at(position) {
             if let Some(entry) = self.sidebar.at(index) {
@@ -2719,13 +2750,6 @@ impl App {
                 if path != self.panes.focused().path {
                     self.panes.focused_mut().open(path, &self.jobs);
                 }
-            }
-            self.dirty = true;
-            return true;
-        }
-        if let Some(tool) = self.layout.tool_at(position.x, position.y) {
-            if let Some(id) = commands.find(tool.command()) {
-                commands.run(id, self);
             }
             self.dirty = true;
             return true;
@@ -2756,10 +2780,7 @@ impl App {
             return true;
         }
         let Some(id) = self.leaf_at(position) else { return false };
-        if self.panes.focus() != id {
-            self.panes.focus_on(id);
-            self.settle_panes();
-        }
+        self.focus_pane(id);
         if self.plus_at(position) {
             if let Some(command) = commands.find("tab.new") {
                 commands.run(command, self);
@@ -4708,24 +4729,56 @@ sizes={known}/{running} jobs={jobs}/{panics}",
     /// depth instead of copying the path bar's own constants — which would then
     /// be a second copy to keep right.
     fn separator_state(&self) -> (usize, i64, String) {
-        let drawn = self.hits.separators.iter().filter(|area| area.width > 0.0).count();
-        let hovered = self.hovered_separator.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
-        let aim = self
-            .hits
-            .separators
-            .iter()
-            .enumerate()
-            .filter(|(_, area)| area.width > 0.0)
-            .map(|(depth, area)| {
+        let focus = self.panes.focus();
+        let mine =
+            self.hits.separators.iter().filter(|hit| hit.leaf == focus && hit.area.width > 0.0);
+        let drawn = mine.clone().count();
+        let hovered =
+            self.hovered_separator.map_or(-1, |(_, depth)| i64::try_from(depth).unwrap_or(-1));
+        let aim = mine
+            .map(|hit| {
                 format!(
-                    "{depth}@{:.1}:{:.1}",
-                    area.x + area.width / 2.0,
-                    area.y + area.height / 2.0
+                    "{}@{:.1}:{:.1}",
+                    hit.depth,
+                    hit.area.x + hit.area.width / 2.0,
+                    hit.area.y + hit.area.height / 2.0
                 )
             })
             .collect::<Vec<_>>()
             .join(",");
         (drawn, hovered, aim)
+    }
+
+    /// The focused pane's own bar: its buttons, its crumbs, and where they are.
+    ///
+    /// **The focused pane's, out of however many bars there are.** A scenario
+    /// asks where "the" path bar is, and the one it means is the one the keyboard
+    /// is in — the same choice `body_top` and `name_x` already make.
+    fn bar_state(&self) -> String {
+        let here = self.placement.here;
+        let focus = self.panes.focus();
+        let mine: Vec<_> = self.hits.crumbs.iter().filter(|hit| hit.leaf == focus).collect();
+        let crumbs = mine.len();
+        let crumb_hover =
+            self.hovered_crumb.map_or(-1, |(_, depth)| i64::try_from(depth).unwrap_or(-1));
+        // The component one level up, which is the one a test clicks.
+        let parent =
+            mine.len().checked_sub(2).and_then(|index| mine.get(index)).map(|hit| hit.area);
+        let (parent_x, parent_y) = parent
+            .map_or((0.0, 0.0), |area| (area.x + area.width / 2.0, area.y + area.height / 2.0));
+        let tool_hover = match self.hovered_tool.map(|(_, tool)| tool) {
+            Some(crate::layout::Tool::Back) => "back",
+            Some(crate::layout::Tool::Forward) => "forward",
+            Some(crate::layout::Tool::Parent) => "parent",
+            Some(crate::layout::Tool::Reload) => "reload",
+            None => "none",
+        };
+        format!(
+            "crumbs={crumbs} crumb_hover={crumb_hover} parent_crumb_x={parent_x:.1} \
+parent_crumb_y={parent_y:.1} bar_y={:.1} bar_h={:.1} tools_x={:.1} tool_w={:.1} \
+tool_hover={tool_hover}",
+            here.bar.y, here.bar.height, here.tools[0].x, here.tools[0].width,
+        )
     }
 
     /// The middle of every drawn menu row, by the directory it names.
@@ -4832,29 +4885,34 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             .map(|leaf| format!("{:.0}x{:.0}", leaf.area.width, leaf.area.height))
             .collect::<Vec<_>>()
             .join(",");
-        // Each leaf's list, so a scenario can put the pointer inside a pane that
-        // does not have the keyboard — which `body_top` and `name_x` cannot,
-        // because they answer about the focused one.
-        let bodies = self
-            .placement
-            .leaves
-            .iter()
-            .map(|leaf| {
-                format!(
-                    "{:.0}:{:.0}:{:.0}:{:.0}",
-                    leaf.body.x, leaf.body.y, leaf.body.width, leaf.body.height
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
+        // Each leaf's list and each leaf's own bar, so a scenario can put the
+        // pointer inside a pane that does not have the keyboard — which
+        // `body_top`, `name_x` and `bar_y` cannot, because all three answer about
+        // the focused one.
+        let bodies = self.boxes_of(|leaf| leaf.body);
+        let bars = self.boxes_of(|leaf| leaf.bar);
         format!(
             "panes={} pane_focus={order} pane_sizes={widths:?} pane_paths={paths:?} \
 tabs={} tab={} tab_aim={tab_aim:?} tab_cross={cross_aim:?} plus_aim={plus_aim:?} \
-tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} pane_body={bodies:?}",
+tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} \
+pane_body={bodies:?} pane_bar={bars:?}",
             self.placement.leaves.len(),
             leaf.panes.len(),
             leaf.active,
         )
+    }
+
+    /// One rectangle per leaf, in layout order, as `x:y:w:h`.
+    fn boxes_of(&self, pick: impl Fn(&crate::panes::PaneLayout) -> Area) -> String {
+        self.placement
+            .leaves
+            .iter()
+            .map(|leaf| {
+                let area = pick(leaf);
+                format!("{:.0}:{:.0}:{:.0}:{:.0}", area.x, area.y, area.width, area.height)
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// What the two panels are showing: the Properties title and its rows as
@@ -4893,15 +4951,6 @@ tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} pane_bod
         };
         let close = self.layout.buttons[2];
         let close_x = close.x + close.width / 2.0;
-        // The four navigation buttons are laid out from x=0, this wide each.
-        let tool_w = self.layout.tools[0].width;
-        let tool_hover = match self.hovered_tool {
-            Some(crate::layout::Tool::Back) => "back",
-            Some(crate::layout::Tool::Forward) => "forward",
-            Some(crate::layout::Tool::Parent) => "parent",
-            Some(crate::layout::Tool::Reload) => "reload",
-            None => "none",
-        };
         let cursor_shape = match self.cursor {
             sk_plat::Cursor::Arrow => "arrow".to_owned(),
             sk_plat::Cursor::Hand => "hand".to_owned(),
@@ -4919,11 +4968,10 @@ tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} pane_bod
             .and_then(|index| self.sidebar.at(index))
             .map(|entry| entry.label.clone())
             .unwrap_or_default();
-        let crumb_hover = self.hovered_crumb.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         // Where the path field's box is, so a scenario can drag inside it by
         // arithmetic over what the frame drew rather than over its own copy of the
         // metrics.
-        let box_of = crate::view::path_field(&self.layout, &self.theme.metrics);
+        let box_of = crate::view::path_field(&self.placement.here, &self.theme.metrics);
         let path_field =
             format!("{:.1},{:.1},{:.1},{:.1}", box_of.x, box_of.y, box_of.width, box_of.height);
         // What an input method is composing, if anything. The field it is in is
@@ -4937,24 +4985,17 @@ tab_drop={tab_drop} strip_aim={strip_aim:?} divider_aim={divider_aim:?} pane_bod
         let (separators, separator_hover, separator_aim) = self.separator_state();
         let (crumb_menu, crumb_menu_depth, crumb_menu_active) = self.crumb_menu_state();
         let crumb_menu_aim = self.crumb_menu_aim();
-        let parent_crumb_x = self
-            .hits
-            .crumbs
-            .len()
-            .checked_sub(2)
-            .and_then(|index| self.hits.crumbs.get(index))
-            .map_or(0.0, |area| area.x + area.width / 2.0);
+        let bar_report = self.bar_state();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
-frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} \
-crumbs={} crumb_hover={crumb_hover} parent_crumb_x={parent_crumb_x:.1} \
+frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
+{bar_report} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
 crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={crumb_menu_active:?} \
 crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
-composing={composing:?} \
-tool_w={tool_w:.1} tool_hover={tool_hover} pointer={cursor_shape} \
+composing={composing:?} pointer={cursor_shape} \
 sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={place_hover} place_name={place_name:?} \
 path_field={path_field} \
@@ -4967,7 +5008,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.size.x,
             self.placement.here.size.width,
             self.window_state.maximized,
-            self.hits.crumbs.len(),
+            self.layout.title.height,
             self.layout.sidebar.width,
             self.layout.sidebar.y,
             self.sidebar.len(),
@@ -5121,21 +5162,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.press_on_the_chrome(position, commands) {
             return;
         }
-        // The path field before the drag region, for the same reason a
-        // breadcrumb is: a press in a text field belongs to the caret, and a
-        // press that moved the window instead would make the field unusable.
+        // The open path field before anything in the bar it is drawn across: a
+        // press inside it belongs to the caret, and a press outside it commits
+        // nothing and closes it, the way every other field on the desktop does.
         if self.typing_path.is_some() {
-            // The second click of a double click on the title bar. The first one
-            // opened this field on its release, so taking it back is what makes
-            // "double click to maximise" survive "click to type a path".
-            if clicks >= 2 && self.path_from_title {
-                self.typing_path = None;
-                self.path_from_title = false;
-                self.toggle_maximized();
-                self.dirty = true;
-                return;
-            }
-            let field = crate::view::path_field(&self.layout, &self.theme.metrics);
+            let field = crate::view::path_field(&self.placement.here, &self.theme.metrics);
             if field.contains(position.x, position.y) {
                 self.place_path_caret(position.x);
             } else {
@@ -5144,19 +5175,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             }
             return;
         }
-        // A breadcrumb before the drag region, because the breadcrumbs are *in*
-        // the drag region: the path bar is the title bar, and a component that
-        // moved the window instead of navigating would be a component nobody
-        // could click.
-        if let Some(depth) = self.separator_at(position) {
-            self.open_crumb_menu(depth);
+        // A pane's own bar before the tree, because the bar's four buttons, its
+        // chevrons and its components are all more specific than "a press
+        // somewhere in this pane" — and each of them focuses that pane itself.
+        if self.press_on_a_pane_bar(position, commands) {
             return;
         }
-        if let Some(depth) = self.crumb_at(position) {
-            self.go_to_crumb(depth);
-            return;
-        }
-        if self.press_on_the_path_strip(position, clicks) {
+        if self.press_on_the_title_bar(position, clicks) {
             return;
         }
         // The tree before the header and the list, because both of those are
@@ -5632,12 +5657,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
         let divided = self.placement.dragging.take().is_some();
-        // A press on the title bar that never moved: the person clicked the path
-        // strip, which is a request to type a path.
-        if self.title_press.take().is_some() {
-            self.toggle_path_entry();
-            self.path_from_title = self.typing_path.is_some();
-        }
+        // A press on the title bar that never moved is a click on a title bar,
+        // and a title bar holds nothing to click: the path moved into the panes,
+        // so there is nothing here for a press to be about.
+        self.title_press = None;
         if ended || released || dragged || divided {
             self.dirty = true;
         }
@@ -5649,7 +5672,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// something on a press and nothing to look at is a feature discoverable
     /// only by trying it, and the first thing a person tries is dragging the
     /// edge of a window.
-    fn cursor_at(&self, position: Point, commands: &Registry<Self>) -> sk_plat::Cursor {
+    fn cursor_at(&self, position: Point) -> sk_plat::Cursor {
         // **Before everything, including the resize band.** While files are
         // being carried the pointer is a payload looking for a destination, and
         // every other shape would be an answer to a question nobody is asking —
@@ -5692,12 +5715,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         // A dimmed navigation button is not clickable, and Back is dimmed for the
         // first navigation of every session — so it is the first thing a pointer
-        // lands on that used to promise a click and do nothing. Asked of the
-        // registry, which is where the dimming comes from.
+        // lands on that used to promise a click and do nothing. Asked of the pane
+        // the button belongs to, which is where its dimming comes from.
         let over_tool = self
-            .layout
-            .tool_at(position.x, position.y)
-            .is_some_and(|tool| runnable(commands, self, tool.command()));
+            .tool_at(position)
+            .map(|(id, tool)| self.panes.leaf(id).is_some_and(|leaf| leaf.showing().allows(tool)));
         // The status strip's Pause and Stop are here rather than with the panel
         // buttons above: the strip is not a panel, and they are drawn only while
         // there is an operation to stop.
@@ -5705,7 +5727,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             .iter()
             .flatten()
             .any(|area| area.contains(position.x, position.y));
-        if over_tool
+        if over_tool == Some(true)
             || on_the_strip
             || self.crumb_at(position).is_some()
             || self.layout.button_at(position.x, position.y).is_some()
@@ -5714,7 +5736,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return sk_plat::Cursor::Hand;
         }
         // Over a button that is drawn and dimmed, and nothing else is under it.
-        if self.layout.tool_at(position.x, position.y).is_some() {
+        if over_tool == Some(false) {
             return sk_plat::Cursor::Arrow;
         }
         if self.placement.here.header.contains(position.x, position.y)
@@ -5726,7 +5748,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // the caret into — and both of these fields already accept a click that
         // does exactly that.
         let over_field = self.typing_path.is_some()
-            && crate::view::path_field(&self.layout, &self.theme.metrics)
+            && crate::view::path_field(&self.placement.here, &self.theme.metrics)
                 .contains(position.x, position.y)
             || self.edits.naming.is_some() && self.naming_field().contains(position.x, position.y);
         if over_field {
@@ -5762,11 +5784,22 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// breadcrumb that navigates to the current directory is a reload wearing a
     /// disguise. The regions come from the last frame, which is the only place
     /// the shaped width of a name is known.
-    fn crumb_at(&self, position: Point) -> Option<usize> {
-        let last = self.hits.crumbs.len().checked_sub(1)?;
-        self.hits.crumbs[..last]
+    fn crumb_at(&self, position: Point) -> Option<(crate::panes::PaneId, usize)> {
+        let hit = self
+            .hits
+            .crumbs
             .iter()
-            .position(|area| area.width > 0.0 && area.contains(position.x, position.y))
+            .find(|hit| hit.area.width > 0.0 && hit.area.contains(position.x, position.y))?;
+        // The deepest component *of that pane's own bar*: every leaf pushes its
+        // own run of crumbs, so "the last one" is a question per pane.
+        let deepest = self
+            .hits
+            .crumbs
+            .iter()
+            .filter(|other| other.leaf == hit.leaf)
+            .map(|other| other.depth)
+            .max()?;
+        (hit.depth != deepest).then_some((hit.leaf, hit.depth))
     }
 
     /// Lights the separator and the menu row under the pointer.
@@ -5825,12 +5858,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.hits.crumb_menu.iter().position(|area| area.contains(position.x, position.y))
     }
 
-    /// Which breadcrumb separator is under a point, if any.
-    fn separator_at(&self, position: Point) -> Option<usize> {
+    /// Which breadcrumb separator is under a point, and whose bar it is in.
+    fn separator_at(&self, position: Point) -> Option<(crate::panes::PaneId, usize)> {
         self.hits
             .separators
             .iter()
-            .position(|area| area.width > 0.0 && area.contains(position.x, position.y))
+            .find(|hit| hit.area.width > 0.0 && hit.area.contains(position.x, position.y))
+            .map(|hit| (hit.leaf, hit.depth))
     }
 
     /// The path a breadcrumb at `depth` names: the current path, that deep.
@@ -5865,7 +5899,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.crumb_pending = Some(depth);
         self.dirty = true;
         let parent = self.path_to_crumb(depth);
-        let at = self.hits.separators.get(depth).map_or(0.0, |area| area.x);
+        let focus = self.panes.focus();
+        let at = self
+            .hits
+            .separators
+            .iter()
+            .find(|hit| hit.leaf == focus && hit.depth == depth)
+            .map_or(0.0, |hit| hit.area.x);
         let show_hidden = self.panes.focused().show_hidden;
         let sender = self.replies.siblings_tx.clone();
         let wake = self.waker.handle();
@@ -6002,10 +6042,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.dirty = true;
         }
         // A secondary click inside a text field belongs to the field. Without
-        // this the path bar — which is the title bar — answered one with the
-        // compositor's window menu, over a field with a caret in it.
+        // this the path bar answered one with the compositor's window menu — it
+        // was the title bar then — over a field with a caret in it.
         if self.typing_path.is_some()
-            && crate::view::path_field(&self.layout, &self.theme.metrics)
+            && crate::view::path_field(&self.placement.here, &self.theme.metrics)
                 .contains(position.x, position.y)
         {
             return;
@@ -6362,7 +6402,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         false
     }
 
-    fn moved(&mut self, position: Point, commands: &Registry<Self>) {
+    fn moved(&mut self, position: Point) {
         self.pointer = position;
         // A press on the title bar that has now moved is a window drag after all.
         // The threshold is what separates the two: a click is never perfectly
@@ -6403,7 +6443,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.hovered_crumb = crumb;
             self.dirty = true;
         }
-        let tool = self.layout.tool_at(position.x, position.y);
+        let tool = self.tool_at(position);
         if self.hovered_tool != tool {
             self.hovered_tool = tool;
             self.dirty = true;
@@ -6436,7 +6476,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.hovered_plus = plus;
             self.dirty = true;
         }
-        let cursor = self.cursor_at(position, commands);
+        let cursor = self.cursor_at(position);
         self.point(cursor);
         if let Some(grab) = self.thumb_grab {
             self.drag_thumb(position, grab);
@@ -6557,7 +6597,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// Separate from [`Self::render`] because all of it wants `&mut self` whole,
     /// and the description below splits `self` into its fields — so anything
     /// left here would have to be answered twice or borrowed around.
-    fn before_frame(&mut self, commands: &Registry<Self>) -> ((u32, u32), f32, [bool; 4]) {
+    fn before_frame(&mut self, commands: &Registry<Self>) -> ((u32, u32), f32) {
         let physical = self.window.physical();
         if physical != self.renderer.size() {
             self.renderer.resize(physical);
@@ -6565,12 +6605,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         let scale = self.window.scale();
         self.settle_rows();
-        // Asked here for the same reason: the answer is whether each navigation
-        // command can run, and only the registry knows that — rule 2 again, so
-        // the dimming and the click cannot disagree.
-        let tools = tool_state(commands, self);
         self.settle_menu_state(commands);
-        (physical, scale, tools)
+        (physical, scale)
     }
 
     // The same shape `assemble` is, and settled the same way: almost all of it
@@ -6579,7 +6615,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     // and neither could be read without the other.
     #[expect(clippy::too_many_lines, reason = "a struct literal with one call site")]
     fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
-        let (physical, scale, tools) = self.before_frame(commands);
+        let (physical, scale) = self.before_frame(commands);
         self.list.begin(physical);
 
         let Self {
@@ -6706,7 +6742,6 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             pausable: edits.busy(),
             paused: edits.held(),
             naming: edits.naming.as_ref(),
-            tools,
             filtering: *filtering,
             types: desktop.as_deref().map(|it| &it.mime),
             window: *window_state,

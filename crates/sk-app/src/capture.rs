@@ -346,7 +346,7 @@ fn sample_naming(pane: &mut Pane) -> Option<crate::edit::Naming> {
 /// is the state a person meets, and the only one where the "you are here" mark
 /// is worth a frame at all. A menu anchored at one depth listing another's
 /// children would be a frame that agreed with nothing.
-fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
+fn sample_crumb_menu(here: &crate::panes::PaneLayout, empty: bool) -> crate::crumbs::CrumbMenu {
     let rows = if empty {
         Vec::new()
     } else {
@@ -355,7 +355,7 @@ fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
     crate::crumbs::CrumbMenu::new(
         2,
         std::path::PathBuf::from("/tmp/skerry-golden"),
-        layout.path.x + 180.0,
+        here.path.x + 180.0,
         rows,
         (!empty).then_some("fixture"),
     )
@@ -363,20 +363,23 @@ fn sample_crumb_menu(layout: &Layout, empty: bool) -> crate::crumbs::CrumbMenu {
 
 /// Splits the sample tree, and puts a second tab in the new half.
 ///
-/// The second and third panes read the same directory: a capture's frame has to
-/// be the same on every machine, and a second directory would be a second thing
-/// for the fixture to guarantee.
+/// **The lower half shows a different directory**, and it is the tab beside the
+/// one the leaf opened with. Every pane draws its own path bar now, so a frame
+/// where both halves held the same folder would look identical whether each bar
+/// read its own pane or both read the focused one — which is the mistake this
+/// frame exists to catch. `fixture/documents` is part of what the fixture
+/// guarantees on every machine, so it costs the capture nothing.
 fn split_the_sample(panes: &mut crate::panes::Panes, session: &Session, request: &Capture) {
-    let another = || {
-        let (mut pane, _) = session.read_fully(&request.path);
+    let another = |path: &std::path::Path| {
+        let (mut pane, _) = session.read_fully(path);
         pane.selection.set_cursor(pane.listing.at(0));
         settle_folder_totals(&mut pane, session);
         pane
     };
     let id = panes.focus();
-    panes.split_with(id, crate::panes::Axis::Below, false, another());
+    panes.split_with(id, crate::panes::Axis::Below, false, another(&request.path));
     let into = panes.focus();
-    panes.put_tab(into, 1, another());
+    panes.put_tab(into, 1, another(&request.path.join("documents")));
 }
 
 /// The Properties panel over one file, with every fact stated.
@@ -441,7 +444,6 @@ const FIXED_MTIME: i64 = 981_158_400;
 
 fn sample_overlays(
     request: &Capture,
-    layout: &Layout,
     here: &crate::panes::PaneLayout,
     pane: &mut Pane,
     jobs: &crate::pane::Jobs,
@@ -454,7 +456,7 @@ fn sample_overlays(
     Overlays {
         menu: sample_context_menu(request, here),
         crumbs: (request.crumbs || request.crumbs_empty)
-            .then(|| sample_crumb_menu(layout, request.crumbs_empty)),
+            .then(|| sample_crumb_menu(here, request.crumbs_empty)),
         path_entry: request.path_entry.then(|| sample_path_entry(&request.path)),
         palette: request.palette.then(sample_palette),
         naming: (request.rename || request.composing).then(|| sample_naming(pane)).flatten().map(
@@ -591,7 +593,6 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         // because a capture has no history — and it is the state worth
         // having a golden frame of, since it is the one with two of the
         // four dimmed.
-        tools: [false, false, true, true],
         // **The filter is applied; the box only sometimes has the
         // keyboard.** `--filter --rename` is the state a rename started
         // from a search is in, and the frame that would catch its panel
@@ -674,6 +675,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // The tab `split_the_sample` left *behind* in the lower half, which is the
     // only tab in this frame that is not the one its leaf is showing — and being
     // the one that is not showing is the whole of what this mark means.
+    // The lower leaf's *first* tab, which is not the one it is showing: a drop on
+    // a tab lands in the directory that tab holds, and a mark on the tab already
+    // on screen could not tell the two apart.
     let drop_tab = (request.split && request.tab_drop).then(|| (panes.focus(), 0));
     // Three names and a total of nine, so the frame holds both the list and the
     // "and 6 more" line the list stops at.
@@ -688,7 +692,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().cast_signed());
 
-    let overlays = sample_overlays(request, &layout, &here, panes.focused_mut(), &session.jobs);
+    let overlays = sample_overlays(request, &here, panes.focused_mut(), &session.jobs);
 
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,

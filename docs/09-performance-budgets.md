@@ -132,6 +132,16 @@ and [12-measurement.md](12-measurement.md) says a number taken on a loaded
 machine is worth 6× less than the same number taken on an idle one. Recorded with
 the load rather than quoted as a change.
 
+**Moving the path bar into each pane cost nothing measurable.** The four
+navigation buttons and the breadcrumbs are per pane now, under that pane's tab
+strip, so a window with one pane draws the same widgets in a different place and a
+split draws them twice. Thirteen alternating runs of `--bench 900` at 200,000
+entries, load average 2.6–3.1: p50 median **0.197 ms before, 0.196 ms after**;
+p99 median **0.418 ms before, 0.361 ms after**. One run in thirteen breached 8 ms
+on each binary — the frame the read lands on, which is the row above and not this
+change. The spread is wider than the difference, so what this records is the
+absence of a regression rather than a gain.
+
 **What the row mark costs: 0.012 ms a frame.** Colouring a row by the kind of
 file it names asks `MimeDatabase::by_name` once per visible row per frame — a
 hash lookup and, for the four globs on this machine that are not `*.ext`, a short

@@ -51,30 +51,32 @@ pub struct Layout {
     /// and not a rectangle in it, and reconstructing it from the status strip is
     /// arithmetic that is right until the window is shorter than its own chrome.
     pub window: Size,
-    /// The path bar.
-    pub path: Area,
+    /// The window's own title bar, and **zero height when it has none**.
+    ///
+    /// Only the frame the window draws for itself lives here: the three window
+    /// buttons and the region a press drags the window by. Where the compositor
+    /// draws the frame — every desktop measured except GNOME — there is nothing
+    /// left for this strip to hold, and 44 logical pixels of empty chrome above
+    /// a pane that carries its own path bar is 44 pixels of list given away for
+    /// nothing. So it collapses, and the panes start at the top of the window.
+    pub title: Area,
     /// The list of places down the left, or empty when it is closed or shed.
     ///
-    /// Below the path strip and not beside it, which is where Windows 11 puts
-    /// it: the address bar spans the window and the navigation pane starts under
-    /// it. So the column headers begin where this ends.
+    /// Beside the panes and the full height of them, because the strip that
+    /// spanned the window and pushed it down is gone: each pane says where it
+    /// is now, so there is no window-wide address bar for this to sit under.
     pub sidebar: Area,
-    /// Everything the pane tree divides between its leaves: below the path
+    /// Everything the pane tree divides between its leaves: below the title
     /// strip, right of the sidebar, above the status strip.
     ///
-    /// Where the header, the list and the columns used to be. They are per leaf
-    /// now ([ADR 0010](../adr/0010-a-split-tree-of-tab-strips.md)) and live in
+    /// Where the header, the list and the columns used to be — and the four
+    /// navigation buttons and the breadcrumbs with them. They are per leaf
+    /// ([ADR 0010](../adr/0010-a-split-tree-of-tab-strips.md)) and live in
     /// [`crate::panes::PaneLayout`].
     pub content: Area,
     /// The status strip.
     pub status: Area,
 
-    /// Back, forward, parent and reload, at the left of the path strip.
-    ///
-    /// In the strip rather than above it, which is where Windows puts them and
-    /// costs no vertical space: the path bar is already the title bar, and a
-    /// second row for four buttons is 44 logical pixels of list for four marks.
-    pub tools: [Area; 4],
     /// The three window buttons — minimise, maximise, close, left to right.
     ///
     /// All empty when the compositor draws the frame, which is every desktop
@@ -82,10 +84,8 @@ pub struct Layout {
     pub buttons: [Area; 3],
     /// Where a press starts moving the window.
     ///
-    /// The path strip doubles as the title bar rather than a title bar being
-    /// added above it: a strip that says where you are is already the strip a
-    /// person reaches for to drag the window, and a second one costs 36 logical
-    /// pixels of list for a duplicate of the same information.
+    /// The title strip minus the buttons, and empty when the compositor draws
+    /// the frame — there is no strip then to press.
     pub drag: Area,
     /// How far in from an edge a press starts a resize. Zero with server-side
     /// decorations, and zero when the window is maximized or tiled — its edges
@@ -161,6 +161,10 @@ impl Frame {
 }
 
 /// Which navigation button.
+///
+/// One per pane, in that pane's own bar. The enum stays here because it is the
+/// map from a drawn button to a command, and [`crate::panes::PaneLayout`] is
+/// where its four rectangles are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
     /// Where the last navigation came from.
@@ -222,11 +226,11 @@ impl Button {
 impl Layout {
     /// Computes every region for a window of `size`.
     ///
-    /// The two metadata columns keep their width and the name column takes what
-    /// is left, because a filename is the only cell whose useful length is
-    /// unbounded. Below the width where the name column would fall under a
-    /// hundred logical pixels the metadata columns give way instead, so a
-    /// narrow window shows names rather than three unreadable columns.
+    /// Three strips and a middle: the title bar the window draws for itself, the
+    /// status strip, the sidebar down the left, and everything the pane tree
+    /// divides between its leaves. Where a pane's own parts go is
+    /// [`crate::panes::PaneLayout`]'s answer, because a leaf is the thing that
+    /// has a path, a history and a sort.
     #[must_use]
     pub fn compute_with(size: Size, metrics: &Metrics, frame: Frame, sidebar: bool) -> Self {
         let full = size.width.max(1.0);
@@ -235,28 +239,11 @@ impl Layout {
         // a button that does nothing reads as a worse one.
         let offered = frame.offered();
         let strip = metrics.button_width * offered.iter().filter(|it| **it).count() as f32;
-        // The tools come off the left of the strip and the breadcrumb starts
-        // after them. Shed together below the width where the path would have
-        // nothing left, the same way the metadata columns shed.
-        let tools_width = metrics.tool_width * 4.0;
-        let room = full - strip;
-        let tools = std::array::from_fn(|index| {
-            if room - tools_width < 120.0 {
-                return Area::default();
-            }
-            Area {
-                x: metrics.tool_width * index as f32,
-                y: 0.0,
-                width: metrics.tool_width,
-                height: metrics.path_height,
-            }
-        });
-        let toolbar = tools.iter().map(|tool| tool.width).sum::<f32>();
-        let path = Area {
-            x: toolbar,
+        let title = Area {
+            x: 0.0,
             y: 0.0,
-            width: (room - toolbar).max(0.0),
-            height: metrics.path_height,
+            width: full,
+            height: if frame.is_own() { metrics.path_height } else { 0.0 },
         };
         let mut cursor = full - strip;
         let mut buttons = [Area::default(); 3];
@@ -264,15 +251,16 @@ impl Layout {
             if !offered {
                 continue;
             }
-            *slot = Area {
-                x: cursor,
-                y: 0.0,
-                width: metrics.button_width,
-                height: metrics.path_height,
-            };
+            *slot = Area { x: cursor, y: 0.0, width: metrics.button_width, height: title.height };
             cursor += metrics.button_width;
         }
-        let drag = if frame.is_own() { path } else { Area::default() };
+        // The strip minus the buttons: a press on a button is a press on that
+        // button, not the start of a window drag that happens to begin there.
+        let drag = if frame.is_own() {
+            Area { width: (full - strip).max(0.0), ..title }
+        } else {
+            Area::default()
+        };
         // A maximized or tiled window has no free edges, so there is nothing to
         // grab — and an invisible six-pixel band that swallows clicks at the top
         // of a maximized list is worse than no resize at all.
@@ -282,7 +270,7 @@ impl Layout {
         };
         let status = Area {
             x: 0.0,
-            y: (size.height - metrics.status_height).max(path.bottom() + metrics.header_height),
+            y: (size.height - metrics.status_height).max(title.bottom() + metrics.header_height),
             width: full,
             height: metrics.status_height,
         };
@@ -292,43 +280,21 @@ impl Layout {
         let aside = if sidebar && full - metrics.sidebar_width >= 320.0 {
             Area {
                 x: 0.0,
-                y: path.bottom(),
+                y: title.bottom(),
                 width: metrics.sidebar_width,
-                height: (status.y - path.bottom()).max(0.0),
+                height: (status.y - title.bottom()).max(0.0),
             }
         } else {
             Area::default()
         };
         let content = Area {
             x: aside.width,
-            y: path.bottom(),
+            y: title.bottom(),
             width: full - aside.width,
-            height: (status.y - path.bottom()).max(0.0),
+            height: (status.y - title.bottom()).max(0.0),
         };
 
-        Self {
-            window: size,
-            path,
-            sidebar: aside,
-            content,
-            status,
-            tools,
-            buttons,
-            drag,
-            resize_border,
-        }
-    }
-
-    /// The navigation button at a point, if any.
-    ///
-    /// Split out of `compute_with` only because that function has a length limit
-    /// worth keeping; the reasoning is in the doc on [`Layout::compute`].
-    #[must_use]
-    pub fn tool_at(&self, x: f32, y: f32) -> Option<Tool> {
-        Tool::ALL
-            .into_iter()
-            .zip(self.tools)
-            .find_map(|(tool, area)| (area.width > 0.0 && area.contains(x, y)).then_some(tool))
+        Self { window: size, title, sidebar: aside, content, status, buttons, drag, resize_border }
     }
 
     /// The window button at a point, if any.
@@ -402,7 +368,7 @@ mod tests {
         );
         assert!(all.buttons.iter().all(|button| button.width > 0.0));
         assert!((all.buttons[2].right() - 1100.0).abs() < f32::EPSILON, "close is not at the edge");
-        assert!((all.path.right() - all.buttons[0].x).abs() < f32::EPSILON, "a gap before the row");
+        assert!((all.drag.right() - all.buttons[0].x).abs() < f32::EPSILON, "a gap before the row");
 
         let two = Layout::compute_with(
             size,
@@ -413,28 +379,30 @@ mod tests {
         assert!(two.buttons[0].width <= 0.0, "an absent action was given a slot");
         assert!((two.buttons[2].right() - 1100.0).abs() < f32::EPSILON);
         assert!((two.buttons[1].right() - two.buttons[2].x).abs() < f32::EPSILON, "a hole");
-        assert!(two.path.width > all.path.width, "the path bar did not take the freed width");
+        assert!(two.drag.width > all.drag.width, "the drag region did not take the freed width");
 
+        // **And a compositor-drawn frame leaves no strip at all.** A title bar
+        // with nothing in it above a pane that carries its own path is 44
+        // logical pixels of list given away for nothing.
         let served = Layout::compute_with(size, &metrics, Frame::None, false);
         assert!(served.buttons.iter().all(|button| button.width <= 0.0));
         assert!(served.drag.width <= 0.0, "a compositor-drawn title bar is not ours to drag");
-        // The whole strip minus the four navigation buttons, which are there
-        // whoever draws the frame.
-        assert!((served.path.right() - 1100.0).abs() < f32::EPSILON);
-        assert!((served.path.x - served.tools[3].right()).abs() < f32::EPSILON);
+        assert!(served.title.height <= 0.0, "an empty title strip took height");
+        assert!(served.content.y <= f32::EPSILON, "the panes did not start at the top");
+        assert!(served.content.height > all.content.height, "the freed height went nowhere");
     }
 
-    /// The sidebar takes the left of everything below the path strip, the
-    /// header and the list start where it ends, and both shed at the width
-    /// where the list would be narrower than the sidebar is wide.
+    /// The sidebar takes the left of everything below the title strip, the
+    /// panes start where it ends, and both shed at the width where the list
+    /// would be narrower than the sidebar is wide.
     #[test]
     fn the_sidebar_takes_the_left_and_the_list_starts_where_it_ends() {
         let metrics = Metrics::default();
         let open = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, true);
         assert!((open.sidebar.width - metrics.sidebar_width).abs() < f32::EPSILON);
         assert!(open.sidebar.x <= f32::EPSILON);
-        // Below the path strip, down to the status strip, with no gap at either.
-        assert!((open.sidebar.y - open.path.bottom()).abs() < f32::EPSILON);
+        // Below the title strip, down to the status strip, with no gap at either.
+        assert!((open.sidebar.y - open.title.bottom()).abs() < f32::EPSILON);
         assert!((open.sidebar.bottom() - open.status.y).abs() < f32::EPSILON);
         // And the panes start after it. The columns are the tree's now, so the
         // question this test asks of them is asked through one leaf's layout.
@@ -498,42 +466,11 @@ mod tests {
         assert!(fixed.buttons[2].width > 0.0, "a tiled window still has to close");
     }
 
-    /// The four navigation buttons come off the left of the strip, the
-    /// breadcrumb starts after them, and both shed at the same width — a path
-    /// bar with buttons and no path is worse than either alone.
+    /// The four commands the buttons stand for, which is all this file still
+    /// decides about them: where they are drawn is a leaf's question now, and
+    /// `panes.rs` asks it.
     #[test]
-    fn the_navigation_buttons_take_the_left_of_the_strip_and_shed_together() {
-        let metrics = Metrics::default();
-        let wide = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
-        assert!(wide.tools.iter().all(|tool| tool.width > 0.0));
-        assert!(wide.tools[0].x <= f32::EPSILON, "they start at the left edge");
-        for pair in wide.tools.windows(2) {
-            assert!((pair[0].right() - pair[1].x).abs() < f32::EPSILON, "a gap in the row");
-        }
-        assert!(
-            (wide.tools[3].right() - wide.path.x).abs() < f32::EPSILON,
-            "the path does not start where the buttons end"
-        );
-        assert!((wide.path.right() - 1100.0).abs() < f32::EPSILON);
-
-        // Narrow enough that the path would have nothing left.
-        let narrow = Layout::compute_with(Size::new(200.0, 720.0), &metrics, Frame::None, false);
-        assert!(narrow.tools.iter().all(|tool| tool.width <= 0.0));
-        assert!(narrow.path.x <= f32::EPSILON);
-        assert!((narrow.path.width - 200.0).abs() < f32::EPSILON);
-    }
-
-    /// Each button is found by the rectangle it is drawn from, and each names
-    /// the command it runs — rule 2, so the dimming and the click agree.
-    #[test]
-    fn a_press_on_a_navigation_button_finds_that_button() {
-        let layout =
-            Layout::compute_with(Size::new(1100.0, 720.0), &Metrics::default(), Frame::None, false);
-        for (tool, area) in Tool::ALL.into_iter().zip(layout.tools) {
-            let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
-            assert_eq!(layout.tool_at(x, y), Some(tool));
-        }
-        assert_eq!(layout.tool_at(600.0, 20.0), None, "the breadcrumb is not a button");
+    fn each_navigation_button_names_the_command_it_runs() {
         let commands: Vec<_> = Tool::ALL.into_iter().map(Tool::command).collect();
         assert_eq!(commands, vec!["go.back", "go.forward", "go.parent", "go.reload"]);
     }
@@ -558,14 +495,15 @@ mod tests {
     fn the_regions_tile_the_window_with_no_gap_and_no_overlap() {
         let metrics = Metrics::default();
         let layout = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
-        assert!((layout.path.bottom() - layout.content.y).abs() < f32::EPSILON);
+        assert!((layout.title.bottom() - layout.content.y).abs() < f32::EPSILON);
         assert!((layout.content.bottom() - layout.status.y).abs() < f32::EPSILON);
         assert!((layout.status.bottom() - 720.0).abs() < f32::EPSILON);
         // And inside the content, the one leaf tiles it in turn: the tab strip
-        // first, then the column header, then the list.
+        // first, then its own path bar, then the column header, then the list.
         let pane = one_leaf(&layout, &metrics);
         assert!((pane.tabs.y - layout.content.y).abs() < f32::EPSILON);
-        assert!((pane.tabs.bottom() - pane.header.y).abs() < f32::EPSILON);
+        assert!((pane.tabs.bottom() - pane.bar.y).abs() < f32::EPSILON);
+        assert!((pane.bar.bottom() - pane.header.y).abs() < f32::EPSILON);
         assert!((pane.header.bottom() - pane.body.y).abs() < f32::EPSILON);
         assert!((pane.body.bottom() - layout.content.bottom()).abs() < f32::EPSILON);
     }
@@ -620,7 +558,7 @@ mod tests {
         // geometry for every uniform view, per ADR 0013 — and its tests moved
         // with it, where they cover both modes rather than only this one.
         assert!(layout.body.contains(layout.body.x + 1.0, top + 1.0));
-        assert!(!layout.body.contains(layout.body.x + 1.0, window.path.y + 1.0));
+        assert!(!layout.body.contains(layout.body.x + 1.0, layout.bar.y + 1.0));
         assert!(!layout.body.contains(layout.body.x + 1.0, window.status.y + 1.0));
     }
 }

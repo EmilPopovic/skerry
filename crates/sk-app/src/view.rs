@@ -51,10 +51,10 @@ pub struct Chrome<'a> {
     pub watching: bool,
     /// The window button under the pointer, if the window draws its own frame.
     pub hovered_button: Option<Button>,
-    /// The path component under the pointer.
-    pub hovered_crumb: Option<usize>,
-    /// The navigation button under the pointer.
-    pub hovered_tool: Option<Tool>,
+    /// The path component under the pointer: whose bar, and how deep.
+    pub hovered_crumb: Option<(PaneId, usize)>,
+    /// The navigation button under the pointer, and which pane's bar it is in.
+    pub hovered_tool: Option<(PaneId, Tool)>,
     /// The sidebar's contents, once the job that reads them has finished.
     ///
     /// A slice rather than the model, because the view needs the arrangement and
@@ -95,15 +95,12 @@ pub struct Chrome<'a> {
     /// An index build is cancellable and not pausable — it is seconds long — and
     /// a Pause drawn on the strip that did nothing would be worse than none.
     pub pausable: bool,
-    /// The breadcrumb separator under the pointer.
-    pub hovered_separator: Option<usize>,
+    /// The breadcrumb separator under the pointer: whose bar, and how deep.
+    pub hovered_separator: Option<(PaneId, usize)>,
     /// The sibling menu a separator has opened, while one is open.
     pub crumb_menu: Option<&'a crate::crumbs::CrumbMenu>,
     /// The name being typed, if one is.
     pub naming: Option<&'a Naming>,
-    /// Whether each of the four navigation buttons can run right now, from the
-    /// command registry rather than from a second copy of the same question.
-    pub tools: [bool; 4],
     /// Whether the filter field has the keyboard.
     pub filtering: bool,
     /// The filename half of shared-mime-info, once the job that reads it is
@@ -146,19 +143,23 @@ pub struct Chrome<'a> {
 /// two measurements drifting apart at 125%.
 #[derive(Default)]
 pub struct Hits {
-    /// One rectangle per path component, root first. The index is the number of
-    /// components to keep when it is clicked.
-    pub crumbs: Vec<Area>,
+    /// One region per path component of every pane's bar, root first within each
+    /// pane. `depth` is the number of components to keep when it is clicked.
+    ///
+    /// A component that did not fit is still recorded, with a zero-width
+    /// rectangle: the depth of a crumb has to be its index in the path whether
+    /// the bar had room to draw it or not.
+    pub crumbs: Vec<BarHit>,
     /// One rectangle per *drawn* row of a separator's menu, in draw order — so
     /// the index a click reports is an offset from the menu's scroll.
     pub crumb_menu: Vec<Area>,
-    /// One rectangle per **separator**, indexed by the component on its left.
+    /// One region per **separator**, `depth` naming the component on its left.
     ///
     /// A separator is a target of its own — clicking one lists the directories
     /// inside the component to its left, which are the siblings of the component
     /// to its right. There is one after the last component too: its list is the
     /// children of where you already are.
-    pub separators: Vec<Area>,
+    pub separators: Vec<BarHit>,
     /// One rectangle per sidebar row, in the flattened order the model uses, so
     /// the index a click reports is an index into it.
     pub places: Vec<Area>,
@@ -204,6 +205,22 @@ pub struct Hits {
     pub panels: Vec<Area>,
 }
 
+/// One target in one pane's own path bar.
+///
+/// **Which pane, not just where.** Every leaf draws its own breadcrumbs, so a
+/// rectangle alone cannot say whose path a click is asking about — and a click
+/// in the other half of a split has to move the keyboard there before it
+/// navigates, which needs the leaf's name.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BarHit {
+    /// The leaf whose bar it is in.
+    pub leaf: PaneId,
+    /// How many path components the click keeps.
+    pub depth: usize,
+    /// Where it was drawn, or empty for a component that did not fit.
+    pub area: Area,
+}
+
 /// Numbers for the statistics overlay and the status line.
 pub struct Diagnostics<'a> {
     /// Frame history.
@@ -246,13 +263,17 @@ pub fn draw(
     let pane = panes.focused();
     hits.panels.clear();
     sidebar(painter, pane, layout, chrome, hits);
-    path_bar(painter, pane, layout, chrome, hits);
-    tool_buttons(painter, layout, chrome);
+    title_bar(painter, pane, layout, chrome);
     window_buttons(painter, layout, chrome);
+    // Cleared once for the window and filled by each pane in turn, because a
+    // click has to find a crumb in whichever bar it landed in.
+    hits.crumbs.clear();
+    hits.separators.clear();
     for leaf in chrome.leaves {
         let Some(tabs) = panes.leaf(leaf.id) else { continue };
         let has_keyboard = leaf.id == focus;
         tab_strip(painter, tabs, leaf, chrome, has_keyboard);
+        nav_bar(painter, tabs.showing(), leaf, chrome, hits, has_keyboard);
         header(painter, tabs.showing(), leaf);
         body(painter, tabs.showing(), leaf, now, chrome, has_keyboard);
     }
@@ -301,7 +322,7 @@ pub fn draw(
         keys_overlay(painter, layout, rows, hits);
     }
     if let Some(menu) = chrome.crumb_menu {
-        crumb_menu(painter, layout, menu, hits);
+        crumb_menu(painter, layout, here, menu, hits);
     }
     if let Some(palette) = chrome.palette {
         command_palette(painter, layout, palette, hits);
@@ -370,66 +391,100 @@ fn line(
     painter.label(text, style, box_rect, baseline)
 }
 
-fn path_bar(
+/// The strip the window draws for itself: the buttons' ground, and a title.
+///
+/// Only where the compositor draws no frame. Everywhere else this is zero height
+/// and nothing is drawn at all, because a strip holding neither a path nor a
+/// button is 44 logical pixels of list given away for a background colour.
+///
+/// The title is the focused pane's folder, which is what a title bar is for and
+/// what the task switcher already shows — the *path* belongs to each pane's own
+/// bar, and repeating one of them up here would say which pane is privileged.
+fn title_bar(painter: &mut Painter<'_>, pane: &Pane, layout: &Layout, chrome: &Chrome<'_>) {
+    let theme = *painter.theme;
+    let strip = layout.title;
+    if strip.height <= 0.0 {
+        return;
+    }
+    fill(painter, strip, theme.palette.chrome);
+    painter.hairline(0.0, strip.bottom() - 1.0, strip.width, theme.palette.divider);
+    let metrics = theme.metrics;
+    let ink =
+        if chrome.window.activated { theme.palette.dim } else { theme.palette.dim.with_alpha(140) };
+    let baseline = painter.baseline(strip.y, strip.height, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, ink).centred();
+    let room = layout.drag.width.max(1.0);
+    line(painter, crate::panes::title_of(&pane.path), style, 0.0, room, baseline);
+}
+
+/// One pane's own path bar: four buttons, then where that pane is.
+///
+/// Every leaf draws one, so each half of a split says where *it* is. The hit
+/// regions carry the leaf's name for the same reason ([`BarHit`]): a click has
+/// to move the keyboard into the pane whose bar it landed in before it navigates.
+///
+/// The keyboard hint goes in the pane that has the keyboard and nowhere else —
+/// four copies of "press F1" is four times the furniture and three times the
+/// lie.
+fn nav_bar(
     painter: &mut Painter<'_>,
     pane: &Pane,
-    layout: &Layout,
+    leaf: &PaneLayout,
     chrome: &Chrome<'_>,
     hits: &mut Hits,
+    has_keyboard: bool,
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    // The whole strip, buttons included: the path area stops short of them and a
-    // gap in the title bar's background is the first thing an eye finds.
-    let strip = Area { x: 0.0, width: layout.path.right() + strip_width(layout), ..layout.path };
-    fill(painter, strip, theme.palette.chrome);
-    painter.hairline(0.0, strip.bottom() - 1.0, strip.width, theme.palette.divider);
-
-    let baseline = painter.baseline(layout.path.y, layout.path.height, metrics.path_size);
-    let hint_style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
-    let hint_width = line(
-        painter,
-        chrome.hint,
-        hint_style,
-        layout.path.x,
-        layout.path.width - metrics.gutter,
-        baseline,
-    ) / painter.scale;
-
-    hits.crumbs.clear();
-    hits.separators.clear();
-    if let Some(field) = chrome.path_entry {
-        // No breadcrumbs and no hit regions for them: the strip is a text field
-        // now, and a click in it belongs to the caret.
-        path_entry(painter, layout, field, baseline);
+    if leaf.bar.height <= 0.0 {
         return;
     }
-    let available = layout.path.width - metrics.gutter * 2.0 - hint_width - 12.0;
+    fill(painter, leaf.bar, theme.palette.chrome);
+    painter.hairline(leaf.bar.x, leaf.bar.bottom() - 1.0, leaf.bar.width, theme.palette.divider);
+    tool_buttons(painter, pane, leaf, chrome);
+
+    let baseline = painter.baseline(leaf.bar.y, leaf.bar.height, metrics.path_size);
+    let hint_width = if has_keyboard {
+        let style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
+        line(painter, chrome.hint, style, leaf.path.x, leaf.path.width - metrics.gutter, baseline)
+            / painter.scale
+    } else {
+        0.0
+    };
+
+    if has_keyboard && let Some(field) = chrome.path_entry {
+        // No breadcrumbs and no hit regions for them: the bar is a text field
+        // now, and a click in it belongs to the caret.
+        path_entry(painter, leaf, field, baseline);
+        return;
+    }
+    let available = leaf.path.width - metrics.gutter * 2.0 - hint_width - 12.0;
     let names = crumb_names(pane);
     let widths = crumb_widths(painter, &names, metrics.path_size);
 
     let first = first_crumb(painter, &names, &widths, available, metrics.path_size);
     let elided = first > 1;
-    let mut cursor = layout.path.x + metrics.gutter;
+    let mut cursor = leaf.path.x + metrics.gutter;
 
     // Clipped to its own region, so a path that will not fit cannot draw over
-    // the keyboard hint or under the window buttons.
-    let region = painter.rect(layout.path.x, layout.path.y, layout.path.width, layout.path.height);
+    // the keyboard hint or into the pane beside it.
+    let region = painter.rect(leaf.path.x, leaf.path.y, leaf.path.width, leaf.path.height);
     painter.list.push_clip(region);
     for (index, name) in names.iter().enumerate() {
+        // A component that did not fit still gets its regions, empty: the depth
+        // of a crumb is its index in the path however narrow the bar was.
         if index > 0 && index < first {
+            hits.crumbs.push(BarHit { leaf: leaf.id, depth: index, area: Area::default() });
+            hits.separators.push(BarHit { leaf: leaf.id, depth: index, area: Area::default() });
             continue;
         }
         let last = index + 1 == names.len();
         let width = widths[index];
-        let area = Area { x: cursor, y: layout.path.y, width, height: layout.path.height };
-        while hits.crumbs.len() < index {
-            hits.crumbs.push(Area::default());
-        }
-        hits.crumbs.push(area);
+        let area = Area { x: cursor, y: leaf.path.y, width, height: leaf.path.height };
+        hits.crumbs.push(BarHit { leaf: leaf.id, depth: index, area });
 
         let text_cell = width - SEPARATOR;
-        if chrome.hovered_crumb == Some(index) && text_cell > 0.0 {
+        if chrome.hovered_crumb == Some((leaf.id, index)) && text_cell > 0.0 {
             let shape = painter.rect(area.x, area.y + 6.0, text_cell, area.height - 12.0);
             painter.list.rect(shape, theme.palette.hover, painter.px(metrics.radius));
         }
@@ -444,15 +499,11 @@ fn path_bar(
         cursor += text_cell;
 
         // The separator, which is a target of its own.
-        let cell =
-            Area { x: cursor, y: layout.path.y, width: SEPARATOR, height: layout.path.height };
-        while hits.separators.len() < index {
-            hits.separators.push(Area::default());
-        }
-        hits.separators.push(cell);
-        if chrome.hovered_separator == Some(index)
-            || chrome.crumb_menu.map(|it| it.depth) == Some(index)
-        {
+        let cell = Area { x: cursor, y: leaf.path.y, width: SEPARATOR, height: leaf.path.height };
+        hits.separators.push(BarHit { leaf: leaf.id, depth: index, area: cell });
+        let opened = has_keyboard && chrome.crumb_menu.map(|it| it.depth) == Some(index);
+        let hovered = chrome.hovered_separator == Some((leaf.id, index));
+        if hovered || opened {
             let shape = painter.rect(cell.x, cell.y + 6.0, cell.width, cell.height - 12.0);
             painter.list.rect(shape, theme.palette.hover, painter.px(metrics.radius));
         }
@@ -461,11 +512,7 @@ fn path_bar(
         } else {
             i18n::lookup("chrome.crumb_separator")
         };
-        let shade = if chrome.hovered_separator == Some(index) {
-            theme.palette.text
-        } else {
-            theme.palette.dim.with_alpha(150)
-        };
+        let shade = if hovered { theme.palette.text } else { theme.palette.dim.with_alpha(150) };
         let style = TextStyle::new(metrics.path_size, shade).centred();
         line(painter, mark, style, cell.x, cell.width, baseline);
         cursor += SEPARATOR;
@@ -480,7 +527,7 @@ fn path_bar(
                 line(painter, mark, style, cursor, available, baseline) / painter.scale + CRUMB_PAD;
             let style = TextStyle::new(metrics.path_size, theme.palette.dim.with_alpha(150));
             let mark = i18n::lookup("chrome.crumb_separator");
-            let cell = Area { x: cursor, y: layout.path.y, width: SEPARATOR, ..layout.path };
+            let cell = Area { x: cursor, y: leaf.path.y, width: SEPARATOR, ..leaf.path };
             line(painter, mark, style.centred(), cell.x, cell.width, baseline);
             cursor += SEPARATOR;
         }
@@ -488,11 +535,11 @@ fn path_bar(
     painter.list.pop_clip();
 }
 
-/// The path being typed, across the strip the breadcrumbs were on.
-fn path_entry(painter: &mut Painter<'_>, layout: &Layout, field: &Field, baseline: f32) {
+/// The path being typed, across the bar the breadcrumbs were on.
+fn path_entry(painter: &mut Painter<'_>, leaf: &PaneLayout, field: &Field, baseline: f32) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let area = path_field(layout, &metrics);
+    let area = path_field(leaf, &metrics);
     let box_rect = painter.rect(area.x, area.y, area.width, area.height);
     painter.list.rect(box_rect, theme.palette.background, painter.px(metrics.radius));
     painter.list.stroke(
@@ -507,12 +554,15 @@ fn path_entry(painter: &mut Painter<'_>, layout: &Layout, field: &Field, baselin
 }
 
 /// Where the path field goes, for the draw and for the hit test.
-pub fn path_field(layout: &Layout, metrics: &sk_ui::Metrics) -> Area {
+///
+/// The focused pane's bar, because only one path is ever being typed: the field
+/// belongs to whichever pane has the keyboard.
+pub fn path_field(leaf: &PaneLayout, metrics: &sk_ui::Metrics) -> Area {
     Area {
-        x: layout.path.x + metrics.gutter * 0.5,
-        y: layout.path.y + 6.0,
-        width: (layout.path.width - metrics.gutter).max(0.0),
-        height: (layout.path.height - 12.0).max(0.0),
+        x: leaf.path.x + metrics.gutter * 0.5,
+        y: leaf.path.y + 6.0,
+        width: (leaf.path.width - metrics.gutter).max(0.0),
+        height: (leaf.path.height - 12.0).max(0.0),
     }
 }
 
@@ -726,6 +776,7 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
 fn crumb_menu(
     painter: &mut Painter<'_>,
     layout: &Layout,
+    here: &PaneLayout,
     menu: &crate::crumbs::CrumbMenu,
     hits: &mut Hits,
 ) {
@@ -750,7 +801,10 @@ fn crumb_menu(
     let height = drawn.len().max(1) as f32 * CRUMB_MENU_STEP + CRUMB_MENU_PAD * 2.0;
     let area = Area {
         x: (menu.at - CRUMB_MENU_INSET).clamp(8.0, (layout.window.width - width - 8.0).max(8.0)),
-        y: layout.path.bottom(),
+        // Under the bar it was opened from, which is the focused pane's: opening
+        // one puts the keyboard in that pane, and nothing can move it while the
+        // menu is up.
+        y: here.bar.bottom(),
         width,
         height,
     };
@@ -1807,11 +1861,6 @@ fn kind_color(theme: &sk_ui::Theme, types: Option<&MimeDatabase>, name: &str) ->
     }
 }
 
-/// The width the window buttons take, or zero when the compositor draws them.
-fn strip_width(layout: &Layout) -> f32 {
-    layout.buttons.iter().map(|button| button.width).sum()
-}
-
 /// The list of places down the left.
 ///
 /// Sections with a heading, rows with a mark and a label, one accent for where
@@ -1911,13 +1960,17 @@ fn place_row(painter: &mut Painter<'_>, entry: &Entry, row: Area, current: bool,
 ///
 /// Dimmed from the command's own `enabled`, so a Back button with nowhere to go
 /// looks like a dimmed menu item and not like a broken one.
-fn tool_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_>) {
+fn tool_buttons(painter: &mut Painter<'_>, pane: &Pane, leaf: &PaneLayout, chrome: &Chrome<'_>) {
     let theme = *painter.theme;
-    for ((tool, area), enabled) in Tool::ALL.into_iter().zip(layout.tools).zip(chrome.tools) {
+    for (tool, area) in Tool::ALL.into_iter().zip(leaf.tools) {
         if area.width <= 0.0 {
             continue;
         }
-        let hovered = chrome.hovered_tool == Some(tool);
+        // The pane's own answer, not the focused pane's: an unfocused half of a
+        // split has its own history, and a Back that looked live because the
+        // *other* pane had somewhere to go would be a lie in both directions.
+        let enabled = pane.allows(tool);
+        let hovered = chrome.hovered_tool == Some((leaf.id, tool));
         if hovered && enabled {
             let shape =
                 painter.rect(area.x + 3.0, area.y + 7.0, area.width - 6.0, area.height - 14.0);
@@ -2075,6 +2128,9 @@ static EMPTY_LEAF: PaneLayout = PaneLayout {
     id: PaneId::FIRST,
     area: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     tabs: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    bar: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+    tools: [Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; 4],
+    path: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     header: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     body: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     icon: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -3120,6 +3176,7 @@ mod tests {
         theme: &Theme,
         fonts: &mut Fonts,
         cache: &mut LayoutCache,
+        hits: &mut Hits,
     ) -> Vec<(sk_text::GlyphKey, u32, u32)> {
         let logical = Size::new(1000.0, 620.0);
         let layout =
@@ -3170,7 +3227,6 @@ mod tests {
                 paused: false,
                 pausable: false,
                 naming: None,
-                tools: [true, true, true, true],
                 filtering: false,
                 types: None,
                 window: sk_plat::WindowState::default(),
@@ -3190,15 +3246,7 @@ mod tests {
             // A fixed timestamp: the Modified column is relative to "now", and a
             // clock that ticks between two frames is not the difference this test
             // is looking for.
-            draw(
-                &mut painter,
-                panes,
-                &layout,
-                1_787_000_000,
-                &chrome,
-                &mut diagnostics,
-                &mut Hits::default(),
-            );
+            draw(&mut painter, panes, &layout, 1_787_000_000, &chrome, &mut diagnostics, hits);
         }
         list.glyphs().map(|(key, x, y)| (key, x.to_bits(), y.to_bits())).collect()
     }
@@ -3264,6 +3312,64 @@ mod tests {
         );
     }
 
+    /// Every pane's bar records its own targets, each tagged with the pane it
+    /// belongs to — which is the half a rectangle alone cannot say.
+    ///
+    /// A frame that recorded the focused pane's crumbs and nobody else's would
+    /// leave the other half of a split with a path drawn on screen and nothing
+    /// in it to click, which reads as a dead bar rather than as a bar that is
+    /// somebody else's. And two panes' regions must not overlap, or a click in
+    /// one bar would navigate the other.
+    #[test]
+    fn each_pane_bar_records_its_own_targets_against_its_own_pane() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let root = fixture();
+        let waker = Waker::new().expect("eventfd");
+        let (sender, updates) = mpsc::channel();
+        let jobs =
+            Jobs { pool: std::sync::Arc::new(Pool::with_width(4)), wake: waker.handle(), sender };
+        let theme = Theme::dark();
+        let mut cache = LayoutCache::new(4096);
+
+        let mut panes = Panes::new(Pane::new(root.clone()));
+        panes.focused_mut().reload(&jobs);
+        settle(panes.focused_mut(), &jobs, &updates);
+        // Stacked, so both bars are full width, and the lower one a level deeper
+        // — a depth the shallower pane's bar cannot produce.
+        panes.split(crate::panes::Axis::Below, &jobs);
+        panes.focused_mut().open(root.join("sub"), &jobs);
+        settle(panes.focused_mut(), &jobs, &updates);
+
+        let mut hits = Hits::default();
+        frame_of(&panes, &theme, &mut fonts, &mut cache, &mut hits);
+
+        let ids: Vec<_> = panes.leaves().map(|leaf| leaf.id).collect();
+        assert_eq!(ids.len(), 2, "the tree did not split");
+        for id in &ids {
+            let drawn = |hits: &[super::BarHit]| {
+                hits.iter().filter(|hit| hit.leaf == *id && hit.area.width > 0.0).count()
+            };
+            assert!(drawn(&hits.crumbs) > 0, "a pane's bar recorded no crumb of its own");
+            assert!(drawn(&hits.separators) > 0, "a pane's bar recorded no chevron of its own");
+        }
+        let depth = |id| hits.crumbs.iter().filter(|hit| hit.leaf == id).count();
+        assert_eq!(
+            depth(ids[1]),
+            depth(ids[0]) + 1,
+            "both bars reported the same path, so one of them is not its pane's"
+        );
+        for mine in hits.crumbs.iter().filter(|hit| hit.leaf == ids[0] && hit.area.width > 0.0) {
+            let middle = (mine.area.x + mine.area.width / 2.0, mine.area.y + 1.0);
+            assert!(
+                !hits.crumbs.iter().any(|other| other.leaf != mine.leaf
+                    && other.area.width > 0.0
+                    && other.area.contains(middle.0, middle.1)),
+                "two panes' crumbs overlap, so a click would navigate the wrong one"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_warm_cache_draws_the_same_frame_as_a_cold_one_after_navigating() {
         let Ok(mut fonts) = Fonts::discover() else { return };
@@ -3280,7 +3386,7 @@ mod tests {
         settle(panes.focused_mut(), &jobs, &updates);
 
         // Draw the parent, which fills the cache with the parent's rows.
-        let parent = frame_of(&panes, &theme, &mut fonts, &mut warm);
+        let parent = frame_of(&panes, &theme, &mut fonts, &mut warm, &mut Hits::default());
         assert!(!parent.is_empty(), "the parent drew no text at all");
 
         let pane = panes.focused_mut();
@@ -3292,9 +3398,9 @@ mod tests {
         assert!(pane.open_focused(&jobs));
         settle(panes.focused_mut(), &jobs, &updates);
 
-        let with_warm_cache = frame_of(&panes, &theme, &mut fonts, &mut warm);
+        let with_warm_cache = frame_of(&panes, &theme, &mut fonts, &mut warm, &mut Hits::default());
         let mut cold = LayoutCache::new(4096);
-        let with_cold_cache = frame_of(&panes, &theme, &mut fonts, &mut cold);
+        let with_cold_cache = frame_of(&panes, &theme, &mut fonts, &mut cold, &mut Hits::default());
 
         assert_eq!(
             with_warm_cache.len(),
