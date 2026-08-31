@@ -587,10 +587,10 @@ impl Pane {
         if self.mode == crate::cells::Mode::Columns {
             return false;
         }
-        if self.mode == view.mode && self.grouping == view.grouping {
+        if self.mode == view.layout.mode() && self.grouping == view.grouping {
             return false;
         }
-        self.mode = view.mode;
+        self.mode = view.layout.mode();
         self.grouping = view.grouping;
         true
     }
@@ -1488,22 +1488,18 @@ mod tests {
     fn a_pane_in_columns_declines_a_folders_remembered_view() {
         let mut pane = Pane::new(PathBuf::from("/tmp"));
         let details = crate::views::View {
-            mode: crate::cells::Mode::Details,
+            layout: crate::views::Layout::Details,
             grouping: crate::groups::Grouping::Time,
         };
 
-        // From a details list, the record is what arriving means: it applies, and
-        // it can put the pane *into* columns.
+        // From a details list, the record is what arriving means, and it applies.
         assert!(pane.apply_view(details), "a details pane took nothing");
         assert_eq!(pane.grouping, crate::groups::Grouping::Time);
-        let columns = crate::views::View {
-            mode: crate::cells::Mode::Columns,
-            grouping: crate::groups::Grouping::None,
-        };
-        assert!(pane.apply_view(columns), "a record naming columns did not apply");
-        assert_eq!(pane.mode, crate::cells::Mode::Columns);
 
-        // And once it is in them, walking through a folder is not arriving at one.
+        // A record cannot name columns, so a pane only ever gets there by being
+        // put there. Once it is, walking through a folder is not arriving at one.
+        pane.mode = crate::cells::Mode::Columns;
+        pane.grouping = crate::groups::Grouping::None;
         assert!(!pane.apply_view(details), "a trail was taken out of column mode");
         assert_eq!(pane.mode, crate::cells::Mode::Columns);
         assert_eq!(pane.grouping, crate::groups::Grouping::None, "nor regrouped");

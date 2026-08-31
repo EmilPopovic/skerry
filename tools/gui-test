@@ -1641,6 +1641,19 @@ def column_view_survives_a_remembered_view(run: Run, fixture: Path) -> None:
     if not walked["path"].rstrip('"').endswith("one"):
         raise Failure(f"the walk did not arrive: {walked['path']}")
 
+    # **And columns leaves nothing behind.** Choosing a details list here and
+    # stepping out used to find the parent in columns — because switching *to*
+    # columns had recorded it against whatever folder the pane was standing in, and
+    # every directory beneath inherited it. Details here, and the parent is a
+    # details list too, because nothing under it says otherwise any more.
+    run.drive("key ctrl+1\nsleep 400\nkey f12\nsleep 200\n")
+    if run.state()["mode"] != "details":
+        raise Failure(f"Ctrl+1 left the pane in {run.state()['mode']!r}")
+    run.drive("key alt+up\nsleep 700\nkey f12\nsleep 200\n")
+    out = run.state()
+    if out["mode"] != "details":
+        raise Failure(f"stepping out of a folder set to details found {out['mode']!r}")
+
 
 @scenario("column-scroll", fresh=True)
 def column_scroll(run: Run, fixture: Path) -> None:

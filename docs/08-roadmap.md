@@ -279,12 +279,20 @@ dropped everywhere until there was a mode that could use it — does the same. T
 pane's own column is brought into view when a column appears or goes and **not on
 every frame**, so scrolling back to look at an ancestor stays where it was put.
 
-**A trail keeps its columns.** The per-folder record says how a folder is laid out
-when you come to look at it, and walking through one is not that — so arriving
-somewhere from a details list still applies the record, and can put the pane into
-columns, while walking on from there does not. Before the distinction the pane
-flipped to Details at the first folder anybody had ever set one on, which is two
-steps into most trails.
+**A folder's record says Details or Grid, and cannot say columns.** The record is
+how a folder's *contents* are laid out; a column view shows a path, so "this folder
+is a column view" is a statement about how somebody was moving around rather than
+about what is in the folder — and under
+[subtree inheritance](04-architecture.md) it is worse than meaningless. Recorded
+against whatever folder a pane happened to be standing in, it was inherited by
+every directory beneath, so setting one destination back to a details list and
+stepping out put the whole subtree into columns.
+
+`views::Layout` is that sentence with a type: two variants, and a pane in columns
+records nothing at all. A trail also declines a record on arrival, because the
+columns are the path and every directory on it is a step rather than a
+destination — while arriving from a details list still applies one, since that
+*is* coming to look at a folder.
 
 The shape is [ADR 0015](adr/0015-a-column-is-a-directory-and-a-choice.md)'s, and
 it is the second answer to the question:

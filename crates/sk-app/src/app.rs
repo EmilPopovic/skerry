@@ -4721,7 +4721,13 @@ search_active={active:?}",
     /// Records the focused pane's layout against the folder it is showing.
     fn remember_view(&mut self) {
         let pane = self.panes.focused();
-        let view = crate::views::View { mode: pane.mode, grouping: pane.grouping };
+        // **A pane in columns records nothing.** It is showing a path, and the
+        // folder it happens to be standing in has not been said anything about —
+        // where a record saying so would be inherited by every directory beneath
+        // it, which is how switching one destination back to a details list put a
+        // whole subtree into columns.
+        let Some(layout) = crate::views::Layout::of(pane.mode) else { return };
+        let view = crate::views::View { layout, grouping: pane.grouping };
         let path = pane.path.clone();
         if !self.views.remember(&path, view) {
             return;

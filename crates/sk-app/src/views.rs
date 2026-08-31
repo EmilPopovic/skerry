@@ -39,11 +39,79 @@ const VERSION: u32 = 1;
 /// that no longer exists.
 const MOST: usize = 256;
 
+/// How a folder's *contents* are laid out: a row each, or a cell each.
+///
+/// **Not [`Mode`], which has a third variant.** A column view shows a *path* — N
+/// directories at once — so "this folder is a column view" is a statement about
+/// how somebody was moving around rather than about what is in the folder. With
+/// the subtree inheritance in [`Views::for_path`] it is worse than meaningless:
+/// setting a pane to columns anywhere recorded it against that folder, every
+/// directory beneath it then inherited "show a path", and switching one
+/// destination back to a details list and stepping out put the whole subtree into
+/// columns.
+///
+/// The field below said "Details or grid" in a comment before `Mode` grew its
+/// third variant. This is that sentence with a type instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Layout {
+    /// One entry per row.
+    #[default]
+    Details,
+    /// A grid of cells.
+    Grid,
+}
+
+impl Layout {
+    /// The token this is written as in the file.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Details => "details",
+            Self::Grid => "grid",
+        }
+    }
+
+    /// The layout a token names, if it names one this build records.
+    ///
+    /// A file written by a build that recorded `columns` reads as no record at
+    /// all, which is the same thing a file written before this feature existed
+    /// reads as — and both are folders with no opinion, which take the default.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "details" => Some(Self::Details),
+            "grid" => Some(Self::Grid),
+            _ => None,
+        }
+    }
+
+    /// The pane mode this lays a folder out as.
+    #[must_use]
+    pub const fn mode(self) -> Mode {
+        match self {
+            Self::Details => Mode::Details,
+            Self::Grid => Mode::Grid,
+        }
+    }
+
+    /// The layout a pane mode records as, or nothing where it records as none.
+    #[must_use]
+    pub const fn of(mode: Mode) -> Option<Self> {
+        match mode {
+            Mode::Details => Some(Self::Details),
+            Mode::Grid => Some(Self::Grid),
+            // A pane in columns is showing a path. There is nothing here to say
+            // about the folder it happens to be standing in.
+            Mode::Columns => None,
+        }
+    }
+}
+
 /// One folder's view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct View {
-    /// Details or grid.
-    pub mode: Mode,
+    /// Details or grid, and it cannot be anything else.
+    pub layout: Layout,
     /// Whether it is cut into headings, and by what.
     pub grouping: Grouping,
 }
@@ -132,7 +200,7 @@ impl Views {
             let _ = writeln!(
                 out,
                 "view {} {} {}",
-                view.mode.token(),
+                view.layout.token(),
                 view.grouping.token(),
                 path.display()
             );
@@ -151,10 +219,13 @@ impl Views {
         let mut held = Vec::new();
         for line in lines {
             let Some(rest) = line.strip_prefix("view ") else { continue };
-            let Some((mode, rest)) = rest.split_once(' ') else { continue };
+            let Some((layout, rest)) = rest.split_once(' ') else { continue };
             let Some((grouping, path)) = rest.split_once(' ') else { continue };
-            let (Some(mode), Some(grouping)) =
-                (Mode::from_token(mode), Grouping::from_token(grouping))
+            // A line naming a layout this build does not record — `columns`, which
+            // an earlier one wrote — is skipped, the same as one from a build that
+            // had no such field. Both are folders with no opinion.
+            let (Some(layout), Some(grouping)) =
+                (Layout::from_token(layout), Grouping::from_token(grouping))
             else {
                 continue;
             };
@@ -164,7 +235,7 @@ impl Views {
             if !path.is_absolute() {
                 continue;
             }
-            held.push((path.to_path_buf(), View { mode, grouping }));
+            held.push((path.to_path_buf(), View { layout, grouping }));
             if held.len() >= MOST {
                 break;
             }
@@ -229,17 +300,16 @@ pub fn write(text: &str) -> bool {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{MOST, View, Views};
-    use crate::cells::Mode;
+    use super::{Layout, MOST, View, Views};
     use crate::groups::Grouping;
     use std::path::{Path, PathBuf};
 
     fn grid() -> View {
-        View { mode: Mode::Grid, grouping: Grouping::None }
+        View { layout: Layout::Grid, grouping: Grouping::None }
     }
 
     fn grouped() -> View {
-        View { mode: Mode::Details, grouping: Grouping::Time }
+        View { layout: Layout::Details, grouping: Grouping::Time }
     }
 
     /// A folder with no record of its own takes the nearest ancestor's.
@@ -370,7 +440,64 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert_eq!(
             views.for_path(Path::new("/home/a/good")),
-            View { mode: Mode::Grid, grouping: Grouping::Time }
+            View { layout: Layout::Grid, grouping: Grouping::Time }
+        );
+    }
+
+    /// **The scenario that found this.** Set a pane to columns anywhere, walk
+    /// somewhere deep, set *that* folder to a details list, and step back out: the
+    /// parent inherited the columns record from the ancestor the pane happened to
+    /// be standing in when the mode was chosen, and so did every other directory
+    /// under it.
+    ///
+    /// It cannot happen now because the record has no way to say it. This asserts
+    /// the shape rather than the type, so it would fail again if a conversion
+    /// somewhere started answering `Layout::Details` for a pane in columns.
+    #[test]
+    fn a_pane_in_columns_leaves_no_record_to_inherit() {
+        assert_eq!(Layout::of(crate::cells::Mode::Columns), None);
+        assert_eq!(Layout::of(crate::cells::Mode::Details), Some(Layout::Details));
+        assert_eq!(Layout::of(crate::cells::Mode::Grid), Some(Layout::Grid));
+
+        // A subtree with one real decision in it: the album is a grid.
+        let mut views = Views::default();
+        views.remember(Path::new("/home/emil/Pictures"), grid());
+        // Nothing recorded for the folders a trail walked through, so a folder
+        // deep inside still inherits the one decision anybody made.
+        assert_eq!(views.for_path(Path::new("/home/emil/Pictures/2026/June")), grid());
+        // And a folder outside it takes the default, not whatever a pane was in.
+        assert_eq!(views.for_path(Path::new("/home/emil/Downloads")), View::default());
+    }
+
+    /// A file written by a build that recorded `columns` reads as no record for
+    /// that folder — the same as a file that never mentioned it. Which is what
+    /// makes the fix retroactive rather than something a person has to undo by
+    /// hand, folder by folder, through a subtree they never chose anything for.
+    #[test]
+    fn a_columns_record_from_an_older_build_reads_as_no_record() {
+        let text = concat!(
+            "skerry 1\n",
+            "view columns flat /home/emil\n",
+            "view grid flat /home/emil/Pictures\n",
+        );
+        let views = Views::parse(text).expect("a line it cannot use is not a broken file");
+        // **Asserted on what was kept, not on what a folder answers.** A build that
+        // read `columns` as `details` would answer `View::default()` here too —
+        // the default *is* details — so the question has to be whether there is a
+        // record at all. There is one line in the file this build would write, and
+        // it is the grid.
+        let file = views.render();
+        let kept: Vec<&str> = file.lines().filter(|line| line.starts_with("view ")).collect();
+        assert_eq!(kept, vec!["view grid flat /home/emil/Pictures"], "a columns line was kept");
+        assert_eq!(
+            views.for_path(Path::new("/home/emil/a/b/c")),
+            View::default(),
+            "and a whole subtree inherited it"
+        );
+        assert_eq!(
+            views.for_path(Path::new("/home/emil/Pictures")),
+            grid(),
+            "the rest still reads"
         );
     }
 }
