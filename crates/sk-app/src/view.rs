@@ -2563,6 +2563,31 @@ struct CellState {
 /// **No size and no date, because a column has neither.** A trail level fetches no
 /// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
 /// that would be blank while it arrived.
+/// The mark in a column row, square.
+const ICON: f32 = 16.0;
+
+/// Where a column row's three parts start, in logical pixels: the mark, the name,
+/// and how wide the name's box is.
+///
+/// **A free function with no `Painter`, which is the point.** This arithmetic was
+/// written inline and took `icon_box.right()` — a rectangle that has already been
+/// through `Painter::rect` and is therefore in *device* pixels — as the left edge
+/// of a name box measured against `area.right()`, which is logical. At 100% the
+/// two are the same number and the row drew correctly; at 125% the name started a
+/// quarter of a column too far right, and at 200% every column but the first had
+/// a name box one pixel wide and drew a single character and an ellipsis.
+///
+/// It is a function taking an [`Area`] and [`Metrics`] because neither of those
+/// can be a device pixel. The rule is CLAUDE.md's — everything above the
+/// `Painter` is logical, and the conversion happens in exactly one place — and
+/// this is what obeying it structurally looks like rather than by care.
+fn column_parts(area: Area, metrics: &sk_ui::Metrics) -> (f32, f32, f32) {
+    let icon_x = area.x + metrics.gutter;
+    let text_x = icon_x + ICON + 6.0;
+    let width = (area.right() - metrics.gutter - CHEVRON - text_x).max(1.0);
+    (icon_x, text_x, width)
+}
+
 /// The room a folder's chevron takes at the right of a column row.
 ///
 /// Reserved whether or not it is drawn, so a folder's name and a file's name elide
@@ -2606,13 +2631,8 @@ fn column_row(
         painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
     }
 
-    let icon_size = 16.0;
-    let icon_box = painter.rect(
-        area.x + metrics.gutter,
-        top + (metrics.row_height - icon_size) / 2.0,
-        icon_size,
-        icon_size,
-    );
+    let (icon_x, text_x, width) = column_parts(area, &metrics);
+    let icon_box = painter.rect(icon_x, top + (metrics.row_height - ICON) / 2.0, ICON, ICON);
     let ink = kind_colour_of(&theme, types, listing, id, directory, broken);
     if directory {
         painter.folder(icon_box, ink);
@@ -2620,8 +2640,6 @@ fn column_row(
         painter.file(icon_box, ink);
     }
 
-    let text_x = icon_box.right() + 6.0;
-    let width = (area.right() - metrics.gutter - CHEVRON - text_x).max(1.0);
     let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
     let colour = if broken { theme.palette.dim } else { theme.palette.text };
     let key = RunKey::cell(
@@ -3606,6 +3624,43 @@ mod tests {
         }
         while let Ok(message) = updates.try_recv() {
             pane.apply(message, jobs);
+        }
+    }
+
+    /// **The name box is a fraction of its column, at every scale.**
+    ///
+    /// This arithmetic mixed a device rectangle into logical values, and the shape
+    /// of the failure is what makes it worth a test rather than a comment: at 100%
+    /// the row drew correctly, so a golden frame at that scale said nothing. The
+    /// error grew with both the scale *and* the column's distance from the left
+    /// edge — at 200% the first column lost its names entirely and the second drew
+    /// one character and an ellipsis.
+    ///
+    /// `column_parts` takes no `Painter`, so it cannot see a device pixel; what is
+    /// left to assert is that the three parts tile the column in order and leave a
+    /// name box worth having.
+    #[test]
+    fn a_column_row_gives_its_name_most_of_the_column() {
+        let metrics = sk_ui::Metrics::default();
+        // Four columns across a wide body, which is where the old arithmetic went
+        // wrong fastest: the further right the column, the larger the device
+        // number that was being subtracted from a logical one.
+        let body = crate::layout::Area { x: 220.0, y: 100.0, width: 1200.0, height: 600.0 };
+        for area in crate::trail::areas(body, 3, 0.0) {
+            let (icon_x, text_x, width) = super::column_parts(area, &metrics);
+            assert!(icon_x > area.x, "the mark is inside the column");
+            assert!(text_x > icon_x + super::ICON, "the name starts after the mark");
+            assert!(
+                text_x + width <= area.right() - metrics.gutter,
+                "the name runs past the column: {} of {}",
+                text_x + width,
+                area.right()
+            );
+            assert!(
+                width > area.width * 0.6,
+                "a {width} name box in a {} column leaves nothing to read",
+                area.width
+            );
         }
     }
 

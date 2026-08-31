@@ -1587,3 +1587,51 @@ on, and it gets deleted when the measurement is taken.
 
 The general form, which is the same shape as every other rule here: an error
 message names the resource the kernel checked last, not the one you are short of.
+
+## A golden frame is a reference for whatever somebody looked at
+
+The column view shipped broken at every scale but 100%, and the frame that would
+have shown it was in the suite, green, blessed by me an hour earlier.
+
+`columns-200` was added at the same time as `columns`, with this reason written
+beside it:
+
+> And at 200%, because the columns are a fixed logical width and the reveal that
+> keeps the last one on screen is arithmetic over it — right at one scale and
+> wrong at another is the class of defect a second scale exists to catch.
+
+It caught exactly that. `column_row` computed a name box's left edge from
+`icon_box.right()` — a rectangle that has already been through `Painter::rect`
+and is therefore in **device** pixels — and measured its width against
+`area.right()`, which is logical. At 100% those are the same number and the row
+draws correctly. At 125% the name starts a quarter of a column too far right. At
+200% the first column has no names at all and the second draws one character and
+an ellipsis.
+
+The 200% frame rendered that. I ran `tools/golden --bless`, the suite went green,
+and the defect became the reference. I had looked at `columns.png` and not at
+`columns-200.png` — the one added because the code was most likely to be wrong
+there.
+
+**Blessing is not a neutral operation.** `--bless` does not record a frame, it
+asserts that a frame is correct; the reference is only worth what the person who
+blessed it looked at. A new frame is the case where that matters most, because
+there is nothing to diff against and the whole of the check is one pair of eyes.
+
+Two things followed from it.
+
+**Every new frame gets looked at, and the ones added for a reason get looked at
+for that reason.** A second scale exists because the first one cannot see a class
+of bug; blessing it unexamined turns the second scale into decoration with a
+comment explaining why it is not.
+
+**And the arithmetic moved somewhere it cannot make the mistake.** `column_parts`
+is a free function taking an `Area` and `Metrics`, with no `Painter` in reach, so
+it has no device pixel to accidentally mix in — CLAUDE.md's rule about logical
+above the `Painter` and device below it, obeyed structurally rather than by care.
+The test that goes with it asserts the three parts tile the column and leave a
+name box worth reading, and it fails against a left edge scaled by two.
+
+The general form is the one this file keeps arriving at from different directions:
+an instrument nobody has read is not an instrument. A gate nobody has watched fail
+is decoration; a reference nobody has looked at is a photograph of the bug.
