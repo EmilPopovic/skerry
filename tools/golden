@@ -156,6 +156,19 @@ FRAMES = [
     ("grid", ["--size", "900x520", "--scale", "125", "--grid"]),
     ("grid-200", ["--size", "900x520", "--scale", "200", "--grid"]),
     ("grid-narrow", ["--size", "560x420", "--scale", "100", "--grid"]),
+    # The column view: one column per level of the path, the pane's own rightmost
+    # with the real selection in it and every ancestor showing which of its
+    # entries the next column came from. The **only** frame where more than one
+    # directory is on screen inside one pane, so it is the only thing that would
+    # catch the trail drawing the wrong end of a path — which the first capture of
+    # it did, showing four columns of a seven-deep path and none of the pane's.
+    ("columns", ["--size", "1100x520", "--scale", "100", "--columns",
+                 "--at", "documents/deeper"]),
+    # And at 200%, because the columns are a fixed logical width and the reveal
+    # that keeps the last one on screen is arithmetic over it — right at one scale
+    # and wrong at another is the class of defect a second scale exists to catch.
+    ("columns-200", ["--size", "1100x520", "--scale", "200", "--columns",
+                     "--at", "documents/deeper"]),
     # Grouping, in both geometries, because orthogonal is the claim: the same
     # headings over rows and over cells, with each band sorted on its own. Two
     # frames rather than one because the heading's rule and the band's first line
@@ -265,6 +278,10 @@ def build_fixture() -> Path:
     for name in ("build", "documents", "مستندات"):
         (directory / name).mkdir(parents=True)
         (directory / name / "inner.bin").write_bytes(b"x" * 4096)
+    # One level deeper, so the column view has two ancestors *inside* the fixture
+    # to draw. Invisible from the fixture root, so it changes no other frame.
+    (directory / "documents" / "deeper").mkdir()
+    (directory / "documents" / "deeper" / "leaf.txt").write_bytes(b"y" * 128)
     entries = [
         ("report.pdf", 1_048_576),
         ("archive.tar.gz", 12_582_912),

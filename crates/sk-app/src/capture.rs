@@ -74,6 +74,15 @@ pub struct Capture {
     pub indexing: bool,
     /// Whether to lay the pane out as a grid instead of a details list.
     pub grid: bool,
+    /// Whether to lay it out as a run of columns, one per level of the path.
+    pub columns: bool,
+    /// A subdirectory of `path` to open instead of it, and the depth the trail is
+    /// capped to.
+    ///
+    /// **So a frame of a column view is a function of the fixture.** The real
+    /// ancestors of any fixture reach `/tmp` and then `/`, and what is in `/tmp`
+    /// is not the fixture's business — see [`crate::trail::settled`].
+    pub at: Option<String>,
     /// Whether to cut the pane into time headings, which is orthogonal to `grid`.
     pub grouped: bool,
     /// The same, banded on size instead: folders, then gigantic down to empty.
@@ -210,6 +219,38 @@ fn group_the_sample(
 ///
 /// One at a time: the three flags are three values of one setting, and a frame
 /// banded twice would be a frame of whichever call ran last.
+/// Whichever layout the flags asked for.
+fn mode_the_sample(
+    panes: &mut crate::panes::Panes,
+    request: &Capture,
+    session: &crate::headless::Session,
+    width: f32,
+) {
+    if request.grid {
+        panes.focused_mut().mode = crate::cells::Mode::Grid;
+    }
+    if request.columns {
+        // As deep as `--at` went, so the shallowest column is the directory the
+        // harness was pointed at and nothing above it is on screen.
+        let most = request.at.as_deref().map_or(0, |at| Path::new(at).components().count());
+        column_the_sample(panes.focused_mut(), session, width, most);
+    }
+}
+
+/// Puts the sample pane into column mode with every ancestor already read.
+fn column_the_sample(
+    pane: &mut crate::pane::Pane,
+    session: &crate::headless::Session,
+    width: f32,
+    most: usize,
+) {
+    pane.mode = crate::cells::Mode::Columns;
+    let path = pane.path.clone();
+    pane.trail = crate::trail::settled(&path, most, |at| session.read_fully(at).0.listing);
+    let levels = pane.trail.len();
+    crate::trail::follow(&mut pane.across, levels, width);
+}
+
 fn requested_grouping(request: &Capture) -> Option<crate::groups::Grouping> {
     [
         (request.grouped, crate::groups::Grouping::Time),
@@ -665,7 +706,15 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
 /// Renders one frame and writes it.
 pub fn run(request: &Capture) -> Result<(), Problem> {
     let mut session = Session::open(request.logical, request.scale_120)?;
-    let (mut pane, _) = session.read_fully(&request.path);
+    // `--at` moves the frame into a subdirectory before anything is read, so the
+    // capture is *of* that directory rather than of one the pane navigated to
+    // afterwards — a navigation would leave `view_owed` set and a `Back` in the
+    // history, neither of which belongs in a still frame.
+    let where_ = match request.at.as_deref() {
+        Some(at) => request.path.join(at),
+        None => request.path.clone(),
+    };
+    let (mut pane, _) = session.read_fully(&where_);
 
     settle_folder_totals(&mut pane, &session);
     pose(&mut pane);
@@ -695,9 +744,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // frame rather than a variant of every other.
     let crate::panes::Single { mut panes, mut leaves, mut dividers, mut here } =
         crate::panes::single(pane, layout.content, &theme.metrics);
-    if request.grid {
-        panes.focused_mut().mode = crate::cells::Mode::Grid;
-    }
+    mode_the_sample(&mut panes, request, &session, here.body.width);
     if let Some(grouping) = requested_grouping(request) {
         group_the_sample(panes.focused_mut(), grouping, &types);
     }

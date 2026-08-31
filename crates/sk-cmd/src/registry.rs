@@ -156,11 +156,13 @@ impl<C> Registry<C> {
             match Chord::parse(text) {
                 None => self.problems.push(format!("`{}`: `{text}` is not a chord", spec.id)),
                 Some(chord) => {
-                    if let Some((_, _, taken)) = self
-                        .bindings
-                        .iter()
-                        .find(|(existing, at, _)| *existing == chord && *at == scope)
-                    {
+                    // **Compared by what they match, not by what they equal.**
+                    // `Chord::canonical` is why: Shift is not part of a digit's
+                    // identity, so `ctrl+shift+0` and `ctrl+0` are one chord, and
+                    // this check accepted both until it asked the right question.
+                    if let Some((_, _, taken)) = self.bindings.iter().find(|(existing, at, _)| {
+                        existing.canonical() == chord.canonical() && *at == scope
+                    }) {
                         let other = self.specs.get(*taken).map_or("?", |spec| spec.id);
                         self.problems.push(format!(
                             "`{}`: `{text}` is already `{other}` in {scope:?}",

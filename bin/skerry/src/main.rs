@@ -41,6 +41,7 @@ struct Overlays {
     progress: bool,
     indexing: bool,
     grid: bool,
+    columns: bool,
     grouped: bool,
     grouped_size: bool,
     grouped_kind: bool,
@@ -85,6 +86,7 @@ impl Overlays {
             "--progress" => &mut self.progress,
             "--indexing" => &mut self.indexing,
             "--grid" => &mut self.grid,
+            "--columns" => &mut self.columns,
             "--grouped" => &mut self.grouped,
             "--grouped-size" => &mut self.grouped_size,
             "--grouped-kind" => &mut self.grouped_kind,
@@ -118,6 +120,9 @@ struct Shape {
     stats: bool,
     own_frame: bool,
     sidebar: bool,
+    /// A subdirectory of `path` to capture, and where a column view's trail
+    /// starts. See the `--at` line in the usage.
+    at: Option<String>,
 }
 
 /// Renders one frame to a file.
@@ -139,6 +144,8 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         progress: overlays.progress,
         indexing: overlays.indexing,
         grid: overlays.grid,
+        columns: overlays.columns,
+        at: shape.at.clone(),
         grouped: overlays.grouped,
         grouped_size: overlays.grouped_size,
         grouped_kind: overlays.grouped_kind,
@@ -179,6 +186,7 @@ fn main() -> std::process::ExitCode {
     // 100%" from "not asked at all" — different things where the server states
     // one, and the only way to run at a fractional scale under a bare X server.
     let mut forced_scale = None;
+    let mut at: Option<String> = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -202,6 +210,10 @@ fn main() -> std::process::ExitCode {
             "--scale" => match arguments.next().as_deref().and_then(parse_scale) {
                 Some(scale) => forced_scale = Some(scale),
                 None => return usage_error("--scale needs a percentage, such as 125"),
+            },
+            "--at" => match arguments.next() {
+                Some(relative) => at = Some(relative),
+                None => return usage_error("--at needs a path relative to the directory"),
             },
             "--help" | "-h" => {
                 // The answer to `--help`, which is the program's output rather
@@ -227,7 +239,17 @@ fn main() -> std::process::ExitCode {
     let scale_120 = forced_scale.unwrap_or(120);
     let outcome = match (capture, bench) {
         (Some(file), _) => render_one(
-            &Shape { file, path, logical, scale_120, dark, stats, own_frame, sidebar: !no_sidebar },
+            &Shape {
+                file,
+                path,
+                logical,
+                scale_120,
+                dark,
+                stats,
+                own_frame,
+                sidebar: !no_sidebar,
+                at,
+            },
             &overlays,
         )
         .map(|()| true),
@@ -331,5 +353,8 @@ looking at:
   --bench FRAMES   render a scripted scroll and report p50 / p99 frame cost
   --size WxH       logical size for the capture (default 1100x720)
   --scale PERCENT  scale for the capture: 100, 125, 150, 200 (default 100)
+  --at REL         capture a subdirectory of PATH, and start a column view's
+                   trail at PATH — so a frame is a function of the directory
+                   it was pointed at and not of what is above it
 
 Once it is open, F1 lists the keyboard.";

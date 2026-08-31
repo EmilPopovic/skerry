@@ -2059,6 +2059,7 @@ fn mode_buttons(painter: &mut Painter<'_>, pane: &Pane, leaf: &PaneLayout, chrom
         match mode {
             Mode::Grid => grid_mark(painter, centre, ink),
             Mode::Details => list_mark(painter, centre, ink),
+            Mode::Columns => columns_mark(painter, centre, ink),
         }
     }
 }
@@ -2080,6 +2081,23 @@ fn grid_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
             );
             painter.list.rect(rect, ink, painter.px(1.0));
         }
+    }
+}
+
+/// Three upright panes side by side, for the column view.
+fn columns_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
+    /// The whole mark, and the rule between two panes.
+    const SPAN: f32 = 13.0;
+    const HEIGHT: f32 = 11.0;
+    const WEIGHT: f32 = 1.5;
+    let (x, y) = centre;
+    let frame = painter.rect(x - SPAN / 2.0, y - HEIGHT / 2.0, SPAN, HEIGHT);
+    painter.list.stroke(frame, ink, painter.px(1.5), painter.px(WEIGHT).max(1.0));
+    // Two rules rather than three panes drawn: the frame is the outer two edges,
+    // so the divisions are what is left to say.
+    for third in 1..3 {
+        let at = x - SPAN / 2.0 + SPAN * third as f32 / 3.0;
+        painter.vline(at, y - HEIGHT / 2.0, HEIGHT, ink);
     }
 }
 
@@ -2395,6 +2413,15 @@ pub fn sort_columns(
     mode: Mode,
 ) -> [(SortColumn, Area, Align, f32); 3] {
     match mode {
+        // **Only the name.** A trail's columns hold a name and a chevron; there is
+        // no size and no date in one, so there is nothing for the other two
+        // headers to sort and a header that offered them would sort by a column
+        // that is not drawn.
+        Mode::Columns => [
+            (SortColumn::Name, layout.name, Align::Left, 0.0),
+            (SortColumn::Size, Area::default(), Align::Right, 12.0),
+            (SortColumn::Modified, Area::default(), Align::Left, 12.0),
+        ],
         Mode::Details => [
             (SortColumn::Name, layout.name, Align::Left, 0.0),
             (SortColumn::Size, layout.size, Align::Right, 12.0),
@@ -2509,6 +2536,155 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     }
 }
 
+/// The rectangle the pane's own entries occupy.
+///
+/// The whole table in Details, the body in a grid, and **the last column** in a
+/// trail — which is the one thing about column mode that `PaneLayout` cannot
+/// answer, because only the pane knows how many ancestors it has.
+pub(crate) fn table_of(layout: &PaneLayout, pane: &Pane) -> Area {
+    if pane.mode == Mode::Columns {
+        return crate::trail::pane_area(layout.body, pane.trail.len(), pane.across.offset());
+    }
+    layout.rows(pane.mode)
+}
+
+/// How one row of a column is drawn.
+#[derive(Clone, Copy, Default)]
+struct CellState {
+    selected: bool,
+    cursor: bool,
+    hovered: bool,
+    /// Whether this is the entry whose folder is open in the column to the right.
+    chosen: bool,
+}
+
+/// One row of a trail column: a mark, a name, and a chevron for a folder.
+///
+/// **No size and no date, because a column has neither.** A trail level fetches no
+/// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
+/// that would be blank while it arrived.
+/// The room a folder's chevron takes at the right of a column row.
+///
+/// Reserved whether or not it is drawn, so a folder's name and a file's name elide
+/// at the same width and the column does not look ragged.
+const CHEVRON: f32 = 14.0;
+
+fn column_row(
+    painter: &mut Painter<'_>,
+    listing: &sk_model::Listing,
+    id: sk_model::EntryId,
+    area: Area,
+    top: f32,
+    state: CellState,
+    types: Option<&sk_desktop::MimeDatabase>,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let flags = listing.flags(id);
+    let directory = flags.has(Flags::DIR);
+    let broken = flags.has(Flags::BROKEN);
+
+    let pill = painter.rect(
+        area.x + metrics.gutter * 0.5,
+        top + 1.0,
+        area.width - metrics.gutter,
+        metrics.row_height - 2.0,
+    );
+    // **The chosen entry keeps a fill while the keyboard is elsewhere.** It is
+    // what says which of these rows the column to the right came from, so it
+    // cannot be the hover's colour and it cannot go when focus does.
+    let background = if state.chosen && !state.selected {
+        theme.palette.button_hover
+    } else {
+        theme.row_background(state.selected, state.hovered)
+    };
+    if !background.is_invisible() {
+        painter.list.rect(pill, background, painter.px(metrics.radius));
+    }
+    if state.cursor {
+        let ring = painter.px(1.0).round().max(1.0);
+        painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
+    }
+
+    let icon_size = 16.0;
+    let icon_box = painter.rect(
+        area.x + metrics.gutter,
+        top + (metrics.row_height - icon_size) / 2.0,
+        icon_size,
+        icon_size,
+    );
+    let ink = kind_colour_of(&theme, types, listing, id, directory, broken);
+    if directory {
+        painter.folder(icon_box, ink);
+    } else {
+        painter.file(icon_box, ink);
+    }
+
+    let text_x = icon_box.right() + 6.0;
+    let width = (area.right() - metrics.gutter - CHEVRON - text_x).max(1.0);
+    let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
+    let colour = if broken { theme.palette.dim } else { theme.palette.text };
+    let key = RunKey::cell(
+        listing.version(),
+        id.0,
+        COLUMN_NAME,
+        Weight::Regular,
+        painter.px(metrics.text_size),
+    );
+    let box_ = painter.rect(text_x, top, width, metrics.row_height);
+    painter.cell(key, listing.name(id), box_, baseline, colour, Align::Left);
+    if directory {
+        painter.triangle(
+            area.right() - metrics.gutter - CHEVRON + 4.0,
+            top + metrics.row_height / 2.0 - 4.0,
+            6.0,
+            8.0,
+            theme.palette.dim,
+            Direction::Right,
+        );
+    }
+}
+
+/// Every column left of the pane's own.
+fn ancestor_columns(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &PaneLayout,
+    chrome: &Chrome<'_>,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let offset = pane.across.offset();
+    for (level, area) in
+        pane.trail.iter().zip(crate::trail::areas(layout.body, pane.trail.len(), offset))
+    {
+        if area.right() <= layout.body.x || area.x >= layout.body.right() {
+            continue;
+        }
+        painter.vline(area.right(), area.y, area.height, theme.palette.divider);
+        let rows = level.dir.listing.rows();
+        // No bands: a trail column is never grouped, because grouping is one of
+        // the decisions a level deliberately has no field for.
+        let cells = crate::groups::Bands::new(Mode::Columns, area, metrics.row_height, &[], rows);
+        for row in cells.visible(level.scroll.offset()) {
+            let Some(id) = level.dir.listing.at(row) else { continue };
+            let top = cells.at(row, level.scroll.offset()).y;
+            let state = CellState { chosen: level.chosen == Some(id), ..CellState::default() };
+            column_row(painter, &level.dir.listing, id, area, top, state, chrome.types);
+        }
+        if rows == 0 && !level.dir.loading {
+            let message = level.dir.problem.as_ref().map_or_else(
+                || i18n::lookup("status.empty").to_owned(),
+                sk_model::Problem::message,
+            );
+            let baseline = painter.baseline(area.y + 8.0, metrics.row_height, metrics.header_size);
+            let style = TextStyle::new(metrics.header_size, theme.palette.dim);
+            let width = area.width - metrics.gutter * 2.0;
+            line(painter, &message, style, area.x + metrics.gutter, width, baseline);
+        }
+    }
+}
+
 fn body(
     painter: &mut Painter<'_>,
     pane: &Pane,
@@ -2523,13 +2699,19 @@ fn body(
     painter.list.push_clip(clip);
 
     let rows = pane.listing.rows();
+    // **The ancestors first, so the pane's own column draws over their rule.** In
+    // every other mode this is one list; here it is one list with a path's worth
+    // of narrower ones to its left, and only the last of them is the pane.
+    if pane.mode == Mode::Columns {
+        ancestor_columns(painter, pane, layout, chrome);
+    }
     // One geometry for both modes, per [ADR
     // 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
     // Details is a one-column grid, so the loop below is the same loop either way
     // and only the cell's *contents* differ.
     let cells = crate::groups::Bands::new(
         pane.mode,
-        layout.rows(pane.mode),
+        table_of(layout, pane),
         metrics.row_height,
         &pane.bands,
         rows,
@@ -2546,6 +2728,18 @@ fn body(
         match pane.mode {
             Mode::Details => row_at(painter, pane, layout, now, row, context),
             Mode::Grid => cell_at(painter, pane, layout, &cells, row, context),
+            Mode::Columns => {
+                let area = table_of(layout, pane);
+                let top = cells.at(row, pane.scroll.offset()).y;
+                let Some(id) = pane.listing.at(row) else { continue };
+                let state = CellState {
+                    selected: pane.selection.contains(id),
+                    cursor: pane.selection.cursor() == Some(id) && context.naming.is_none(),
+                    hovered: pane.hover == Some(row),
+                    chosen: false,
+                };
+                column_row(painter, &pane.listing, id, area, top, state, chrome.types);
+            }
         }
     }
 
@@ -2924,7 +3118,7 @@ fn metadata_cells(
 
 fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
-    let table = layout.rows(pane.mode);
+    let table = table_of(layout, pane);
     let content = crate::groups::Bands::new(
         pane.mode,
         table,

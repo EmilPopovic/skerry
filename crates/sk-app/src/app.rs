@@ -749,6 +749,28 @@ pub struct App {
     hovered_tool: Option<(crate::panes::PaneId, crate::layout::Tool)>,
     /// The switcher button under the pointer.
     hovered_mode: Option<(crate::panes::PaneId, crate::cells::Mode)>,
+    /// How many scroll events have arrived, how many of them said a finger sent
+    /// them, and how many gestures have ended.
+    ///
+    /// **Three counters for the diagnostic line, and they earned their place.** A
+    /// flick that moved the list but threw nothing could have been any of three
+    /// things — no `axis_source`, no `axis_stop`, or a velocity of zero — and
+    /// nothing on screen tells them apart. `zwlr_virtual_pointer_v1` is the only
+    /// way the harness can send a scroll at all, so what it does and does not
+    /// forward is a fact worth being able to read.
+    scrolls: (u64, u64, u64),
+    /// How many lifts actually threw the list.
+    ///
+    /// The answer to the only question the other counters leave open: everything a
+    /// fling needs can be present and the velocity still come out at nothing.
+    flings: u64,
+    /// The device clock on the last scroll event, or zero if it carried none.
+    ///
+    /// The third of the three things that decide whether a flick can throw, and
+    /// the one that is invisible everywhere else: `axis_value120` and
+    /// `axis_discrete` have no `time` field in the protocol, so a compositor that
+    /// forwards only those leaves every frame of a gesture stamped zero.
+    scroll_time: u32,
     /// How far the list is zoomed, as a step on [`ZOOM`].
     ///
     /// A step rather than a factor, so `Ctrl +` and a pinch land on the same
@@ -1090,6 +1112,9 @@ impl App {
             crumb_pending: None,
             hovered_tool: None,
             hovered_mode: None,
+            scrolls: (0, 0, 0),
+            scroll_time: 0,
+            flings: 0,
             hits: crate::view::Hits::default(),
             cursor: sk_plat::Cursor::Arrow,
             hint: String::new(),
@@ -1279,6 +1304,15 @@ impl App {
                 // reply for a tab that has been closed matches no pane and is
                 // dropped, and a reply for a background tab lands there without
                 // touching the frame.
+                //
+                // A trail's columns take theirs from the same counter, so this is
+                // where they are offered it — and a reply handed back is one no
+                // column wanted, which then goes to the panes below.
+                let Some(message) = panes.take_reply(message) else {
+                    *dirty = true;
+                    landed = true;
+                    continue;
+                };
                 // A background tab's listing lands without a frame; a split's
                 // other pane is on screen and needs one.
                 let drawn = panes.is_showing(message.generation);
@@ -1571,9 +1605,15 @@ impl App {
                 _ => {}
             },
             Event::Scroll { delta, precise, time, mods } => {
+                self.scrolls.0 += 1;
+                self.scrolls.1 += u64::from(*precise);
+                self.scroll_time = *time;
                 self.scrolled(*delta, *precise, *time, *mods);
             }
-            Event::ScrollEnded { time } => self.scroll_released(*time),
+            Event::ScrollEnded { time } => {
+                self.scrolls.2 += 1;
+                self.scroll_released(*time);
+            }
             // **Three fingers, not two.** Two-finger movement on a touchpad is
             // scroll and arrives as `Scroll`; a compositor that also reported it
             // as a swipe would navigate while the list moved.
@@ -1918,6 +1958,31 @@ impl App {
         self.place_caret_in(Claim::Naming, area, size, crate::view::NAME_INSET, x);
     }
 
+    /// Keeps every visible pane's trail equal to the ancestors of its path.
+    ///
+    /// **Once a frame, and the only caller of [`crate::trail::sync`].** A trail is
+    /// a function of the path, so what has to be noticed is a path that changed —
+    /// and this is the one place that sees that whatever caused it: a click in a
+    /// column, a breadcrumb, `Alt ←`, a sidebar row, a restored session, a
+    /// directory that vanished underneath. The same shape `watch_target` and
+    /// `view_owed` already have, and for the same reason: the fourteen call sites
+    /// that open a directory cannot each be trusted to remember.
+    ///
+    /// Cheap when nothing moved — a zip and a `take_while` over a path's depth —
+    /// and it drops the whole trail in every other mode, which cancels those reads
+    /// and hands the listings back.
+    fn settle_trails(&mut self) {
+        let Self { panes, jobs, .. } = self;
+        for pane in panes.visible_mut() {
+            if pane.mode == crate::cells::Mode::Columns {
+                let path = pane.path.clone();
+                crate::trail::sync(&mut pane.trail, &path, jobs);
+            } else if !pane.trail.is_empty() {
+                pane.trail.clear();
+            }
+        }
+    }
+
     /// The scroll extent, and the folder totals for what is on screen.
     ///
     /// Once per frame, and bounded by the viewport rather than by the directory:
@@ -1925,6 +1990,7 @@ impl App {
     /// known instead of starting again.
     fn settle_rows(&mut self) {
         self.settle_views();
+        self.settle_trails();
         self.rebandif_needed();
         // **Every leaf, because every leaf can be scrolled.** A pane whose extent
         // is never set clamps every scroll against a `max` of zero, so the wheel
@@ -1933,8 +1999,22 @@ impl App {
         for layout in &leaves {
             let Some(tabs) = self.panes.leaf(layout.id) else { continue };
             let content = self.cells_of(layout, tabs.showing()).content_height();
+            let columns = tabs.showing().mode == crate::cells::Mode::Columns;
             if let Some(tabs) = self.panes.leaf_mut(layout.id) {
-                tabs.showing_mut().scroll.set_extent(content, layout.body.height);
+                let pane = tabs.showing_mut();
+                pane.scroll.set_extent(content, layout.body.height);
+                // The other axis, and only in the one mode that has one. Set
+                // every frame like the vertical extent, because the run grows by
+                // a column every time somebody opens a folder.
+                if columns {
+                    // **The pane's own column stays in view.** Descending past the
+                    // right edge is the normal way to use this mode, so this is
+                    // not an occasional courtesy — it is what makes it work at any
+                    // depth.
+                    crate::trail::follow(&mut pane.across, pane.trail.len(), layout.body.width);
+                } else {
+                    pane.across.set_extent(0.0, layout.body.width);
+                }
             }
         }
         self.placement.leaves = leaves;
@@ -2825,7 +2905,18 @@ impl App {
     /// the tree cannot forget: the same reasoning as the `watch_target` check
     /// this sits beside.
     fn retarget_watches(&mut self) {
-        let wanted: Vec<PathBuf> = self.panes.visible().map(|pane| pane.path.clone()).collect();
+        // **The trail as well as the pane.** A column showing a directory that
+        // changes has to notice, and M0 already moved this from one directory to
+        // every visible pane; a trail is more visible directories. Bounded by path
+        // depth, so the per-user inotify budget in docs/09 is nowhere near it.
+        let wanted: Vec<PathBuf> = self
+            .panes
+            .visible()
+            .flat_map(|pane| {
+                std::iter::once(pane.path.clone())
+                    .chain(pane.trail.iter().map(|level| level.dir.path.clone()))
+            })
+            .collect();
         if wanted != self.watched {
             self.watched.clone_from(&wanted);
             self.watcher.watch(wanted);
@@ -3027,7 +3118,15 @@ impl App {
         } else {
             let id = self.scrolling_pane();
             if let Some(leaf) = self.panes.leaf_mut(id) {
-                leaf.showing_mut().scroll.by(delta.y, precise, time);
+                let pane = leaf.showing_mut();
+                pane.scroll.by(delta.y, precise, time);
+                // **The x delta was dropped everywhere until there was a mode
+                // that could use it.** A touchpad reports a hand's sideways drift
+                // on every scroll, so this only reaches a run of columns — where
+                // it is the gesture for moving along one.
+                if pane.mode == crate::cells::Mode::Columns {
+                    pane.across.by(delta.x, precise, time);
+                }
             }
         }
         self.dirty = true;
@@ -3048,6 +3147,7 @@ impl App {
         });
         // A lift that threw nothing is not a frame: the list is already drawn
         // where the finger stopped it.
+        self.flings += u64::from(thrown);
         self.dirty |= thrown;
     }
 
@@ -5215,14 +5315,13 @@ pane_body={bodies:?} pane_bar={bars:?}",
         let (crumb_menu, crumb_menu_depth, crumb_menu_active) = self.crumb_menu_state();
         let crumb_menu_aim = self.crumb_menu_aim();
         let bar_report = self.bar_state();
-        let mode_hover = match self.hovered_mode.map(|(_, mode)| mode) {
-            Some(mode) => mode.token(),
-            None => "none",
-        };
+        let (column_aim, mode_hover) = self.column_state();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
 rows_right={:.1} body_right={:.1} modes_x={:.1} mode_w={:.1} mode_hover={mode_hover} \
+trail={} across={:.1} column_aim={column_aim} \
+scrolls={} precise={} lifts={} scroll_time={} flings={} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
 {bar_report} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
@@ -5246,10 +5345,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.header.height,
             self.placement.here.modified.x,
             self.placement.here.modified.width,
-            self.placement.here.rows(self.panes.focused().mode).right(),
+            crate::view::table_of(&self.placement.here, self.panes.focused()).right(),
             self.placement.here.body.right(),
             self.placement.here.modes.first().map_or(0.0, |area| area.x),
             self.placement.here.modes.first().map_or(0.0, |area| area.width),
+            self.panes.focused().trail.len(),
+            self.panes.focused().across.offset(),
+            self.scrolls.0,
+            self.scrolls.1,
+            self.scrolls.2,
+            self.scroll_time,
+            self.flings,
             self.window_state.maximized,
             self.layout.title.height,
             self.layout.sidebar.width,
@@ -5292,7 +5398,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     ) -> crate::groups::Bands {
         crate::groups::Bands::new(
             pane.mode,
-            layout.rows(pane.mode),
+            crate::view::table_of(layout, pane),
             self.theme.metrics.row_height,
             &pane.bands,
             pane.listing.rows(),
@@ -5449,6 +5555,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         if let Some(grab) = self.thumb_at(position) {
             self.thumb_grab = Some(grab);
+            return;
+        }
+        // **A press in a column left of the pane's own is a navigation.** Which is
+        // what a column browser is: the trail is a function of the path, so
+        // choosing something three columns back moves the pane there and every
+        // level above it is kept rather than re-read.
+        if let Some((depth, row)) = self.column_press(position) {
+            self.open_from_column(depth, row);
             return;
         }
 
@@ -6366,6 +6480,92 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             crate::menu::ON_BACKGROUND
         };
         self.menu_wanted = Some((at, groups));
+    }
+
+    /// What the diagnostic line says about the column view.
+    ///
+    /// The aim as `x:y` or `none` — the shape every other aim on that line uses,
+    /// because a harness made to parse `Some((768.0, 123.0))` would be parsing
+    /// Rust's `Debug` rather than a report — and which switcher button the pointer
+    /// is on.
+    fn column_state(&self) -> (String, &'static str) {
+        let aim =
+            self.column_aim().map_or_else(|| "none".to_owned(), |(x, y)| format!("{x:.1}:{y:.1}"));
+        let hover = match self.hovered_mode.map(|(_, mode)| mode) {
+            Some(mode) => mode.token(),
+            None => "none",
+        };
+        (aim, hover)
+    }
+
+    /// The middle of the chosen row in the deepest ancestor column, for a test to
+    /// aim at.
+    ///
+    /// **From the rectangle the frame drew it in**, which is docs/12's rule after
+    /// a chrome aim taken from a neighbour moved without it. `None` in every other
+    /// mode and while the column's listing is still arriving, so a scenario that
+    /// waits for it is waiting for something real.
+    fn column_aim(&self) -> Option<(f32, f32)> {
+        let pane = self.panes.focused();
+        if pane.mode != crate::cells::Mode::Columns {
+            return None;
+        }
+        let depth = pane.trail.len().checked_sub(1)?;
+        let level = pane.trail.get(depth)?;
+        let chosen = level.chosen?;
+        let row =
+            (0..level.dir.listing.rows()).find(|row| level.dir.listing.at(*row) == Some(chosen))?;
+        let area =
+            crate::trail::areas(self.placement.here.body, pane.trail.len(), pane.across.offset())
+                .nth(depth)?;
+        let cells = crate::groups::Bands::new(
+            crate::cells::Mode::Columns,
+            area,
+            self.theme.metrics.row_height,
+            &[],
+            level.dir.listing.rows(),
+        );
+        let at = cells.at(row, level.scroll.offset());
+        Some((at.x + at.width / 2.0, at.y + at.height / 2.0))
+    }
+
+    /// The ancestor column and row under a point, in the pane the point is in.
+    fn column_press(&self, position: Point) -> Option<(usize, usize)> {
+        let leaf =
+            self.placement.leaves.iter().find(|leaf| leaf.body.contains(position.x, position.y))?;
+        let pane = self.panes.leaf(leaf.id)?.showing();
+        if pane.mode != crate::cells::Mode::Columns {
+            return None;
+        }
+        crate::trail::hit(
+            &pane.trail,
+            leaf.body,
+            pane.across.offset(),
+            self.theme.metrics.row_height,
+            position,
+        )
+    }
+
+    /// Opens what was pressed in the ancestor column at `depth`.
+    ///
+    /// A folder becomes the new deepest column; anything else makes its own
+    /// column the deepest and is selected there. Both are navigations, so
+    /// [`Self::settle_trails`] rebuilds the trail on the next frame — keeping
+    /// every level that is still an ancestor — and nothing here touches the
+    /// vector.
+    fn open_from_column(&mut self, depth: usize, row: usize) {
+        let pane = self.panes.focused();
+        let Some((directory, name, is_folder)) = crate::trail::entry(&pane.trail, depth, row)
+        else {
+            return;
+        };
+        let pane = self.panes.focused_mut();
+        if is_folder {
+            pane.open(directory.join(&name), &self.jobs);
+        } else {
+            pane.open_at(directory, name, &self.jobs);
+        }
+        self.dirty = true;
     }
 
     /// Which listing row is under a point, or `None` outside the list.

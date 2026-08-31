@@ -37,6 +37,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &[
         "view.details",
         "view.grid",
+        "view.columns",
         "view.group_none",
         "view.group_time",
         "view.group_size",
@@ -198,13 +199,18 @@ impl Menu {
     /// Scrolls by a wheel notch. Whether anything moved.
     pub fn wheel(&mut self, delta: f32, room: f32) -> bool {
         let was = self.scroll;
+        // **The same direction the list scrolls.** A positive delta is the wheel
+        // turned down and it brings *later* rows into view, here as everywhere
+        // else. These two arms were the other way round, so a tall menu answered
+        // the wheel backwards — and the scenario that covered it was written
+        // against the wrong direction, which is why nobody noticed.
         if delta > 0.0 {
-            self.scroll = self.scroll.saturating_sub(1);
-        } else if delta < 0.0 {
             let (first, drawn) = self.window(room);
             if first + drawn.len() < self.items.len() {
                 self.scroll += 1;
             }
+        } else if delta < 0.0 {
+            self.scroll = self.scroll.saturating_sub(1);
         }
         self.scroll != was
     }
@@ -375,5 +381,21 @@ mod tests {
         assert!((tops[2] - tops[1] - super::STEP).abs() < 0.01, "{tops:?}");
         // The panel is exactly as tall as the rows it holds, plus its padding.
         assert!((panel.bottom() - super::PAD - tops[2] - super::STEP).abs() < 0.01, "{tops:?}");
+    }
+
+    /// **A menu answers the wheel the way the list does.** A positive delta is the
+    /// wheel turned down and it shows what is further along; the two arms were
+    /// swapped, and a menu taller than the window scrolled backwards.
+    #[test]
+    fn the_wheel_scrolls_a_menu_the_way_it_scrolls_a_list() {
+        let mut tall = menu(&[true; 20]);
+        // Room for a handful of its rows, so there is somewhere to scroll to.
+        let room = 120.0;
+        assert_eq!(tall.scroll, 0);
+        assert!(tall.wheel(66.0, room), "a wheel down moved nothing");
+        assert_eq!(tall.scroll, 1, "a wheel down shows what is further along");
+        assert!(tall.wheel(-66.0, room));
+        assert_eq!(tall.scroll, 0, "and a wheel up comes back");
+        assert!(!tall.wheel(-66.0, room), "the top clamps rather than wrapping");
     }
 }

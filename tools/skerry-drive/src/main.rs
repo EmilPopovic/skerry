@@ -352,6 +352,8 @@ struct Driver {
     keyboard: zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
     pointer: zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
     time: u32,
+    /// When this process started, so a timestamp is a real elapsed millisecond.
+    started: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -381,28 +383,63 @@ impl Driver {
         keyboard.keymap(wl_keyboard::KeymapFormat::XkbV1 as u32, fd.as_fd(), size);
         queue.roundtrip(&mut state).map_err(|error| format!("roundtrip: {error}"))?;
 
-        Ok(Self { queue, state, keyboard, pointer, time: 1 })
+        Ok(Self { queue, state, keyboard, pointer, time: 1, started: std::time::Instant::now() })
     }
 
     /// Advances the clock.
     ///
-    /// Milliseconds, monotonically. The click counter under test decides a double
-    /// click from these timestamps, so a driver that sent the same one twice
-    /// would be testing its own bug.
+    /// Milliseconds, monotonically, and **real**.
+    ///
+    /// The click counter under test decides a double click from these timestamps,
+    /// so a driver that sent the same one twice would be testing its own bug —
+    /// hence monotonic, and hence the `max` below.
+    ///
+    /// **A fixed step of eight per call was the other half of that, and it was
+    /// wrong.** It made every *duration* the client measures a fiction. A `flick`
+    /// that rested three hundred milliseconds before lifting reported a lift eight
+    /// milliseconds after the last movement, so the client measured a finger still
+    /// moving and threw the list — and the scenario comparing a flick against a
+    /// drag that stopped saw the same distance twice and had no way to say why.
+    /// A velocity is a distance over a time, and a driver that fakes the time
+    /// cannot test one.
     fn tick(&mut self) -> u32 {
-        self.time = self.time.wrapping_add(8);
+        let now = self.started.elapsed().as_millis() as u32;
+        self.time = now.max(self.time.wrapping_add(1));
         self.time
     }
 
-    /// One touchpad delta: a distance with a finger source and no notch count.
+    /// One touchpad delta: a finger source, and a distance the only way one can
+    /// be delivered.
     ///
-    /// The pair of them is what makes it a touchpad rather than a wheel at the
-    /// far end — `axis_source` decides whether the client tracks the distance 1:1
-    /// or eases a notch, and `axis_discrete` is what a finger does not send.
+    /// **`axis` alone arrives as zero**, which is the same limitation
+    /// [`Driver::wheel`] records above and works around: Hyprland forwards a bare
+    /// `virtual_pointer.axis` to the client with a value of zero. So the distance
+    /// has to ride on `axis_discrete`'s notch count, and a finger source beside a
+    /// notch count is a pair no real touchpad sends.
+    ///
+    /// What that costs is one thing and what it keeps is the rest. The *distance*
+    /// is synthetic — one notch, resolved by the client to `WHEEL_NOTCH` — and
+    /// everything downstream of it is the real path: `axis_source` is what makes
+    /// the client track 1:1 rather than ease, `axis_stop` is what ends the gesture,
+    /// the timestamps are what the velocity is measured from, and the fling is the
+    /// fling. The scenario is differential for exactly this reason: it compares a
+    /// lift at speed against a lift at rest, so what the distance happens to be
+    /// does not enter the assertion.
+    ///
+    /// The protocol has no `axis_value120`, so there is no third option to prefer.
+    ///
+    /// **Both events, because only one of them carries a clock.** `axis_value120`
+    /// and `axis_discrete` have no `time` field in the protocol at all — a
+    /// timestamp reaches the client on `axis` and on `axis_stop` and nowhere else.
+    /// With the discrete event alone every frame of a gesture arrived stamped zero,
+    /// so the client had twenty samples with no span between them, measured a
+    /// velocity of nothing, and threw nothing: the flick moved the list exactly as
+    /// far as a drag that stopped. A real touchpad always sends `axis`, so this is
+    /// the harness catching up with the device rather than the client being lenient.
     fn delta(&mut self, pixels: f64) {
         let time = self.tick();
         self.pointer.axis_source(wl_pointer::AxisSource::Finger);
-        self.pointer.axis(time, wl_pointer::Axis::VerticalScroll, pixels);
+        self.pointer.axis_discrete(time, wl_pointer::Axis::VerticalScroll, pixels, 1);
         self.pointer.frame();
     }
 

@@ -65,6 +65,28 @@ impl Chord {
             && (!self.shift_matters() || self.mods.shift == event.mods.shift)
     }
 
+    /// The chord as *matching* sees it, for deciding whether two collide.
+    ///
+    /// **Two chords that are not equal can still match the same press.**
+    /// [`Chord::matches`] ignores Shift for anything but a letter, and compares a
+    /// letter case-insensitively — both for good reasons, stated below and on
+    /// [`Chord::shift_matters`]. So `ctrl+0` and `ctrl+shift+0` are two values and
+    /// one chord, and a registry that compared them for equality accepted both and
+    /// gave the press to whichever it happened to find first. Which is how
+    /// `Ctrl+Shift+0` came to mean "reset the zoom" — and how a test asserting no
+    /// two commands share a binding passed while two did.
+    #[must_use]
+    pub fn canonical(self) -> Self {
+        let mut same = self;
+        if !self.shift_matters() {
+            same.mods.shift = false;
+        }
+        if let Key::Character(character) = same.key {
+            same.key = Key::Character(character.to_ascii_lowercase());
+        }
+        same
+    }
+
     /// Whether Shift is part of this chord's identity.
     ///
     /// **For a letter and for a named key, yes; for other characters, no.**
@@ -350,5 +372,27 @@ mod tests {
         assert_eq!(Chord::parse("shift+up").expect("chord").display(), "Shift ↑");
         assert_eq!(Chord::parse("ctrl+shift+t").expect("chord").display(), "Ctrl Shift T");
         assert_eq!(Chord::parse("f5").expect("chord").display(), "F5");
+    }
+    /// **Two values, one chord.** The identity a collision has to be decided by
+    /// is what `matches` will accept, not what `==` says.
+    #[test]
+    fn a_digit_with_shift_is_the_same_chord_as_the_digit() {
+        let plain = Chord::parse("ctrl+0").expect("chord");
+        let shifted = Chord::parse("ctrl+shift+0").expect("chord");
+        assert_ne!(plain, shifted, "they differ as values");
+        assert_eq!(plain.canonical(), shifted.canonical(), "and not as chords");
+
+        // A letter is the other way round: Shift changes the case and nothing
+        // else, so the two are genuinely two chords.
+        let lower = Chord::parse("ctrl+c").expect("chord");
+        let upper = Chord::parse("ctrl+shift+c").expect("chord");
+        assert_ne!(lower.canonical(), upper.canonical());
+
+        // And the case a binding is written in is not part of it.
+        assert_eq!(
+            Chord::parse("ctrl+C").expect("chord").canonical(),
+            lower.canonical(),
+            "a binding written in capitals is the same chord"
+        );
     }
 }

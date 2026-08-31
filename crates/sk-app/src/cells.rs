@@ -28,6 +28,15 @@ pub enum Mode {
     Details,
     /// A grid of square-ish cells, the name under the mark.
     Grid,
+    /// One column per level of the path, the pane's own directory rightmost.
+    ///
+    /// **Not a fourth arithmetic.** A column is Details over a narrower body, so
+    /// everything here treats this exactly as [`Mode::Details`] — one cell per
+    /// row, the full width of whatever area it is handed. What differs is *which*
+    /// area that is, and that is [`crate::trail`]'s answer because only the trail
+    /// knows how many columns there are. See [ADR
+    /// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md).
+    Columns,
 }
 
 impl Mode {
@@ -35,7 +44,7 @@ impl Mode {
     ///
     /// Least dense first, which is the order every file manager that has a
     /// switcher uses: a grid of large cells, then a row per entry.
-    pub const ALL: [Self; 2] = [Self::Grid, Self::Details];
+    pub const ALL: [Self; 3] = [Self::Grid, Self::Details, Self::Columns];
 
     /// The command each one runs.
     ///
@@ -49,6 +58,7 @@ impl Mode {
         match self {
             Self::Details => "view.details",
             Self::Grid => "view.grid",
+            Self::Columns => "view.columns",
         }
     }
 
@@ -58,6 +68,7 @@ impl Mode {
         match self {
             Self::Details => "details",
             Self::Grid => "grid",
+            Self::Columns => "columns",
         }
     }
 
@@ -67,6 +78,7 @@ impl Mode {
         match token {
             "details" => Some(Self::Details),
             "grid" => Some(Self::Grid),
+            "columns" => Some(Self::Columns),
             _ => None,
         }
     }
@@ -132,7 +144,10 @@ impl Cells {
     pub(crate) fn new(mode: Mode, body: Area, row_height: f32, count: usize) -> Self {
         let row_height = row_height.max(1.0);
         let (cell, columns) = match mode {
-            Mode::Details => ((body.width, row_height), 1),
+            // One column of full-width cells for both, because a trail's column
+            // *is* Details over a narrower body — which is what makes this a
+            // third mode rather than a third arithmetic.
+            Mode::Details | Mode::Columns => ((body.width, row_height), 1),
             Mode::Grid => {
                 // The track is only worth reserving where a cell still fits
                 // beside it. Subtracting it unconditionally collapsed a pane

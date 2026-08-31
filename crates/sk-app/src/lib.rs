@@ -46,6 +46,7 @@ mod search;
 mod session;
 mod sidebar;
 mod sizes;
+mod trail;
 mod view;
 mod views;
 

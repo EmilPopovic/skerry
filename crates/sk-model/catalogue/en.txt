@@ -291,6 +291,7 @@ band.documents = Documents
 band.programs = Programs
 band.other = Other
 action.view_grid = Grid
+action.view_columns = Columns
 action.cursor_left = Cursor left
 action.cursor_right = Cursor right
 action.extend_left = Extend selection left

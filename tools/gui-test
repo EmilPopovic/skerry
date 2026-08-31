@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 104
+FEWEST_SCENARIOS = 105
 
 
 def scenario(name, fresh: bool = False):
@@ -1498,6 +1498,75 @@ def pointer_scroll(run: Run, fixture: Path) -> None:
         raise Failure("scrolling up moved nothing")
 
 
+@scenario("column-view", fresh=True)
+def column_view(run: Run, fixture: Path) -> None:
+    """`Ctrl+3` lays the pane out as columns, and the trail follows the path.
+
+    **The trail is a function of the path**, so what this checks is that every
+    kind of navigation moves it: descending adds a column, going up removes one,
+    and the levels above are kept rather than re-read — which the unit tests prove
+    by generation and this proves by the count surviving a round trip.
+
+    Then the pointer half, which is the thing no unit test can reach: a press in an
+    ancestor column has to be *handled*. Without `App::column_press` it falls
+    through to "empty space" and clears the selection, and the mode looks as though
+    it works right up until you click in it.
+    """
+    (fixture / "one").mkdir()
+    (fixture / "two").mkdir()
+    for _ in range(40):
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+        if int(run.state()["rows"]) >= 11:
+            break
+    else:
+        raise Failure(f"the two folders never arrived: {run.state()['rows']} rows")
+
+    run.drive("key ctrl+3\nsleep 500\nkey f12\nsleep 200\n")
+    state = run.state()
+    if state["mode"] != "columns":
+        raise Failure(f"Ctrl+3 left the pane in {state['mode']!r}")
+    shallow = int(state["trail"])
+    if shallow < 1:
+        raise Failure(f"a fixture under /tmp has ancestors, and the trail has {shallow}")
+
+    # Down into `one`: a column appears and the path is inside it.
+    run.drive("text one\nsleep 300\nkey enter\nsleep 600\nkey f12\nsleep 200\n")
+    deeper = run.state()
+    if not deeper["path"].endswith("one\"") and not deeper["path"].endswith("one"):
+        raise Failure(f"Enter on a folder left the pane at {deeper['path']}")
+    if int(deeper["trail"]) != shallow + 1:
+        raise Failure(f"descending took the trail from {shallow} to {deeper['trail']}")
+
+    # A press on the chosen row of the deepest ancestor column, which is `one`
+    # itself: nothing moves, and the selection it would have cleared is still
+    # there. Waits for the column's listing, because the aim comes from it.
+    for _ in range(40):
+        aim_at = run.state().get("column_aim", "none")
+        if aim_at != "none":
+            break
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+    else:
+        raise Failure("the ancestor column never reported a chosen row")
+    inside = run.state()
+    x, _, y = aim_at.partition(":")
+    x, y = float(x), float(y)
+    at = aim(run, inside, x, y)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 400\nkey f12\nsleep 200\n")
+    pressed = run.state()
+    if pressed["path"] != inside["path"]:
+        raise Failure(f"pressing the chosen folder moved to {pressed['path']}")
+    if int(pressed["trail"]) != int(inside["trail"]):
+        raise Failure("pressing the chosen folder changed the trail")
+
+    # And back up: the column goes and the ones above it stay.
+    run.drive("key alt+up\nsleep 600\nkey f12\nsleep 200\n")
+    back = run.state()
+    if int(back["trail"]) != shallow:
+        raise Failure(f"going up took the trail to {back['trail']}, not {shallow}")
+    if back["mode"] != "columns":
+        raise Failure("the mode did not survive a navigation")
+
+
 @scenario("view-switcher")
 def view_switcher(run: Run, fixture: Path) -> None:
     """The pane's own bar switches the view mode, without a menu.
@@ -1579,7 +1648,7 @@ def column_drag(run: Run, fixture: Path) -> None:
     here is a fraction of the window, which is the rule docs/12-measurement.md
     records after a chrome aim taken from a neighbour moved without it.
 
-    Then `Ctrl+Shift+0`, because a boundary dragged to its floor leaves a
+    Then `Ctrl+Shift+R`, because a boundary dragged to its floor leaves a
     four-pixel grab band as the only other way back and the reset is the command
     that exists for it.
     """
@@ -1597,7 +1666,7 @@ def column_drag(run: Run, fixture: Path) -> None:
     if after > before - 100.0:
         raise Failure(f"a 140 px drag moved the boundary from {before} to {after}")
 
-    run.drive("key ctrl+shift+0\nsleep 300\nkey f12\nsleep 200\n")
+    run.drive("key ctrl+shift+r\nsleep 300\nkey f12\nsleep 200\n")
     back = float(run.state()["size_x"])
     if abs(back - before) > 1.0:
         raise Failure(f"the reset left the boundary at {back}, not {before}")
@@ -1658,11 +1727,19 @@ def touchpad_flick(run: Run, fixture: Path) -> None:
         return float(run.state()["scroll"]) - before
 
     at_rest = travel(300)
+    resting = run.state()
     if at_rest <= 0.0:
         raise Failure(f"the gesture itself moved nothing: {at_rest}")
     thrown = travel(0)
+    lifted = run.state()
     if thrown < at_rest * 1.25:
-        raise Failure(f"a lift at speed travelled {thrown} against {at_rest} for one at rest")
+        raise Failure(
+            f"a lift at speed travelled {thrown} against {at_rest} for one at rest; "
+            f"the window saw {lifted['scrolls']} scrolls, {lifted['precise']} of them "
+            f"from a finger, {lifted['lifts']} lifts, and a clock of "
+            f"{lifted['scroll_time']} and {lifted['flings']} flings "
+            f"({resting['scrolls']}/{resting['precise']}/{resting['lifts']} after the first)"
+        )
 
 
 @scenario("type-ahead")
@@ -2095,7 +2172,11 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
                 break
             over = aim(run, state, float(x), float(y))
             run.drive(f"move {over[0]:.1f} {over[1]:.1f}\nsleep 120\n")
-        run.drive("scroll -3\nsleep 150\nkey f12\nsleep 150\n")
+        # Down the menu, which is a positive delta — the same direction that
+        # scrolls a list. It used to be `-3` here, against a `Menu::wheel` whose
+        # two arms were swapped: the harness and the defect agreed with each other
+        # and neither agreed with the pane.
+        run.drive("scroll 3\nsleep 150\nkey f12\nsleep 150\n")
         state = run.state()
     raise Failure(f"{command} is not on the open menu: {state.get('menu_aim')!r}")
 
@@ -3750,8 +3831,10 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
         "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 150\n"
     )
     opened = run.state()
-    if "view.path_entry" not in opened["menu_aim"]:
-        raise Failure(f"the background menu has no path entry: {opened['menu_aim']}")
+    # **`menu_aim` scrolls to find it**, because the background menu is taller than
+    # the window and has been since it was written — the `context-menu` golden
+    # frame exists partly to show the arrow that says there is more. Every row
+    # added to it pushes the tail further off, and this row is now past the end.
     aimed = menu_aim(run, opened, "view.path_entry")
     run.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 400\nkey f12\nsleep 200\n")
     field = run.state()
@@ -5780,6 +5863,31 @@ def no_cpu_when_idle(run: Run, fixture: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def sweep_stale_work() -> None:
+    """Removes work directories a killed run left behind.
+
+    **Because the limit that runs out is inodes, not bytes.** A run that is
+    interrupted — a timeout, a `Ctrl+C`, a crash — never reaches the `finally` that
+    removes its directory, and each one holds a fixture per scenario. A hundred and
+    fourteen of them accumulated here and took 727,000 of `/tmp`'s million inodes;
+    the next run failed with `No space left on device` on a tmpfs with twenty-six
+    gigabytes free, which reads as a full disk and is not one.
+
+    An hour old, so a run in progress in another terminal is never touched.
+    """
+    cutoff = time.time() - 3600
+    gone = 0
+    for stale in Path(tempfile.gettempdir()).glob("skerry-gui-*"):
+        try:
+            if stale.is_dir() and stale.stat().st_mtime < cutoff:
+                shutil.rmtree(stale, ignore_errors=True)
+                gone += 1
+        except OSError:
+            continue
+    if gone:
+        print(f"swept {gone} work director{'y' if gone == 1 else 'ies'} a killed run left behind")
+
+
 def main(argv: list[str]) -> int:
     wanted = [a for a in argv[1:] if not a.startswith("--")]
     keep = "--keep" in argv
@@ -5821,6 +5929,7 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
+    sweep_stale_work()
     work = Path(tempfile.mkdtemp(prefix="skerry-gui-"))
     passed, failed = 0, []
     global SERVER

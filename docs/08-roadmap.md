@@ -267,19 +267,31 @@ a menu row is a mode most people never find, which is [rule
 and they shed after the navigation buttons: a bar with room for one group keeps
 the one that moves rather than the one that looks.
 
-**A column view is decided and not yet written.**
-[ADR 0015](adr/0015-a-column-is-a-directory-and-a-choice.md) settles the seam that
-had to come first, and it is the second answer to the question:
+**The column view is built**, and the switcher's third mark is it. One column per
+level of the path, the pane's own rightmost, each ancestor showing which of its
+entries the next column came from, and a press in one of them navigating. It
+scrolls sideways and keeps the pane's own column in view at any depth, and the
+wheel's horizontal delta — dropped everywhere until there was a mode that could
+use it — moves along the run.
+
+The shape is [ADR 0015](adr/0015-a-column-is-a-directory-and-a-choice.md)'s, and
+it is the second answer to the question:
 [0014](adr/0014-a-column-view-is-a-trail-of-panes.md) said a column *is* a `Pane`
 and was wrong, because a pane is an independent view and columns are one path
-decomposed — the relation between two neighbours is the feature, and a
-`Vec<Pane>` cannot hold it. What a read is about turns out to be neither: a
-`Directory` — a path, a listing, a generation — held by a pane beside its own
-view decisions, and by a `Level { directory, chosen, scroll }` that is a column
-and has no sort, no mode and no selection to get out of step. The deepest column
-is still the pane, so no operation and no session field changes. The switcher
-grows its third mark when that lands, and not before: a button that does nothing
-is worse than no button.
+decomposed — the relation between two neighbours is the feature, and a `Vec<Pane>`
+cannot hold it. What a read is about turns out to be neither: a `Level` is a
+directory, a scroll and a chosen entry, with no sort, no mode and no selection to
+get out of step. The trail is a function of the path, so one method keeps it equal
+to the ancestors and every navigation goes through it — a click in a column, a
+breadcrumb, `Alt ←`, a restored session. A level fetches no metadata, so eight
+columns cost eight enumerations and no `statx` fan-out.
+
+What 0015 predicted it would cost — moving `Pane`'s own fields behind a
+`Directory` — did not happen, and that belongs beside the decision rather than
+inside it: it would have renamed a hundred and sixty-nine `pane.listing.rows()`
+call sites with no reader any the wiser. The guarantee the extraction existed for
+is one read and one place a reply lands, and `pane::spawn_read` and
+`Panes::take_reply` are those.
 
 **Still owed here:** middle-click to split, the **List** columns — and the inline
 **Tree**,

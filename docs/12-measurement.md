@@ -1493,3 +1493,97 @@ feature is untested and the suite will not say so.** The suite reported 35 passe
 while the thing under change was drawn nowhere. A green sweep is a statement about
 the premises the fixtures encode, and the premises are as much a part of the
 instrument as the assertions are.
+
+## A driver that fakes the time cannot test a velocity
+
+`touchpad-flick` was written blind, two commits before there was a machine free to
+run it on. It failed, and the three things it took to make it pass are each a
+different way for a harness to be wrong about the thing it is driving.
+
+**One: the distance could not be sent.** `skerry-drive` asked
+`zwlr_virtual_pointer_v1` for a finger-source `axis` and the client saw a distance
+of zero — the same limitation `Driver::wheel` had already recorded and worked
+around with `axis_discrete`. So the flick's distance rides on a notch count, which
+is a pair no real touchpad sends: a finger source beside a discrete step. What
+that costs is one thing and what it keeps is everything downstream — `axis_source`
+is still what makes the client track 1:1 rather than ease, `axis_stop` is still
+what ends the gesture, and the fling is still the fling. The scenario is
+differential for exactly this reason.
+
+**Two: the diagnosis took three guesses and one measurement.** A flick that moved
+the list but threw nothing could have been a missing `axis_source`, a missing
+`axis_stop`, or a velocity that came out at zero, and nothing on screen tells them
+apart. Three counters on the diagnostic line — scrolls, how many said a finger
+sent them, lifts — plus the clock and a count of flings actually started, settled
+it in one run each. Two of the three guesses before that were wrong. **A window
+that cannot say what arrived is a window you debug by rebuilding it.**
+
+**Three, and the real defect: the clock was a fiction.** `Driver::tick` advanced
+by a fixed eight milliseconds per call. It was written that way for a good reason
+— the click counter under test decides a double click from these stamps, so they
+have to be monotonic and distinct — and the fixed step made every *duration* the
+client measures a lie. A `flick` that rested three hundred real milliseconds
+before lifting reported a lift eight milliseconds after the last movement. So the
+client measured a finger still moving and threw the list, the flick and the drag
+that stopped travelled the same distance, and the scenario's only complaint was
+that two numbers were equal.
+
+The counters said `2 flings` for two gestures, which is what turned it from a
+mystery into a subtraction.
+
+**A velocity is a distance over a time, and a driver that synthesises the time can
+only test the distance.** The clock is real elapsed milliseconds now, still
+strictly increasing so the click counter keeps what it needed. The general form:
+when a harness fabricates one of the quantities under test, every assertion about
+that quantity is an assertion about the harness — and it will pass.
+
+## A gate that compares two things has to compare the right two
+
+`Ctrl+Shift+0` was bound to "reset the column widths" for a whole commit, and what
+it actually did was reset the zoom.
+
+`Chord::shift_matters` is why, and it is right: Shift is part of a letter's
+identity and not part of a digit's, because Shift on a digit changes which
+character the key produces from one layout to the next. So `Chord::matches`
+ignores Shift for `0`, and `ctrl+shift+0` and `ctrl+0` are two values and one
+chord.
+
+The registry checks for exactly this. It refuses a chord already taken in the same
+scope, a test asserts the whole set is sound, and both were green — because the
+check compared chords with `==`. Two chords that are not equal can still match the
+same press, and the one that had been registered first won at lookup. The gate was
+asking whether two *values* were the same when the question is whether two
+*behaviours* collide.
+
+It was found by a scenario that had nothing to do with either command:
+`the-list-zooms-and-comes-back-exactly` reported `back at 22.0, started at 26.0`,
+because `Ctrl+0` had stopped resetting the zoom.
+
+The fix is `Chord::canonical` — the chord as matching sees it, with Shift dropped
+where it does not count and a letter's case folded — and the registry compares
+those. It reported the collision immediately, which is how the binding moved to
+`Ctrl+Shift+R`, where Shift *is* part of the identity.
+
+**Whenever a check exists to prevent two things colliding, the comparison it makes
+has to be the same one the runtime makes.** Anywhere those two differ, the check
+is a test of its own equality operator.
+
+## The limit that runs out is not always the one in the error
+
+A sweep failed with `No space left on device` on a `/tmp` with twenty-six
+gigabytes free.
+
+What had run out was **inodes**. `df -h` says nothing about them and `df -i` says
+everything: 971,072 of 1,048,576 used, of which 727,658 belonged to a hundred and
+fourteen `skerry-gui-*` work directories that interrupted runs had left behind,
+and 200,711 to a 200,000-file benchmark fixture. The harness's own cleanup is
+correct and runs in a `finally`; a killed run never reaches it.
+
+Two things came of it. `tools/gui-test` now sweeps work directories older than an
+hour before it starts, so the failure mode cannot accumulate. And a benchmark
+fixture of two hundred thousand empty files is 200,000 inodes on a filesystem
+with a million — it belongs somewhere that is not the same tmpfs the suite runs
+on, and it gets deleted when the measurement is taken.
+
+The general form, which is the same shape as every other rule here: an error
+message names the resource the kernel checked last, not the one you are short of.

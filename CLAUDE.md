@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 604
-tests, 104 GUI scenarios **on both Wayland and X11**, thirty-eight golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 611
+tests, 105 GUI scenarios **on both Wayland and X11**, forty golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
@@ -40,11 +40,12 @@ where the frame loop learned that an animation is a wake-up with an owner
 the columns have **a ceiling and drawn boundaries that drag**, so an ultrawide
 window packs them left into a table with an edge instead of putting a file's size
 a screen away from its name; each pane's bar carries a **switcher** for its view
-mode, so a mode is one press rather than a menu — and the third mode it will hold
-is decided but not written
-([ADR 0015](docs/adr/0015-a-column-is-a-directory-and-a-choice.md), which
-supersedes 0014 — a column is not a pane, because a pane is independent and
-columns are one path decomposed);
+mode, so a mode is one press rather than a menu — and its third mark is a **column view** —
+one column per level of the path, the pane's own rightmost, a press in an ancestor
+navigating ([ADR
+0015](docs/adr/0015-a-column-is-a-directory-and-a-choice.md), which supersedes
+0014: a column is not a pane, because a pane is independent and columns are one
+path decomposed);
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —

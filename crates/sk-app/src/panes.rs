@@ -315,6 +315,30 @@ impl Panes {
         self.leaves_mut().flat_map(|leaf| leaf.panes.iter_mut())
     }
 
+    /// Offers a reply to every trail in the tree, handing it back if none took it.
+    ///
+    /// **The one place a column's read lands**, which is what [ADR
+    /// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md) means
+    /// by one apply in one place. Every pane, not only the visible ones: a
+    /// background tab in column mode has reads in flight the same way it has one
+    /// for its own directory.
+    pub(crate) fn take_reply(
+        &mut self,
+        message: crate::pane::Message,
+    ) -> Option<crate::pane::Message> {
+        let mut held = message;
+        for leaf in self.leaves_mut() {
+            for pane in &mut leaf.panes {
+                let path = pane.path.clone();
+                match crate::trail::apply(&mut pane.trail, held, &path) {
+                    Some(back) => held = back,
+                    None => return None,
+                }
+            }
+        }
+        Some(held)
+    }
+
     /// Whether the pane waiting for `generation` is on screen.
     ///
     /// A reply to a background tab changes nothing anybody can see, and a frame

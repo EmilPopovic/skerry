@@ -693,6 +693,14 @@ fn view(registry: &mut Registry<App>) {
 fn grouping(registry: &mut Registry<App>) {
     for spec in [
         CommandSpec {
+            id: "view.columns",
+            name: "action.view_columns",
+            group: Group::View,
+            keys: &["ctrl+3"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_mode(crate::cells::Mode::Columns),
+        },
+        CommandSpec {
             id: "view.group_none",
             name: "action.group_none",
             group: Group::View,
@@ -729,14 +737,17 @@ fn grouping(registry: &mut Registry<App>) {
             enabled: |_| true,
             run: |app: &mut App| app.set_grouping(crate::groups::Grouping::Kind),
         },
-        // `Ctrl+Shift+0` beside `view.zoom_reset`'s `Ctrl+0`: both put a piece of
-        // the layout back to what it ships as, and a column dragged to its floor
-        // leaves a four-pixel grab band as the only other way out of it.
+        // **Not `Ctrl+Shift+0`, which is `Ctrl+0`.** Shift is not part of a
+        // digit's identity — `Chord::shift_matters`, and it is right, because
+        // Shift changes which character a digit key produces from one layout to
+        // the next. So that binding was the zoom's, silently, and the registry's
+        // conflict check said nothing until it started comparing chords by what
+        // they match. `Ctrl+Shift+R` for reset, and a letter's Shift *is* its own.
         CommandSpec {
             id: "view.columns_reset",
             name: "action.columns_reset",
             group: Group::View,
-            keys: &["ctrl+shift+0"],
+            keys: &["ctrl+shift+r"],
             enabled: |_| true,
             run: App::reset_columns,
         },

@@ -168,6 +168,17 @@ pub struct Pane {
     pub selection: Selection,
     /// How far down.
     pub scroll: sk_ui::Scroll,
+    /// How far across, for the one mode that scrolls that way.
+    ///
+    /// A second [`sk_ui::Scroll`] on the other axis, which is what [ADR
+    /// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md) said
+    /// it would take — and the fling comes with it for nothing.
+    pub across: sk_ui::Scroll,
+    /// The ancestor columns, shallowest first, and empty in every other mode.
+    ///
+    /// The pane is the column *after* the last of these. Kept equal to the
+    /// ancestors of [`Pane::path`] by [`crate::trail::sync`] and by nothing else.
+    pub(crate) trail: Vec<crate::trail::Level>,
     /// In what order.
     pub sort: Sort,
     /// How the entries are cut into headings.
@@ -279,6 +290,77 @@ pub struct Pane {
     scroll_when_loaded: Option<f32>,
 }
 
+/// A generation nothing has used yet.
+///
+/// `pub(crate)` because a trail's columns take one from the same counter: a
+/// generation is what routes a reply, and two sources would be two reply spaces
+/// that could collide. See [ADR
+/// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md).
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Spawns the one job that reads a directory and orders it before it replies.
+///
+/// **One body, two callers.** A pane reads this way and so does every column of a
+/// trail, which is the whole of what [ADR
+/// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md) means by
+/// one read in one place — the two differ only in the `view` they pass and in
+/// whether they want the filename database, and neither difference is a second
+/// copy of `getdents64`, of the sort, or of the cancellation.
+///
+/// One job, so `Parallel` costs at most one worker even on a mount that never
+/// answers. The lane that matters is the metadata fan-out's, and this job is what
+/// discovers it.
+pub(crate) fn spawn_read(
+    path: PathBuf,
+    view: View,
+    mime: Option<Arc<sk_desktop::MimeDatabase>>,
+    generation: u64,
+    cancel: Cancel,
+    jobs: &Jobs,
+) {
+    let sender = jobs.sender.clone();
+    let wake = jobs.wake.clone();
+    jobs.pool.spawn(Lane::Parallel, cancel, move |cancel| {
+        let lane = sk_fs::lane_for(&path);
+        let View { sort, show_hidden, filter } = &view;
+        let update = match sk_fs::names(&path, cancel) {
+            Ok(found) => {
+                // The first sort happens **here**, on the job, not when the
+                // listing is applied. At 200,000 entries it costs a quarter of a
+                // second, and a quarter of a second on the frame loop is rule 1's
+                // canonical failure.
+                let mut listing = found.listing;
+                let started = std::time::Instant::now();
+                let kinds = kind_bytes(&listing, sort.bands, mime.as_deref());
+                listing.set_order(listing.compute_order(*sort, *show_hidden, filter, &kinds));
+                Update::Names {
+                    listing: Box::new(listing),
+                    names: found.names,
+                    elapsed_us: found.elapsed_us,
+                    sort_us: started.elapsed().as_micros() as u64,
+                    kinds,
+                    view: view.clone(),
+                    lane,
+                }
+            }
+            // A cancelled read has nothing to report: the reader has already
+            // moved on, and a failure message would be about a directory nobody
+            // is looking at.
+            Err(_) if cancel.is_cancelled() => return,
+            Err(problem) => Update::Failed(problem),
+        };
+        // A closed channel means the window is gone, and the job should stop
+        // rather than finish reading a million entries for nobody.
+        if sender.send(Message { generation, update }).is_err() {
+            cancel.cancel();
+            return;
+        }
+        wake.wake();
+    });
+}
+
 impl Pane {
     /// An empty pane at `path`. Nothing is read until [`Pane::reload`].
     #[must_use]
@@ -288,6 +370,8 @@ impl Pane {
             listing: Listing::default(),
             selection: Selection::default(),
             scroll: sk_ui::Scroll::default(),
+            across: sk_ui::Scroll::default(),
+            trail: Vec::new(),
             sort: Sort::default(),
             mode: crate::cells::Mode::default(),
             grouping: crate::groups::Grouping::default(),
@@ -424,7 +508,7 @@ impl Pane {
         // reply from it would replace these rows with the root directory's.
         self.cancel.cancel();
         self.cancel = Cancel::new();
-        self.generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.generation = next_generation();
         self.loading = false;
         self.problem = None;
         self.results = Some(query);
@@ -456,7 +540,7 @@ impl Pane {
         self.sort_cancel.cancel();
         self.sort_cancel = Cancel::new();
         self.sorting = false;
-        self.generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.generation = next_generation();
         self.loading = true;
         self.names_us = 0;
         self.meta_us = 0;
@@ -464,52 +548,42 @@ impl Pane {
         self.meta_done = 0;
         self.meta_started = None;
 
-        let generation = self.generation;
-        let path = self.path.clone();
-        let sender = jobs.sender.clone();
-        let wake = jobs.wake.clone();
-        let mime = jobs.mime.clone();
-        let view = self.view();
-        // One job, so `Parallel` costs at most one worker even on a mount that
-        // never answers. The lane that matters is the metadata fan-out's, and
-        // this job is what discovers it.
-        jobs.pool.spawn(Lane::Parallel, self.cancel.clone(), move |cancel| {
-            let lane = sk_fs::lane_for(&path);
-            let View { sort, show_hidden, filter } = &view;
-            let update = match sk_fs::names(&path, cancel) {
-                Ok(found) => {
-                    // The first sort happens **here**, on the job, not when the
-                    // listing is applied. At 200,000 entries it costs a quarter
-                    // of a second, and a quarter of a second on the frame loop is
-                    // rule 1's canonical failure.
-                    let mut listing = found.listing;
-                    let started = std::time::Instant::now();
-                    let kinds = kind_bytes(&listing, sort.bands, mime.as_deref());
-                    listing.set_order(listing.compute_order(*sort, *show_hidden, filter, &kinds));
-                    Update::Names {
-                        listing: Box::new(listing),
-                        names: found.names,
-                        elapsed_us: found.elapsed_us,
-                        sort_us: started.elapsed().as_micros() as u64,
-                        kinds,
-                        view: view.clone(),
-                        lane,
-                    }
-                }
-                // A cancelled read has nothing to report: the pane has already
-                // moved on, and a failure message would be about a directory
-                // nobody is looking at.
-                Err(_) if cancel.is_cancelled() => return,
-                Err(problem) => Update::Failed(problem),
-            };
-            // A closed channel means the window is gone, and the job should stop
-            // rather than finish reading a million entries for nobody.
-            if sender.send(Message { generation, update }).is_err() {
-                cancel.cancel();
-                return;
-            }
-            wake.wake();
-        });
+        spawn_read(
+            self.path.clone(),
+            self.view(),
+            jobs.mime.clone(),
+            self.generation,
+            self.cancel.clone(),
+            jobs,
+        );
+    }
+
+    /// Opens `path` and puts the cursor on `name` once its listing lands.
+    ///
+    /// **For a press in a column left of the pane's own.** Clicking a file three
+    /// columns back means "I am working in *that* directory now, on that file",
+    /// which is a navigation and a cursor — and the cursor cannot be set here,
+    /// because the listing it would be an index into does not exist yet. Which is
+    /// the same reason `go_up` has this hook.
+    pub fn open_at(&mut self, path: PathBuf, name: String, jobs: &Jobs) {
+        if path == self.path {
+            // Already here: no navigation, so nothing will land to hang the
+            // cursor off. Put it where it goes now.
+            self.select_named(&name);
+            return;
+        }
+        self.open(path, jobs);
+        self.select_after_load = Some(name);
+    }
+
+    /// Puts the cursor and the selection on the entry called `name`, if it is
+    /// there.
+    pub fn select_named(&mut self, name: &str) {
+        let found = (0..self.listing.rows())
+            .find_map(|row| self.listing.at(row).filter(|id| self.listing.name(*id) == name));
+        if let Some(id) = found {
+            self.selection.replace_with(id);
+        }
     }
 
     /// Dispatches one metadata job per slice of the names.
