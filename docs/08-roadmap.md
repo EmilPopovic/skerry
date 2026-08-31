@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 531 tests, 98 GUI scenarios on two display servers and twenty-nine golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 551 tests, 98 GUI scenarios on two display servers and thirty-two golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -151,7 +151,7 @@ defects they exposed.
 | A frame loop that blocks on the display socket and the pool's eventfd — **0 CPU ticks over 8 s idle**, on both servers | — |
 | `/proc/self/mountinfo` polled for `POLLPRI` on the watcher's own thread, so a disk plugged in reaches the sidebar without a restart | The volume's label and its free space, which are `udisks2` and M7's |
 | **GitHub Actions**: `tools/check` verbatim, the golden frames, the declared MSRV, Spike E's matrix nightly on four filesystems it builds itself, and **`tools/check` on `aarch64`** — the second architecture [06-portability.md](06-portability.md) claims | Spike E's matrix is still `x86_64` only, and so are the frames: the ARM image's fonts are not the ones the references were blessed on |
-| Twenty-nine golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on, compared by **CIE76 ΔE against the just-noticeable difference** — and a second pass over both images blurred by a pixel, which separates a glyph that moved from one that blended differently and says which in the failure | — |
+| Thirty-two golden frames against committed references on lavapipe, **in CI**, pinned to the hash of every font file they were blessed on, compared by **CIE76 ΔE against the just-noticeable difference** — and a second pass over both images blurred by a pixel, which separates a glyph that moved from one that blended differently and says which in the failure | — |
 | `--bench`, a scripted scroll through the real frame path | The regression gate that fails a build on it (M8). **Deliberately not in CI**: a shared runner's worst frame says more about its neighbours than about this code, and [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded) prices that at 6× |
 
 The two capabilities left are the expensive ones, and Spike D already knows what
@@ -223,11 +223,18 @@ it and dragged into a strip joins it, with the landing place shaded before the
 button comes up — `Ctrl+T` / `Ctrl+W` / `Ctrl+Shift+T` / `Ctrl+Tab`, `F3` /
 `Shift+F3` / `Ctrl+F3` / `F6`, and a watcher that watches every visible pane
 rather than one directory. **Session persistence landed too**, in
-[ADR 0011](adr/0011-one-plain-text-state-file-written-atomically.md)'s terms.
-**Still owed here:** middle-click to split, the view
-modes, per-folder settings, and session persistence — the tree serializes to a
-recursive four-line form, which is what ADR 0010 chose the shape for, but nothing
-writes it yet.
+[ADR 0011](adr/0011-one-plain-text-state-file-written-atomically.md)'s terms: the
+tree serializes to the recursive form ADR 0010 chose the shape for, and the window
+comes back after `kill -9` with its splits, its tabs, its sorts and its scroll
+offsets. **A second view mode landed as well** — a Grid, behind the cell geometry
+[ADR 0013](adr/0013-one-cell-geometry-behind-every-uniform-view.md) put under
+every uniform view, with the mode saved per tab.
+
+**Still owed here:** middle-click to split, per-folder settings with subtree
+inheritance, the **List** columns and **Group By** — and the inline **Tree**,
+which ADR 0013 explicitly does not reach: it is not a listing laid out
+differently but a listing whose rows come from several directories at varying
+depth, with an expansion state nothing models yet.
 
 ### M3 · 5 wk — Operations and undo
 Copy, move, rename, create, trash, permanent delete on the Spike E engine, behind a queue

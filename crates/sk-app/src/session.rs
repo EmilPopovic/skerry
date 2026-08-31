@@ -94,6 +94,8 @@ pub struct Tab {
     pub path: PathBuf,
     /// The order it was in.
     pub sort: Sort,
+    /// How it was laid out.
+    pub mode: crate::cells::Mode,
     /// How far down the list it was, in logical pixels.
     pub scroll: f32,
 }
@@ -179,8 +181,9 @@ fn write_node(node: &Node, depth: usize, out: &mut String) {
             for tab in tabs {
                 let _ = writeln!(
                     out,
-                    "{pad}  tab {} {} {}",
+                    "{pad}  tab {} {} {} {}",
                     sort_token(tab.sort),
+                    tab.mode.token(),
                     tab.scroll.round() as i64,
                     tab.path.display()
                 );
@@ -341,16 +344,36 @@ fn read_node(lines: &[&str], at: usize, depth: u32) -> Option<(Node, usize)> {
     }
 }
 
-/// `name+ 340 /home/emil/notes` — two tokens, then the path, which is the rest.
+/// One `tab` line, in either arity: `name+ grid 340 /home/emil/notes`, or the
+/// three-token `name+ 340 /home/emil/notes` an older build wrote. The path is the
+/// rest of the line, so it may hold spaces.
+///
+/// **Both forms parse, so adding the mode cost nobody their layout.** [ADR
+/// 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md)
+/// put the view mode on this line, and the alternative — bumping the version —
+/// discards the whole file, which is somebody's window arrangement and the one
+/// thing [ADR 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md)
+/// exists to keep. The two are told apart with no ambiguity at all: the field
+/// after the sort is either a mode word or the scroll offset, and a mode word
+/// never parses as a number.
 fn read_tab(rest: &str) -> Option<Tab> {
     let (sort, rest) = rest.split_once(' ')?;
-    let (scroll, path) = rest.split_once(' ')?;
+    let (second, rest) = rest.split_once(' ')?;
+    let (mode, scroll, path) = match crate::cells::Mode::from_token(second) {
+        Some(mode) => {
+            let (scroll, path) = rest.split_once(' ')?;
+            (mode, scroll, path)
+        }
+        // The three-field form, written by every build before the mode existed.
+        None => (crate::cells::Mode::default(), second, rest),
+    };
     let path = Path::new(path);
     if !path.is_absolute() {
         return None;
     }
     Some(Tab {
         sort: read_sort(sort)?,
+        mode,
         scroll: scroll.parse::<f32>().ok()?.max(0.0),
         path: path.to_path_buf(),
     })
@@ -369,7 +392,53 @@ mod tests {
         Tab {
             path: PathBuf::from(path),
             sort: Sort { column, descending: column == SortColumn::Size, dirs_first: true },
+            mode: crate::cells::Mode::default(),
             scroll,
+        }
+    }
+
+    /// A file written before the view mode existed still restores its layout.
+    ///
+    /// The reason ADR 0013 put the mode on the tab line instead of bumping the
+    /// version: a bump discards the file, and the file is somebody's arrangement
+    /// of windows.
+    #[test]
+    fn a_tab_line_without_a_mode_still_parses_and_defaults() {
+        let old = "skerry 1\nleaf 0\ntab name+ 120 /tmp/notes\n";
+        let session = parse(old).expect("the three-field form was refused");
+        let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].path, PathBuf::from("/tmp/notes"));
+        assert!((tabs[0].scroll - 120.0).abs() < 0.01);
+        assert_eq!(tabs[0].mode, crate::cells::Mode::Details, "the default is Details");
+    }
+
+    /// And the four-field form carries the mode both ways.
+    #[test]
+    fn a_mode_survives_being_written_and_read_back() {
+        let written = "skerry 1\nleaf 0\ntab name+ grid 40 /tmp/pictures\n";
+        let session = parse(written).expect("the four-field form was refused");
+        let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
+        assert_eq!(tabs[0].mode, crate::cells::Mode::Grid);
+        assert!((tabs[0].scroll - 40.0).abs() < 0.01);
+        // Rendered again, it comes out in the four-field form and re-parses.
+        let again = render(&session);
+        assert!(again.contains("tab name+ grid 40 /tmp/pictures"), "{again}");
+        let round = parse(&again).expect("what we wrote we cannot read");
+        let Node::Leaf { tabs, .. } = &round.tree else { panic!("not a leaf") };
+        assert_eq!(tabs[0].mode, crate::cells::Mode::Grid);
+    }
+
+    /// A path with a space in it still lands, in both arities.
+    #[test]
+    fn a_path_with_spaces_survives_either_arity() {
+        for text in [
+            "skerry 1\nleaf 0\ntab name+ 0 /tmp/my notes\n",
+            "skerry 1\nleaf 0\ntab name+ grid 0 /tmp/my notes\n",
+        ] {
+            let session = parse(text).unwrap_or_else(|| panic!("refused {text:?}"));
+            let Node::Leaf { tabs, .. } = &session.tree else { panic!("not a leaf") };
+            assert_eq!(tabs[0].path, PathBuf::from("/tmp/my notes"), "{text:?}");
         }
     }
 

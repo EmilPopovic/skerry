@@ -136,6 +136,14 @@ FRAMES = [
     # frame because the two operations reach the bar by different routes and this
     # is what would catch one of them losing it.
     ("indexing", ["--size", "900x520", "--scale", "125", "--indexing"]),
+    # The grid: the same listing, the same selection and the same cursor ring, in
+    # cells instead of rows. Its own frames at two scales because the cell is
+    # derived from the pane's width — the columns and the aspect are arithmetic
+    # that is right at one scale and wrong at another, which is exactly the class
+    # of defect a golden frame catches and a unit test cannot.
+    ("grid", ["--size", "900x520", "--scale", "125", "--grid"]),
+    ("grid-200", ["--size", "900x520", "--scale", "200", "--grid"]),
+    ("grid-narrow", ["--size", "560x420", "--scale", "100", "--grid"]),
     # The subtree search: results from three different folders, each with the
     # folder it is in beside it, over a summary that says the walk is still
     # going. The only frame whose rows are not one directory's.

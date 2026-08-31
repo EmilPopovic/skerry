@@ -25,6 +25,7 @@ pub fn registry() -> Registry<App> {
     navigate(&mut registry);
     panes(&mut registry);
     select(&mut registry);
+    directions(&mut registry);
     view(&mut registry);
     zoom(&mut registry);
     file(&mut registry);
@@ -168,7 +169,7 @@ fn select(registry: &mut Registry<App>) {
             group: Group::Select,
             keys: &["up"],
             enabled: |_| true,
-            run: |app: &mut App| app.move_cursor(-1, false),
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Up, false),
         },
         CommandSpec {
             id: "select.down",
@@ -176,7 +177,7 @@ fn select(registry: &mut Registry<App>) {
             group: Group::Select,
             keys: &["down"],
             enabled: |_| true,
-            run: |app: &mut App| app.move_cursor(1, false),
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Down, false),
         },
         CommandSpec {
             id: "select.extend_up",
@@ -184,7 +185,7 @@ fn select(registry: &mut Registry<App>) {
             group: Group::Select,
             keys: &["shift+up"],
             enabled: |_| true,
-            run: |app: &mut App| app.move_cursor(-1, true),
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Up, true),
         },
         CommandSpec {
             id: "select.extend_down",
@@ -192,7 +193,7 @@ fn select(registry: &mut Registry<App>) {
             group: Group::Select,
             keys: &["shift+down"],
             enabled: |_| true,
-            run: |app: &mut App| app.move_cursor(1, true),
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Down, true),
         },
         CommandSpec {
             id: "select.page_up",
@@ -244,6 +245,56 @@ fn select(registry: &mut Registry<App>) {
             keys: &["escape"],
             enabled: |_| true,
             run: App::clear,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// The four direction keys, which are one idea and are the reason `select` was
+/// two functions.
+///
+/// **All four in both modes.** A one-column grid makes Left and Right previous
+/// and next, which is what they already mean in a list, so nothing here is
+/// bound per mode — see [ADR
+/// 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
+fn directions(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "select.left",
+            name: "action.cursor_left",
+            group: Group::Select,
+            // **Bound in both modes, and in Details it is Up.** A one-column
+            // grid makes Left and Right previous and next, which is what they
+            // already mean in a list — so there is no mode-dependent binding and
+            // no key that does nothing in one view.
+            keys: &["left"],
+            enabled: |_| true,
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Left, false),
+        },
+        CommandSpec {
+            id: "select.right",
+            name: "action.cursor_right",
+            group: Group::Select,
+            keys: &["right"],
+            enabled: |_| true,
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Right, false),
+        },
+        CommandSpec {
+            id: "select.extend_left",
+            name: "action.extend_left",
+            group: Group::Select,
+            keys: &["shift+left"],
+            enabled: |_| true,
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Left, true),
+        },
+        CommandSpec {
+            id: "select.extend_right",
+            name: "action.extend_right",
+            group: Group::Select,
+            keys: &["shift+right"],
+            enabled: |_| true,
+            run: |app: &mut App| app.step_cursor(crate::cells::Step::Right, true),
         },
     ] {
         registry.add(spec);
@@ -568,6 +619,24 @@ fn view(registry: &mut Registry<App>) {
             run: App::toggle_sidebar,
         },
         CommandSpec {
+            id: "view.details",
+            name: "action.view_details",
+            group: Group::View,
+            // `Ctrl+1` and `Ctrl+2` are what every file manager numbers its views
+            // with, and the numbers stay stable as more arrive.
+            keys: &["ctrl+1"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_mode(crate::cells::Mode::Details),
+        },
+        CommandSpec {
+            id: "view.grid",
+            name: "action.view_grid",
+            group: Group::View,
+            keys: &["ctrl+2"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_mode(crate::cells::Mode::Grid),
+        },
+        CommandSpec {
             id: "view.hidden",
             name: "action.toggle_hidden",
             group: Group::View,
@@ -777,6 +846,10 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
 #[cfg(test)]
 const POINTER_EXEMPT: &[(&str, &str)] = &[
     ("select.up", "a pointer moves the cursor by clicking the row"),
+    ("select.left", "a pointer moves the cursor by clicking the cell"),
+    ("select.right", "a pointer moves the cursor by clicking the cell"),
+    ("select.extend_left", "a pointer extends a selection by shift-clicking"),
+    ("select.extend_right", "a pointer extends a selection by shift-clicking"),
     ("select.down", "a pointer moves the cursor by clicking the row"),
     ("select.extend_up", "a pointer extends a selection by shift-clicking"),
     ("select.extend_down", "a pointer extends a selection by shift-clicking"),

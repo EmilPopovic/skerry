@@ -25,6 +25,7 @@
 mod app;
 mod bench;
 mod capture;
+mod cells;
 mod commands;
 mod crumbs;
 mod edit;

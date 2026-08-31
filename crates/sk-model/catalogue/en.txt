@@ -257,6 +257,12 @@ index.building = Indexing… {0} entries so far
 index.building_of = Indexing… {0} of {1} entries
 action.search = Find a file
 action.search_results = Show all results in this pane
+action.view_details = Details
+action.view_grid = Grid
+action.cursor_left = Cursor left
+action.cursor_right = Cursor right
+action.extend_left = Extend selection left
+action.extend_right = Extend selection right
 action.index_build = Index this folder
 action.index_forget = Delete this folder's index
 

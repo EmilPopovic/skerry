@@ -370,16 +370,6 @@ impl Layout {
     }
 }
 
-impl crate::panes::PaneLayout {
-    /// The display row at logical `y`, or `None` outside this pane's list.
-    pub(crate) fn row_at(&self, y: f32, offset: f32, row_height: f32) -> Option<usize> {
-        if y < self.body.y || y >= self.body.bottom() || row_height <= 0.0 {
-            return None;
-        }
-        Some(((y - self.body.y + offset) / row_height) as usize)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -626,10 +616,11 @@ mod tests {
         let window = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
         let layout = one_leaf(&window, &metrics);
         let top = layout.body.y;
-        assert_eq!(layout.row_at(top + 1.0, 0.0, 26.0), Some(0));
-        assert_eq!(layout.row_at(top + 27.0, 0.0, 26.0), Some(1));
-        assert_eq!(layout.row_at(top + 1.0, 260.0, 26.0), Some(10));
-        assert_eq!(layout.row_at(window.path.y + 1.0, 0.0, 26.0), None, "not in the path bar");
-        assert_eq!(layout.row_at(window.status.y + 1.0, 0.0, 26.0), None);
+        // The row arithmetic that used to live here is `crate::cells` now — one
+        // geometry for every uniform view, per ADR 0013 — and its tests moved
+        // with it, where they cover both modes rather than only this one.
+        assert!(layout.body.contains(layout.body.x + 1.0, top + 1.0));
+        assert!(!layout.body.contains(layout.body.x + 1.0, window.path.y + 1.0));
+        assert!(!layout.body.contains(layout.body.x + 1.0, window.status.y + 1.0));
     }
 }

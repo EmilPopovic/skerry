@@ -20,6 +20,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0010](0010-a-split-tree-of-tab-strips.md) | A binary split tree whose leaves are tab strips | Accepted |
 | [0011](0011-one-plain-text-state-file-written-atomically.md) | One plain-text state file, written whole and renamed into place | Accepted |
 | [0012](0012-a-flat-index-file-per-root-rebuilt-whole.md) | One flat index file per root, rebuilt whole, verified at the point of use | Accepted |
+| [0013](0013-one-cell-geometry-behind-every-uniform-view.md) | One cell geometry behind every uniform view, and Tree is not one of them | Accepted |
 
 ## Triggers that have been answered
 

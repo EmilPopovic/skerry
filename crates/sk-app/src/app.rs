@@ -1871,14 +1871,12 @@ impl App {
     /// keyed by path rather than by row, so a new listing shows what is already
     /// known instead of starting again.
     fn settle_rows(&mut self) {
-        let content = self.panes.focused().listing.rows() as f32 * self.theme.metrics.row_height;
-        self.panes.focused_mut().scroll.set_extent(content, self.placement.here.body.height);
-        let visible = sk_ui::visible_rows(
-            self.panes.focused().scroll.offset(),
-            self.placement.here.body.height,
-            self.theme.metrics.row_height,
-            self.panes.focused().listing.rows(),
-        );
+        let cells = self.cells();
+        self.panes
+            .focused_mut()
+            .scroll
+            .set_extent(cells.content_height(), self.placement.here.body.height);
+        let visible = cells.visible(self.panes.focused().scroll.offset());
         let Self { measurer, panes, jobs, .. } = self;
         measurer.update(panes.focused_mut(), visible, jobs);
     }
@@ -2294,11 +2292,9 @@ impl App {
         let Some(row) = self.panes.focused().listing.row_of(id) else { return };
         let name = self.panes.focused().listing.name(id).to_owned();
         let directory = self.panes.focused().listing.flags(id).has(sk_model::Flags::DIR);
-        self.panes.focused_mut().scroll.reveal(
-            row as f32 * self.theme.metrics.row_height,
-            (row + 1) as f32 * self.theme.metrics.row_height,
-            self.placement.here.body.height,
-        );
+        let (top, bottom) = self.cells().span(row);
+        let body = self.placement.here.body.height;
+        self.panes.focused_mut().scroll.reveal(top, bottom, body);
         self.edits.naming = Some(crate::edit::Naming {
             row,
             path: self.panes.focused().path.join(&name),
@@ -4257,17 +4253,53 @@ search_active={active:?}",
         self.panes.focused_mut().refresh(&self.jobs);
     }
 
-    /// Moves the cursor by `delta` rows, extending the selection if asked.
-    pub(crate) fn move_cursor(&mut self, delta: isize, extend: bool) {
-        self.panes.focused_mut().move_cursor(delta, extend);
+    /// Moves the cursor one step in a direction.
+    ///
+    /// **Not `move_cursor(±1)`.** In a grid, Up and Down move by a whole line and
+    /// Left and Right by one entry; in Details there is one column, so all four
+    /// come out as previous and next. [`crate::cells::Cells::step`] is the only
+    /// thing that knows which, which is what keeps the two modes from needing two
+    /// bindings — see [ADR
+    /// 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
+    pub(crate) fn step_cursor(&mut self, step: crate::cells::Step, extend: bool) {
+        let cells = self.cells();
+        let Some(from) = self.panes.focused().cursor_row() else {
+            // No cursor yet: a direction key puts one on the first entry, which
+            // is what it does in every list.
+            self.panes.focused_mut().cursor_to(0, extend);
+            self.reveal_cursor();
+            return;
+        };
+        let to = cells.step(from, step);
+        self.panes.focused_mut().cursor_to(to, extend);
         self.reveal_cursor();
+    }
+
+    /// Lays the focused pane out the other way.
+    ///
+    /// **The cursor is revealed afterwards**, because the same entry is at a
+    /// different height once the cells change shape: switching to a grid while
+    /// looking at entry nine hundred and leaving the scroll offset where it was
+    /// lands somewhere else entirely.
+    pub(crate) fn set_mode(&mut self, mode: crate::cells::Mode) {
+        if self.panes.focused().mode == mode {
+            return;
+        }
+        self.panes.focused_mut().mode = mode;
+        let cells = self.cells();
+        let body = self.placement.here.body.height;
+        self.panes.focused_mut().scroll.set_extent(cells.content_height(), body);
+        self.reveal_cursor();
+        // Nothing saves the session here: `keep_the_session` compares the
+        // rendered file every frame rather than trusting twenty callers to
+        // remember a flag, and this is one of the twenty.
+        self.dirty = true;
     }
 
     /// Moves the cursor by a screenful.
     pub(crate) fn move_page(&mut self, direction: isize) {
-        let rows =
-            (self.placement.here.body.height / self.theme.metrics.row_height).floor().max(1.0);
-        self.panes.focused_mut().move_cursor(direction * rows as isize, false);
+        let page = isize::try_from(self.cells().page()).unwrap_or(1);
+        self.panes.focused_mut().move_cursor(direction * page, false);
         self.reveal_cursor();
     }
 
@@ -4386,6 +4418,32 @@ search_active={active:?}",
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
+    /// How the focused pane lays out, and what index it has.
+    ///
+    /// Split out of [`Self::listing_state`] because that function reached the
+    /// hundred-line lint, and these two belong together: both answer "what shape
+    /// is this pane in", which is exactly what the rest of the line cannot say —
+    /// [rule 8](../../../docs/03-principles.md) makes a grid and a details list
+    /// the same rows in the same order, and an indexed search and a walk give the
+    /// same answer on purpose.
+    fn shape_state(&self) -> String {
+        let cells = self.cells();
+        let index = self
+            .indexes
+            .covering(&self.panes.focused().path)
+            .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
+        let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
+        let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
+        format!(
+            "mode={} columns={} cell={:.1}x{:.1} index={index} indexing={indexing} \
+search_indexed={searched}",
+            cells.mode().token(),
+            cells.columns(),
+            cells.cell().0,
+            cells.cell().1,
+        )
+    }
+
     /// What the pane is showing.
     #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
     fn listing_state(&mut self) -> String {
@@ -4469,12 +4527,7 @@ search_active={active:?}",
         // outside an indexed search and a walk are deliberately identical — which
         // is ADR 0008's third constraint and therefore the thing a test has to be
         // able to see in order to assert that both answer the same.
-        let index = self
-            .indexes
-            .covering(&self.panes.focused().path)
-            .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
-        let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
-        let searched_index = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
+        let shape = self.shape_state();
         // How many the delete-for-good question is asking about, and which button
         // it is on. `0` when it is not up, which is not the same as asking about
         // nothing — the panel never opens on an empty selection.
@@ -4483,7 +4536,7 @@ search_active={active:?}",
         let drag_in = self.window.dragging().is_some();
         let drag_out = self.window.dragging_out();
         format!(
-            "index={index} indexing={indexing} search_indexed={searched_index} \
+            "{shape} \
 path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} notice={:?} \
@@ -4876,14 +4929,34 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         )
     }
 
+    /// Where the focused pane's entries are, this frame.
+    ///
+    /// [ADR 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md):
+    /// nothing outside [`crate::cells`] computes an entry's position, so every
+    /// hit test, reveal, page and band goes through here.
+    pub(crate) fn cells(&self) -> crate::cells::Cells {
+        self.cells_of(&self.placement.here, self.panes.focused())
+    }
+
+    /// As [`Self::cells`], for a pane that is not the focused one.
+    fn cells_of(
+        &self,
+        layout: &crate::panes::PaneLayout,
+        pane: &crate::pane::Pane,
+    ) -> crate::cells::Cells {
+        crate::cells::Cells::new(
+            pane.mode,
+            layout.body,
+            self.theme.metrics.row_height,
+            pane.listing.rows(),
+        )
+    }
+
     fn reveal_cursor(&mut self) {
         let Some(row) = self.panes.focused().cursor_row() else { return };
-        let height = self.theme.metrics.row_height;
-        self.panes.focused_mut().scroll.reveal(
-            row as f32 * height,
-            (row + 1) as f32 * height,
-            self.placement.here.body.height,
-        );
+        let (top, bottom) = self.cells().span(row);
+        let height = self.placement.here.body.height;
+        self.panes.focused_mut().scroll.reveal(top, bottom, height);
     }
 
     fn press(
@@ -5228,9 +5301,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let leaf =
             self.placement.leaves.iter().find(|it| it.body.contains(position.x, position.y))?;
         let pane = self.panes.leaf(leaf.id)?.showing();
-        let row = leaf
-            .row_at(position.y, pane.scroll.offset(), self.theme.metrics.row_height)
-            .filter(|row| *row < pane.listing.rows())?;
+        let row =
+            self.cells_of(leaf, pane).index_at(position.x, position.y, pane.scroll.offset())?;
         let id = pane.listing.at(row)?;
         if !pane.listing.flags(id).has(sk_model::Flags::DIR) {
             return None;
@@ -5896,13 +5968,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
 
     /// Which listing row is under a point, or `None` outside the list.
     fn row_under(&self, position: Point) -> Option<usize> {
-        if !self.placement.here.body.contains(position.x, position.y) {
-            return None;
-        }
-        self.placement
-            .here
-            .row_at(position.y, self.panes.focused().scroll.offset(), self.theme.metrics.row_height)
-            .filter(|row| *row < self.panes.focused().listing.rows())
+        self.cells().index_at(position.x, position.y, self.panes.focused().scroll.offset())
     }
 
     /// Which drawn palette result is under a point, if the palette is open.
@@ -6302,14 +6368,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             !under_a_panel && self.placement.here.body.contains(position.x, position.y);
         let row = in_the_list
             .then(|| {
-                self.placement.here.row_at(
-                    position.y,
-                    self.panes.focused().scroll.offset(),
-                    self.theme.metrics.row_height,
-                )
+                self.cells().index_at(position.x, position.y, self.panes.focused().scroll.offset())
             })
-            .flatten()
-            .filter(|row| *row < self.panes.focused().listing.rows());
+            .flatten();
         if self.panes.focused().hover != row {
             self.panes.focused_mut().hover = row;
             self.dirty = true;
@@ -6317,18 +6378,19 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     }
 
     fn select_band(&mut self, from: Point, to: Point) {
-        let height = self.theme.metrics.row_height;
+        let cells = self.cells();
         let offset = self.panes.focused().scroll.offset();
-        let top = from.y.min(to.y);
-        let bottom = from.y.max(to.y);
-        let first =
-            ((top - self.placement.here.body.y + offset) / height).floor().max(0.0) as usize;
-        let last =
-            ((bottom - self.placement.here.body.y + offset) / height).floor().max(0.0) as usize;
+        let rect = crate::layout::Area {
+            x: from.x.min(to.x),
+            y: from.y.min(to.y),
+            width: (to.x - from.x).abs(),
+            height: (to.y - from.y).abs(),
+        };
+        let mut touched = Vec::new();
+        cells.touching(rect, offset, |index| touched.push(index));
         let pane = self.panes.focused_mut();
         pane.selection.clear();
-        let rows = pane.listing.rows();
-        for row in first..=last.min(rows.saturating_sub(1)) {
+        for row in touched {
             if let Some(id) = pane.listing.at(row) {
                 pane.selection.toggle(id);
             }
@@ -6341,7 +6403,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// two used to be separate copies of the same arithmetic and had already
     /// drifted into two spellings of one clamp, one of which panicked.
     fn thumb(&self) -> Option<(f32, f32)> {
-        let content = self.panes.focused().listing.rows() as f32 * self.theme.metrics.row_height;
+        let content = self.cells().content_height();
         let (position, height) = sk_ui::thumb(
             self.panes.focused().scroll.offset(),
             content,
@@ -6364,18 +6426,23 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let Some((_, thumb)) = self.thumb() else { return };
         let track = self.placement.here.body.height;
         let travel = (track - thumb).max(1.0);
-        let content = self.panes.focused().listing.rows() as f32 * self.theme.metrics.row_height;
+        let content = self.cells().content_height();
         let extent = (content - track).max(0.0);
         let fraction = ((position.y - grab - self.placement.here.body.y) / travel).clamp(0.0, 1.0);
         self.panes.focused_mut().scroll.to(fraction * extent);
     }
 
     fn column_at(&self, x: f32) -> Option<SortColumn> {
-        for (column, area) in [
-            (SortColumn::Name, self.placement.here.name),
-            (SortColumn::Size, self.placement.here.size),
-            (SortColumn::Modified, self.placement.here.modified),
-        ] {
+        // The header's own geometry, asked rather than repeated: in a grid the
+        // three labels are a strip at the left rather than three columns, and a
+        // second copy of that arithmetic here would sort by whatever Details
+        // would have had under the pointer.
+        let columns = crate::view::sort_columns(
+            &self.placement.here,
+            &self.theme.metrics,
+            self.panes.focused().mode,
+        );
+        for (column, area, ..) in columns {
             if area.width > 0.0 && x >= area.x && x < area.right() {
                 return Some(column);
             }

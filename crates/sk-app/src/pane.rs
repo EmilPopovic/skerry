@@ -138,6 +138,12 @@ pub struct Pane {
     pub scroll: sk_ui::Scroll,
     /// In what order.
     pub sort: Sort,
+    /// How the entries are laid out.
+    ///
+    /// Per pane rather than per window, because two panes side by side are two
+    /// answers to two questions — a grid of photographs beside a details list of
+    /// the folder they are going into is the whole reason the split exists.
+    pub mode: crate::cells::Mode,
     /// What the list is narrowed to, or empty for everything.
     ///
     /// A view of the listing and not a property of it: the entries are all still
@@ -224,6 +230,7 @@ impl Pane {
             selection: Selection::default(),
             scroll: sk_ui::Scroll::default(),
             sort: Sort::default(),
+            mode: crate::cells::Mode::default(),
             filter: String::new(),
             show_hidden: false,
             loading: false,

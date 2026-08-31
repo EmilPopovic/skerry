@@ -72,6 +72,8 @@ pub struct Capture {
     /// different operation — and the frame that would catch the two drifting
     /// apart.
     pub indexing: bool,
+    /// Whether to lay the pane out as a grid instead of a details list.
+    pub grid: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -621,6 +623,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // frame rather than a variant of every other.
     let crate::panes::Single { mut panes, mut leaves, mut dividers, mut here } =
         crate::panes::single(pane, layout.content, &theme.metrics);
+    if request.grid {
+        panes.focused_mut().mode = crate::cells::Mode::Grid;
+    }
     if request.split {
         // **Stacked, and two tabs in the lower half.** A `Below` split is the
         // arrangement that puts a second column header halfway down the window,

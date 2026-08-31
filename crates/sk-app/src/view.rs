@@ -9,7 +9,9 @@ use sk_gpu::{Color, FrameStats};
 use sk_model::{Flags, SortColumn, i18n};
 use sk_plat::{Point, WindowState};
 use sk_text::Weight;
-use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format, visible_rows};
+use sk_ui::{Align, Direction, Painter, RunKey, TextStyle, format};
+
+use crate::cells::{Cells, Mode};
 
 use crate::edit::Naming;
 use crate::field::Field;
@@ -2208,6 +2210,46 @@ fn divider_line(painter: &mut Painter<'_>, divider: Divider, hovered: bool) {
     }
 }
 
+/// Where the three sort labels are, and how each is aligned.
+///
+/// **A free function because the header draws them and the hit test finds them**,
+/// and two rectangles computed separately are two rectangles that agree until one
+/// of them is edited — which is the same reason [`name_field`] is one.
+///
+/// **A grid has no columns, so its header is not one.** The three labels stay —
+/// they are how a pointer reaches the three sort commands, and the sort still
+/// orders the cells — but they sit adjacently from the left rather than at the
+/// Details column offsets, where `Size` stood over cells that have no size in
+/// them and read as a column that was not there.
+#[must_use]
+pub fn sort_columns(
+    layout: &PaneLayout,
+    metrics: &sk_ui::Metrics,
+    mode: Mode,
+) -> [(SortColumn, Area, Align, f32); 3] {
+    match mode {
+        Mode::Details => [
+            (SortColumn::Name, layout.name, Align::Left, 0.0),
+            (SortColumn::Size, layout.size, Align::Right, 12.0),
+            (SortColumn::Modified, layout.modified, Align::Left, 12.0),
+        ],
+        Mode::Grid => {
+            let slot = 96.0_f32.min((layout.header.width - metrics.gutter) / 3.0).max(1.0);
+            let strip = |nth: f32| Area {
+                x: layout.name.x + nth * slot,
+                y: layout.header.y,
+                width: slot,
+                height: layout.header.height,
+            };
+            [
+                (SortColumn::Name, strip(0.0), Align::Left, 0.0),
+                (SortColumn::Size, strip(1.0), Align::Left, 0.0),
+                (SortColumn::Modified, strip(2.0), Align::Left, 0.0),
+            ]
+        }
+    }
+}
+
 fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -2224,11 +2266,7 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     );
 
     let baseline = painter.baseline(layout.header.y, layout.header.height, metrics.header_size);
-    let columns: [(SortColumn, Area, Align, f32); 3] = [
-        (SortColumn::Name, layout.name, Align::Left, 0.0),
-        (SortColumn::Size, layout.size, Align::Right, 12.0),
-        (SortColumn::Modified, layout.modified, Align::Left, 12.0),
-    ];
+    let columns = sort_columns(layout, &metrics, pane.mode);
 
     for (column, area, align, inset) in columns {
         if area.width <= 0.0 {
@@ -2282,14 +2320,21 @@ fn body(
     painter.list.push_clip(clip);
 
     let rows = pane.listing.rows();
-    let range = visible_rows(pane.scroll.offset(), layout.body.height, metrics.row_height, rows);
-    for row in range {
+    // One geometry for both modes, per [ADR
+    // 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md).
+    // Details is a one-column grid, so the loop below is the same loop either way
+    // and only the cell's *contents* differ.
+    let cells = Cells::new(pane.mode, layout.body, metrics.row_height, rows);
+    for row in cells.visible(pane.scroll.offset()) {
         let context = RowContext {
             types: chrome.types,
             naming: chrome.naming.filter(|_| has_keyboard),
             drop_row: chrome.drop_row.filter(|(id, _)| *id == layout.id).map(|(_, row)| row),
         };
-        row_at(painter, pane, layout, now, row, context);
+        match pane.mode {
+            Mode::Details => row_at(painter, pane, layout, now, row, context),
+            Mode::Grid => cell_at(painter, pane, layout, &cells, row, context),
+        }
     }
 
     if rows == 0 && !pane.loading {
@@ -2334,6 +2379,127 @@ struct RowContext<'a> {
     drop_row: Option<usize>,
 }
 
+/// One grid cell: its shape, a large mark, and the name under it.
+///
+/// The same three states a row draws — selected, cursor, drop target — because
+/// [rule 8](../../../docs/03-principles.md) is that the selection semantics are
+/// the same in every view, and a view where the cursor ring means something else
+/// is a second thing to learn.
+///
+/// **No thumbnail yet.** The picture that belongs in the middle of this is M5's
+/// and arrives through `sk-preview`; what is here is the kind mark at cell size,
+/// which is the same colour the row draws at 16 pixels.
+fn cell_at(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    layout: &PaneLayout,
+    cells: &Cells,
+    row: usize,
+    context: RowContext<'_>,
+) {
+    let RowContext { types, naming, drop_row } = context;
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let Some(id) = pane.listing.at(row) else { return };
+    let box_ = cells.at(row, pane.scroll.offset());
+    let flags = pane.listing.flags(id);
+    let selected = pane.selection.contains(id);
+    let directory = flags.has(Flags::DIR);
+    let broken = flags.has(Flags::BROKEN);
+    let ring = painter.px(1.0).round().max(1.0);
+
+    // Inset, so two cells side by side have a gap between their fills rather
+    // than one continuous band of selection colour.
+    let inset = metrics.gutter * 0.5;
+    let pill = painter.rect(
+        box_.x + inset,
+        box_.y + inset,
+        (box_.width - inset * 2.0).max(1.0),
+        (box_.height - inset * 2.0).max(1.0),
+    );
+    let background = theme.row_background(selected, pane.hover == Some(row));
+    if !background.is_invisible() {
+        painter.list.rect(pill, background, painter.px(metrics.radius));
+    }
+    if pane.selection.cursor() == Some(id) && naming.is_none() {
+        painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
+    }
+    if drop_row == Some(row) {
+        painter.list.rect(pill, theme.palette.accent.with_alpha(90), painter.px(metrics.radius));
+    }
+
+    // **From the height, capped by the width.** The cell's height is fixed and its
+    // width stretches to fill the pane, so a mark sized from the width grew with
+    // the window while the cell it sits in did not — and in a wide pane it drew
+    // straight through the name. The cap is what keeps it inside a narrow one.
+    let mark = (box_.height * 0.46).min(box_.width * 0.42);
+    let icon_box = painter.rect(
+        box_.x + (box_.width - mark) / 2.0,
+        box_.y + box_.height * 0.34 - mark / 2.0,
+        mark,
+        mark,
+    );
+    let colour = kind_colour_of(&theme, types, &pane.listing, id, directory, broken);
+    if directory {
+        painter.folder(icon_box, colour);
+    } else {
+        painter.file(icon_box, colour);
+    }
+
+    let text_top = box_.y + box_.height * 0.58;
+    let baseline = painter.baseline(text_top, metrics.row_height, metrics.text_size);
+    if let Some(naming) = naming.filter(|naming| naming.row == row) {
+        name_field_at(painter, layout, naming, text_top, baseline);
+        return;
+    }
+    let name_box = painter.rect(box_.x + 4.0, 0.0, (box_.width - 8.0).max(1.0), 0.0);
+    painter.cell(
+        RunKey::cell(
+            pane.listing.version(),
+            id.0,
+            COLUMN_NAME,
+            Weight::Regular,
+            painter.px(metrics.text_size),
+        ),
+        pane.listing.name(id),
+        name_box,
+        baseline,
+        theme.name_color(selected, directory, broken),
+        Align::Center,
+    );
+}
+
+/// The colour of an entry's mark.
+///
+/// Shared by the row and the cell, because a file that is one colour at 16 pixels
+/// and another at 48 is two files as far as anybody scanning the pane is
+/// concerned.
+fn kind_colour_of(
+    theme: &sk_ui::Theme,
+    types: Option<&MimeDatabase>,
+    listing: &sk_model::Listing,
+    id: sk_model::EntryId,
+    directory: bool,
+    broken: bool,
+) -> Color {
+    if broken {
+        return theme.palette.pending;
+    }
+    if directory {
+        return theme.palette.kinds.folder;
+    }
+    // The mode bit before the name: a program is usually called something with no
+    // extension at all — `runme`, `configure`, half of `/usr/bin` — so a
+    // name-only answer calls it unknown, and what it is is the one thing about it
+    // worth marking.
+    let by_name = kind_color(theme, types, listing.name(id));
+    if listing.flags(id).has(Flags::EXEC) && by_name == theme.palette.kinds.unknown {
+        theme.palette.kinds.executable
+    } else {
+        by_name
+    }
+}
+
 /// One row: its shape, its mark, and its three cells.
 fn row_at(
     painter: &mut Painter<'_>,
@@ -2354,7 +2520,8 @@ fn row_at(
 
     {
         let Some(id) = pane.listing.at(row) else { return };
-        let top = layout.body.y + row as f32 * metrics.row_height - pane.scroll.offset();
+        let cells = Cells::new(pane.mode, layout.body, metrics.row_height, pane.listing.rows());
+        let top = cells.at(row, pane.scroll.offset()).y;
         let flags = pane.listing.flags(id);
         let selected = pane.selection.contains(id);
         let directory = flags.has(Flags::DIR);
@@ -2403,22 +2570,7 @@ fn row_at(
             icon_size,
             icon_size,
         );
-        let icon_color = if broken {
-            theme.palette.pending
-        } else if directory {
-            theme.palette.kinds.folder
-        } else {
-            // The mode bit before the name: a program is usually called
-            // something with no extension at all — `runme`, `configure`, half of
-            // `/usr/bin` — so a name-only answer calls it unknown, and what it
-            // is is the one thing about it worth marking.
-            let by_name = kind_color(&theme, types, pane.listing.name(id));
-            if flags.has(Flags::EXEC) && by_name == theme.palette.kinds.unknown {
-                theme.palette.kinds.executable
-            } else {
-                by_name
-            }
-        };
+        let icon_color = kind_colour_of(&theme, types, &pane.listing, id, directory, broken);
         if directory {
             painter.folder(icon_box, icon_color);
         } else {
@@ -2526,7 +2678,8 @@ fn metadata_cells(
 
 fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
-    let content = pane.listing.rows() as f32 * theme.metrics.row_height;
+    let content = Cells::new(pane.mode, layout.body, theme.metrics.row_height, pane.listing.rows())
+        .content_height();
     let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, layout.body.height)
     else {
         return;
