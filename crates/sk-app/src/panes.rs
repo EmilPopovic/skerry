@@ -606,6 +606,12 @@ impl Panes {
     }
 }
 
+/// How wide the scrollbar thumb is drawn, in logical pixels.
+///
+/// Eight, and the grab band around it is wider, because a thumb is a thing to see
+/// and a pointer is not eight pixels accurate.
+pub(crate) const THUMB: f32 = 8.0;
+
 /// Where one leaf's parts are.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PaneLayout {
@@ -659,6 +665,24 @@ impl PaneLayout {
         let gutter = self.icon.x - self.body.x;
         let right = (self.modified.right() + gutter).min(self.body.right());
         Area { width: (right - self.body.x).max(0.0), ..self.body }
+    }
+
+    /// The strip the scrollbar thumb is drawn in, and the strip a press grabs it
+    /// by.
+    ///
+    /// **Inside the table, against its right edge.** Not at the pane's right edge,
+    /// where a thumb two thousand pixels from the rows it scrolls belongs to
+    /// nothing on screen; and not past the table's closing rule, which is where it
+    /// went for one commit and read as a bar floating in the empty space beside
+    /// the list rather than as the list's own scrollbar.
+    ///
+    /// One function because there were nearly two. [`sk_ui::thumb`] exists for
+    /// exactly this reason on the other axis: the view drew the thumb and the hit
+    /// test found it, from the same arithmetic written out twice, and the two had
+    /// already grown two spellings of one clamp.
+    pub(crate) fn track(&self, mode: crate::cells::Mode) -> Area {
+        let table = self.rows(mode);
+        Area { x: table.right() - THUMB - 3.0, width: THUMB, ..table }
     }
 
     /// The navigation button at a point, if any.
@@ -1245,6 +1269,43 @@ mod tests {
         assert_eq!(cells.index_at(table.x + 20.0, y, 0.0), Some(0), "inside the table is row 0");
         assert_eq!(cells.index_at(table.right() + 40.0, y, 0.0), None, "past it is nothing");
         assert_eq!(cells.index_at(leaf.body.right() - 5.0, y, 0.0), None, "and so is the far edge");
+    }
+
+    /// **The thumb belongs against the table's right edge, inside it.**
+    ///
+    /// It has been wrong on both sides of that: once past the edge, a bar floating
+    /// in the empty space beside the list, and once eleven pixels further in,
+    /// dodging a rule that closed the table off and has since been dropped for
+    /// wanting the same ten pixels.
+    #[test]
+    fn the_thumb_sits_inside_the_table_and_clear_of_its_closing_rule() {
+        let (panes, _waker, jobs, _updates) = tree();
+        drop(jobs);
+        let metrics = sk_ui::Metrics::default();
+        let widths = crate::layout::Columns::default();
+        let mut leaves = Vec::new();
+        let mut dividers = Vec::new();
+        let wide = Area { x: 0.0, y: 0.0, width: 2400.0, height: 600.0 };
+        panes.layout(wide, &metrics, widths, &mut leaves, &mut dividers);
+        let leaf = leaves[0];
+
+        let table = leaf.rows(crate::cells::Mode::Details);
+        let track = leaf.track(crate::cells::Mode::Details);
+        assert!(track.x > table.x, "and not off the left of it either");
+        assert!(track.right() <= table.right(), "the thumb left the table at {}", track.right());
+        assert!(
+            track.right() > table.right() - 12.0,
+            "the thumb is {} short of the table's edge at {}",
+            table.right() - track.right(),
+            table.right()
+        );
+        assert!((track.width - super::THUMB).abs() < f32::EPSILON);
+
+        // A grid has no rule and reserves its own strip, so there the thumb goes
+        // against the body's edge.
+        let grid = leaf.track(crate::cells::Mode::Grid);
+        assert!(grid.right() <= leaf.body.right(), "outside the pane");
+        assert!(grid.right() > leaf.body.right() - 12.0, "not against the edge: {}", grid.right());
     }
 
     /// A grid's cells tile the whole body, so the body is the table — and a pane

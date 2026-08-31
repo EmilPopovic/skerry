@@ -6,7 +6,7 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 601
+**M0, in progress, and something you can use for a day.** Eleven crates, 602
 tests, 103 GUI scenarios **on both Wayland and X11**, thirty-eight golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live

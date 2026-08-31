@@ -2317,13 +2317,21 @@ pub fn sort_columns(
 /// Inset top and bottom, and stopping short of the rule under the header, because
 /// a boundary that met it on both ends would close a box around each label and
 /// the header would read as three fields to type in.
+///
+/// **Between the columns and not around them.** A rule at the last column's right
+/// edge closed the table off, and the scrollbar then had nowhere to go: the thumb
+/// belongs against the table's edge, that rule marks a boundary a drag takes hold
+/// of and may not be drawn over, and the two are the same ten pixels. The rule
+/// lost, because what says where the table ends is the row fill, which ends there
+/// on every row — and a boundary that only the third column has is the one a hand
+/// reaches for least. It is still draggable; it is the fill's edge that shows it.
 fn separators(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout, colour: sk_gpu::Color) {
     if pane.mode != Mode::Details {
         return;
     }
     let inset = 5.0;
     let height = (layout.header.height - inset * 2.0).max(1.0);
-    for column in [layout.name, layout.size, layout.modified] {
+    for column in [layout.name, layout.size] {
         if column.width > 0.0 {
             painter.vline(column.right(), layout.header.y + inset, height, colour);
         }
@@ -2814,15 +2822,9 @@ fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, table.height) else {
         return;
     };
-    let width = 8.0;
-    // **Beside the table, not at the pane's right edge and not inside it.** A
-    // thumb two thousand pixels away from the rows it scrolls belongs to nothing
-    // on screen; one drawn inside the table lands on the rule that closes it. So
-    // it sits just past that rule, and stays inside the pane when the table
-    // reaches the pane's edge, which is every window narrower than the ceiling.
-    let x = (table.right() + 3.0).min(layout.body.right() - width - 3.0);
-    let rect = painter.rect(x, table.y + position, width, thumb);
-    painter.list.rect(rect, theme.palette.thumb, painter.px(width / 2.0));
+    let track = layout.track(pane.mode);
+    let rect = painter.rect(track.x, track.y + position, track.width, thumb);
+    painter.list.rect(rect, theme.palette.thumb, painter.px(track.width / 2.0));
 }
 
 fn status(
