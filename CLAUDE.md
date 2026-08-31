@@ -42,7 +42,9 @@ window packs them left into a table with an edge instead of putting a file's siz
 a screen away from its name; each pane's bar carries a **switcher** for its view
 mode, so a mode is one press rather than a menu — and the third mode it will hold
 is decided but not written
-([ADR 0014](docs/adr/0014-a-column-view-is-a-trail-of-panes.md));
+([ADR 0015](docs/adr/0015-a-column-is-a-directory-and-a-choice.md), which
+supersedes 0014 — a column is not a pane, because a pane is independent and
+columns are one path decomposed);
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —

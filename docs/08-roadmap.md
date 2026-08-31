@@ -268,13 +268,18 @@ and they shed after the navigation buttons: a bar with room for one group keeps
 the one that moves rather than the one that looks.
 
 **A column view is decided and not yet written.**
-[ADR 0014](adr/0014-a-column-view-is-a-trail-of-panes.md) settles the seam that
-had to come first — a column *is* a `Pane`, a pane in column mode holds a trail of
-them, and the last one is the pane the rest of the program talks to — so reads
-route themselves by generation, operations act on the deepest column, the watcher
-watches the trail, and the session stores nothing new. The switcher grows its
-third mark when that lands, and not before: a button that does nothing is worse
-than no button.
+[ADR 0015](adr/0015-a-column-is-a-directory-and-a-choice.md) settles the seam that
+had to come first, and it is the second answer to the question:
+[0014](adr/0014-a-column-view-is-a-trail-of-panes.md) said a column *is* a `Pane`
+and was wrong, because a pane is an independent view and columns are one path
+decomposed — the relation between two neighbours is the feature, and a
+`Vec<Pane>` cannot hold it. What a read is about turns out to be neither: a
+`Directory` — a path, a listing, a generation — held by a pane beside its own
+view decisions, and by a `Level { directory, chosen, scroll }` that is a column
+and has no sort, no mode and no selection to get out of step. The deepest column
+is still the pane, so no operation and no session field changes. The switcher
+grows its third mark when that lands, and not before: a button that does nothing
+is worse than no button.
 
 **Still owed here:** middle-click to split, the **List** columns — and the inline
 **Tree**,
