@@ -3133,6 +3133,19 @@ impl App {
     ///
     /// Stops the operation in flight and drops the rest of the queue.
     pub(crate) fn cancel_operation(&mut self) {
+        // **Whatever the strip is showing.** Stop has one meaning — stop the
+        // operation that is running — and which operation that is, is not the
+        // person's problem. An index build is a long operation and [rule
+        // 7](../../../docs/03-principles.md) says a long operation is
+        // cancellable, so it answers to the same command the copy does rather
+        // than to a second one nobody would look for.
+        if self.indexes.building().is_some() {
+            self.indexes.stop();
+            self.notice =
+                Some((sk_model::i18n::lookup("notice.cancelled").to_owned(), Instant::now()));
+            self.dirty = true;
+            return;
+        }
         if !self.edits.cancellable() {
             return;
         }
@@ -3144,14 +3157,19 @@ impl App {
     /// Whether there is anything worth stopping.
     #[must_use]
     pub fn can_cancel(&self) -> bool {
-        self.edits.cancellable()
+        self.edits.cancellable() || self.indexes.building().is_some()
     }
 
     /// Whether there is anything worth holding still.
     ///
-    /// The same set as [`Self::can_cancel`]: a trash is one syscall with nothing
-    /// between its start and its end to pause at, and a queue that is already
-    /// paused is worth un-pausing.
+    /// A trash is one syscall with nothing between its start and its end to
+    /// pause at, and a queue that is already paused is worth un-pausing.
+    ///
+    /// **Not the same set as [`Self::can_cancel`] any more.** An index build is
+    /// cancellable and is not pausable: it is seconds long — 652 ms for half a
+    /// million entries, measured — so a latch on it would be a control nobody
+    /// has time to reach, and a Pause drawn on the strip that did nothing would
+    /// be worse than no Pause at all.
     #[must_use]
     pub fn can_pause(&self) -> bool {
         self.edits.cancellable()
@@ -3839,6 +3857,23 @@ search_active={active:?}",
         self.indexes.begins(&root, cancel.clone());
         let sender = self.replies.index_tx.clone();
         let wake = self.waker.handle();
+
+        // **The counting pass, beside the build rather than before it.** This is
+        // the copy engine's bargain and it is what gives the bar a denominator:
+        // counting first would make every index wait on a walk, and estimating
+        // from a partial count is the bar that reaches 40% and starts over.
+        // Cheap enough to be worth doing twice because it reads names and does
+        // not `statx` each entry — see `sk_index::store::count`.
+        let counting = (sender.clone(), self.waker.handle(), root.clone());
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, cancel.clone(), move |cancel| {
+            let (sender, wake, root) = counting;
+            sk_index::store::count(&root, cancel, &mut |seen, complete| {
+                if sender.send(crate::indexing::Note::Total(seen, complete)).is_ok() {
+                    wake.wake();
+                }
+            });
+        });
+
         self.jobs.pool.spawn(sk_util::Lane::Parallel, cancel, move |cancel| {
             let mut said = |count: usize| {
                 if sender.send(crate::indexing::Note::Counting(count)).is_ok() {
@@ -6432,7 +6467,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // count is honest; a bar that guesses at a denominator is the indeterminate
         // spinner [rule 7](../../../docs/03-principles.md) refuses.
         let indexing = indexes.building().map(|(_, count)| {
-            sk_model::i18n::format("index.building", &[&sk_ui::format::grouped(count)])
+            let done = sk_ui::format::grouped(count);
+            // Once the counting pass has landed, the sentence says the
+            // denominator the bar is drawn from — a bar with no number beside it
+            // is a bar a person has to trust rather than read.
+            indexes.counted().map_or_else(
+                || sk_model::i18n::format("index.building", &[&done]),
+                |total| {
+                    let all = sk_ui::format::grouped(total);
+                    sk_model::i18n::format("index.building_of", &[&done, &all])
+                },
+            )
         });
         let progress = edits.progress_line().or(indexing);
         let doomed: Option<(Vec<String>, usize, bool)> = erasing.as_ref().map(|asking| {
@@ -6485,7 +6530,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             erasing: doomed.as_ref().map(|(names, total, on)| (names.as_slice(), *total, *on)),
             answering: edits.answering,
             for_the_rest: edits.for_the_rest,
-            progress: edits.fraction(),
+            // The copy's bar if one is running, the index build's otherwise. Both
+            // are a real fraction of a counted total or nothing at all.
+            progress: edits.fraction().or_else(|| indexes.fraction()),
+            // Only where there is something a latch can hold. See `can_pause`.
+            pausable: edits.busy(),
             paused: edits.held(),
             naming: edits.naming.as_ref(),
             tools,

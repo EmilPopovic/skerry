@@ -88,6 +88,11 @@ pub struct Chrome<'a> {
     /// Whether that operation is on the pause latch, so the button can say
     /// *Resume* rather than offering to pause something already paused.
     pub paused: bool,
+    /// Whether the operation on the strip is one a latch can hold.
+    ///
+    /// An index build is cancellable and not pausable — it is seconds long — and
+    /// a Pause drawn on the strip that did nothing would be worse than none.
+    pub pausable: bool,
     /// The breadcrumb separator under the pointer.
     pub hovered_separator: Option<usize>,
     /// The sibling menu a separator has opened, while one is open.
@@ -2622,6 +2627,9 @@ fn status(
         for (label, paused_label, is_cancel) in
             [("status.cancel", "status.cancel", true), ("status.pause", "status.resume", false)]
         {
+            if !is_cancel && !chrome.pausable {
+                continue;
+            }
             let key = if !is_cancel && chrome.paused { paused_label } else { label };
             let text = i18n::lookup(key);
             let width = text_width(painter, text, metrics.header_size, false) + 12.0;
@@ -2958,6 +2966,7 @@ mod tests {
                 for_the_rest: false,
                 progress: None,
                 paused: false,
+                pausable: false,
                 naming: None,
                 tools: [true, true, true, true],
                 filtering: false,

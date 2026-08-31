@@ -126,6 +126,7 @@ fn chrome_of<'a>(
         for_the_rest: false,
         progress: None,
         paused: false,
+        pausable: false,
         naming: None,
         tools: [true, true, true, true],
         filtering: false,

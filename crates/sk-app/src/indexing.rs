@@ -18,6 +18,11 @@ use std::sync::Arc;
 pub(crate) enum Note {
     /// Entries walked so far, while a build runs.
     Counting(usize),
+    /// How many entries there turn out to be, and whether that is the final word.
+    ///
+    /// From the counting pass beside the build, which is where the progress bar's
+    /// denominator comes from.
+    Total(usize, bool),
     /// A build finished, and this is what it produced.
     Built(Option<Arc<sk_index::Index>>),
     /// A load finished, and this is what was on disk.
@@ -31,6 +36,13 @@ pub(crate) struct Indexes {
     held: Option<Arc<sk_index::Index>>,
     /// The root a build is running for, and how many entries it has reached.
     building: Option<(PathBuf, usize)>,
+    /// How many entries the counting pass has found, and whether it finished.
+    ///
+    /// **Nothing is estimated from a partial count**, which is the rule the copy
+    /// engine's `Total` states and the reason it carries the same flag: a bar that
+    /// climbs to 40% and starts over because the walk found more is worse than no
+    /// bar at all. So the fraction waits for the `bool`.
+    total: (usize, bool),
     /// The token that stops a build in flight.
     cancel: Option<sk_util::Cancel>,
     /// The root a load or a build was asked about.
@@ -73,7 +85,28 @@ impl Indexes {
         self.stop();
         self.asking(root);
         self.building = Some((root.to_path_buf(), 0));
+        self.total = (0, false);
         self.cancel = Some(cancel);
+    }
+
+    /// How far the build has got, once there is a total to measure it against.
+    ///
+    /// `None` until the counting pass has finished, which is the same bargain
+    /// the copy makes: no bar at all rather than one whose denominator is still
+    /// moving. Clamped, because the tree can grow between the count and the
+    /// build reaching the end of it.
+    pub(crate) fn fraction(&self) -> Option<f32> {
+        let (_, done) = self.building.as_ref()?;
+        let (total, complete) = self.total;
+        (complete && total > 0).then(|| (*done as f32 / total as f32).clamp(0.0, 1.0))
+    }
+
+    /// The total the counting pass found, once it is final.
+    pub(crate) const fn counted(&self) -> Option<usize> {
+        match self.total {
+            (total, true) => Some(total),
+            _ => None,
+        }
     }
 
     /// Stops a build in flight, if there is one.
@@ -102,9 +135,14 @@ impl Indexes {
                 *at = count;
                 true
             }
+            Note::Total(total, complete) => {
+                self.total = (total, complete);
+                self.building.is_some()
+            }
             Note::Built(index) => {
                 self.building = None;
                 self.cancel = None;
+                self.total = (0, false);
                 if index.is_some() {
                     self.held = index;
                 }
@@ -149,6 +187,38 @@ mod tests {
         let mut indexes = Indexes::default();
         assert!(!indexes.arrived(Note::Loaded(None)), "an empty load claimed to change something");
         assert!(indexes.covering(Path::new("/tmp")).is_none());
+    }
+
+    /// No bar until the count has finished, and then a real one.
+    ///
+    /// **The rule the copy engine states and this one inherits**: nothing is
+    /// estimated from a partial total, because a bar that climbs to 40% and
+    /// starts over when the walk finds more is worse than no bar at all.
+    #[test]
+    fn the_bar_waits_for_a_total_that_has_stopped_moving() {
+        let mut indexes = Indexes::default();
+        assert!(indexes.fraction().is_none(), "a bar with no build behind it");
+        indexes.begins(Path::new("/tmp"), sk_util::Cancel::new());
+        assert!(indexes.fraction().is_none(), "a bar before anything was counted");
+
+        indexes.arrived(Note::Counting(50));
+        indexes.arrived(Note::Total(200, false));
+        assert!(indexes.fraction().is_none(), "a bar drawn from a count still moving");
+        assert!(indexes.counted().is_none());
+
+        indexes.arrived(Note::Total(400, true));
+        assert_eq!(indexes.counted(), Some(400));
+        assert_eq!(indexes.fraction(), Some(0.125));
+
+        // The tree can grow between the count and the build reaching the end of
+        // it, and a bar past its own end is a bar that has stopped meaning
+        // anything.
+        indexes.arrived(Note::Counting(900));
+        assert_eq!(indexes.fraction(), Some(1.0));
+
+        // And it goes away with the build rather than lingering over the strip.
+        indexes.arrived(Note::Built(None));
+        assert!(indexes.fraction().is_none());
     }
 
     /// A build that is cancelled stops being a build in flight.

@@ -131,6 +131,11 @@ FRAMES = [
     # its divider, the sentence is at full strength, and Pause and Stop are in it.
     # The only frame that would catch the fill and the text drifting apart.
     ("copying", ["--size", "900x520", "--scale", "125", "--progress"]),
+    # The same strip mid-index-build: the bar is a real fraction of a counted
+    # total, and the sentence names the denominator it is drawn from. Its own
+    # frame because the two operations reach the bar by different routes and this
+    # is what would catch one of them losing it.
+    ("indexing", ["--size", "900x520", "--scale", "125", "--indexing"]),
     # The subtree search: results from three different folders, each with the
     # folder it is in beside it, over a summary that says the walk is still
     # going. The only frame whose rows are not one directory's.

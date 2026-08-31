@@ -287,6 +287,7 @@ rather than a single multiplier.
 | | median of 3 | spread |
 | --- | --- | --- |
 | Build, walking the tree | 652.1 ms | 651.8–659.5 |
+| **The counting pass beside it** | **275.2 ms**, 42% of the build | 246.1–278.2 |
 | Save | 31.5 ms | one run |
 | Load, warm | 31.7 ms | 30.7–32.5 |
 | **Scan for a query** | **6.99 ms** | 6.36–7.15 |
@@ -304,6 +305,19 @@ as-you-type keystroke needs before the next one arrives: 639.9 ms of walking, or
 a different tree, and it is the figure for the privacy conversation [ADR
 0008](adr/0008-persistent-index-is-required.md) asked for: a million files is
 about 45 MB on the user's disk.
+
+**The counting pass is what pays for the progress bar.** A bar needs a
+denominator and a walk does not have one until it has finished, so the build runs
+a second walk beside it — the same bargain the copy engine already makes, and the
+same rule: nothing is estimated from a partial count, so there is no bar at all
+until that walk has finished. It is affordable because it reads names and does
+**not** `statx` each entry, which [Spike
+B](../spikes/b-enumeration/README.md) and [Spike
+F](../spikes/f-index-and-search/README.md) both measure as the expensive half.
+Measured at **42% of the build**, so the bar appears about four tenths of the way
+in and is real for the rest. Sequentially measured; run concurrently the two
+contend for I/O, and on a cold tree the counting pass also warms the cache for
+the build behind it — neither effect is measured here.
 
 **Three things this does not say.** It is warm, so it is not the row's cold
 target. It is one tree on one machine. And the build is 652 ms for half a million

@@ -68,6 +68,10 @@ pub struct Capture {
     /// Whether to draw the status strip mid-operation: the bar behind its own
     /// text, with Pause and Stop in it.
     pub progress: bool,
+    /// Whether to draw the strip mid-index-build, which is the same bar over a
+    /// different operation — and the frame that would catch the two drifting
+    /// apart.
+    pub indexing: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -518,7 +522,10 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         // A capture has no queue, so the sentence a copy would be writing is
         // stated — the same trade `sample_properties` makes, and for the same
         // reason: a frame has to be the same on every machine.
-        notice: request.progress.then_some("Copying 1,204 of 1,776 · 42 MB/s · about 14 s left"),
+        notice: request
+            .progress
+            .then_some("Copying 1,204 of 1,776 · 42 MB/s · about 14 s left")
+            .or(request.indexing.then_some("Indexing… 214,880 of 563,605 entries")),
         // The pointer is on a row, so nothing in the frame is hovered
         // — the hover shapes are covered by the GUI scenarios, which can
         // actually move a pointer.
@@ -537,8 +544,12 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         // Two thirds through and not paused, which is the state that draws every
         // part of this: a filled bar, its head, the sentence at full strength and
         // both controls.
-        progress: request.progress.then_some(0.66),
+        progress: request
+            .progress
+            .then_some(0.66)
+            .or(request.indexing.then_some(214_880.0 / 563_605.0)),
         paused: false,
+        pausable: request.progress,
         naming: sample.overlays.naming.as_ref(),
         // What a freshly opened directory looks like: nowhere to go
         // back to, nowhere forward, a parent and a reload. Hardcoded

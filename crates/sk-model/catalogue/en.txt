@@ -254,6 +254,7 @@ search.none = Nothing under here is called that
 search.indexed = {0} found in {1} indexed entries · indexed {2}
 search.indexed_capped = the first {0}, of {1} indexed entries · indexed {2}
 index.building = Indexing… {0} entries so far
+index.building_of = Indexing… {0} of {1} entries
 action.search = Find a file
 action.search_results = Show all results in this pane
 action.index_build = Index this folder

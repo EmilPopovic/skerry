@@ -361,6 +361,106 @@ fn read_into(
     }
 }
 
+/// How often a count says how far it has got.
+///
+/// The same 64 ms [`crate::find`] and [`crate::size`] use, and for the same
+/// reason: often enough that a bar visibly moves, rarely enough that a tree of a
+/// million entries does not send a million messages.
+const COUNT_EVERY: std::time::Duration = std::time::Duration::from_millis(64);
+
+/// How many entries [`build`] would store under `root`.
+///
+/// # Why this exists
+///
+/// A progress bar needs a denominator, and a walk does not know one until it has
+/// finished. This is the same answer the copy engine already gives: a counting
+/// pass **beside** the operation rather than before it, whose total the bar waits
+/// for. Nothing is estimated from a partial count — a bar that reaches 40% and
+/// starts over because the walk found more is worse than no bar at all.
+///
+/// # Why it is not [`crate::size`]
+///
+/// That walk answers a different question — how many bytes and files are under
+/// here — and it disagrees with this one in four places: it never counts a
+/// symlink, never counts a directory on another filesystem, drops an entry whose
+/// `statx` failed, and counts the root itself. `build` stores all four. Borrowing
+/// its total would put the bar a few percent out on any tree with links in it,
+/// which is every tree.
+///
+/// # Why it is cheap enough to be worth doing twice
+///
+/// It reads names and does **not** `statx` each entry, which
+/// [Spike B](../../../spikes/b-enumeration/README.md) and [Spike
+/// F](../../../spikes/f-index-and-search/README.md) both measure as the
+/// expensive half — deferring it is 2× on the median and 10× on the p99. The
+/// kind comes from `getdents64`'s own `d_type`, and `statx` is asked only where
+/// the filesystem answered `Unknown`. One `statx` per *directory* settles the
+/// one-filesystem rule, rather than one per entry.
+pub fn count(root: &Path, cancel: &Cancel, report: &mut impl FnMut(usize, bool)) {
+    let Some(device) = device_of(root) else {
+        report(0, true);
+        return;
+    };
+    let mut seen = 0usize;
+    let mut pending = vec![root.to_path_buf()];
+    let mut next_report = std::time::Instant::now() + COUNT_EVERY;
+    while let Some(directory) = pending.pop() {
+        if cancel.is_cancelled() {
+            return;
+        }
+        count_one(&directory, device, &mut seen, &mut pending);
+        if std::time::Instant::now() >= next_report {
+            next_report = std::time::Instant::now() + COUNT_EVERY;
+            report(seen, false);
+        }
+    }
+    report(seen, true);
+}
+
+/// Counts one directory's entries, queueing the subdirectories under it.
+fn count_one(directory: &Path, device: u64, seen: &mut usize, pending: &mut Vec<PathBuf>) {
+    let open = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let Ok(fd) = rustix::fs::open(directory, open, Mode::empty()) else { return };
+    // **The `du -x` rule, once per directory instead of once per entry.** `build`
+    // reaches the same decision from the `statx` it is already doing per entry;
+    // this one is not doing those, so it asks here — a mount point is counted as
+    // an entry by whoever listed it and nothing inside it is counted by either.
+    let on = rustix::fs::statx(&fd, "", rustix::fs::AtFlags::EMPTY_PATH, StatxFlags::TYPE)
+        .map(|it| u64::from(it.stx_dev_major) << 32 | u64::from(it.stx_dev_minor));
+    if on.is_ok_and(|it| it != device) {
+        return;
+    }
+    let Ok(dir) = Dir::read_from(&fd) else { return };
+
+    for entry in dir.flatten() {
+        let raw = entry.file_name().to_bytes();
+        if raw == b"." || raw == b".." {
+            continue;
+        }
+        // Every entry, because `build` stores every entry — a link, a socket and
+        // a directory it cannot read are all one row in the file.
+        *seen += 1;
+        let kind = entry.file_type();
+        if kind == FileType::Symlink {
+            continue;
+        }
+        let name = String::from_utf8_lossy(raw);
+        let directory_here = match kind {
+            FileType::Directory => true,
+            // Some filesystems do not fill in `d_type`. Only those pay a `statx`.
+            FileType::Unknown => {
+                let at = rustix::fs::AtFlags::SYMLINK_NOFOLLOW;
+                rustix::fs::statx(&fd, name.as_ref(), at, StatxFlags::TYPE)
+                    .is_ok_and(|it| u32::from(it.stx_mode) & 0o170_000 == 0o040_000)
+            }
+            _ => false,
+        };
+        if directory_here {
+            pending.push(directory.join(name.as_ref()));
+        }
+    }
+}
+
 /// Writes the index where [`path_for`] says, whole and atomically.
 ///
 /// Written to a neighbouring name and renamed, which is atomic within a
@@ -680,8 +780,9 @@ fn now() -> i64 {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{HEADER, Index, MOST, build, load_from, save_to, scan_by, search, shard_of};
+    use super::{HEADER, Index, MOST, build, count, load_from, save_to, scan_by, search, shard_of};
     use sk_util::{Cancel, Pool};
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -715,6 +816,57 @@ mod tests {
     fn hunt(index: &Arc<Index>, needle: &str) -> super::Found {
         // One worker, so the shard the caller finishes itself is the whole scan.
         search(index, needle, &Pool::with_width(1), &Cancel::new())
+    }
+
+    /// The count is the number of entries the build stores. Exactly.
+    ///
+    /// **This is the whole basis for the progress bar being honest.** The bar's
+    /// denominator comes from a second, cheaper walk, and the two agreeing is not
+    /// something the type system can arrange — they are separate loops that make
+    /// the same decisions for different reasons. The fixture holds one of each
+    /// thing they could disagree about: a symlink, which `size` would not have
+    /// counted; a directory that cannot be read; and a dangling link.
+    #[test]
+    fn the_count_is_exactly_what_the_build_stores() {
+        let root = fixture("count");
+        std::os::unix::fs::symlink(root.join("a"), root.join("a-link")).unwrap();
+        std::os::unix::fs::symlink("nowhere-at-all", root.join("dangling")).unwrap();
+        let shut = root.join("shut");
+        std::fs::create_dir_all(shut.join("hidden-inside")).unwrap();
+        std::fs::write(shut.join("unreachable.txt"), b"x").unwrap();
+        // Unreadable, so neither walk can see inside it — and both must still
+        // count the directory itself.
+        let locked = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(&shut, locked).unwrap();
+
+        let mut counted = 0usize;
+        let mut finished = false;
+        count(&root, &Cancel::new(), &mut |seen, done| {
+            counted = seen;
+            finished = done;
+        });
+        let index = built(&root);
+
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(finished, "the count never said it had finished");
+        assert_eq!(
+            counted,
+            index.len(),
+            "the count and the build disagree, so the bar would end somewhere other than the end"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cancelled count stops rather than finishing for nobody.
+    #[test]
+    fn a_cancelled_count_never_says_it_finished() {
+        let root = fixture("count-cancel");
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let mut reports = 0;
+        count(&root, &cancel, &mut |_, _| reports += 1);
+        assert_eq!(reports, 0, "a cancelled count reported anyway");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Every entry is reachable by the path the parent chain reconstructs.
@@ -908,7 +1060,7 @@ mod tests {
 mod measure {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::print_stdout)]
 
-    use super::{build, load_from, save_to, search};
+    use super::{build, count, load_from, save_to, search};
     use sk_util::{Cancel, Pool};
     use std::sync::Arc;
     use std::time::Instant;
@@ -923,10 +1075,18 @@ mod measure {
         let root = std::path::PathBuf::from(tree);
         let file = std::env::temp_dir().join("skerry-measure.skix");
 
+        // The counting pass first, on its own, because the question the progress
+        // bar turns on is whether it finishes early enough to be worth having.
+        let at = Instant::now();
+        let mut counted = 0usize;
+        count(&root, &Cancel::new(), &mut |seen, _| counted = seen);
+        let counting = at.elapsed();
+
         let at = Instant::now();
         let index = build(&root, &Cancel::new(), &mut |_| {}).expect("the build found no root");
         let building = at.elapsed();
         let entries = index.len();
+        assert_eq!(counted, entries, "the count and the build disagree");
 
         let at = Instant::now();
         assert!(save_to(&index, &file), "the index would not save");
@@ -958,6 +1118,11 @@ mod measure {
         println!("skerry-index root {}", root.display());
         println!("skerry-index entries {entries}");
         println!("skerry-index build {:.1} ms", building.as_secs_f64() * 1000.0);
+        println!(
+            "skerry-index count {:.1} ms ({:.0}% of the build)",
+            counting.as_secs_f64() * 1000.0,
+            counting.as_secs_f64() / building.as_secs_f64() * 100.0
+        );
         println!("skerry-index save {:.1} ms", saving.as_secs_f64() * 1000.0);
         println!("skerry-index load-warm {:.1} ms", loading.as_secs_f64() * 1000.0);
         println!(

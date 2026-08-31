@@ -1145,6 +1145,44 @@ failing on, three assertions later and under a message about the *window* rather
 than about the wait. The sleeps stay: they are also what gives a pointer motion
 time to be drawn, and a motion has nothing to print.
 
+## A gate whose premise is occasionally false is a gate that occasionally lies
+
+`no-cpu-when-idle` is rule 1's gate: three seconds of a window nobody is
+touching, and any CPU at all is a failure. It failed once in four or five full
+sweeps, always with **exactly one tick**, and passed six times in isolation and
+eight times under twelve spinning processes. Load was not the variable and the
+scenario was not at fault.
+
+The premise was. The scenario assumes nothing will happen to the window for three
+seconds, and in a nested compositor that has mapped and unmapped a hundred
+windows, occasionally something does. A window handed an event draws a frame for
+it and is behaving *correctly* — it is simply not idle, so the measurement is
+void rather than failed. **The invariant is not "no CPU", it is "no CPU without
+something to do for it."**
+
+The window already reports `frames`, so the two can be told apart: a loop on a
+timer burns CPU in every window and draws nothing, and a stray event burns it in
+one window and draws a frame. The gate now says that in as many words.
+
+Two things this cost, and the second is the reusable one.
+
+The first version counted *any* movement in `frames` as an event. Measured, an
+`F12` draws exactly one frame by itself — the very report used to read the
+counter moves it — so the "drew nothing" branch could never be reached and the
+whole discriminator was dead code. The gate had quietly become a three-window
+retry with an explanation attached to it. **A counter read by an instrument that
+also moves the counter has to have the instrument's own contribution subtracted,
+and the size of that contribution is a measurement rather than an assumption.**
+
+The second is that the repair was checked against a real violation, which is
+where the first version was caught. A 100 ms timer injected into the frame loop's
+poll **passed both the old gate and the new one**: thirty wakeups that do nothing
+cost less than a single scheduler tick, so the cheapest form of the thing this
+gate exists to forbid is invisible to it. A zero-length timeout — a busy loop —
+fails it on the first window, at 299 ticks in three seconds. The gate catches a
+loop that spins and does not catch a loop that merely wakes, and that is worth
+knowing about it rather than assuming otherwise.
+
 ## A wait that gives up quietly hands back the answer to the previous question
 
 The fix above put the guarantee one level down: `Run.drive` counted the `key f12`

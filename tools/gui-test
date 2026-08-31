@@ -5481,22 +5481,58 @@ def no_cpu_when_idle(run: Run, fixture: Path) -> None:
     measurement started — which a `sleep 1500` calls idle on a quiet machine and
     does not on a busy one. The window reports how many walks are running, so
     this asks.
+
+    **Every kind of walk, not the two it started with.** An index build is a
+    third, and it is two walks: the build and the counting pass beside it that
+    the progress bar's denominator comes from. Nothing in this scenario asks for
+    one, so this is a guard against a later scenario or a later default rather
+    than against today — the gate has to name what would make it wrong, because
+    a tick of CPU says nothing about which walk produced it.
     """
+    quiet = lambda it: (
+        it.get("sizes", "").endswith("/0")
+        and it.get("loading") == "false"
+        and it.get("indexing") == "0"
+        and it.get("busy") == "false"
+    )
     for _ in range(40):
         run.drive("key f12\nsleep 150\n")
         state = run.state()
-        if state.get("sizes", "").endswith("/0") and state.get("loading") == "false":
+        if quiet(state):
             break
     else:
-        raise Failure(f"the folder walks never finished: sizes={run.state().get('sizes')!r}")
+        raise Failure(f"the window never went quiet: {run.state()}")
     ticks = lambda: sum(
         int(value) for value in Path(f"/proc/{run.process.pid}/stat").read_text().split()[13:15]
     )
-    before = ticks()
-    time.sleep(3.0)
-    after = ticks()
-    if after != before:
-        raise Failure(f"an idle window used {after - before} ticks of CPU")
+    # **CPU is only a violation if nothing was drawn for it.** The premise here is
+    # that nothing happens to this window for three seconds, and in a compositor
+    # that has mapped and unmapped a hundred windows that is occasionally false —
+    # measured, one sweep in four or five, always exactly one tick. A window that
+    # is handed an event and draws a frame for it is behaving correctly and is
+    # not idle, so that measurement is void rather than failing.
+    #
+    # The distinction is the whole invariant: **a loop on a timer burns CPU in
+    # every window and draws nothing**, which this now says in as many words,
+    # and a stray event burns it in one window and draws a frame. `frames` is
+    # what tells them apart, and an `F12` on its own does not move it.
+    drawn = int(state["frames"])
+    for _ in range(3):
+        before = ticks()
+        time.sleep(3.0)
+        spent = ticks() - before
+        after = run.answered()
+        # **One, because the `F12` that reads this draws one.** Measured, not
+        # assumed: the first version of this counted any movement as an event
+        # and so could never reach the branch below, which made the whole
+        # discriminator dead code and the gate a plain three-window retry.
+        moved = (int(after["frames"]) - drawn - 1) if after else 0
+        if spent == 0:
+            return
+        if moved <= 0:
+            raise Failure(f"an idle window used {spent} ticks of CPU and drew nothing for them")
+        drawn = int(after["frames"])
+    raise Failure("the window kept drawing unasked; it was never idle long enough to measure")
 
 
 # --------------------------------------------------------------------------
