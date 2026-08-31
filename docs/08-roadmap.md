@@ -279,6 +279,13 @@ dropped everywhere until there was a mode that could use it — does the same. T
 pane's own column is brought into view when a column appears or goes and **not on
 every frame**, so scrolling back to look at an ancestor stays where it was put.
 
+**A trail keeps its columns.** The per-folder record says how a folder is laid out
+when you come to look at it, and walking through one is not that — so arriving
+somewhere from a details list still applies the record, and can put the pane into
+columns, while walking on from there does not. Before the distinction the pane
+flipped to Details at the first folder anybody had ever set one on, which is two
+steps into most trails.
+
 The shape is [ADR 0015](adr/0015-a-column-is-a-directory-and-a-choice.md)'s, and
 it is the second answer to the question:
 [0014](adr/0014-a-column-view-is-a-trail-of-panes.md) said a column *is* a `Pane`

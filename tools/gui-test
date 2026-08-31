@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 106
+FEWEST_SCENARIOS = 107
 
 
 def scenario(name, fresh: bool = False):
@@ -1595,6 +1595,51 @@ def point_at_column(run: Run, state: dict[str, str], depth: int) -> dict[str, st
         f"could not put the pointer in column {depth}: it is over {last['column_over']} "
         f"at {last['pointer_at']}, aiming at {state['column_aim']}"
     )
+
+
+@scenario("column-view-survives-a-remembered-view", fresh=True)
+def column_view_survives_a_remembered_view(run: Run, fixture: Path) -> None:
+    """Walking into a folder that remembers Details stays in columns.
+
+    **The per-folder record is about arriving, and a trail is not arriving.** Set
+    one folder to Details from inside it, come back out, switch the pane to
+    columns, and walk back in: before this the pane flipped to Details at the
+    doorstep, which for one person was Downloads two steps into a trail.
+
+    The record has to be *set* rather than assumed, because `views` only writes a
+    folder down when somebody chooses something for it — a fresh fixture remembers
+    nothing, and a scenario over one would pass without the rule existing.
+    """
+    (fixture / "one").mkdir()
+    for _ in range(40):
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+        if int(run.state()["rows"]) >= 10:
+            break
+    else:
+        raise Failure(f"the folder never arrived: {run.state()['rows']} rows")
+
+    # Into `one`, set it to a grid, and back out. Now `one` remembers a grid.
+    run.drive("text one\nsleep 300\nkey enter\nsleep 600\nkey ctrl+2\nsleep 400\nkey f12\nsleep 200\n")
+    inside = run.state()
+    if inside["mode"] != "grid":
+        raise Failure(f"Ctrl+2 left the pane in {inside['mode']!r}")
+    run.drive("key alt+up\nsleep 600\nkey f12\nsleep 200\n")
+
+    # A pane not in columns takes the record: back into `one` and it is a grid.
+    run.drive("text one\nsleep 300\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    if run.state()["mode"] != "grid":
+        raise Failure("the folder's remembered view was not applied at all")
+    run.drive("key alt+up\nsleep 600\nkey ctrl+3\nsleep 500\nkey f12\nsleep 200\n")
+    if run.state()["mode"] != "columns":
+        raise Failure(f"Ctrl+3 left the pane in {run.state()['mode']!r}")
+
+    # And a pane in columns does not: the same folder, the same record, no flip.
+    run.drive("text one\nsleep 300\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    walked = run.state()
+    if walked["mode"] != "columns":
+        raise Failure(f"walking into a folder that remembers grid left the pane in {walked['mode']!r}")
+    if not walked["path"].rstrip('"').endswith("one"):
+        raise Failure(f"the walk did not arrive: {walked['path']}")
 
 
 @scenario("column-scroll", fresh=True)

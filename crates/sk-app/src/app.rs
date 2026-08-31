@@ -4709,12 +4709,9 @@ search_active={active:?}",
             // Every folder gets an answer, its own or an ancestor's or the
             // default — the one thing this must not do is leave the pane showing
             // the *previous* folder's layout, which is how the setting leaked.
+            // Whether the pane takes it is `Pane::apply_view`'s to say.
             let view = self.views.for_path(&pane.path);
-            if pane.mode != view.mode || pane.grouping != view.grouping {
-                pane.mode = view.mode;
-                pane.grouping = view.grouping;
-                moved = true;
-            }
+            moved |= pane.apply_view(view);
         }
         if moved {
             self.dirty = true;

@@ -569,6 +569,32 @@ impl Pane {
         );
     }
 
+    /// Applies a folder's remembered layout, and says whether anything moved.
+    ///
+    /// **A pane showing a trail keeps it.** The per-folder record in
+    /// [`crate::views`] says how a folder is laid out *when you come to look at
+    /// it*, and walking through one in a column view is not that: the columns are
+    /// the path, and every directory on it is a step rather than a destination.
+    /// Applying the record mid-walk took the pane out of column mode the moment it
+    /// reached a folder that remembers Details — which is every folder anybody has
+    /// ever set one on, so a trail could be walked exactly as far as the first one.
+    ///
+    /// The asymmetry is deliberate and it is the same sentence read twice: arriving
+    /// somewhere from a details list *is* coming to look at it, so the record
+    /// applies and can put the pane into columns. Once it is in them, where it goes
+    /// next is navigation.
+    pub fn apply_view(&mut self, view: crate::views::View) -> bool {
+        if self.mode == crate::cells::Mode::Columns {
+            return false;
+        }
+        if self.mode == view.mode && self.grouping == view.grouping {
+            return false;
+        }
+        self.mode = view.mode;
+        self.grouping = view.grouping;
+        true
+    }
+
     /// Opens `path` and puts the cursor on `name` once its listing lands.
     ///
     /// **For a press in a column left of the pane's own.** Clicking a file three
@@ -1454,6 +1480,35 @@ mod tests {
     /// And the filter does not follow you into the next directory: it narrows
     /// *this* one, and arriving somewhere that silently hides most of what is
     /// there is not a view, it is a trap.
+    /// **A pane walking a trail keeps its columns.** Every folder anybody has ever
+    /// set a view on remembers Details or Grid, so applying the record on arrival
+    /// took the pane out of column mode at the first such folder — which for one
+    /// person was Downloads, two steps in.
+    #[test]
+    fn a_pane_in_columns_declines_a_folders_remembered_view() {
+        let mut pane = Pane::new(PathBuf::from("/tmp"));
+        let details = crate::views::View {
+            mode: crate::cells::Mode::Details,
+            grouping: crate::groups::Grouping::Time,
+        };
+
+        // From a details list, the record is what arriving means: it applies, and
+        // it can put the pane *into* columns.
+        assert!(pane.apply_view(details), "a details pane took nothing");
+        assert_eq!(pane.grouping, crate::groups::Grouping::Time);
+        let columns = crate::views::View {
+            mode: crate::cells::Mode::Columns,
+            grouping: crate::groups::Grouping::None,
+        };
+        assert!(pane.apply_view(columns), "a record naming columns did not apply");
+        assert_eq!(pane.mode, crate::cells::Mode::Columns);
+
+        // And once it is in them, walking through a folder is not arriving at one.
+        assert!(!pane.apply_view(details), "a trail was taken out of column mode");
+        assert_eq!(pane.mode, crate::cells::Mode::Columns);
+        assert_eq!(pane.grouping, crate::groups::Grouping::None, "nor regrouped");
+    }
+
     #[test]
     fn navigating_clears_the_filter() {
         let root = fixture("filter-nav");
