@@ -106,6 +106,29 @@ pub(crate) fn now_for_tests() -> i64 {
 /// How many bands [`day_bands`] cuts time into: one more than the edges.
 pub const BANDS: usize = 7;
 
+/// How many bands [`SIZE_EDGES`] cuts a listing into: the seven sizes, and
+/// directories ahead of them in a band of their own.
+pub const SIZE_BANDS: usize = 8;
+
+/// The byte counts where "gigantic", "huge" and the rest begin, largest first.
+///
+/// **Windows Explorer's seven, in binary units.** Empty, tiny, small, medium,
+/// large, huge, gigantic is a taxonomy people have already met, and inventing a
+/// different set of thresholds would buy nothing but unfamiliarity. The units
+/// are `KiB` and `MiB` rather than Explorer's decimal ones because that is what
+/// the size column writes, and a heading that says "10 KB" over a row that says
+/// "9.8 KiB" is two answers to one question.
+///
+/// Zero is its own band below the last edge: an empty file is the one size worth
+/// telling apart at a glance, because it is usually a mistake.
+///
+/// A constant and not a function, because unlike the time edges these need no
+/// calendar, no locale and no clock — they are the same on every machine and at
+/// every moment, which is also what makes them safe to compare a `u64` against
+/// without re-deriving them per frame.
+pub const SIZE_EDGES: [i64; SIZE_BANDS - 2] =
+    [128 * 1024 * 1024, 16 * 1024 * 1024, 1024 * 1024, 100 * 1024, 10 * 1024, 1];
+
 /// The epoch seconds where "today", "yesterday" and the rest begin, newest first.
 ///
 /// **Edges rather than labels, and numbers rather than a calendar.** Deciding
@@ -227,7 +250,7 @@ fn month_name(month: u8) -> &'static str {
 
 #[cfg(test)]
 mod band_tests {
-    use super::{BANDS, day_bands};
+    use super::{BANDS, SIZE_BANDS, SIZE_EDGES, day_bands};
 
     /// The edges run newest first and never climb, whatever day it is.
     ///
@@ -261,6 +284,28 @@ mod band_tests {
         assert_eq!(band_of(edges[1] - 1), 2, "a second before midnight is not yesterday");
         // And the far past is the last band, whatever the edges are.
         assert_eq!(band_of(0), BANDS - 1, "1970 is not in the oldest band");
+    }
+
+    /// The size edges descend, cut where the labels say, and leave zero its own
+    /// band — an empty file is the one size worth telling apart at a glance.
+    #[test]
+    fn the_size_edges_descend_and_cut_where_the_labels_say() {
+        assert_eq!(
+            SIZE_EDGES.len(),
+            SIZE_BANDS - 2,
+            "one band for folders, one per edge, one over"
+        );
+        for pair in SIZE_EDGES.windows(2) {
+            assert!(pair[0] > pair[1], "the edges do not descend: {SIZE_EDGES:?}");
+        }
+        // Which band a value lands in is the count of edges it falls below, so
+        // this is the same arithmetic `Cuts::band_of` does.
+        let band = |bytes: i64| SIZE_EDGES.iter().filter(|edge| bytes < **edge).count();
+        assert_eq!(band(0), SIZE_EDGES.len(), "zero is not the last band");
+        assert_eq!(band(1), SIZE_EDGES.len() - 1, "one byte is not the band above empty");
+        assert_eq!(band(200 * 1024 * 1024), 0, "200 MiB is not the top band");
+        assert_eq!(band(9 * 1024), band(1), "9 KiB and one byte are different bands");
+        assert_ne!(band(11 * 1024), band(9 * 1024), "10 KiB is not an edge");
     }
 }
 

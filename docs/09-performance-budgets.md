@@ -132,6 +132,35 @@ and [12-measurement.md](12-measurement.md) says a number taken on a loaded
 machine is worth 6× less than the same number taken on an idle one. Recorded with
 the load rather than quoted as a change.
 
+**What each grouping costs a sort, at 200,000 entries.** Three runs of
+`--bench 900` each, load average 2.2, reading the `sort` figure the listing line
+reports. **Which sort that is differs between the rows**, and it has to be
+said: a grouped pane re-sorts when its metadata lands — the bands are derived
+from `mtime`, `statx` brings it, and the first order was computed without it — so
+the grouped rows are that re-sort, and the ungrouped one is the read job's first
+and only sort. Both are a full `compute_order` over the same 200,000 entries,
+which is what makes the comparison worth making at all:
+
+| Grouping | Sort | Over no grouping |
+| --- | --- | --- |
+| None | **16.3 ms** | — |
+| By time | **20.6 ms** | +4.3 ms |
+| By size | **25.2 ms** | +8.9 ms |
+| By kind | **41.3 ms** | +25.0 ms |
+
+Time and size are a prefix byte over a column the listing already holds. **Kind
+is not**: it asks `MimeDatabase::by_name` once per entry, which is 200,000 hash
+lookups at about 0.125 µs each. That happens on the job that computes the order
+and never on the frame loop, and the frame distribution is unchanged — p50 0.190
+ms and p99 0.386 ms banded by kind against 0.194 and 0.424 unbanded, which is
+inside the run-to-run spread. Below the 8,192-entry threshold where a sort runs
+inline the same pass costs about 1 ms on the frame loop, which is why the
+threshold is the same one.
+
+The bytes come back from the job with the order and are kept, so nothing on the
+frame loop ever asks `by_name` a hundred thousand times: re-banding after a mode
+change is a walk over bytes already in hand.
+
 **Moving the path bar into each pane cost nothing measurable.** The four
 navigation buttons and the breadcrumbs are per pane now, under that pane's tab
 strip, so a window with one pane draws the same widgets in a different place and a

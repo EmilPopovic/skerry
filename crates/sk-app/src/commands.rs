@@ -699,8 +699,9 @@ fn grouping(registry: &mut Registry<App>) {
             // **Not `Ctrl+0`**, which is Reset zoom here as it is in every
             // browser — the registry's own conflict check said so. The grouping
             // is a second axis to the `Ctrl+1` / `Ctrl+2` that pick a geometry,
-            // so it takes the far end of the same row of digits.
-            keys: &["ctrl+8"],
+            // so it takes the far end of the same row of digits: four groupings,
+            // the four digits at that end, in the order the View menu lists them.
+            keys: &["ctrl+6"],
             enabled: |_| true,
             run: |app: &mut App| app.set_grouping(crate::groups::Grouping::None),
         },
@@ -708,9 +709,25 @@ fn grouping(registry: &mut Registry<App>) {
             id: "view.group_time",
             name: "action.group_time",
             group: Group::View,
-            keys: &["ctrl+9"],
+            keys: &["ctrl+7"],
             enabled: |_| true,
             run: |app: &mut App| app.set_grouping(crate::groups::Grouping::Time),
+        },
+        CommandSpec {
+            id: "view.group_size",
+            name: "action.group_size",
+            group: Group::View,
+            keys: &["ctrl+8"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_grouping(crate::groups::Grouping::Size),
+        },
+        CommandSpec {
+            id: "view.group_kind",
+            name: "action.group_kind",
+            group: Group::View,
+            keys: &["ctrl+9"],
+            enabled: |_| true,
+            run: |app: &mut App| app.set_grouping(crate::groups::Grouping::Kind),
         },
     ] {
         registry.add(spec);

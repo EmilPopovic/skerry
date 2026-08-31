@@ -19,11 +19,22 @@
 //! column, so the display order already has the bands as contiguous runs, each
 //! sorted by whatever the pane is sorted by. This reads those runs and lays them
 //! out; it never reorders anything.
+//!
+//! **Three quantities, one mechanism.** Time and size band on a column the
+//! listing already holds, so they cost the sort a byte. Kind does not: it is
+//! [`sk_desktop::Category`], which needs the desktop's `globs2`, so the byte is
+//! worked out for every entry on the job that computes the order and comes back
+//! with it — see `Pane::kinds` and the numbers in
+//! [09-performance-budgets.md](../../../docs/09-performance-budgets.md).
 
 use crate::cells::{Cells, Mode, Step};
 use crate::layout::Area;
 
 /// How a pane cuts its entries into headings.
+///
+/// **Three quantities, one mechanism.** Each is a prefix byte ahead of the
+/// sort's column ([`sk_model::Banding`]), so the display order already has the
+/// bands as contiguous runs and none of them is a second pass over the listing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Grouping {
     /// One band, no headings.
@@ -31,46 +42,97 @@ pub enum Grouping {
     None,
     /// Today, yesterday, this week, this month, this year, and older.
     Time,
+    /// Gigantic down to empty, with folders ahead of them.
+    Size,
+    /// Folders, images, audio, video, archives, code, documents, programs, and
+    /// anything else — [`sk_desktop::Category`], which is also what colours a
+    /// row's mark, so the heading and the mark under it always agree.
+    Kind,
 }
 
 impl Grouping {
+    /// The four, in the order the View menu lists them.
+    pub const ALL: [Self; 4] = [Self::None, Self::Time, Self::Size, Self::Kind];
+
     /// The token this is written as in the session file.
     #[must_use]
     pub const fn token(self) -> &'static str {
         match self {
             Self::None => "flat",
             Self::Time => "by-time",
+            Self::Size => "by-size",
+            Self::Kind => "by-kind",
         }
     }
 
     /// The grouping a session file's token names, if it names one.
     #[must_use]
     pub fn from_token(token: &str) -> Option<Self> {
-        match token {
-            "flat" => Some(Self::None),
-            "by-time" => Some(Self::Time),
-            _ => None,
+        Self::ALL.into_iter().find(|it| it.token() == token)
+    }
+
+    /// The catalogue key for one of this grouping's bands, first band first.
+    ///
+    /// A band with nothing in it is never drawn, which is what happens to
+    /// "earlier this week" on a Monday, to "in the future" almost always, and to
+    /// six of the nine kinds in most folders.
+    ///
+    /// **Clamped, deliberately.** A byte past the end is the band for "anything
+    /// this level could not classify" — a kind byte the sort never received, say
+    /// — and the last key of every set is the one that says so.
+    #[must_use]
+    pub fn label(self, band: u8) -> &'static str {
+        let keys: &[&'static str] = match self {
+            Self::None => &["band.older"],
+            Self::Time => &[
+                "band.future",
+                "band.today",
+                "band.yesterday",
+                "band.this_week",
+                "band.this_month",
+                "band.this_year",
+                "band.older",
+            ],
+            Self::Size => &[
+                "band.folders",
+                "band.gigantic",
+                "band.huge",
+                "band.large",
+                "band.medium",
+                "band.small",
+                "band.tiny",
+                "band.empty",
+            ],
+            Self::Kind => &[
+                "band.folders",
+                "band.images",
+                "band.audio",
+                "band.video",
+                "band.archives",
+                "band.code",
+                "band.documents",
+                "band.programs",
+                "band.other",
+            ],
+        };
+        keys[(band as usize).min(keys.len() - 1)]
+    }
+
+    /// What a pane sorted this way bands on.
+    ///
+    /// `now` is only read by [`Self::Time`], whose edges come from the local
+    /// calendar and move at midnight — which is why this is asked every frame
+    /// rather than once. See `App::rebandif_needed`.
+    #[must_use]
+    pub fn banding(self, now: i64) -> sk_model::Banding {
+        use sk_model::{Banding, Cuts};
+        match self {
+            Self::None => Banding::None,
+            Self::Time => Banding::Time(Cuts::new(&sk_ui::format::day_bands(now))),
+            Self::Size => Banding::Size(Cuts::new(&sk_ui::format::SIZE_EDGES)),
+            Self::Kind => Banding::Kind,
         }
     }
-}
-
-/// The catalogue key for a time band, newest first.
-///
-/// Seven, because [`sk_ui::format::day_bands`] cuts six edges. A band with
-/// nothing in it is never drawn, which is what happens to "earlier this week" on
-/// a Monday and to "in the future" almost always.
-#[must_use]
-pub fn time_label(band: u8) -> &'static str {
-    const KEYS: [&str; 7] = [
-        "band.future",
-        "band.today",
-        "band.yesterday",
-        "band.this_week",
-        "band.this_month",
-        "band.this_year",
-        "band.older",
-    ];
-    KEYS[(band as usize).min(KEYS.len() - 1)]
 }
 
 /// How tall a heading is, in row heights.
@@ -364,14 +426,18 @@ fn lines(count: usize, columns: usize) -> usize {
 /// order changes rather than per frame, because at two hundred thousand entries
 /// per frame it would be the frame.
 #[must_use]
-pub fn runs_of(listing: &sk_model::Listing, bands: sk_model::Banding) -> Vec<(u8, usize)> {
+pub fn runs_of(
+    listing: &sk_model::Listing,
+    bands: sk_model::Banding,
+    kinds: &[u8],
+) -> Vec<(u8, usize)> {
     if bands.is_empty() {
         return Vec::new();
     }
-    let mut runs: Vec<(u8, usize)> = Vec::with_capacity(bands.bands());
+    let mut runs: Vec<(u8, usize)> = Vec::new();
     for row in 0..listing.rows() {
         let Some(id) = listing.at(row) else { continue };
-        let band = bands.band_of(listing.mtime(id));
+        let band = listing.band_of(id, bands, kinds);
         if runs.last().is_none_or(|(last, _)| *last != band) {
             runs.push((band, row));
         }
@@ -584,13 +650,32 @@ mod tests {
         }
     }
 
-    /// The tokens the session file writes round-trip.
+    /// The tokens the session file writes round-trip, and every grouping has a
+    /// label for every band it can produce.
     #[test]
-    fn every_grouping_survives_the_session_file() {
-        for grouping in [Grouping::None, Grouping::Time] {
+    fn every_grouping_survives_the_session_file_and_labels_all_of_its_bands() {
+        for grouping in Grouping::ALL {
             assert_eq!(Grouping::from_token(grouping.token()), Some(grouping), "{grouping:?}");
+            // **Every band, and one past the end.** A `label` that indexed
+            // instead of clamping would panic on a byte the sort never received,
+            // which is exactly what an unclassified kind is.
+            let mut seen: Vec<&str> = Vec::new();
+            for band in 0..=u8::MAX {
+                let key = grouping.label(band);
+                assert!(!key.is_empty());
+                if !seen.contains(&key) {
+                    seen.push(key);
+                }
+            }
+            let wanted = match grouping {
+                Grouping::None => 1,
+                Grouping::Time => sk_ui::format::BANDS,
+                Grouping::Size => sk_ui::format::SIZE_BANDS,
+                Grouping::Kind => sk_desktop::Category::ALL.len(),
+            };
+            assert_eq!(seen.len(), wanted, "{grouping:?} has the wrong number of labels");
         }
-        assert_eq!(Grouping::from_token("by-kind"), None, "a grouping that does not exist yet");
+        assert_eq!(Grouping::from_token("by-shape"), None, "a grouping that does not exist");
         // And it must never be read as a mode or a number: the session's tolerant
         // parser tells the three apart by exactly this.
         assert_eq!(Grouping::from_token("grid"), None);

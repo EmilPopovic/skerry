@@ -45,6 +45,11 @@ use crate::pane::{Message, Pane};
 use crate::sizes::Measurer;
 use crate::view::{self, Chrome};
 
+/// The wall clock, in epoch seconds. Only the time bands read it.
+fn now_seconds() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
+}
+
 /// How long a turn may block waiting for the read, while the read is running.
 ///
 /// One frame at 120 Hz. It bounds the wait, it does not pace the trace: a turn
@@ -61,6 +66,12 @@ pub struct Bench {
     pub scale_120: u32,
     /// How many frames the trace runs for.
     pub frames: u32,
+    /// How the pane is cut into headings, if it is.
+    ///
+    /// Here because it is a cost: banding by kind asks `by_name` once per entry
+    /// on the sort's job, which is the one thing in the program that does. The
+    /// `sort` figure on the listing line is what measures it.
+    pub grouping: crate::groups::Grouping,
 }
 
 /// Everything the loop does between waking and drawing.
@@ -172,7 +183,7 @@ struct Trace {
 
 /// What a trace draws that does not change between frames.
 struct Fixed {
-    types: sk_desktop::MimeDatabase,
+    types: std::sync::Arc<sk_desktop::MimeDatabase>,
     places: Vec<crate::sidebar::Section>,
     theme: Theme,
     layout: Layout,
@@ -183,7 +194,7 @@ fn fixed(request: &Bench) -> Fixed {
     let theme = Theme::dark();
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     Fixed {
-        types: sk_desktop::MimeDatabase::load(),
+        types: std::sync::Arc::new(sk_desktop::MimeDatabase::load()),
         places: crate::sidebar::sample(&request.path),
         layout: Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, true),
         theme,
@@ -206,13 +217,16 @@ pub fn run(request: &Bench) -> Result<(), Problem> {
     // are drawn into is the same every frame.
     let crate::panes::Single { mut panes, leaves, dividers, here } =
         crate::panes::single(Pane::new(request.path.clone()), layout.content, &theme.metrics);
+    // Before the read starts, so the first sort is the one being measured: the
+    // job bands with whatever the pane asked for when it went out.
+    session.jobs.mime = Some(std::sync::Arc::clone(&types));
+    panes.focused_mut().grouping = request.grouping;
+    panes.focused_mut().sort.bands = request.grouping.banding(now_seconds());
     panes.focused_mut().reload(&session.jobs);
     let mut cache = LayoutCache::new(4096);
     let mut list = DrawList::default();
     let mut frames = Frames::new();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs().cast_signed());
+    let now = now_seconds();
 
     let mut stats = FrameStats::default();
     let mut trace = Trace::default();

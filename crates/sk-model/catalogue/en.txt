@@ -260,6 +260,8 @@ action.search_results = Show all results in this pane
 action.view_details = Details
 action.group_none = No grouping
 action.group_time = Group by time
+action.group_size = Group by size
+action.group_kind = Group by kind
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday
@@ -267,6 +269,26 @@ band.this_week = Earlier this week
 band.this_month = Earlier this month
 band.this_year = Earlier this year
 band.older = Older
+# The size bands, largest first. A folder's size is a recursive total that may
+# never have been measured, so folders are a band of their own ahead of them.
+band.folders = Folders
+band.gigantic = Gigantic
+band.huge = Huge
+band.large = Large
+band.medium = Medium
+band.small = Small
+band.tiny = Tiny
+band.empty = Empty
+# The kind bands, in the order sk_desktop::Category::ALL lists them. `Folders`
+# above is the first of these too — the same word for the same set of entries.
+band.images = Images
+band.audio = Audio
+band.video = Video
+band.archives = Archives
+band.code = Code
+band.documents = Documents
+band.programs = Programs
+band.other = Other
 action.view_grid = Grid
 action.cursor_left = Cursor left
 action.cursor_right = Cursor right

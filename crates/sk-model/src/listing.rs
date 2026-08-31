@@ -21,7 +21,7 @@
 
 use crate::arena::{StrArena, StrRef};
 
-use crate::sort::{Sort, SortColumn};
+use crate::sort::{Banding, Sort, SortColumn};
 
 /// An index into one listing's parallel arrays.
 ///
@@ -423,8 +423,8 @@ impl Listing {
     ///
     /// The secondary key is always the name, so every order is total and a listing
     /// cannot reshuffle between two frames.
-    pub fn reorder(&mut self, sort: Sort, show_hidden: bool, filter: &str) {
-        self.order = self.compute_order(sort, show_hidden, filter);
+    pub fn reorder(&mut self, sort: Sort, show_hidden: bool, filter: &str, kinds: &[u8]) {
+        self.order = self.compute_order(sort, show_hidden, filter, kinds);
     }
 
     /// Replaces the display order with one computed elsewhere.
@@ -447,8 +447,18 @@ impl Listing {
     /// compares two names. The comparison sort this replaced was 1.40 s at
     /// 974,000 entries against a 120 ms budget; the numbers and the method are in
     /// [09-performance-budgets.md](../../../docs/09-performance-budgets.md#what-m0-measured).
+    ///
+    /// `kinds` is one band byte per entry, indexed by [`EntryId`], and is read
+    /// only under [`Banding::Kind`] — empty for every other banding, because
+    /// nothing else needs a byte this level cannot derive.
     #[must_use]
-    pub fn compute_order(&self, sort: Sort, show_hidden: bool, filter: &str) -> Vec<EntryId> {
+    pub fn compute_order(
+        &self,
+        sort: Sort,
+        show_hidden: bool,
+        filter: &str,
+        kinds: &[u8],
+    ) -> Vec<EntryId> {
         // **Not lowercased.** `contains_folded` compares with
         // `eq_ignore_ascii_case`, which folds both sides — so folding one of them
         // first is folding it twice for ASCII and once for everything else. With
@@ -468,16 +478,39 @@ impl Listing {
         let mut keys = crate::radix::KeySet::with_capacity(kept.len(), reserve);
         let mut prefix = [0u8; PREFIX_MAX];
         for id in &kept {
-            let width = self.write_prefix(*id, sort, &mut prefix);
+            let width = self.write_prefix(*id, sort, kinds, &mut prefix);
             keys.push(&prefix[..width], self.names.raw(self.name[id.index()]));
         }
 
         let mut order: Vec<EntryId> =
             crate::radix::order(&keys).iter().map(|at| kept[*at as usize]).collect();
         if sort.descending {
-            self.reverse_within_groups(&mut order, sort);
+            self.reverse_within_groups(&mut order, sort, kinds);
         }
         order
+    }
+
+    /// Which band an entry falls in, and `0` where there is no banding.
+    ///
+    /// **Directories are a band of their own under [`Banding::Size`]**, ahead of
+    /// every size band. A folder's size is a recursive total that may never have
+    /// been measured, so it reads as zero — and every folder in a directory
+    /// filed under "Empty", moving to "Large" the next time anything re-sorts, is
+    /// a heading that lies twice. The Size *column* says the same thing by
+    /// drawing nothing at all.
+    #[must_use]
+    pub fn band_of(&self, id: EntryId, bands: Banding, kinds: &[u8]) -> u8 {
+        match bands {
+            Banding::None => 0,
+            Banding::Time(cuts) => cuts.band_of(self.mtime(id)),
+            Banding::Size(_) if self.flags(id).has(Flags::DIR) => 0,
+            Banding::Size(cuts) => {
+                1 + cuts.band_of(i64::try_from(self.sort_size(id)).unwrap_or(i64::MAX))
+            }
+            // A byte nobody supplied bands with whatever the level above calls
+            // its last band, which is where "anything else" belongs.
+            Banding::Kind => kinds.get(id.index()).copied().unwrap_or(u8::MAX),
+        }
     }
 
     /// The bytes that sort ahead of the name, and how many there are.
@@ -485,14 +518,20 @@ impl Listing {
     /// Directories first is one byte because it is a grouping rather than an
     /// order: it is not reversed by `descending`, which is why it goes ahead of
     /// everything and why the reversal below happens inside each group.
-    fn write_prefix(&self, id: EntryId, sort: Sort, prefix: &mut [u8; PREFIX_MAX]) -> usize {
+    fn write_prefix(
+        &self,
+        id: EntryId,
+        sort: Sort,
+        kinds: &[u8],
+        prefix: &mut [u8; PREFIX_MAX],
+    ) -> usize {
         let mut width = 0;
         // **Ahead of everything, including directories-first.** The bands are the
         // outermost grouping: a heading says "today" and everything under it is
         // today's, folders included. Like `dirs_first` it is not reversed by
         // `descending` — see `reverse_within_groups`.
         if !sort.bands.is_empty() {
-            prefix[0] = sort.bands.band_of(self.mtime(id));
+            prefix[0] = self.band_of(id, sort.bands, kinds);
             width = 1;
         }
         if sort.dirs_first {
@@ -520,9 +559,9 @@ impl Listing {
     ///
     /// The groups are runs, because the order is already sorted by exactly this
     /// key: the prefix bytes `write_prefix` emits ahead of the column.
-    fn reverse_within_groups(&self, order: &mut [EntryId], sort: Sort) {
+    fn reverse_within_groups(&self, order: &mut [EntryId], sort: Sort, kinds: &[u8]) {
         let key = |id: &EntryId| {
-            let band = if sort.bands.is_empty() { 0 } else { sort.bands.band_of(self.mtime(*id)) };
+            let band = self.band_of(*id, sort.bands, kinds);
             let kind = sort.dirs_first && !self.flags[id.index()].has(Flags::DIR);
             (band, kind)
         };
@@ -570,9 +609,9 @@ mod tests {
             listing.set_meta(id, 0, mtime, Flags::NONE);
         }
         // One edge at 1,000: band 0 is everything at or after it.
-        let bands = crate::sort::Banding::new(&[1_000]);
+        let bands = Banding::Time(crate::sort::Cuts::new(&[1_000]));
         let sort = Sort { dirs_first: false, bands, ..Sort::default() };
-        listing.reorder(sort, true, "");
+        listing.reorder(sort, true, "", &[]);
         let names: Vec<&str> = (0..listing.rows())
             .filter_map(|row| listing.at(row))
             .map(|id| listing.name(id))
@@ -585,7 +624,7 @@ mod tests {
 
         // Descending reverses inside each band and never moves a band.
         let sort = Sort { descending: true, ..sort };
-        listing.reorder(sort, true, "");
+        listing.reorder(sort, true, "", &[]);
         let names: Vec<&str> = (0..listing.rows())
             .filter_map(|row| listing.at(row))
             .map(|id| listing.name(id))
@@ -610,8 +649,8 @@ mod tests {
             let id = listing.push(name, flags);
             listing.set_meta(id, 0, mtime, flags);
         }
-        let bands = crate::sort::Banding::new(&[1_000]);
-        listing.reorder(Sort { descending: true, bands, ..Sort::default() }, true, "");
+        let bands = Banding::Time(crate::sort::Cuts::new(&[1_000]));
+        listing.reorder(Sort { descending: true, bands, ..Sort::default() }, true, "", &[]);
         let names: Vec<&str> = (0..listing.rows())
             .filter_map(|row| listing.at(row))
             .map(|id| listing.name(id))
@@ -619,6 +658,74 @@ mod tests {
         // Band 0's folder, band 0's file, then band 1's folder and file — with
         // `descending` reversing neither grouping.
         assert_eq!(names, ["new-dir", "new-file", "old-dir", "old-file"]);
+    }
+
+    /// A folder's size is a recursive total that may never have been measured,
+    /// so grouping by size gives folders a band of their own ahead of the sizes.
+    ///
+    /// **Without it every unmeasured folder files under "Empty"** — and moves to
+    /// "Large" the next time anything re-sorts, which is a heading that lies
+    /// twice. The Size column says the same thing by drawing nothing at all.
+    #[test]
+    fn a_size_banding_files_every_directory_ahead_of_every_size() {
+        let mut listing = Listing::with_capacity(5);
+        for (name, size, flags) in [
+            ("small.txt", 2_000u64, Flags::NONE),
+            ("measured-dir", 0, Flags::DIR),
+            ("big.bin", 5_000_000, Flags::NONE),
+            ("plain-dir", 0, Flags::DIR),
+            ("empty.txt", 0, Flags::NONE),
+        ] {
+            let id = listing.push(name, flags);
+            listing.set_meta(id, size, 0, flags);
+        }
+        // A measured folder is still a folder: it is the *kind* of quantity that
+        // puts it here, not the number.
+        let dir = (0..5).map(EntryId).find(|id| listing.name(*id) == "measured-dir").expect("dir");
+        listing.set_recursive_size(dir, 9_000_000, true, false);
+
+        let cuts = crate::sort::Cuts::new(&[1_000_000, 1_000, 1]);
+        let sort = Sort { bands: Banding::Size(cuts), ..Sort::default() };
+        listing.reorder(sort, true, "", &[]);
+        let bands: Vec<u8> = (0..listing.rows())
+            .filter_map(|row| listing.at(row))
+            .map(|id| listing.band_of(id, sort.bands, &[]))
+            .collect();
+        // Three edges make four size bands; nothing here falls in the third, and
+        // an empty band is simply never drawn.
+        assert_eq!(bands, [0, 0, 1, 2, 4], "the bands are not in order: {bands:?}");
+        assert_eq!(
+            names(&listing),
+            vec!["measured-dir", "plain-dir", "big.bin", "small.txt", "empty.txt"],
+            "a folder's total put it in a size band, or a band came out of order"
+        );
+    }
+
+    /// The kind bytes come from above and this level only ever compares them.
+    ///
+    /// A byte nobody supplied is the *last* band, which is where "anything we
+    /// could not classify" belongs — and `label` clamps to the same key, so the
+    /// heading over it says so rather than panicking.
+    #[test]
+    fn a_kind_banding_groups_by_the_bytes_it_is_given() {
+        let mut listing = Listing::with_capacity(4);
+        for name in ["delta", "alpha", "charlie", "bravo"] {
+            listing.push(name, Flags::NONE);
+        }
+        // Indexed by `EntryId`, which is push order: delta and bravo share band
+        // 2, alpha is band 5, charlie is band 7. So band 2 comes first with its
+        // two members in name order, and the bytes decide the bands while the
+        // column still decides the order inside one.
+        let kinds = [2u8, 5, 7, 2];
+        let sort = Sort { dirs_first: false, bands: Banding::Kind, ..Sort::default() };
+        listing.reorder(sort, true, "", &kinds);
+        assert_eq!(names(&listing), vec!["bravo", "delta", "alpha", "charlie"]);
+        assert_eq!(listing.band_of(EntryId(3), sort.bands, &kinds), 2);
+        assert_eq!(
+            listing.band_of(EntryId(0), sort.bands, &[]),
+            u8::MAX,
+            "a listing with no kind bytes at all banded as something"
+        );
     }
 
     /// No banding is one band, and costs the order nothing.
@@ -630,7 +737,7 @@ mod tests {
             listing.set_meta(id, 0, mtime, Flags::NONE);
         }
         assert!(Sort::default().bands.is_empty());
-        listing.reorder(Sort { dirs_first: false, ..Sort::default() }, true, "");
+        listing.reorder(Sort { dirs_first: false, ..Sort::default() }, true, "", &[]);
         let names: Vec<&str> = (0..listing.rows())
             .filter_map(|row| listing.at(row))
             .map(|id| listing.name(id))
@@ -670,7 +777,7 @@ mod tests {
 
     use super::{EntryId, Flags, Listing};
     use crate::collate::natural_cmp;
-    use crate::sort::{Sort, SortColumn};
+    use crate::sort::{Banding, Sort, SortColumn};
 
     fn fixture() -> Listing {
         let mut listing = Listing::with_capacity(8);
@@ -796,7 +903,7 @@ mod tests {
                     for show_hidden in [false, true] {
                         for filter in ["", "img", "a", "É"] {
                             let wanted = by_comparison(&listing, sort, show_hidden, filter);
-                            let got = listing.compute_order(sort, show_hidden, filter);
+                            let got = listing.compute_order(sort, show_hidden, filter, &[]);
                             let shown = |order: &[EntryId]| -> Vec<&str> {
                                 order.iter().map(|id| listing.name(*id)).collect()
                             };
@@ -837,8 +944,11 @@ mod tests {
                 .iter()
                 .map(|id| listing.name(*id))
                 .collect();
-            let got: Vec<&str> =
-                listing.compute_order(sort, true, "").iter().map(|id| listing.name(*id)).collect();
+            let got: Vec<&str> = listing
+                .compute_order(sort, true, "", &[])
+                .iter()
+                .map(|id| listing.name(*id))
+                .collect();
             assert_eq!(got, wanted, "{column:?}");
         }
     }
@@ -876,16 +986,16 @@ mod tests {
     #[test]
     fn directories_lead_and_names_are_natural() {
         let mut listing = fixture();
-        listing.reorder(Sort::default(), false, "");
+        listing.reorder(Sort::default(), false, "", &[]);
         assert_eq!(names(&listing), vec!["src", "img2.png", "img10.png", "Makefile"]);
     }
 
     #[test]
     fn hidden_entries_appear_only_when_asked_for() {
         let mut listing = fixture();
-        listing.reorder(Sort::default(), false, "");
+        listing.reorder(Sort::default(), false, "", &[]);
         assert_eq!(listing.rows(), 4);
-        listing.reorder(Sort::default(), true, "");
+        listing.reorder(Sort::default(), true, "", &[]);
         assert_eq!(listing.rows(), 5);
         assert!(names(&listing).contains(&".hidden"));
     }
@@ -893,7 +1003,7 @@ mod tests {
     #[test]
     fn descending_reverses_the_names_but_not_the_directory_grouping() {
         let mut listing = fixture();
-        listing.reorder(Sort { descending: true, ..Sort::default() }, false, "");
+        listing.reorder(Sort { descending: true, ..Sort::default() }, false, "", &[]);
         assert_eq!(names(&listing), vec!["src", "Makefile", "img10.png", "img2.png"]);
     }
 
@@ -904,24 +1014,24 @@ mod tests {
     fn a_filter_narrows_what_is_shown_and_not_what_exists() {
         let mut listing = fixture();
         let before = listing.len();
-        listing.reorder(Sort::default(), false, "img");
+        listing.reorder(Sort::default(), false, "img", &[]);
         assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
         assert_eq!(listing.len(), before, "the filter removed entries rather than hiding them");
 
         // Case-insensitive, and a substring rather than a prefix.
-        listing.reorder(Sort::default(), false, "MAKE");
+        listing.reorder(Sort::default(), false, "MAKE", &[]);
         assert_eq!(names(&listing), vec!["Makefile"]);
-        listing.reorder(Sort::default(), false, "make");
+        listing.reorder(Sort::default(), false, "make", &[]);
         assert_eq!(names(&listing), vec!["Makefile"]);
-        listing.reorder(Sort::default(), false, "PNG");
+        listing.reorder(Sort::default(), false, "PNG", &[]);
         assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
 
         // Nothing matching is an empty list, not the whole list.
-        listing.reorder(Sort::default(), false, "zzz");
+        listing.reorder(Sort::default(), false, "zzz", &[]);
         assert!(names(&listing).is_empty());
 
         // And an empty filter is every row back, in the order it had.
-        listing.reorder(Sort::default(), false, "");
+        listing.reorder(Sort::default(), false, "", &[]);
         assert_eq!(names(&listing), vec!["src", "img2.png", "img10.png", "Makefile"]);
     }
 
@@ -934,14 +1044,14 @@ mod tests {
         for name in ["Äpfel", "äpfel", "İstanbul", "Istanbul"] {
             listing.push(name, Flags::NONE);
         }
-        listing.reorder(Sort::default(), false, "Ä");
+        listing.reorder(Sort::default(), false, "Ä", &[]);
         assert_eq!(names(&listing), vec!["Äpfel"]);
-        listing.reorder(Sort::default(), false, "ä");
+        listing.reorder(Sort::default(), false, "ä", &[]);
         assert_eq!(names(&listing), vec!["äpfel"]);
-        listing.reorder(Sort::default(), false, "İ");
+        listing.reorder(Sort::default(), false, "İ", &[]);
         assert_eq!(names(&listing), vec!["İstanbul"]);
         // And ASCII still folds, which is the bargain this is trading against.
-        listing.reorder(Sort::default(), false, "ISTAN");
+        listing.reorder(Sort::default(), false, "ISTAN", &[]);
         assert_eq!(names(&listing), vec!["Istanbul"]);
     }
 
@@ -951,9 +1061,9 @@ mod tests {
     fn a_filter_does_not_reveal_hidden_entries() {
         let mut listing = fixture();
         listing.push(".imgcache", Flags::NONE);
-        listing.reorder(Sort::default(), false, "img");
+        listing.reorder(Sort::default(), false, "img", &[]);
         assert_eq!(names(&listing), vec!["img2.png", "img10.png"]);
-        listing.reorder(Sort::default(), true, "img");
+        listing.reorder(Sort::default(), true, "img", &[]);
         assert_eq!(names(&listing), vec![".imgcache", "img2.png", "img10.png"]);
     }
 
@@ -964,6 +1074,7 @@ mod tests {
             Sort { column: SortColumn::Size, dirs_first: false, ..Sort::default() },
             false,
             "",
+            &[],
         );
         // Every size is still 0, so the tiebreak is the whole order.
         assert_eq!(names(&listing), vec!["img2.png", "img10.png", "Makefile", "src"]);
@@ -972,7 +1083,7 @@ mod tests {
     #[test]
     fn row_of_finds_what_at_returns() {
         let mut listing = fixture();
-        listing.reorder(Sort::default(), true, "");
+        listing.reorder(Sort::default(), true, "", &[]);
         for row in 0..listing.rows() {
             let id = listing.at(row).unwrap();
             assert_eq!(listing.row_of(id), Some(row));

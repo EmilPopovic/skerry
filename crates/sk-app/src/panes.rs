@@ -1030,8 +1030,12 @@ mod tests {
     fn idle() -> (Waker, Jobs, mpsc::Receiver<crate::pane::Message>) {
         let waker = Waker::new().expect("eventfd");
         let (sender, updates) = mpsc::channel();
-        let jobs =
-            Jobs { pool: std::sync::Arc::new(Pool::with_width(1)), wake: waker.handle(), sender };
+        let jobs = Jobs {
+            pool: std::sync::Arc::new(Pool::with_width(1)),
+            wake: waker.handle(),
+            sender,
+            mime: None,
+        };
         (waker, jobs, updates)
     }
 

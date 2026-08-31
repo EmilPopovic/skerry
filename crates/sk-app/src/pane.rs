@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use sk_desktop::MimeDatabase;
 use sk_fs::{META_CHUNK, MetaRow};
-use sk_model::{EntryId, Flags, Listing, Problem, Selection, Sort, SortColumn};
+use sk_model::{Banding, EntryId, Flags, Listing, Problem, Selection, Sort, SortColumn};
 use sk_util::{Cancel, Lane, Pool, WakeHandle};
 
 /// What a directory read reports back.
@@ -37,6 +38,9 @@ pub enum Update {
         /// whatever they had asked for, and nothing re-synced — the status line
         /// said `3 of 200 items match "abc"` over an unfiltered list.
         view: View,
+        /// The band byte per entry the order was computed with, or empty where
+        /// the banding needs none — see [`kind_bytes`].
+        kinds: Vec<u8>,
         /// Which lane this directory's device belongs on, probed **on the job**.
         ///
         /// `statfs` on a suspended sshfs host blocks for the mount's timeout, and
@@ -56,6 +60,8 @@ pub enum Update {
         epoch: u64,
         /// The permutation.
         order: Vec<EntryId>,
+        /// The band byte per entry it was computed with — see [`kind_bytes`].
+        kinds: Vec<u8>,
         /// Microseconds it took.
         elapsed_us: u64,
     },
@@ -100,6 +106,16 @@ pub struct Jobs {
     pub wake: WakeHandle,
     /// Where updates go.
     pub sender: Sender<Message>,
+    /// The filename half of shared-mime-info, once the job that reads it has
+    /// finished.
+    ///
+    /// **Here because a sort needs it.** Grouping by kind bands on
+    /// [`sk_desktop::Category`], which is a question `globs2` answers — and the
+    /// answer is wanted for every entry, not the visible ones, so it is worked
+    /// out on the job that computes the order. A job cannot borrow the `App` that
+    /// holds this, and every pane needs the same copy, which is what this bundle
+    /// is for.
+    pub(crate) mime: Option<std::sync::Arc<MimeDatabase>>,
 }
 
 /// Directories remembered for Back and Forward.
@@ -125,6 +141,22 @@ static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 /// largest power of two whose reorder fits inside one 8 ms frame with room to
 /// spare, and below it a round trip through the pool costs more than the sort.
 const SORT_INLINE: usize = 8_192;
+
+/// The band byte for every entry, where the banding needs one.
+///
+/// **Empty for every banding but [`Banding::Kind`]**, which is what makes
+/// grouping by time or by size cost the sort nothing: both band on a column the
+/// listing already holds, and a kind is not one.
+///
+/// Runs where the order is computed — on a job above [`SORT_INLINE`] entries —
+/// because it asks `by_name` once per entry, and a hundred thousand hash lookups
+/// is not a frame.
+fn kind_bytes(listing: &Listing, bands: Banding, mime: Option<&MimeDatabase>) -> Vec<u8> {
+    if bands != Banding::Kind {
+        return Vec::new();
+    }
+    sk_desktop::kinds(listing, mime)
+}
 
 /// A pane.
 pub struct Pane {
@@ -156,6 +188,15 @@ pub struct Pane {
     /// the whole order, and at two hundred thousand entries a frame that did it
     /// would be the frame. The bands only move when the order does.
     pub bands: Vec<(u8, usize)>,
+    /// The band byte per entry the current order was computed with, indexed by
+    /// [`EntryId`], and empty for every banding but [`Banding::Kind`].
+    ///
+    /// Kept rather than recomputed because [`Self::reband`] needs it and
+    /// `reband` runs on the frame loop: the bytes come back from the job that
+    /// sorted with them, so nothing on this thread ever asks `by_name` a hundred
+    /// thousand times. One byte an entry — 200 KB at two hundred thousand, and
+    /// nothing at all unless the pane is grouped by kind.
+    kinds: Vec<u8>,
     /// How the entries are laid out.
     ///
     /// Per pane rather than per window, because two panes side by side are two
@@ -252,6 +293,7 @@ impl Pane {
             grouping: crate::groups::Grouping::default(),
             view_owed: true,
             bands: Vec::new(),
+            kinds: Vec::new(),
             filter: String::new(),
             show_hidden: false,
             loading: false,
@@ -377,7 +419,7 @@ impl Pane {
     /// result exactly as it works on a row of a folder, which is what
     /// [rule 8](../../../docs/03-principles.md) asks for and what a results list
     /// that could only be *navigated to* could not give.
-    pub fn show_results(&mut self, query: String, listing: Listing) {
+    pub fn show_results(&mut self, query: String, listing: Listing, mime: Option<&MimeDatabase>) {
         // The read that is still running has nothing to land in any more: a
         // reply from it would replace these rows with the root directory's.
         self.cancel.cancel();
@@ -387,8 +429,11 @@ impl Pane {
         self.problem = None;
         self.results = Some(query);
         self.listing = listing;
-        self.listing.reorder(self.sort, self.show_hidden, &self.filter);
-        self.reband();
+        // On this thread: a set of results is what a person just asked for, and
+        // a round trip through the pool to order it would show them an unsorted
+        // list first. `mime` because a pane grouped by kind has to band these
+        // rows the same way it bands a directory's.
+        self.resort_now(mime);
         self.selection.clear();
         self.selection.set_cursor(self.listing.at(0));
         self.scroll.want(0.0);
@@ -423,6 +468,7 @@ impl Pane {
         let path = self.path.clone();
         let sender = jobs.sender.clone();
         let wake = jobs.wake.clone();
+        let mime = jobs.mime.clone();
         let view = self.view();
         // One job, so `Parallel` costs at most one worker even on a mount that
         // never answers. The lane that matters is the metadata fan-out's, and
@@ -438,12 +484,14 @@ impl Pane {
                     // rule 1's canonical failure.
                     let mut listing = found.listing;
                     let started = std::time::Instant::now();
-                    listing.set_order(listing.compute_order(*sort, *show_hidden, filter));
+                    let kinds = kind_bytes(&listing, sort.bands, mime.as_deref());
+                    listing.set_order(listing.compute_order(*sort, *show_hidden, filter, &kinds));
                     Update::Names {
                         listing: Box::new(listing),
                         names: found.names,
                         elapsed_us: found.elapsed_us,
                         sort_us: started.elapsed().as_micros() as u64,
+                        kinds,
                         view: view.clone(),
                         lane,
                     }
@@ -562,9 +610,10 @@ impl Pane {
             return false;
         }
         match message.update {
-            Update::Names { listing, names, elapsed_us, sort_us, view, lane } => {
+            Update::Names { listing, names, elapsed_us, sort_us, kinds, view, lane } => {
                 self.carry_selection(&listing);
                 self.listing = *listing;
+                self.kinds = kinds;
                 // The order arrived with the listing — the job sorts before it
                 // sends — so the bands have to be worked out for it here.
                 self.reband();
@@ -628,7 +677,7 @@ impl Pane {
                     }
                 }
             }
-            Update::Ordered { epoch, order, elapsed_us } => {
+            Update::Ordered { epoch, order, kinds, elapsed_us } => {
                 // A sort that was overtaken still finishes and still sends. It
                 // carries the same generation as the one that overtook it, so
                 // only the epoch can tell them apart.
@@ -638,6 +687,7 @@ impl Pane {
                 self.sorting = false;
                 self.sort_us = elapsed_us;
                 self.listing.set_order(order);
+                self.kinds = kinds;
                 self.reband();
                 self.restore_cursor();
                 self.forget_hidden_cursor();
@@ -654,12 +704,24 @@ impl Pane {
         true
     }
 
+    /// Re-sorts and re-bands on **this** thread.
+    ///
+    /// The inline half of [`Self::reorder`], and what a headless capture uses:
+    /// there is no frame loop there to take delivery of a job's answer. Above
+    /// [`SORT_INLINE`] entries every other caller wants `reorder`, which puts the
+    /// work on the pool.
+    pub(crate) fn resort_now(&mut self, mime: Option<&MimeDatabase>) {
+        self.kinds = kind_bytes(&self.listing, self.sort.bands, mime);
+        self.listing.reorder(self.sort, self.show_hidden, &self.filter, &self.kinds);
+        self.reband();
+    }
+
     /// Recomputes where the display order's bands begin.
     ///
     /// Called wherever the order changes and nowhere else. A walk of the whole
     /// order, which is why it is not per frame — see [`Self::bands`].
     pub fn reband(&mut self) {
-        self.bands = crate::groups::runs_of(&self.listing, self.sort.bands);
+        self.bands = crate::groups::runs_of(&self.listing, self.sort.bands, &self.kinds);
     }
 
     /// Rebuilds the display order, on this thread or on a job.
@@ -671,8 +733,7 @@ impl Pane {
     pub fn reorder(&mut self, jobs: &Jobs) {
         if self.listing.rows() <= SORT_INLINE && self.listing.len() <= SORT_INLINE {
             let started = std::time::Instant::now();
-            self.listing.reorder(self.sort, self.show_hidden, &self.filter);
-            self.reband();
+            self.resort_now(jobs.mime.as_deref());
             self.sort_us = started.elapsed().as_micros() as u64;
             self.forget_hidden_cursor();
             return;
@@ -697,6 +758,7 @@ impl Pane {
         let filter = self.filter.clone();
         let sender = jobs.sender.clone();
         let wake = jobs.wake.clone();
+        let mime = jobs.mime.clone();
         let generation = self.generation;
         let epoch = self.sort_epoch;
         // `Parallel`, not the pane's lane: a sort touches no device, and queueing
@@ -704,15 +766,14 @@ impl Pane {
         // stops landing while a filter is being typed.
         jobs.pool.spawn(Lane::Parallel, self.sort_cancel.clone(), move |cancel| {
             let started = std::time::Instant::now();
-            let order = snapshot.compute_order(sort, show_hidden, &filter);
+            let kinds = kind_bytes(&snapshot, sort.bands, mime.as_deref());
+            let order = snapshot.compute_order(sort, show_hidden, &filter, &kinds);
             if cancel.is_cancelled() {
                 return;
             }
             let elapsed_us = started.elapsed().as_micros() as u64;
-            if sender
-                .send(Message { generation, update: Update::Ordered { epoch, order, elapsed_us } })
-                .is_ok()
-            {
+            let update = Update::Ordered { epoch, order, kinds, elapsed_us };
+            if sender.send(Message { generation, update }).is_ok() {
                 wake.wake();
             }
         });
@@ -960,6 +1021,7 @@ mod tests {
                 pool: std::sync::Arc::new(Pool::with_width(4)),
                 wake: waker.handle(),
                 sender,
+                mime: None,
             };
             Self { jobs, updates, _waker: waker }
         }
@@ -1087,13 +1149,14 @@ mod tests {
         let harness = Harness::new();
         let mut pane = Pane::new(root.clone());
         // One edge a day back: band 1 is the last day, band 2 everything before.
-        pane.sort.bands = sk_model::Banding::new(&[seconds + 86_400, seconds - 86_400]);
+        pane.sort.bands =
+            sk_model::Banding::Time(sk_model::Cuts::new(&[seconds + 86_400, seconds - 86_400]));
         pane.reload(&harness.jobs);
         harness.settle(&mut pane);
 
         let bands: Vec<u8> = (0..pane.listing.rows())
             .filter_map(|row| pane.listing.at(row))
-            .map(|id| pane.sort.bands.band_of(pane.listing.mtime(id)))
+            .map(|id| pane.listing.band_of(id, pane.sort.bands, &[]))
             .collect();
         assert!(bands.len() >= 4, "the fixture read too little: {bands:?}");
         assert!(bands.contains(&1) && bands.contains(&2), "one band only: {bands:?}");
@@ -1216,6 +1279,7 @@ mod tests {
             update: Update::Ordered {
                 epoch: pane.sort_epoch.wrapping_sub(1),
                 order: backwards,
+                kinds: Vec::new(),
                 elapsed_us: 0,
             },
         };

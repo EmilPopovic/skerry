@@ -52,6 +52,8 @@ mod views;
 pub use app::{App, Options};
 pub use bench::{Bench, run as bench};
 pub use capture::{Capture, run as capture};
+// Named by a trace, which measures what banding by kind costs a sort.
+pub use groups::Grouping;
 // Re-exported because every entry point above returns one, and a binary that
 // calls them has to be able to name what they fail with.
 pub use pane::Pane;

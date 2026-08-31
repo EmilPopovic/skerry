@@ -1832,23 +1832,16 @@ pub fn name_field(layout: &PaneLayout, metrics: &sk_ui::Metrics, row: usize, off
     }
 }
 
-/// The colour of the mark at the head of a row, from the file's kind.
+/// One colour per kind, and the palette is the only thing this decides.
 ///
-/// **By name only.** `MimeDatabase::by_name` is a hash lookup and, for the few
-/// globs that are not `*.ext`, a short scan — no allocation and no syscall, which
-/// is what lets this run once per visible row per frame. `of` would sniff the
-/// first bytes of a file with an unhelpful name, and that is a `read` on the
-/// frame loop.
-///
-/// Grey until the databases arrive, which is the first few milliseconds after
-/// start-up. A row that changes colour once is better than a first frame that
-/// waits for `globs2`.
-fn kind_color(theme: &sk_ui::Theme, types: Option<&MimeDatabase>, name: &str) -> Color {
+/// What kind a file *is* comes from `sk_desktop::kind_of` — a hash lookup and,
+/// for the few globs that are not `*.ext`, a short scan, which is what lets it
+/// run once per visible row per frame. Grey until the databases arrive, which is
+/// the first few milliseconds after start-up: a row that changes colour once is
+/// better than a first frame that waits for `globs2`.
+fn kind_colour(theme: &sk_ui::Theme, category: Category) -> Color {
     let kinds = theme.palette.kinds;
-    let Some(mime) = types.and_then(|types| types.by_name(name)) else {
-        return kinds.unknown;
-    };
-    match sk_desktop::category(mime) {
+    match category {
         Category::Folder => kinds.folder,
         Category::Image => kinds.image,
         Category::Audio => kinds.audio,
@@ -2383,7 +2376,7 @@ fn body(
     let cells =
         crate::groups::Bands::new(pane.mode, layout.body, metrics.row_height, &pane.bands, rows);
     for (band, at) in cells.headings(pane.scroll.offset()) {
-        heading_at(painter, band, at);
+        heading_at(painter, pane.grouping, band, at);
     }
     for row in cells.visible(pane.scroll.offset()) {
         let context = RowContext {
@@ -2444,10 +2437,10 @@ struct RowContext<'a> {
 /// **Not a row.** It carries no selection, no hover and no cursor ring, because
 /// it is not an entry and a click on it selects nothing — which is what
 /// [`crate::groups::Bands::index_at`] answers and what this has to look like.
-fn heading_at(painter: &mut Painter<'_>, band: u8, at: Area) {
+fn heading_at(painter: &mut Painter<'_>, grouping: crate::groups::Grouping, band: u8, at: Area) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let label = i18n::lookup(crate::groups::time_label(band));
+    let label = i18n::lookup(grouping.label(band));
     let baseline = painter.baseline(at.y, at.height, metrics.header_size);
     let style = TextStyle {
         weight: Weight::Bold,
@@ -2581,16 +2574,10 @@ fn kind_colour_of(
     if directory {
         return theme.palette.kinds.folder;
     }
-    // The mode bit before the name: a program is usually called something with no
-    // extension at all — `runme`, `configure`, half of `/usr/bin` — so a
-    // name-only answer calls it unknown, and what it is is the one thing about it
-    // worth marking.
-    let by_name = kind_color(theme, types, listing.name(id));
-    if listing.flags(id).has(Flags::EXEC) && by_name == theme.palette.kinds.unknown {
-        theme.palette.kinds.executable
-    } else {
-        by_name
-    }
+    // **One taxonomy, two readers.** `sk_desktop::kind_of` decides what a file is
+    // and a grouped pane's headings read the same function, so a row cannot be an
+    // image to its mark and a document to the heading above it.
+    kind_colour(theme, sk_desktop::kind_of(listing, id, types))
 }
 
 /// One row: its shape, its mark, and its three cells.
@@ -3326,8 +3313,12 @@ mod tests {
         let root = fixture();
         let waker = Waker::new().expect("eventfd");
         let (sender, updates) = mpsc::channel();
-        let jobs =
-            Jobs { pool: std::sync::Arc::new(Pool::with_width(4)), wake: waker.handle(), sender };
+        let jobs = Jobs {
+            pool: std::sync::Arc::new(Pool::with_width(4)),
+            wake: waker.handle(),
+            sender,
+            mime: None,
+        };
         let theme = Theme::dark();
         let mut cache = LayoutCache::new(4096);
 
@@ -3376,8 +3367,12 @@ mod tests {
         let root = fixture();
         let waker = Waker::new().expect("eventfd");
         let (sender, updates) = mpsc::channel();
-        let jobs =
-            Jobs { pool: std::sync::Arc::new(Pool::with_width(4)), wake: waker.handle(), sender };
+        let jobs = Jobs {
+            pool: std::sync::Arc::new(Pool::with_width(4)),
+            wake: waker.handle(),
+            sender,
+            mime: None,
+        };
         let theme = Theme::dark();
 
         let mut warm = LayoutCache::new(4096);

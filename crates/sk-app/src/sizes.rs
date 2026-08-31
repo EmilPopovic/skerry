@@ -164,6 +164,7 @@ mod tests {
                 pool: std::sync::Arc::new(Pool::with_width(4)),
                 wake: waker.handle(),
                 sender,
+                mime: None,
             };
             (Self { jobs, updates, _waker: waker }, measurer)
         }

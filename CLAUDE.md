@@ -35,8 +35,9 @@ result at **0.7 ms over 817,288 entries**, and `Ctrl+Enter` puts every result
 into the pane as rows that can be selected, dragged and trashed where they are;
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
-that every future view plugs into, and **groups by time** — today, yesterday,
-earlier this week — orthogonally to either, with each band sorted on its own
+that every future view plugs into, and **groups by time, by size or by kind** —
+today and yesterday, gigantic down to empty, or images and archives and code —
+orthogonally to either, with each band sorted on its own
 because the band is a prefix byte ahead of the sort's column, **remembered per
 folder** with the nearest ancestor inherited, so Downloads can be a grouped list
 while Pictures is a grid;

@@ -233,7 +233,9 @@ every uniform view, with the mode saved per tab.
 **Group By landed too**, as ADR 0013 said it should: over the cell geometry
 rather than inside it, so the same headings work in both views, and as a sort
 prefix rather than a second pass, so each band is ordered by whatever the pane is
-sorted by. Time only — by kind and by size are the same seam.
+sorted by. All three quantities: **by time, by size and by kind**, the last of
+them banding on `sk_desktop::Category` — the same taxonomy that colours a row's
+mark, so a heading and the marks under it cannot disagree.
 
 **Per-folder view settings landed with subtree inheritance**, in a file beside
 the session: the mode and the grouping are a decision about a folder rather than

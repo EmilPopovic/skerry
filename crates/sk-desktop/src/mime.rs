@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use sk_model::{EntryId, Flags, Listing};
+
 /// The type of a directory, which shared-mime-info defines and no glob matches.
 pub const DIRECTORY: &str = "inode/directory";
 /// What an unrecognised file is called.
@@ -77,6 +79,83 @@ pub enum Category {
     /// Anything else, including a file whose type nothing claims.
     #[default]
     Unknown,
+}
+
+impl Category {
+    /// The nine, in the order a grouped pane lists them.
+    ///
+    /// Folders first because a folder is not a file and everything else is
+    /// alphabetical-by-accident; `Unknown` last because "anything else" is where
+    /// a heading nobody recognises belongs.
+    pub const ALL: [Self; 9] = [
+        Self::Folder,
+        Self::Image,
+        Self::Audio,
+        Self::Video,
+        Self::Archive,
+        Self::Code,
+        Self::Document,
+        Self::Executable,
+        Self::Unknown,
+    ];
+
+    /// Its position in [`Self::ALL`], which is the byte a sort bands on.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        match self {
+            Self::Folder => 0,
+            Self::Image => 1,
+            Self::Audio => 2,
+            Self::Video => 3,
+            Self::Archive => 4,
+            Self::Code => 5,
+            Self::Document => 6,
+            Self::Executable => 7,
+            Self::Unknown => 8,
+        }
+    }
+}
+
+/// What kind one entry of a listing is.
+///
+/// **The one place the taxonomy is decided.** A row's mark, a cell's mark and a
+/// grouped pane's headings all read this, so a file cannot be an image to the
+/// colour and a document to the heading above it.
+///
+/// `mime` is optional because the databases are read on a job: for the first few
+/// milliseconds of a session there is no answer from the name, and every entry
+/// that is not a folder or a program is `Unknown`.
+#[must_use]
+pub fn kind_of(listing: &Listing, id: EntryId, mime: Option<&MimeDatabase>) -> Category {
+    let flags = listing.flags(id);
+    if flags.has(Flags::DIR) {
+        return Category::Folder;
+    }
+    let by_name =
+        mime.and_then(|mime| mime.by_name(listing.name(id))).map_or(Category::Unknown, category);
+    // The mode bit after the name: a program is usually called something with no
+    // extension at all — `runme`, `configure`, half of `/usr/bin` — so a
+    // name-only answer calls it unknown, and what it is is the one thing about it
+    // worth marking.
+    if by_name == Category::Unknown && flags.has(Flags::EXEC) {
+        Category::Executable
+    } else {
+        by_name
+    }
+}
+
+/// One band byte per entry, indexed by [`EntryId`], for [`Banding::Kind`].
+///
+/// **Every entry, not the visible ones.** A sort groups the whole listing, so
+/// this is the one place in the program that asks `by_name` a hundred thousand
+/// times — which is why it runs on the job that computes the order and not on the
+/// frame loop. Measured cost is in
+/// [09-performance-budgets.md](../../../docs/09-performance-budgets.md).
+///
+/// [`Banding::Kind`]: sk_model::Banding::Kind
+#[must_use]
+pub fn kinds(listing: &Listing, mime: Option<&MimeDatabase>) -> Vec<u8> {
+    (0..listing.len() as u32).map(|index| kind_of(listing, EntryId(index), mime).index()).collect()
 }
 
 /// Whether a type's *bytes* are text.
@@ -585,8 +664,57 @@ fn in_class<T: Glyph>(set: &[T], glyph: T) -> bool {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{DIRECTORY, MimeDatabase, TEXT, matches};
+    use super::{Category, DIRECTORY, MimeDatabase, TEXT, kind_of, kinds, matches};
+    use sk_model::{EntryId, Flags, Listing};
     use std::path::Path;
+
+    /// Every category's `index` is its position in `ALL`, because the band bytes
+    /// a sort groups by are indices into it and the labels are read in that order.
+    ///
+    /// **Two lists that have to agree and no compiler check that they do.** A
+    /// category inserted in the middle of `ALL` without its `index` moving files
+    /// every archive under "Code".
+    #[test]
+    fn every_category_index_is_its_place_in_the_list() {
+        for (at, category) in Category::ALL.into_iter().enumerate() {
+            assert_eq!(usize::from(category.index()), at, "{category:?}");
+        }
+        assert_eq!(Category::ALL.len(), 9);
+        assert_eq!(Category::default(), Category::Unknown, "the default is not the last band");
+    }
+
+    /// What a listing's entries are, by the three things that decide it: the
+    /// directory bit, the name, and the executable bit for a name that says
+    /// nothing.
+    #[test]
+    fn a_folder_is_a_folder_and_a_nameless_program_is_a_program() {
+        let mut listing = Listing::with_capacity(4);
+        // A directory whose name looks like a picture is still a directory.
+        listing.push("holiday.png", Flags::DIR);
+        listing.push("shot.png", Flags::NONE);
+        listing.push("configure", Flags::EXEC);
+        listing.push("notes", Flags::NONE);
+        let mime = MimeDatabase::load();
+
+        assert_eq!(kind_of(&listing, EntryId(0), Some(&mime)), Category::Folder);
+        assert_eq!(kind_of(&listing, EntryId(1), Some(&mime)), Category::Image);
+        // The mode bit only where the name said nothing: `configure` matches no
+        // glob, and half of `/usr/bin` is named like that.
+        assert_eq!(kind_of(&listing, EntryId(2), Some(&mime)), Category::Executable);
+        assert_eq!(kind_of(&listing, EntryId(3), Some(&mime)), Category::Unknown);
+
+        // Before the databases land there is no answer from the name, and the two
+        // that come from flags alone still have one.
+        assert_eq!(kind_of(&listing, EntryId(1), None), Category::Unknown);
+        assert_eq!(kind_of(&listing, EntryId(0), None), Category::Folder);
+        assert_eq!(kind_of(&listing, EntryId(2), None), Category::Executable);
+
+        // And the band bytes are one per entry, in `EntryId` order.
+        let bytes = kinds(&listing, Some(&mime));
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(bytes[0], Category::Folder.index());
+        assert_eq!(bytes[1], Category::Image.index());
+    }
 
     /// A `globs2` line is a file anyone can write, and a filename is what it is
     /// matched against. The recursive matcher took 665,879 calls for eight stars

@@ -282,8 +282,13 @@ fn gpu_note(found: &sk_plat::Capabilities) -> Option<String> {
 }
 
 /// The freedesktop databases, read together on one job.
-struct Desktop {
-    mime: MimeDatabase,
+pub(crate) struct Desktop {
+    /// **Behind its own `Arc`**, because a sort job needs it and a job cannot
+    /// borrow the `App` that holds this — grouping by kind bands on
+    /// `sk_desktop::Category`, which is a question `globs2` answers. One
+    /// reference count, rather than the whole bundle in [`crate::pane::Jobs`]
+    /// when only this half is ever read there.
+    pub(crate) mime: std::sync::Arc<MimeDatabase>,
     apps: Applications,
 }
 
@@ -298,8 +303,10 @@ fn read_desktop_databases(
     let (sender, receiver) = mpsc::channel();
     let wake = waker.handle();
     jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-        let loaded =
-            std::sync::Arc::new(Desktop { mime: MimeDatabase::load(), apps: Applications::load() });
+        let loaded = std::sync::Arc::new(Desktop {
+            mime: std::sync::Arc::new(MimeDatabase::load()),
+            apps: Applications::load(),
+        });
         if sender.send(loaded).is_ok() {
             wake.wake();
         }
@@ -332,7 +339,12 @@ impl Background {
             Problem::plain(ProblemKind::OutOfResources, format!("eventfd: {error}"))
         })?;
         let (sender, updates) = mpsc::channel();
-        let jobs = Jobs { pool: std::sync::Arc::new(Pool::new()), wake: waker.handle(), sender };
+        let jobs = Jobs {
+            pool: std::sync::Arc::new(Pool::new()),
+            wake: waker.handle(),
+            sender,
+            mime: None,
+        };
         let mut pane = Pane::new(path);
         pane.reload(&jobs);
 
@@ -1336,14 +1348,26 @@ impl App {
     }
 
     /// Takes delivery of the freedesktop databases, once.
+    ///
+    /// **A pane grouped by kind is re-sorted here**, and nowhere else. Its bands
+    /// are `sk_desktop::Category`, which needs `globs2`; a pane that sorted
+    /// before this landed filed every file under "Other", and nothing else would
+    /// ever ask again — the banding it wants has not changed, so
+    /// [`Self::rebandif_needed`] sees nothing to do.
     fn drain_desktop(&mut self) {
-        if let Ok(loaded) = self.desktop_rx.try_recv() {
-            self.desktop = Some(loaded);
-            if let Some(path) = self.open_owed.take() {
-                self.launch(path);
+        let Ok(loaded) = self.desktop_rx.try_recv() else { return };
+        self.jobs.mime = Some(loaded.mime.clone());
+        self.desktop = Some(loaded);
+        let Self { panes, jobs, .. } = self;
+        for pane in panes.every_mut() {
+            if pane.grouping == crate::groups::Grouping::Kind {
+                pane.reorder(jobs);
             }
-            self.dirty = true;
         }
+        if let Some(path) = self.open_owed.take() {
+            self.launch(path);
+        }
+        self.dirty = true;
     }
 
     fn advance(&mut self) {
@@ -3985,7 +4009,8 @@ search_active={active:?}",
         }
         let (query, listing) = (search.query.text.clone(), search.listing());
         self.close_search();
-        self.panes.focused_mut().show_results(query, listing);
+        let mime = self.desktop.clone();
+        self.panes.focused_mut().show_results(query, listing, mime.as_deref().map(|it| &*it.mime));
         self.settle_panes();
     }
 
@@ -5080,13 +5105,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // has its own grouping; banding only the focused half left the other one
         // grouped with no bands, which draws no headings at all — the setting
         // looked like it had been forgotten by walking into the other pane.
-        let edges = sk_ui::format::day_bands(clock_seconds());
+        let now = clock_seconds();
         let Self { panes, jobs, .. } = self;
         for pane in panes.every_mut() {
-            let wanted = match pane.grouping {
-                crate::groups::Grouping::None => sk_model::Banding::default(),
-                crate::groups::Grouping::Time => sk_model::Banding::new(&edges),
-            };
+            let wanted = pane.grouping.banding(now);
             if pane.sort.bands == wanted {
                 continue;
             }
@@ -6743,7 +6765,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             paused: edits.held(),
             naming: edits.naming.as_ref(),
             filtering: *filtering,
-            types: desktop.as_deref().map(|it| &it.mime),
+            types: desktop.as_deref().map(|it| it.mime.as_ref()),
             window: *window_state,
             menu: menu.as_ref(),
             path_entry: typing_path.as_ref(),

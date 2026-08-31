@@ -155,6 +155,12 @@ FRAMES = [
     # every other scale, which is the one class of defect only a second scale
     # catches.
     ("grouped-200", ["--size", "900x520", "--scale", "200", "--grouped"]),
+    # The other two groupings, which are the same mechanism over two other
+    # quantities. `grouped-kind` is the one frame where a heading and the marks
+    # under it come from the same taxonomy, so a row that is an image to its mark
+    # and a document to its heading is visible here and nowhere else.
+    ("grouped-size", ["--size", "900x520", "--scale", "125", "--grouped-size"]),
+    ("grouped-kind", ["--size", "900x520", "--scale", "125", "--grouped-kind"]),
     # The subtree search: results from three different folders, each with the
     # folder it is in beside it, over a summary that says the walk is still
     # going. The only frame whose rows are not one directory's.

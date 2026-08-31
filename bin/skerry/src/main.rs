@@ -42,6 +42,8 @@ struct Overlays {
     indexing: bool,
     grid: bool,
     grouped: bool,
+    grouped_size: bool,
+    grouped_kind: bool,
     search: bool,
     carrying: bool,
     path_entry: bool,
@@ -58,6 +60,20 @@ struct Overlays {
 }
 
 impl Overlays {
+    /// Which grouping the flags asked for. The first one given wins: they are
+    /// three values of one setting rather than three settings.
+    fn grouping(&self) -> sk_app::Grouping {
+        use sk_app::Grouping;
+        [
+            (self.grouped, Grouping::Time),
+            (self.grouped_size, Grouping::Size),
+            (self.grouped_kind, Grouping::Kind),
+        ]
+        .into_iter()
+        .find_map(|(wanted, grouping)| wanted.then_some(grouping))
+        .unwrap_or(Grouping::None)
+    }
+
     /// Whether `argument` was one of these, and sets it if so.
     fn take(&mut self, argument: &str) -> bool {
         let slot = match argument {
@@ -70,6 +86,8 @@ impl Overlays {
             "--indexing" => &mut self.indexing,
             "--grid" => &mut self.grid,
             "--grouped" => &mut self.grouped,
+            "--grouped-size" => &mut self.grouped_size,
+            "--grouped-kind" => &mut self.grouped_kind,
             "--search" => &mut self.search,
             "--carrying" => &mut self.carrying,
             "--path-entry" => &mut self.path_entry,
@@ -122,6 +140,8 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         indexing: overlays.indexing,
         grid: overlays.grid,
         grouped: overlays.grouped,
+        grouped_size: overlays.grouped_size,
+        grouped_kind: overlays.grouped_kind,
         search: overlays.search,
         carrying: overlays.carrying,
         path_entry: overlays.path_entry,
@@ -212,7 +232,8 @@ fn main() -> std::process::ExitCode {
         )
         .map(|()| true),
         (None, Some(frames)) => {
-            sk_app::bench(&Bench { path, logical, scale_120, frames }).map(|()| true)
+            let grouping = overlays.grouping();
+            sk_app::bench(&Bench { path, logical, scale_120, frames, grouping }).map(|()| true)
         }
         (None, None) => {
             window(&Options {

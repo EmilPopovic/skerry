@@ -76,6 +76,12 @@ pub struct Capture {
     pub grid: bool,
     /// Whether to cut the pane into time headings, which is orthogonal to `grid`.
     pub grouped: bool,
+    /// The same, banded on size instead: folders, then gigantic down to empty.
+    pub grouped_size: bool,
+    /// The same, banded on `sk_desktop::Category` — the taxonomy that also
+    /// colours each row's mark, so this is the frame where a heading disagreeing
+    /// with the marks under it would be visible.
+    pub grouped_kind: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -161,9 +167,22 @@ fn sample_row_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu>
 ///
 /// The edges come from the fixture rather than from the clock, so the frame means
 /// the same thing tomorrow.
-fn group_the_sample(pane: &mut Pane) {
+fn group_the_sample(
+    pane: &mut Pane,
+    grouping: crate::groups::Grouping,
+    types: &sk_desktop::MimeDatabase,
+) {
     const DAY: i64 = 86_400;
-    pane.grouping = crate::groups::Grouping::Time;
+    pane.grouping = grouping;
+    if grouping != crate::groups::Grouping::Time {
+        // Size and kind band on what the fixture already is, so there is nothing
+        // to arrange: the sizes are truncated to fixed byte counts and the names
+        // are the adversarial set, which between them reach four size bands and
+        // five kinds.
+        pane.sort.bands = grouping.banding(0);
+        pane.resort_now(Some(types));
+        return;
+    }
     let base = (0..pane.listing.rows())
         .filter_map(|row| pane.listing.at(row))
         .map(|id| pane.listing.mtime(id))
@@ -177,10 +196,28 @@ fn group_the_sample(pane: &mut Pane) {
         pane.listing.set_meta(*id, size, base + days * DAY, sk_model::Flags::NONE);
     }
     // Four bands: today, yesterday, earlier this week, earlier this month.
-    pane.sort.bands =
-        sk_model::Banding::new(&[base + DAY, base, base - DAY, base - 2 * DAY, base - 7 * DAY]);
-    pane.listing.reorder(pane.sort, pane.show_hidden, &pane.filter);
-    pane.reband();
+    pane.sort.bands = sk_model::Banding::Time(sk_model::Cuts::new(&[
+        base + DAY,
+        base,
+        base - DAY,
+        base - 2 * DAY,
+        base - 7 * DAY,
+    ]));
+    pane.resort_now(None);
+}
+
+/// Which grouping the flags asked for, if any.
+///
+/// One at a time: the three flags are three values of one setting, and a frame
+/// banded twice would be a frame of whichever call ran last.
+fn requested_grouping(request: &Capture) -> Option<crate::groups::Grouping> {
+    [
+        (request.grouped, crate::groups::Grouping::Time),
+        (request.grouped_size, crate::groups::Grouping::Size),
+        (request.grouped_kind, crate::groups::Grouping::Kind),
+    ]
+    .into_iter()
+    .find_map(|(wanted, grouping)| wanted.then_some(grouping))
 }
 
 /// Whichever of the two context menus was asked for.
@@ -660,8 +697,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     if request.grid {
         panes.focused_mut().mode = crate::cells::Mode::Grid;
     }
-    if request.grouped {
-        group_the_sample(panes.focused_mut());
+    if let Some(grouping) = requested_grouping(request) {
+        group_the_sample(panes.focused_mut(), grouping, &types);
     }
     if request.split {
         // **Stacked, and two tabs in the lower half.** A `Below` split is the
