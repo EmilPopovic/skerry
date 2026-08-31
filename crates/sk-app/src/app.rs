@@ -747,6 +747,8 @@ pub struct App {
     crumb_pending: Option<usize>,
     /// The navigation button under the pointer.
     hovered_tool: Option<(crate::panes::PaneId, crate::layout::Tool)>,
+    /// The switcher button under the pointer.
+    hovered_mode: Option<(crate::panes::PaneId, crate::cells::Mode)>,
     /// How far the list is zoomed, as a step on [`ZOOM`].
     ///
     /// A step rather than a factor, so `Ctrl +` and a pinch land on the same
@@ -1087,6 +1089,7 @@ impl App {
             crumb_menu: None,
             crumb_pending: None,
             hovered_tool: None,
+            hovered_mode: None,
             hits: crate::view::Hits::default(),
             cursor: sk_plat::Cursor::Arrow,
             hint: String::new(),
@@ -1530,6 +1533,7 @@ impl App {
                     self.hovered_crumb.take().is_some(),
                     self.hovered_separator.take().is_some(),
                     self.hovered_tool.take().is_some(),
+                    self.hovered_mode.take().is_some(),
                     self.sidebar.hover.take().is_some(),
                 ];
                 if gone.contains(&true) {
@@ -1996,6 +2000,16 @@ impl App {
             self.dirty = true;
             return true;
         }
+        // The switcher runs the same command the palette and `Ctrl+1` do, so a
+        // mode that is already on costs a no-op rather than a second code path.
+        if let Some((id, mode)) = self.mode_at(position) {
+            self.focus_pane(id);
+            if let Some(command) = commands.find(mode.command()) {
+                commands.run(command, self);
+            }
+            self.dirty = true;
+            return true;
+        }
         let Some(id) = self.bar_at(position) else { return false };
         self.focus_pane(id);
         self.toggle_path_entry();
@@ -2016,6 +2030,14 @@ impl App {
             .leaves
             .iter()
             .find_map(|leaf| leaf.tool_at(position.x, position.y).map(|tool| (leaf.id, tool)))
+    }
+
+    /// The switcher button under a point, and the pane whose bar it is in.
+    fn mode_at(&self, position: Point) -> Option<(crate::panes::PaneId, crate::cells::Mode)> {
+        self.placement
+            .leaves
+            .iter()
+            .find_map(|leaf| leaf.mode_at(position.x, position.y).map(|mode| (leaf.id, mode)))
     }
 
     /// Which pane's bar a point is in, if any.
@@ -5193,10 +5215,14 @@ pane_body={bodies:?} pane_bar={bars:?}",
         let (crumb_menu, crumb_menu_depth, crumb_menu_active) = self.crumb_menu_state();
         let crumb_menu_aim = self.crumb_menu_aim();
         let bar_report = self.bar_state();
+        let mode_hover = match self.hovered_mode.map(|(_, mode)| mode) {
+            Some(mode) => mode.token(),
+            None => "none",
+        };
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
-rows_right={:.1} body_right={:.1} \
+rows_right={:.1} body_right={:.1} modes_x={:.1} mode_w={:.1} mode_hover={mode_hover} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
 {bar_report} \
 separators={separators} separator_hover={separator_hover} separator_aim={separator_aim:?} \
@@ -5222,6 +5248,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.modified.width,
             self.placement.here.rows(self.panes.focused().mode).right(),
             self.placement.here.body.right(),
+            self.placement.here.modes.first().map_or(0.0, |area| area.x),
+            self.placement.here.modes.first().map_or(0.0, |area| area.width),
             self.window_state.maximized,
             self.layout.title.height,
             self.layout.sidebar.width,
@@ -5963,6 +5991,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if over_tool == Some(false) {
             return sk_plat::Cursor::Arrow;
         }
+        if self.mode_at(position).is_some() {
+            return sk_plat::Cursor::Hand;
+        }
         // Before the header's hand, for the same reason the press is: the
         // boundary is inside the header and is the more specific thing there.
         if self.column_drag.is_some() || self.column_edge_at(position).is_some() {
@@ -6681,6 +6712,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.dirty = true;
         }
         let tool = self.tool_at(position);
+        let mode = self.mode_at(position);
+        if self.hovered_mode != mode {
+            self.hovered_mode = mode;
+            self.dirty = true;
+        }
         if self.hovered_tool != tool {
             self.hovered_tool = tool;
             self.dirty = true;
@@ -6889,6 +6925,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_separator,
             crumb_menu,
             hovered_tool,
+            hovered_mode,
             sidebar,
             edits,
             filtering,
@@ -6967,6 +7004,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_separator: *hovered_separator,
             crumb_menu: crumb_menu.as_ref(),
             hovered_tool: *hovered_tool,
+            hovered_mode: *hovered_mode,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,
             drop_row: dropping.and_then(|drag| drag.landing.row),

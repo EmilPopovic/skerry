@@ -635,6 +635,8 @@ pub(crate) struct PaneLayout {
     /// which is the rule the metadata columns follow: a bar with buttons and no
     /// path is worse than either alone.
     pub(crate) tools: [Area; 4],
+    /// The view-mode switcher, at the right of the bar, or all empty when shed.
+    pub(crate) modes: [Area; crate::cells::Mode::ALL.len()],
     /// The breadcrumbs, which take what the buttons leave.
     pub(crate) path: Area,
     pub(crate) header: Area,
@@ -697,6 +699,15 @@ impl PaneLayout {
             .into_iter()
             .zip(self.tools)
             .find_map(|(tool, area)| (area.width > 0.0 && area.contains(x, y)).then_some(tool))
+    }
+
+    /// The switcher button at a point, if any. The rectangles the frame drew from,
+    /// for the same reason [`Self::tool_at`] reads those.
+    pub(crate) fn mode_at(&self, x: f32, y: f32) -> Option<crate::cells::Mode> {
+        crate::cells::Mode::ALL
+            .into_iter()
+            .zip(self.modes)
+            .find_map(|(mode, area)| (area.width > 0.0 && area.contains(x, y)).then_some(mode))
     }
 }
 
@@ -977,7 +988,32 @@ fn leaf_layout(
         }
     });
     let toolbar = tools.iter().map(|tool| tool.width).sum::<f32>();
-    let path = Area { x: bar.x + toolbar, width: (bar.width - toolbar).max(0.0), ..bar };
+    // **Off the right of the bar, where the modes belong to the pane.** The mode
+    // is a per-pane decision — a grid of photographs beside a details list of the
+    // folder they are going into is the whole reason the split exists — so the
+    // switcher goes in the pane's own bar rather than once in the window. Shed on
+    // the same rule the navigation buttons use, and shed *after* them: a bar with
+    // room for one group keeps the one that moves rather than the one that looks.
+    let switch_width = metrics.tool_width * crate::cells::Mode::ALL.len() as f32;
+    // **Against `tools_width`, not against what the buttons actually took.** With
+    // the shed width, shedding the buttons freed 120 pixels and the switcher
+    // reappeared in a bar too narrow for either — shrinking the pane put a group
+    // back. Both rules read the same unshed figures, so shedding is monotone in
+    // the bar's width.
+    let room = bar.width - tools_width - switch_width;
+    let modes = std::array::from_fn(|index| {
+        if room < 120.0 {
+            return Area::default();
+        }
+        Area {
+            x: bar.right() - switch_width + metrics.tool_width * index as f32,
+            y: bar.y,
+            width: metrics.tool_width,
+            height: bar.height,
+        }
+    });
+    let switcher = modes.iter().map(|mode| mode.width).sum::<f32>();
+    let path = Area { x: bar.x + toolbar, width: (bar.width - toolbar - switcher).max(0.0), ..bar };
     let header = Area { y: bar.bottom(), height: metrics.header_height, ..area };
     let body =
         Area { y: header.bottom(), height: (area.bottom() - header.bottom()).max(0.0), ..area };
@@ -988,6 +1024,7 @@ fn leaf_layout(
         tabs: strip,
         bar,
         tools,
+        modes,
         path,
         header,
         body,
@@ -1516,7 +1553,13 @@ mod tests {
             (wide.tools[3].right() - wide.path.x).abs() < f32::EPSILON,
             "the path does not start where the buttons end"
         );
-        assert!((wide.path.right() - wide.bar.right()).abs() < f32::EPSILON);
+        // The path now ends where the switcher begins, and the switcher ends at
+        // the bar's edge: three regions that tile the bar with nothing between.
+        assert!((wide.path.right() - wide.modes[0].x).abs() < f32::EPSILON);
+        assert!(
+            (wide.modes[crate::cells::Mode::ALL.len() - 1].right() - wide.bar.right()).abs()
+                < f32::EPSILON
+        );
 
         // Narrow enough that the path would have nothing left. A pane gets this
         // narrow long before a window does, which is the reason the rule moved
@@ -1532,6 +1575,60 @@ mod tests {
 
     /// Each button is found by the rectangle it is drawn from — rule 2, so the
     /// dimming and the click agree about where it is.
+    /// The switcher takes the right of the bar, and **sheds after** the buttons:
+    /// a bar with room for one group keeps the one that moves rather than the one
+    /// that looks. Between those two widths the buttons are drawn and the switcher
+    /// is not, which is the only state where the two rules differ and therefore
+    /// the only one worth an assertion.
+    #[test]
+    fn the_switcher_takes_the_right_of_the_bar_and_sheds_after_the_buttons() {
+        let (panes, _waker, _jobs, _updates) = tree();
+        let metrics = sk_ui::Metrics::default();
+        let widths = crate::layout::Columns::default();
+        let at = |width: f32| {
+            let mut leaves = Vec::new();
+            let mut dividers = Vec::new();
+            let area = Area { x: 0.0, y: 0.0, width, height: 500.0 };
+            panes.layout(area, &metrics, widths, &mut leaves, &mut dividers);
+            leaves[0]
+        };
+
+        let wide = at(1000.0);
+        assert!(wide.modes.iter().all(|mode| mode.width > 0.0));
+        for pair in wide.modes.windows(2) {
+            assert!((pair[0].right() - pair[1].x).abs() < f32::EPSILON, "a gap in the row");
+        }
+
+        // Room for the buttons and the path, but not for the switcher as well.
+        let tight = at(260.0);
+        assert!(tight.tools.iter().all(|tool| tool.width > 0.0), "the buttons went first");
+        assert!(tight.modes.iter().all(|mode| mode.width <= 0.0), "the switcher stayed");
+        assert!(
+            (tight.path.right() - tight.bar.right()).abs() < f32::EPSILON,
+            "and the path took the room back"
+        );
+
+        // Narrower still and both are gone.
+        let narrow = at(200.0);
+        assert!(narrow.tools.iter().all(|tool| tool.width <= 0.0));
+        assert!(narrow.modes.iter().all(|mode| mode.width <= 0.0));
+    }
+
+    /// A press aimed at a switcher button finds that button, from the rectangles
+    /// the frame drew.
+    #[test]
+    fn a_press_on_a_switcher_button_finds_that_mode() {
+        let (panes, _waker, _jobs, _updates) = tree();
+        let (leaves, _) = geometry(&panes);
+        let leaf = leaves[0];
+        for (mode, area) in crate::cells::Mode::ALL.into_iter().zip(leaf.modes) {
+            let middle = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+            assert_eq!(leaf.mode_at(middle.0, middle.1), Some(mode));
+        }
+        // And the path beside them is not one of them.
+        assert_eq!(leaf.mode_at(leaf.path.x + 4.0, leaf.path.y + 4.0), None);
+    }
+
     #[test]
     fn a_press_on_a_navigation_button_finds_that_button() {
         let (panes, _waker, _jobs, _updates) = tree();

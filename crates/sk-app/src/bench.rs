@@ -124,6 +124,7 @@ fn chrome_of<'a>(
         hovered_separator: None,
         crumb_menu: None,
         hovered_tool: None,
+        hovered_mode: None,
         places,
         hovered_place: None,
         drop_row: None,

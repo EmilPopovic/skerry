@@ -608,6 +608,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         hovered_separator: None,
         crumb_menu: sample.overlays.crumbs.as_ref(),
         hovered_tool: None,
+        hovered_mode: None,
         places: sample.places,
         hovered_place: None,
         drop_row: None,

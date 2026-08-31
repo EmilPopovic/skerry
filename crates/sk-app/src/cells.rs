@@ -31,6 +31,27 @@ pub enum Mode {
 }
 
 impl Mode {
+    /// The modes, in the order the switcher lays them out.
+    ///
+    /// Least dense first, which is the order every file manager that has a
+    /// switcher uses: a grid of large cells, then a row per entry.
+    pub const ALL: [Self; 2] = [Self::Grid, Self::Details];
+
+    /// The command each one runs.
+    ///
+    /// **Rule 2, the same way [`crate::layout::Tool`] does it.** A button in the
+    /// switcher is not a second way to change the mode, it is the same action the
+    /// palette and `Ctrl+1` reach — so the button's name, its state and its effect
+    /// all come from the one registry entry rather than from three places that
+    /// have to agree.
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Details => "view.details",
+            Self::Grid => "view.grid",
+        }
+    }
+
     /// The token this is written as in the session file.
     #[must_use]
     pub const fn token(self) -> &'static str {

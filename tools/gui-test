@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 103
+FEWEST_SCENARIOS = 104
 
 
 def scenario(name, fresh: bool = False):
@@ -1496,6 +1496,47 @@ def pointer_scroll(run: Run, fixture: Path) -> None:
     run.drive("move 50 50\nsleep 150\nscroll -5\nsleep 500\nkey f12\nsleep 200\n")
     if float(run.state()["scroll"]) >= after:
         raise Failure("scrolling up moved nothing")
+
+
+@scenario("view-switcher")
+def view_switcher(run: Run, fixture: Path) -> None:
+    """The pane's own bar switches the view mode, without a menu.
+
+    **Aimed from the switcher's own rectangle**, `modes_x` and `mode_w`, which is
+    the rule docs/12-measurement.md records after a chrome aim taken from a
+    neighbour moved without it. The order is `cells::Mode::ALL` — grid, then
+    details — so the first button is the grid and the second is the list.
+
+    The buttons run the same registry commands `Ctrl+1` and `Ctrl+2` do, which is
+    what rule 2 asks for; what this covers is that the pointer reaches them at all,
+    which no other scenario does — every other way into a mode is a chord or a
+    menu row.
+    """
+    state = listed(run)
+    width = float(state["mode_w"])
+    if width <= 0.0:
+        raise Skipped("the switcher is shed at this window size")
+    left = float(state["modes_x"])
+    middle = float(state["bar_y"]) + float(state["bar_h"]) / 2.0
+    if state["mode"] != "details":
+        raise Failure(f"expected to start in details, not {state['mode']!r}")
+
+    def press(index: int) -> dict:
+        at = aim(run, state, left + width * (index + 0.5), middle)
+        run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 350\nkey f12\nsleep 200\n")
+        return run.state()
+
+    in_grid = press(0)
+    if in_grid["mode"] != "grid":
+        raise Failure(f"the first button left the pane in {in_grid['mode']!r}")
+    # And the hover reports which button the pointer is on, which is what draws
+    # the button that is not the current one.
+    if in_grid["mode_hover"] != "grid":
+        raise Failure(f"the pointer is on the grid button and reports {in_grid['mode_hover']!r}")
+
+    back = press(1)
+    if back["mode"] != "details":
+        raise Failure(f"the second button left the pane in {back['mode']!r}")
 
 
 @scenario("click-past-the-columns")

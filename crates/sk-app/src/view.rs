@@ -55,6 +55,8 @@ pub struct Chrome<'a> {
     pub hovered_crumb: Option<(PaneId, usize)>,
     /// The navigation button under the pointer, and which pane's bar it is in.
     pub hovered_tool: Option<(PaneId, Tool)>,
+    /// The switcher button under the pointer, and the pane whose bar it is in.
+    pub hovered_mode: Option<(PaneId, Mode)>,
     /// The sidebar's contents, once the job that reads them has finished.
     ///
     /// A slice rather than the model, because the view needs the arrangement and
@@ -442,9 +444,30 @@ fn nav_bar(
     fill(painter, leaf.bar, theme.palette.chrome);
     painter.hairline(leaf.bar.x, leaf.bar.bottom() - 1.0, leaf.bar.width, theme.palette.divider);
     tool_buttons(painter, pane, leaf, chrome);
+    mode_buttons(painter, pane, leaf, chrome);
 
     let baseline = painter.baseline(leaf.bar.y, leaf.bar.height, metrics.path_size);
-    let hint_width = if has_keyboard {
+    let names = crumb_names(pane);
+    let widths = crumb_widths(painter, &names, metrics.path_size);
+
+    // **The hint gives way to the directory's name, and to nothing else.**
+    // `first_crumb` never elides the leaf — a bar reading `/ … ›` with the current
+    // directory absent is worse than a truncated name — so the leaf is the one
+    // component that can overrun, and what it overran into was `F1 keys`. The
+    // switcher taking sixty pixels off this region is what made it visible; the
+    // collision was reachable before it, at any window narrow enough.
+    //
+    // Dropping the hint is the right way round. A person who cannot see where they
+    // are has lost more than a person who cannot see which key lists the others,
+    // and `F1` works whether or not it is advertised.
+    let hint = text_width(painter, chrome.hint, metrics.header_size, false);
+    let needed = widths.first().copied().unwrap_or_default()
+        + crumb_width(painter, i18n::lookup("chrome.crumb_elided"), metrics.path_size, false)
+        + CRUMB_PAD
+        + widths.last().copied().unwrap_or_default();
+    let entering = chrome.path_entry.is_some();
+    let spare = leaf.path.width - metrics.gutter * 2.0 - 12.0 - hint;
+    let hint_width = if has_keyboard && (entering || spare >= needed) {
         let style = TextStyle::new(metrics.header_size, theme.palette.dim.with_alpha(150)).right();
         line(painter, chrome.hint, style, leaf.path.x, leaf.path.width - metrics.gutter, baseline)
             / painter.scale
@@ -459,16 +482,31 @@ fn nav_bar(
         return;
     }
     let available = leaf.path.width - metrics.gutter * 2.0 - hint_width - 12.0;
-    let names = crumb_names(pane);
-    let widths = crumb_widths(painter, &names, metrics.path_size);
 
     let first = first_crumb(painter, &names, &widths, available, metrics.path_size);
     let elided = first > 1;
     let mut cursor = leaf.path.x + metrics.gutter;
 
-    // Clipped to its own region, so a path that will not fit cannot draw over
-    // the keyboard hint or into the pane beside it.
-    let region = painter.rect(leaf.path.x, leaf.path.y, leaf.path.width, leaf.path.height);
+    // Clipped to its own region **minus the hint's**, so a path that will not fit
+    // cannot draw over the keyboard hint or into the pane beside it.
+    //
+    // `first_crumb` fits the elided components inside `available`, which already
+    // reserves the hint — but it deliberately never elides the leaf, because a bar
+    // reading `/ … ›` with the current directory absent is worse than a truncated
+    // name. So the leaf is the one component that can overrun, and this is what it
+    // overruns *into*: without the subtraction it drew straight through `F1 keys`,
+    // which is what sixty pixels of switcher off the same region made visible.
+    //
+    // The hint's own gutter inset comes off as well: it is drawn right-aligned at
+    // `path.right() - gutter`, so subtracting only its width leaves the clip a
+    // gutter's worth *past* where the hint begins — which was six pixels, and six
+    // pixels was the whole of the gap between a directory's name and `F1 keys`.
+    let region = painter.rect(
+        leaf.path.x,
+        leaf.path.y,
+        (leaf.path.width - hint_width - metrics.gutter - 6.0).max(0.0),
+        leaf.path.height,
+    );
     painter.list.push_clip(region);
     for (index, name) in names.iter().enumerate() {
         // A component that did not fit still gets its regions, empty: the depth
@@ -1988,6 +2026,81 @@ fn tool_buttons(painter: &mut Painter<'_>, pane: &Pane, leaf: &PaneLayout, chrom
     }
 }
 
+/// The view-mode switcher: one small mark per mode, the current one filled.
+///
+/// **The current mode is a filled pill, not a brighter mark.** A switcher whose
+/// state is only the ink is a switcher a person has to compare two icons to read;
+/// filling the one that is on says it at a glance, and it is the shape every
+/// segmented control in every toolkit uses.
+fn mode_buttons(painter: &mut Painter<'_>, pane: &Pane, leaf: &PaneLayout, chrome: &Chrome<'_>) {
+    let theme = *painter.theme;
+    for (mode, area) in Mode::ALL.into_iter().zip(leaf.modes) {
+        if area.width <= 0.0 {
+            continue;
+        }
+        let current = pane.mode == mode;
+        let hovered = chrome.hovered_mode == Some((leaf.id, mode));
+        if current || hovered {
+            let shape =
+                painter.rect(area.x + 2.0, area.y + 6.0, area.width - 4.0, area.height - 12.0);
+            let fill = if current {
+                theme.palette.button_hover
+            } else {
+                theme.palette.button_hover.with_alpha(110)
+            };
+            painter.list.rect(shape, fill, painter.px(theme.metrics.radius));
+        }
+        let ink = match (current, chrome.window.activated) {
+            (true, _) => theme.palette.text,
+            (false, true) => theme.palette.dim,
+            (false, false) => theme.palette.dim.with_alpha(150),
+        };
+        let centre = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+        match mode {
+            Mode::Grid => grid_mark(painter, centre, ink),
+            Mode::Details => list_mark(painter, centre, ink),
+        }
+    }
+}
+
+/// Four squares in a square, for the grid.
+fn grid_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
+    /// One square, and the space between two of them.
+    const CELL: f32 = 5.0;
+    const GAP: f32 = 2.5;
+    let (x, y) = centre;
+    let span = CELL * 2.0 + GAP;
+    for row in 0..2 {
+        for column in 0..2 {
+            let rect = painter.rect(
+                x - span / 2.0 + column as f32 * (CELL + GAP),
+                y - span / 2.0 + row as f32 * (CELL + GAP),
+                CELL,
+                CELL,
+            );
+            painter.list.rect(rect, ink, painter.px(1.0));
+        }
+    }
+}
+
+/// Three rows of a dot and a line, for the details list.
+fn list_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
+    /// Between one row's baseline and the next.
+    const PITCH: f32 = 4.5;
+    const DOT: f32 = 2.0;
+    const RULE: f32 = 8.0;
+    const WEIGHT: f32 = 1.5;
+    let (x, y) = centre;
+    let left = x - (DOT + 2.0 + RULE) / 2.0;
+    for row in -1..2 {
+        let top = y + row as f32 * PITCH - WEIGHT / 2.0;
+        let dot = painter.rect(left, top - (DOT - WEIGHT) / 2.0, DOT, DOT);
+        painter.list.rect(dot, ink, painter.px(1.0));
+        let rule = painter.rect(left + DOT + 2.0, top, RULE, WEIGHT);
+        painter.list.rect(rule, ink, 0.0);
+    }
+}
+
 /// The head and the shaft of one arrow, centred on a point.
 fn arrow(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color, at: Direction) {
     /// Across the head, and how far it reaches from the shaft.
@@ -2127,6 +2240,7 @@ static EMPTY_LEAF: PaneLayout = PaneLayout {
     tabs: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     bar: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     tools: [Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; 4],
+    modes: [Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }; crate::cells::Mode::ALL.len()],
     path: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     header: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
     body: Area { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
@@ -3245,6 +3359,7 @@ mod tests {
                 hovered_separator: None,
                 crumb_menu: None,
                 hovered_tool: None,
+                hovered_mode: None,
                 places: &[],
                 hovered_place: None,
                 drop_row: None,

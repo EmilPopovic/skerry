@@ -260,6 +260,22 @@ window's rather than the folder's — a width is a decision about how much of a
 name somebody wants to read — and they live in the session file beside the tabs
 and the splits, on a line an older file simply does not have.
 
+**Each pane's bar carries a view switcher**, at the right of it, one small mark
+per mode with the current one filled — because a mode reached only by `Ctrl+1` or
+a menu row is a mode most people never find, which is [rule
+4](03-principles.md). The buttons run the same registry commands the chords do,
+and they shed after the navigation buttons: a bar with room for one group keeps
+the one that moves rather than the one that looks.
+
+**A column view is decided and not yet written.**
+[ADR 0014](adr/0014-a-column-view-is-a-trail-of-panes.md) settles the seam that
+had to come first — a column *is* a `Pane`, a pane in column mode holds a trail of
+them, and the last one is the pane the rest of the program talks to — so reads
+route themselves by generation, operations act on the deepest column, the watcher
+watches the trail, and the session stores nothing new. The switcher grows its
+third mark when that lands, and not before: a button that does nothing is worse
+than no button.
+
 **Still owed here:** middle-click to split, the **List** columns — and the inline
 **Tree**,
 which ADR 0013 explicitly does not reach: it is not a listing laid out

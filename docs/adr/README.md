@@ -21,6 +21,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0011](0011-one-plain-text-state-file-written-atomically.md) | One plain-text state file, written whole and renamed into place | Accepted |
 | [0012](0012-a-flat-index-file-per-root-rebuilt-whole.md) | One flat index file per root, rebuilt whole, verified at the point of use | Accepted |
 | [0013](0013-one-cell-geometry-behind-every-uniform-view.md) | One cell geometry behind every uniform view, and Tree is not one of them | Accepted |
+| [0014](0014-a-column-view-is-a-trail-of-panes.md) | A column view is a trail of panes, and only the last one is the pane | Accepted |
 
 ## Triggers that have been answered
 
