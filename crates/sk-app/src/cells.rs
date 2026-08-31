@@ -74,10 +74,15 @@ const GRID_HEIGHT: f32 = 3.4;
 /// Reserved from the grid's *column arithmetic* and not from the body, so the
 /// last cell in a line stops short of the thumb while a click in the strip still
 /// lands on that cell — `index_at` clamps a column past the last one, which is
-/// what makes those two compatible. Details does not reserve it: its row fill is
-/// already inset by the gutter, and shrinking its body would make the rightmost
-/// pixels of a row unclickable.
-const TRACK: f32 = 11.0;
+/// what makes those two compatible.
+///
+/// **Details reserves it too, from its columns.** It used not to, on the grounds
+/// that a row's fill is already inset by the gutter — which was true and was not
+/// enough: the thumb sits at the pane's right edge, the fill ran to within five
+/// pixels of it, and the thumb was drawn across the focus ring of any selected
+/// row. Reserving eleven pixels from the column arithmetic is what puts the fill
+/// and the thumb in different places rather than nearly the same one.
+pub(crate) const TRACK: f32 = 11.0;
 
 /// A direction key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

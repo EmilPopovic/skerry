@@ -249,10 +249,13 @@ person sets by dragging the boundary in the header, and the two metadata columns
 then pack against it rather than against the pane's edge. **The boundaries between the
 columns are drawn**, because eight logical pixels of invisible grab band is a
 feature only somebody who was told about it can use — which is [rule
-4](03-principles.md). And the list is a table with an edge: the row fill, the
-scrollbar's strip and the hit test all read one value, so a selected row stops
-where the columns stop, the thumb sits against that edge inside it, and a press
-past them clears the selection the way a press below the last row does. The widths are the
+4](03-principles.md). And the list is a table with an edge: the row fill and the
+hit test read one value, so a selected row stops where the columns stop and a
+press past them clears the selection the way a press below the last row does. The
+scrollbar stays at the pane's right edge, where a viewport's scrollbar goes, and
+the eleven pixels it needs are **reserved out of the columns** — the grid always
+did that, Details did not, and the difference was a thumb drawn across the focus
+ring of every selected row. The widths are the
 window's rather than the folder's — a width is a decision about how much of a
 name somebody wants to read — and they live in the session file beside the tabs
 and the splits, on a line an older file simply does not have.

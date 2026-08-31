@@ -6796,12 +6796,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let (top, height) = self.thumb()?;
         // A generous grab region: the thumb is eight logical pixels wide and a
         // pointer is not, so the hit area is the right edge of the pane.
-        // The strip the frame drew the thumb in, widened either side: the thumb is
-        // eight logical pixels and a pointer is not. Bounded on the right as well
-        // as the left, because the space past the table is not the scrollbar's —
-        // it is nothing, and a press in nothing clears the selection.
-        let track = self.placement.here.track(self.panes.focused().mode);
-        let inside_x = position.x >= track.x - 8.0 && position.x < track.right() + 6.0;
+        // The strip the frame drew the thumb in, widened to the left: the thumb is
+        // eight logical pixels and a pointer is not. To the pane's edge on the
+        // right, because that edge is the strip's — but no further left than the
+        // strip itself, since the space between the table and the strip is nothing
+        // and a press in nothing clears the selection.
+        let track = self.placement.here.track();
+        let inside_x = position.x >= track.x - 8.0 && position.x < self.placement.here.body.right();
         let inside_y = position.y >= top && position.y < top + height;
         (inside_x && inside_y).then_some(position.y - top)
     }

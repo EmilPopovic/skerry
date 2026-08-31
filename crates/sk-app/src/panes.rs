@@ -670,19 +670,22 @@ impl PaneLayout {
     /// The strip the scrollbar thumb is drawn in, and the strip a press grabs it
     /// by.
     ///
-    /// **Inside the table, against its right edge.** Not at the pane's right edge,
-    /// where a thumb two thousand pixels from the rows it scrolls belongs to
-    /// nothing on screen; and not past the table's closing rule, which is where it
-    /// went for one commit and read as a bar floating in the empty space beside
-    /// the list rather than as the list's own scrollbar.
+    /// **At the pane's right edge**, which is where a viewport's scrollbar goes
+    /// and where a hand reaches for one. It took three tries: against the table's
+    /// edge it stopped short of the pane on every window narrower than the name
+    /// column's ceiling, and past the table's edge it was a bar floating in the
+    /// empty space beside the list.
+    ///
+    /// It does not overlap a row because [`crate::cells::TRACK`] is reserved out
+    /// of the columns before they are laid out, not because this dodges anything.
+    /// Which is why it needs no mode: both geometries reserve the same strip.
     ///
     /// One function because there were nearly two. [`sk_ui::thumb`] exists for
     /// exactly this reason on the other axis: the view drew the thumb and the hit
     /// test found it, from the same arithmetic written out twice, and the two had
     /// already grown two spellings of one clamp.
-    pub(crate) fn track(&self, mode: crate::cells::Mode) -> Area {
-        let table = self.rows(mode);
-        Area { x: table.right() - THUMB - 3.0, width: THUMB, ..table }
+    pub(crate) fn track(&self) -> Area {
+        Area { x: self.body.right() - THUMB - 3.0, width: THUMB, ..self.body }
     }
 
     /// The navigation button at a point, if any.
@@ -1271,14 +1274,17 @@ mod tests {
         assert_eq!(cells.index_at(leaf.body.right() - 5.0, y, 0.0), None, "and so is the far edge");
     }
 
-    /// **The thumb belongs against the table's right edge, inside it.**
+    /// **The thumb is at the pane's right edge and no row reaches it.**
     ///
-    /// It has been wrong on both sides of that: once past the edge, a bar floating
-    /// in the empty space beside the list, and once eleven pixels further in,
-    /// dodging a rule that closed the table off and has since been dropped for
-    /// wanting the same ten pixels.
+    /// Three placements were wrong before this one: against the table's edge,
+    /// which stopped short of the pane on every window under the ceiling; past the
+    /// table's edge, a bar floating in the empty space; and eleven pixels further
+    /// in, dodging a rule that has since been dropped. What makes this one right
+    /// is not where it is drawn but that `cells::TRACK` is taken out of the
+    /// columns first — so the inequality below holds by construction rather than
+    /// by arithmetic that happens to work out.
     #[test]
-    fn the_thumb_sits_inside_the_table_and_clear_of_its_closing_rule() {
+    fn the_thumb_is_at_the_panes_edge_and_no_row_reaches_it() {
         let (panes, _waker, jobs, _updates) = tree();
         drop(jobs);
         let metrics = sk_ui::Metrics::default();
@@ -1289,29 +1295,42 @@ mod tests {
         panes.layout(wide, &metrics, widths, &mut leaves, &mut dividers);
         let leaf = leaves[0];
 
-        let table = leaf.rows(crate::cells::Mode::Details);
-        let track = leaf.track(crate::cells::Mode::Details);
-        assert!(track.x > table.x, "and not off the left of it either");
-        assert!(track.right() <= table.right(), "the thumb left the table at {}", track.right());
+        let track = leaf.track();
+        assert!(track.right() <= leaf.body.right(), "outside the pane at {}", track.right());
         assert!(
-            track.right() > table.right() - 12.0,
-            "the thumb is {} short of the table's edge at {}",
-            table.right() - track.right(),
-            table.right()
+            track.right() > leaf.body.right() - 6.0,
+            "{} short of the pane's edge",
+            leaf.body.right() - track.right()
         );
         assert!((track.width - super::THUMB).abs() < f32::EPSILON);
 
-        // A grid has no rule and reserves its own strip, so there the thumb goes
-        // against the body's edge.
-        let grid = leaf.track(crate::cells::Mode::Grid);
-        assert!(grid.right() <= leaf.body.right(), "outside the pane");
-        assert!(grid.right() > leaf.body.right() - 12.0, "not against the edge: {}", grid.right());
+        // **The one that was reported**, at a width where the columns take
+        // everything going as well as one where they stop at the ceiling: a row
+        // that reaches the strip is a row with a scrollbar drawn across its focus
+        // ring. A grid's cells stop short of the same strip from their own
+        // arithmetic — `cells::tests::the_last_cell_reaches_the_thumb` — which is
+        // why `rows` hands a grid the whole body and this loop is Details only.
+        for width in [420.0, 700.0, 1100.0, 2400.0] {
+            let mut leaves = Vec::new();
+            let mut dividers = Vec::new();
+            let area = Area { x: 0.0, y: 0.0, width, height: 600.0 };
+            panes.layout(area, &metrics, widths, &mut leaves, &mut dividers);
+            let leaf = leaves[0];
+            let table = leaf.rows(crate::cells::Mode::Details);
+            assert!(
+                table.right() <= leaf.track().x,
+                "at {width} the rows reach {} and the thumb starts at {}",
+                table.right(),
+                leaf.track().x
+            );
+        }
     }
 
-    /// A grid's cells tile the whole body, so the body is the table — and a pane
-    /// narrower than the name column's ceiling has nothing spare either way.
+    /// A grid's cells tile the whole body, so the body is the table. A pane under
+    /// the name column's ceiling has nothing spare either — except the scrollbar's
+    /// strip, which the columns never get.
     #[test]
-    fn a_grid_and_a_narrow_pane_both_fill_the_body() {
+    fn a_grid_fills_the_body_and_a_narrow_pane_fills_all_but_the_strip() {
         let (panes, _waker, jobs, _updates) = tree();
         drop(jobs);
         let metrics = sk_ui::Metrics::default();
@@ -1326,10 +1345,12 @@ mod tests {
         let narrow = Area { x: 0.0, y: 0.0, width: 700.0, height: 600.0 };
         panes.layout(narrow, &metrics, widths, &mut leaves, &mut dividers);
         let leaf = leaves[0];
-        assert_eq!(
-            leaf.rows(crate::cells::Mode::Details),
-            leaf.body,
-            "under the ceiling the columns already reach the edge"
+        let table = leaf.rows(crate::cells::Mode::Details);
+        assert!(
+            (table.right() - (leaf.body.right() - crate::cells::TRACK)).abs() < f32::EPSILON,
+            "under the ceiling the columns take everything but the strip: {} of {}",
+            table.right(),
+            leaf.body.right()
         );
     }
 

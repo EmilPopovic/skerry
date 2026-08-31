@@ -2822,7 +2822,7 @@ fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, table.height) else {
         return;
     };
-    let track = layout.track(pane.mode);
+    let track = layout.track();
     let rect = painter.rect(track.x, track.y + position, track.width, thumb);
     painter.list.rect(rect, theme.palette.thumb, painter.px(track.width / 2.0));
 }

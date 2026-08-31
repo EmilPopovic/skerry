@@ -163,7 +163,12 @@ impl Default for Columns {
 /// hundred logical pixels the metadata columns give way instead, widest first.
 pub(crate) fn columns(body: Area, metrics: &Metrics, widths: Columns) -> (Area, Area, Area, Area) {
     let gutter = metrics.gutter;
-    let available = body.width - gutter * 2.0;
+    // **The scrollbar's strip is not the columns' to use.** The thumb is drawn at
+    // the pane's right edge, so a column reaching that edge is a column with a
+    // scrollbar across it — which is what the selected row's focus ring looked
+    // like before this line existed. The grid has always reserved it.
+    let edge = body.right() - crate::cells::TRACK;
+    let available = edge - body.x - gutter * 2.0;
     let mut size_width = widths.size;
     let mut modified_width = widths.modified;
     if available - metrics.icon_column - size_width - modified_width < 100.0 {
@@ -175,7 +180,7 @@ pub(crate) fn columns(body: Area, metrics: &Metrics, widths: Columns) -> (Area, 
 
     let icon = Area { x: body.x + gutter, y: 0.0, width: metrics.icon_column, height: 0.0 };
     let name_x = icon.right();
-    let fits = (body.right() - gutter - size_width - modified_width - name_x).max(0.0);
+    let fits = (edge - gutter - size_width - modified_width - name_x).max(0.0);
     let name_width = fits.min(widths.name);
     (
         icon,
@@ -608,7 +613,15 @@ mod tests {
         let window = Layout::compute_with(Size::new(700.0, 720.0), &metrics, Frame::None, false);
         let layout = one_leaf(&window, &metrics);
         assert!(layout.name.width < Columns::default().name, "{}", layout.name.width);
-        assert!((layout.modified.right() - (700.0 - metrics.gutter)).abs() < f32::EPSILON);
+        // Everything but the gutter and the scrollbar's strip, which the columns
+        // never get: a column reaching the pane's edge is a column with a thumb
+        // drawn across it.
+        let edge = 700.0 - metrics.gutter - crate::cells::TRACK;
+        assert!(
+            (layout.modified.right() - edge).abs() < f32::EPSILON,
+            "{}",
+            layout.modified.right()
+        );
     }
 
     /// **The boundary a drag lets go of is the boundary the next frame draws.**
