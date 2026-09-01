@@ -132,8 +132,9 @@ FRAMES = [
     ("context-menu-row", ["--size", "900x520", "--scale", "125", "--menu-row"]),
     # The one panel with no way to dismiss it, and the only one whose content is
     # a *comparison*: two files' sizes and dates side by side, which is what
-    # makes "replace or keep both" a question anybody can answer. Also the only
-    # frame with a checkbox in it.
+    # makes "replace or keep both" a question anybody can answer. Its check box
+    # and a list entry's are one primitive now, and this is the frame that says
+    # so: unifying them changed no pixel of it.
     ("name-taken", ["--size", "900x520", "--scale", "125", "--clash"]),
     # The only question in the program whose answer cannot be taken back, and the
     # only frame with the danger colour in it. It was a sentence in the status
@@ -181,6 +182,15 @@ FRAMES = [
     # it belongs to.
     ("no-listing-columns", ["--size", "1100x520", "--scale", "100", "--columns",
                             "--at", "documents/not-here"]),
+    # **A check box that is ticked.** `pose` hovers row seven and selects rows two
+    # to four, so the box under the pointer is empty in all thirty-three frames that
+    # draw one and the ticked state was in none of them — which is a premise nobody
+    # chose, the same way "every fixture has a listing" was. Row zero, selected.
+    ("check-box", ["--size", "900x520", "--scale", "125", "--checked"]),
+    # And in a trail, which had no box in any frame at all: `HOVERED` is row seven
+    # and a column of the fixture holds three, so the pointer was never on one.
+    ("check-box-columns", ["--size", "1100x520", "--scale", "100", "--columns",
+                           "--at", "documents/deeper", "--checked"]),
     # Grouping, in both geometries, because orthogonal is the claim: the same
     # headings over rows and over cells, with each band sorted on its own. Two
     # frames rather than one because the heading's rule and the band's first line

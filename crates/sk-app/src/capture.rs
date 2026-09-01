@@ -91,6 +91,13 @@ pub struct Capture {
     /// colours each row's mark, so this is the frame where a heading disagreeing
     /// with the marks under it would be visible.
     pub grouped_kind: bool,
+    /// Whether to hover a row that is *selected*, so the check box is filled.
+    ///
+    /// **Because `pose` cannot be both.** It hovers row seven and selects rows two
+    /// to four, so the box under the pointer is empty in every frame that has one
+    /// and the state that says "this one is chosen" was in none of them. Row zero,
+    /// which is the one row every fixture has — a trail's own column holds three.
+    pub checked: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -596,7 +603,7 @@ fn settle_folder_totals(pane: &mut Pane, session: &Session) {
 ///
 /// A selection, a cursor and a hover, at fixed rows: a frame with none of them
 /// covers none of the three shapes a row can have.
-fn pose(pane: &mut Pane) {
+fn pose(pane: &mut Pane, checked: bool) {
     for row in SELECTED {
         if let Some(id) = pane.listing.at(row) {
             pane.selection.toggle(id);
@@ -607,6 +614,13 @@ fn pose(pane: &mut Pane) {
     }
     if pane.listing.rows() > HOVERED {
         pane.hover = Some(HOVERED);
+    }
+    // Row zero instead, selected: the one row every fixture has, including a
+    // trail's own column, which holds three.
+    if let Some(id) = pane.listing.at(0).filter(|_| checked) {
+        pane.selection.select(id);
+        pane.selection.set_cursor(Some(id));
+        pane.hover = Some(0);
     }
 }
 
@@ -718,7 +732,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     let (mut pane, _) = session.read_fully(&where_);
 
     settle_folder_totals(&mut pane, &session);
-    pose(&mut pane);
+    pose(&mut pane, request.checked);
 
     // The overlay reads the command registry, so a capture of it builds one.
     let keys_rows = request.keys.then(|| {

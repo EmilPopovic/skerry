@@ -5389,12 +5389,13 @@ pane_body={bodies:?} pane_bar={bars:?}",
         let crumb_menu_aim = self.crumb_menu_aim();
         let bar_report = self.bar_state();
         let (column_aim, mode_hover, column_scroll, column_over) = self.column_state();
+        let check_aim = self.check_aim();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
 rows_right={:.1} body_right={:.1} modes_x={:.1} mode_w={:.1} mode_hover={mode_hover} \
 trail={} across={:.1} column_aim={column_aim} column_scroll={column_scroll} \
-column_over={column_over} pointer_at={:.1}:{:.1} \
+column_over={column_over} check_aim={check_aim} pointer_at={:.1}:{:.1} \
 scrolls={} precise={} lifts={} scroll_time={} flings={} \
 frame={frame} frame_hover={frame_hover} maximized={} close_x={close_x:.1} title_h={:.1} \
 {bar_report} \
@@ -5643,14 +5644,19 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
 
         let Some(row) = self.row_under(position) else {
-            // Empty space: clear, and be ready to rubber-band.
-            self.panes.focused_mut().selection.clear();
-            self.panes.focused_mut().selection.set_cursor(None);
-            self.band = Some((position, position));
-            self.dirty = true;
+            self.press_on_empty_space(position);
             return;
         };
         let Some(id) = self.panes.focused().listing.at(row) else { return };
+        // **The check box is a toggle and nothing else.** Not `ctrl || ticked`
+        // through the row press: that path also arms a drag, and a second press
+        // inside the box would then open what it had just un-ticked. A person
+        // ticking four rows is not dragging them and has not asked to open one.
+        if self.check_under(row, position) {
+            self.panes.focused_mut().selection.toggle(id);
+            self.dirty = true;
+            return;
+        }
         self.press_on_a_row(id, position, clicks, ctrl, shift);
         if clicks >= 2 {
             // `App::open_focused`, not `Pane::open_focused`: the pane's one
@@ -6045,6 +6051,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// is not known until the pointer moves or does not — so the selection is
     /// deferred to the release. Deciding here is what made dragging three files
     /// drag one of them.
+    /// A press below the last row: nothing is chosen, and a rubber band is armed.
+    fn press_on_empty_space(&mut self, position: Point) {
+        self.panes.focused_mut().selection.clear();
+        self.panes.focused_mut().selection.set_cursor(None);
+        self.band = Some((position, position));
+        self.dirty = true;
+    }
+
     fn press_on_a_row(
         &mut self,
         id: sk_model::EntryId,
@@ -6661,6 +6675,44 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// Which listing row is under a point, or `None` outside the list.
     fn row_under(&self, position: Point) -> Option<usize> {
         self.cells().index_at(position.x, position.y, self.panes.focused().scroll.offset())
+    }
+
+    /// The middle of the check box a press would land on, or nothing.
+    ///
+    /// **From the program, not from a harness's own arithmetic.** A scenario that
+    /// worked the box out from `row_h` and the icon column would be a second
+    /// implementation of [`crate::view::check_of`] — and this file has already
+    /// learned what happens then: a coordinate derived from another region is a
+    /// coordinate that moves. It is `none` until something is hovered, which is
+    /// also the condition for the box existing at all.
+    fn check_aim(&self) -> String {
+        let pane = self.panes.focused();
+        let Some(row) = pane.hover else { return "none".to_owned() };
+        let cell = self.cells().at(row, pane.scroll.offset());
+        let box_ =
+            crate::view::check_of(pane.mode, &self.placement.here, cell, &self.theme.metrics);
+        // The shape every other aim on that line uses, because a harness made to
+        // parse `Some((768.0, 123.0))` would be parsing Rust's `Debug`.
+        format!("{:.1}:{:.1}", box_.x + box_.width / 2.0, box_.y + box_.height / 2.0)
+    }
+
+    /// Whether a press at `position` landed on `row`'s check box.
+    ///
+    /// **Hover is part of the question, not context for it.** The box is drawn only
+    /// under the pointer, so asking only about the rectangle makes a target out of
+    /// a square that is not on screen — and the pointer is not always where the
+    /// window last saw it: a window that maps underneath a pointer which has not
+    /// moved gets no `enter` from this compositor, so `hover` is `None` while the
+    /// pointer is genuinely over a row. A press there has to be an ordinary press
+    /// on the row rather than a toggle nobody could see coming.
+    fn check_under(&self, row: usize, position: Point) -> bool {
+        let pane = self.panes.focused();
+        if pane.hover != Some(row) {
+            return false;
+        }
+        let cell = self.cells().at(row, pane.scroll.offset());
+        crate::view::check_of(pane.mode, &self.placement.here, cell, &self.theme.metrics)
+            .contains(position.x, position.y)
     }
 
     /// Which drawn palette result is under a point, if the palette is open.

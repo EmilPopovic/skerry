@@ -1263,12 +1263,7 @@ fn clash_panel(
     hits.for_the_rest = asks_the_rest.then(|| {
         let top = first + rows * CLASH_STEP;
         let box_ = painter.rect(left, top + 6.0, 14.0, 14.0);
-        let ring = painter.px(1.0).round().max(1.0);
-        painter.list.stroke(box_, theme.palette.dim, painter.px(3.0), ring);
-        if for_the_rest {
-            let tick = painter.rect(left + 4.0, top + 10.0, 6.0, 6.0);
-            painter.list.rect(tick, theme.palette.accent, painter.px(1.0));
-        }
+        painter.checkbox(box_, theme.palette.accent, theme.palette.dim, for_the_rest);
         let label = i18n::format("clash.for_the_rest", &[&clash.rest]);
         let baseline = painter.baseline(top, CLASH_STEP, metrics.text_size);
         line(painter, &label, subtitle, left + 22.0, inner - 22.0, baseline);
@@ -2558,11 +2553,6 @@ struct CellState {
     chosen: bool,
 }
 
-/// One row of a trail column: a mark, a name, and a chevron for a folder.
-///
-/// **No size and no date, because a column has neither.** A trail level fetches no
-/// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
-/// that would be blank while it arrived.
 /// Where the message that stands in for an empty listing goes: its left edge and
 /// how much room it has, both in logical pixels.
 ///
@@ -2585,6 +2575,73 @@ fn empty_message(table: Area, body: Area, metrics: &sk_ui::Metrics) -> (f32, f32
 
 /// The mark in a column row, square.
 const ICON: f32 = 16.0;
+
+/// The most room a check box takes, square.
+///
+/// Sixteen, which is the whole of a row's mark and the corner of a cell's. A
+/// pointer target smaller than this is one a hand misses; larger than this it
+/// covers a grid mark somebody is trying to recognise.
+const CHECK: f32 = 16.0;
+
+/// Where an entry's mark is drawn, in logical pixels, in whichever mode.
+///
+/// **One home per expression, which is the whole reason this exists.** Each of the
+/// three arms was written inline in the function that draws that mode, and the
+/// check box needs the same three answers — so without this there would be two
+/// copies of each, and the copy the pointer is tested against would drift from the
+/// copy a person can see. `Mode::Columns` defers to [`column_parts`] rather than
+/// repeating its gutter for the same reason.
+///
+/// `layout` is read by `Details` alone: it is the one mode whose mark sits in a
+/// column of its own rather than at a fraction of the cell.
+///
+/// **A free function with no `Painter`, for the reason [`column_parts`] is one.**
+/// Neither an [`Area`] nor [`sk_ui::Metrics`] can hold a device pixel, so this
+/// arithmetic cannot mix the two the way `column_row`'s once did.
+pub(crate) fn mark_of(
+    mode: Mode,
+    layout: &PaneLayout,
+    cell: Area,
+    metrics: &sk_ui::Metrics,
+) -> Area {
+    let (x, y, side) = match mode {
+        Mode::Details => (
+            layout.icon.x + (layout.icon.width - ICON) / 2.0,
+            cell.y + (metrics.row_height - ICON) / 2.0,
+            ICON,
+        ),
+        // **From the height, capped by the width.** The cell's height is fixed and
+        // its width stretches to fill the pane, so a mark sized from the width grew
+        // with the window while the cell it sits in did not — and in a wide pane it
+        // drew straight through the name. The cap is what keeps it inside a narrow
+        // one.
+        Mode::Grid => {
+            let side = (cell.height * 0.46).min(cell.width * 0.42);
+            (cell.x + (cell.width - side) / 2.0, cell.y + cell.height * 0.34 - side / 2.0, side)
+        }
+        Mode::Columns => {
+            (column_parts(cell, metrics).0, cell.y + (metrics.row_height - ICON) / 2.0, ICON)
+        }
+    };
+    Area { x, y, width: side, height: side }
+}
+
+/// Where an entry's check box goes: the mark's own top-left square.
+///
+/// **One rule for three modes.** What it looks like follows from how big the mark
+/// is rather than from a branch: a row's mark is sixteen pixels, so the box covers
+/// it exactly and reads as a box where the mark was; a cell's mark is forty or
+/// more, so the same square is a badge on its corner.
+pub(crate) fn check_of(
+    mode: Mode,
+    layout: &PaneLayout,
+    cell: Area,
+    metrics: &sk_ui::Metrics,
+) -> Area {
+    let mark = mark_of(mode, layout, cell, metrics);
+    let side = mark.width.min(CHECK);
+    Area { width: side, height: side, ..mark }
+}
 
 /// Where a column row's three parts start, in logical pixels: the mark, the name,
 /// and how wide the name's box is.
@@ -2614,15 +2671,23 @@ fn column_parts(area: Area, metrics: &sk_ui::Metrics) -> (f32, f32, f32) {
 /// at the same width and the column does not look ragged.
 const CHEVRON: f32 = 14.0;
 
+/// One row of a trail column: a mark, a name, and a chevron for a folder.
+///
+/// **No size and no date, because a column has neither.** A trail level fetches no
+/// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
+/// that would be blank while it arrived.
 fn column_row(
     painter: &mut Painter<'_>,
     listing: &sk_model::Listing,
     id: sk_model::EntryId,
-    area: Area,
-    top: f32,
+    layout: &PaneLayout,
+    cell: Area,
     state: CellState,
     types: Option<&sk_desktop::MimeDatabase>,
 ) {
+    // The column's rectangle at this row's height. `area` is the column, `top` is
+    // where this row starts in it, and every line below wants one or the other.
+    let (area, top) = (cell, cell.y);
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let flags = listing.flags(id);
@@ -2651,8 +2716,9 @@ fn column_row(
         painter.list.stroke(pill, theme.palette.accent, painter.px(metrics.radius), ring);
     }
 
-    let (icon_x, text_x, width) = column_parts(area, &metrics);
-    let icon_box = painter.rect(icon_x, top + (metrics.row_height - ICON) / 2.0, ICON, ICON);
+    let (_, text_x, width) = column_parts(area, &metrics);
+    let mark = mark_of(Mode::Columns, layout, cell, &metrics);
+    let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
     let ink = kind_colour_of(&theme, types, listing, id, directory, broken);
     if directory {
         painter.folder(icon_box, ink);
@@ -2706,7 +2772,8 @@ fn ancestor_columns(
             let Some(id) = level.dir.listing.at(row) else { continue };
             let top = cells.at(row, level.scroll.offset()).y;
             let state = CellState { chosen: level.chosen == Some(id), ..CellState::default() };
-            column_row(painter, &level.dir.listing, id, area, top, state, chrome.types);
+            let cell = Area { y: top, height: metrics.row_height, ..area };
+            column_row(painter, &level.dir.listing, id, layout, cell, state, chrome.types);
         }
         if rows == 0 && !level.dir.loading {
             let message = level.dir.problem.as_ref().map_or_else(
@@ -2774,8 +2841,34 @@ fn body(
                     hovered: pane.hover == Some(row),
                     chosen: false,
                 };
-                column_row(painter, &pane.listing, id, area, top, state, chrome.types);
+                let cell = Area { y: top, height: metrics.row_height, ..area };
+                column_row(painter, &pane.listing, id, layout, cell, state, chrome.types);
             }
+        }
+        // **The check box, in one place for all three modes.** It is drawn after
+        // the mark it sits over and from the same [`check_of`] a press is tested
+        // against, so what a pointer hits is what a person sees — and [rule
+        // 8](../../../docs/03-principles.md)'s "the same selection semantics in
+        // every view" holds by construction rather than by three copies agreeing.
+        //
+        // **Only under the pointer.** A box on every selected row is a column of
+        // furniture and puts the affordance where it is not needed; a box on a row
+        // that is not hovered is a target nobody can see. Hover is the one state
+        // where drawing it and taking a press are the same condition, which is why
+        // `App::check_under` asks for it too.
+        let renaming = context.naming.is_some_and(|naming| naming.row == row);
+        if let Some(id) = pane.listing.at(row).filter(|_| pane.hover == Some(row) && !renaming) {
+            let box_ = check_of(pane.mode, layout, cells.at(row, pane.scroll.offset()), &metrics);
+            let rect = painter.rect(box_.x, box_.y, box_.width, box_.height);
+            // **Its own ground, because it is drawn over the mark.** At sixteen
+            // pixels the box is the mark's whole square and has to hide it; on a
+            // grid cell it is a badge on the corner of one. Painting the pane's
+            // background rather than the row's fill on purpose: a chip that is
+            // clearly a separate object is a chip a hand aims at.
+            let radius = painter.px(3.0);
+            painter.list.rect(rect, theme.palette.background, radius);
+            let on = pane.selection.contains(id);
+            painter.checkbox(rect, theme.palette.accent, theme.palette.dim, on);
         }
     }
 
@@ -2903,17 +2996,8 @@ fn cell_at(
         painter.list.rect(pill, theme.palette.accent.with_alpha(90), painter.px(metrics.radius));
     }
 
-    // **From the height, capped by the width.** The cell's height is fixed and its
-    // width stretches to fill the pane, so a mark sized from the width grew with
-    // the window while the cell it sits in did not — and in a wide pane it drew
-    // straight through the name. The cap is what keeps it inside a narrow one.
-    let mark = (box_.height * 0.46).min(box_.width * 0.42);
-    let icon_box = painter.rect(
-        box_.x + (box_.width - mark) / 2.0,
-        box_.y + box_.height * 0.34 - mark / 2.0,
-        mark,
-        mark,
-    );
+    let mark = mark_of(pane.mode, layout, box_, &metrics);
+    let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
     let colour = kind_colour_of(&theme, types, &pane.listing, id, directory, broken);
     if directory {
         painter.folder(icon_box, colour);
@@ -2983,7 +3067,6 @@ fn row_at(
     let metrics = theme.metrics;
     let cursor = pane.selection.cursor();
     let ring = painter.px(1.0).round().max(1.0);
-    let icon_size = 16.0;
     let text_px = painter.px(metrics.text_size);
     let listing = pane.listing.version();
 
@@ -3040,12 +3123,8 @@ fn row_at(
             );
         }
 
-        let icon_box = painter.rect(
-            layout.icon.x + (layout.icon.width - icon_size) / 2.0,
-            top + (metrics.row_height - icon_size) / 2.0,
-            icon_size,
-            icon_size,
-        );
+        let mark = mark_of(pane.mode, layout, cells.at(row, pane.scroll.offset()), &metrics);
+        let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
         let icon_color = kind_colour_of(&theme, types, &pane.listing, id, directory, broken);
         if directory {
             painter.folder(icon_box, icon_color);
@@ -3669,6 +3748,50 @@ mod tests {
             assert!(x >= body.x, "in {mode} it starts under the sidebar");
             assert!(x + width <= body.right(), "in {mode} it runs past the pane");
             assert!(width > 100.0, "in {mode} a {width} box holds no sentence");
+        }
+    }
+
+    /// **The check box is on the mark, and never bigger than a hand needs.**
+    ///
+    /// One rule for three modes, so the assertions are about the rule rather than
+    /// about three sets of coordinates: the box sits inside the mark it covers, at
+    /// the mark's own top-left, and is capped at [`super::CHECK`] so a grid badge
+    /// does not swallow the picture it is a badge on.
+    ///
+    /// **Asserted against the mark, which is the thing that must not move.** A
+    /// press is tested against exactly what is drawn — one function answers both —
+    /// so what is left to check is that the answer lands on the mark and is worth
+    /// pointing at.
+    #[test]
+    fn a_check_box_covers_a_marks_corner_in_every_mode() {
+        use crate::cells::Mode;
+        use crate::layout::Area;
+
+        let metrics = sk_ui::Metrics::default();
+        // A body that starts where a sidebar leaves off, and a cell as tall as a
+        // grid cell rather than a row, so the two mark sizes are both exercised.
+        let body = Area { x: 220.0, y: 130.0, width: 880.0, height: 500.0 };
+        let (icon, name, size, modified) =
+            crate::layout::columns(body, &metrics, crate::layout::Columns::default());
+        let layout =
+            super::PaneLayout { body, icon, name, size, modified, ..super::PaneLayout::default() };
+
+        let row = Area { y: 200.0, height: metrics.row_height, ..body };
+        let cell = Area { x: 260.0, y: 200.0, width: 110.0, height: 96.0 };
+        for (mode, at) in [(Mode::Details, row), (Mode::Grid, cell), (Mode::Columns, row)] {
+            let box_ = super::check_of(mode, &layout, at, &metrics);
+            let mark = super::mark_of(mode, &layout, at, &metrics);
+            assert!(box_.width > 0.0 && (box_.width - box_.height).abs() < f32::EPSILON);
+            assert!(box_.width <= super::CHECK, "{mode:?}: a {} box is a poster", box_.width);
+            assert!(box_.width >= 10.0, "{mode:?}: a {} box is a target nobody hits", box_.width);
+            // On the mark's top-left, and inside it.
+            assert!((box_.x - mark.x).abs() < f32::EPSILON, "{mode:?}: not at the mark's left");
+            assert!((box_.y - mark.y).abs() < f32::EPSILON, "{mode:?}: not at the mark's top");
+            assert!(box_.right() <= mark.right() + f32::EPSILON, "{mode:?}: wider than the mark");
+            assert!(box_.bottom() <= mark.bottom() + f32::EPSILON, "{mode:?}: taller");
+            // And inside the pane, which is what a press has to be able to reach.
+            assert!(box_.x >= body.x, "{mode:?}: the box is under the sidebar");
+            assert!(box_.right() <= body.right(), "{mode:?}: the box is off the pane");
         }
     }
 

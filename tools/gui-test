@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 108
+FEWEST_SCENARIOS = 109
 
 
 def scenario(name, fresh: bool = False):
@@ -1363,6 +1363,80 @@ def point_at(run: Run, row: int) -> dict[str, str]:
     raise Failure(
         f"could not put the pointer on row {row}; it landed on {run.state()['hover']}"
     )
+
+
+def point_at_the_check_box(run: Run, row: int) -> dict[str, str]:
+    """Puts the pointer on `row`'s check box, and proves it is on it.
+
+    Two moves, because the box only exists under the pointer: the first lands on
+    the row, which is what makes the window draw a box and report where it is, and
+    the second lands inside it. `check_aim` comes from `App::check_of` — the same
+    function the drawing uses — so this cannot be a harness's private idea of where
+    a sixteen-pixel square sits inside a row.
+    """
+    state = point_at(run, row)
+    if state["check_aim"] == "none":
+        raise Failure(f"row {row} is hovered and reports no check box")
+    x, _, y = state["check_aim"].partition(":")
+    at = aim(run, state, float(x), float(y))
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nkey f12\nsleep 150\n")
+    moved = run.state()
+    if moved["hover"] != str(row):
+        raise Failure(f"moving into the box left the pointer on row {moved['hover']}")
+    return moved
+
+
+@scenario("check-box-selects")
+def check_box_selects(run: Run, fixture: Path) -> None:
+    """A press on a check box adds a row to the selection, and takes it back out.
+
+    **Which no unit test reaches, because the whole feature is a hit target.** The
+    semantics are `Selection::toggle`, which `Ctrl`-click has always had; what is
+    new is a square a hand can aim at without a keyboard, and whether a press lands
+    on it is a question about geometry, a pointer and a compositor.
+
+    Three claims: an ordinary press replaces a selection and a press in the box
+    does not, a second press in the same box removes what the first added, and
+    neither one opens anything or starts a drag — the box is a toggle and nothing
+    else.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    here = run.state()["path"]
+
+    # An ordinary press on row 1, to have something for the box to add *to*.
+    pointing = point_at(run, 1)
+    first = pointing["hover_name"]
+    run.drive("click\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), cursor=first, selected="1")
+
+    # Now the box on row 3. Two selected, and the first one is still in.
+    box = point_at_the_check_box(run, 3)
+    third = box["hover_name"]
+    run.drive("click\nsleep 250\nkey f12\nsleep 200\n")
+    added = run.state()
+    if added["selected"] != "2":
+        raise Failure(f"a press in the box left {added['selected']} selected, not 2")
+    if added["cursor"] != third:
+        raise Failure(f"the cursor is on {added['cursor']!r}, not {third!r}")
+    if added["path"] != here:
+        raise Failure(f"the press opened something: {added['path']}")
+
+    # And again: back to one, which is the half a plain click cannot do at all.
+    run.drive("click\nsleep 250\nkey f12\nsleep 200\n")
+    removed = run.state()
+    if removed["selected"] != "1":
+        raise Failure(f"a second press left {removed['selected']} selected, not 1")
+    if removed["path"] != here:
+        raise Failure(f"the second press opened something: {removed['path']}")
+
+    # **The keyboard's half of the same action**, which rule 5 requires and which
+    # `Ctrl`-click never had: `Ctrl+Space` on the cursor row.
+    run.drive("key ctrl+space\nsleep 250\nkey f12\nsleep 200\n")
+    if run.state()["selected"] != "2":
+        raise Failure(f"Ctrl+Space left {run.state()['selected']} selected, not 2")
+    run.drive("key ctrl+space\nsleep 250\nkey f12\nsleep 200\n")
+    if run.state()["selected"] != "1":
+        raise Failure(f"Ctrl+Space did not take it back out: {run.state()['selected']}")
 
 
 @scenario("pointer-click")

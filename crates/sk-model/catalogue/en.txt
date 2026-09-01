@@ -188,6 +188,7 @@ action.open_beside = Open right
 action.open_below = Open down
 action.parent = Parent folder
 action.select_all = Select all
+action.select_toggle = Select or deselect
 action.clear_selection = Clear selection
 action.new_folder = New folder
 action.rename = Rename

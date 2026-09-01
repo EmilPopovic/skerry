@@ -407,6 +407,41 @@ impl Painter<'_> {
         }
     }
 
+    /// A check box: a framed square with a block of `ink` in it when it is on.
+    ///
+    /// **No tick, because a tick is a diagonal.** The display list has rectangles,
+    /// rounded rectangles and a triangle with its apex on one of four edges — see
+    /// [`Self::triangle`], which says why a font glyph is not the alternative
+    /// either: `↻` and `⟳` are both missing from this machine's chain and render as
+    /// a box, and which glyphs somebody else has is somebody else's decision. A
+    /// block inside a frame is a state a person reads at fourteen pixels without
+    /// one, and it is the shape the panel that asks about a taken name already drew
+    /// by hand — this is that shape with one home instead of two.
+    ///
+    /// **Proportional, not fourteen pixels.** The panel's box is fourteen and the
+    /// one over a list entry's mark is sixteen, so the inner block is a fraction of
+    /// the frame rather than a constant; at any size the two read as the same
+    /// control.
+    ///
+    /// It draws no ground. Over a panel there is nothing to hide, and over a mark
+    /// the caller paints one — which is the caller's business, because what is
+    /// behind the box is what the caller put there.
+    pub fn checkbox(&mut self, box_rect: Rect, ink: Color, frame: Color, on: bool) {
+        let ring = self.px(1.0).round().max(1.0);
+        self.list.stroke(box_rect, frame, self.px(3.0), ring);
+        if !on {
+            return;
+        }
+        let inset = (box_rect.width * (4.0 / 14.0)).round();
+        let block = Rect::new(
+            box_rect.x + inset,
+            box_rect.y + inset,
+            (box_rect.width - inset * 2.0).max(1.0),
+            (box_rect.height - inset * 2.0).max(1.0),
+        );
+        self.list.rect(block, ink, self.px(1.0));
+    }
+
     /// The mark for a file: an outlined page with two lines of text in it.
     pub fn file(&mut self, box_rect: Rect, color: Color) {
         let unit = box_rect.height / 16.0;

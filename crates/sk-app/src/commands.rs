@@ -241,6 +241,21 @@ fn select(registry: &mut Registry<App>) {
             },
         },
         CommandSpec {
+            id: "select.toggle",
+            name: "action.select_toggle",
+            group: Group::Select,
+            // **Not a bare `Space`**, which is a character a name field takes and
+            // a type-ahead filter takes too. `Ctrl+Space` is what every list that
+            // has this already uses, and `shift_matters` is false for a space, so
+            // the binding covers the shifted one rather than leaving it silent.
+            keys: &["ctrl+space"],
+            enabled: |app: &App| app.panes.focused().selection.cursor().is_some(),
+            run: |app: &mut App| {
+                let Some(id) = app.panes.focused().selection.cursor() else { return };
+                app.panes.focused_mut().selection.toggle(id);
+            },
+        },
+        CommandSpec {
             id: "select.none",
             name: "action.clear_selection",
             group: Group::Select,
@@ -899,6 +914,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("go.open", "a double click on a row"));
     reach.push(("view.menu", "the secondary pointer button"));
     reach.push(("select.none", "a click on empty space"));
+    reach.push(("select.toggle", "the check box over an entry's mark"));
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));
