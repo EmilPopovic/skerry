@@ -37,6 +37,19 @@ pub struct Chrome<'a> {
     pub keys: Option<&'a [(String, String)]>,
     /// The frame statistics.
     pub stats: bool,
+    /// The undo stack, whose entries the history strip lists.
+    ///
+    /// `None` where there is no stack to draw — a bench, whose frame is measured
+    /// with no panel open because a panel nobody opened is the wrong frame to
+    /// measure.
+    pub edits: Option<&'a crate::edit::Edits>,
+    /// Whether the history strip is showing its list, and how far it is scrolled.
+    ///
+    /// The offset rather than the [`sk_ui::Scroll`], so a caller with no scroll of
+    /// its own needs no borrow it would have to keep alive.
+    pub history: (bool, f32),
+    /// The history row under the pointer.
+    pub hovered_edit: Option<usize>,
     /// The type-ahead buffer, while it is live.
     pub typed: Option<&'a str>,
     /// The rubber-band rectangle, while one is being dragged.
@@ -165,6 +178,16 @@ pub struct Hits {
     /// One rectangle per sidebar row, in the flattened order the model uses, so
     /// the index a click reports is an index into it.
     pub places: Vec<Area>,
+    /// The history strip's header, which collapses the list when pressed.
+    ///
+    /// `None` where there is no history and therefore no strip at all.
+    pub history_header: Option<Area>,
+    /// One rectangle per *drawn* history row, with its index in the timeline.
+    ///
+    /// The index travels with the rectangle rather than being the position in this
+    /// vector, because the list is scrolled and clipped: only the rows on screen
+    /// are recorded, and the first of them is not row zero.
+    pub history_rows: Vec<(usize, Area)>,
     /// One rectangle per open context-menu row, in the menu's own order.
     ///
     /// The menu's width is the width of its widest shaped row, so this is the
@@ -314,6 +337,10 @@ pub fn draw(
     // are describing.
     let here = focused_leaf(chrome, focus);
     status(painter, pane, layout, chrome, diagnostics, hits);
+    if let Some(edits) = chrome.edits {
+        let (open, offset) = chrome.history;
+        history_at(painter, edits, layout.history, open, offset, chrome.hovered_edit, hits);
+    }
     if chrome.filtering || !pane.filter.is_empty() {
         find_popup(painter, pane, here, chrome.filtering, hits);
     }
@@ -3277,6 +3304,163 @@ fn metadata_cells(
     }
 }
 
+/// The most rows the history list draws before it scrolls.
+///
+/// Eight, and `Layout::compute_with` clamps the strip to a third of the window
+/// besides. A panel that grows until there is nowhere to look at files has stopped
+/// being a panel; a list that scrolls is what the wheel is for.
+pub(crate) const HISTORY_ROWS: usize = 8;
+
+/// Where the history strip's parts are, in logical pixels.
+///
+/// **The header is a control and so is every row**, and what a press lands on has
+/// to be what a person sees. The same discipline [`check_of`] and [`column_parts`]
+/// are written with: an [`Area`] and a [`sk_ui::Metrics`], no `Painter` in reach, so
+/// no device pixel can get in.
+///
+/// A row's *rectangle* is not here. The list is scrolled and clipped, so which rows
+/// exist on screen is something only the frame that drew them knows — they go into
+/// `Hits::history_rows` with their timeline index attached, and a press is tested
+/// against those. A second copy of the arithmetic here would be the mistake this
+/// type exists to avoid, one level down.
+pub(crate) struct HistoryParts {
+    /// The header: a title, a count, and the chevron that collapses it.
+    pub(crate) header: Area,
+    /// The strip the rows are drawn in and hit-tested against. Empty when closed.
+    pub(crate) rows: Area,
+}
+
+impl HistoryParts {
+    /// Splits the strip into its header and its list.
+    pub(crate) fn of(strip: Area, metrics: &sk_ui::Metrics) -> Self {
+        let header = Area { height: metrics.header_height.min(strip.height), ..strip };
+        Self {
+            header,
+            rows: Area {
+                y: header.bottom(),
+                height: (strip.bottom() - header.bottom()).max(0.0),
+                ..strip
+            },
+        }
+    }
+}
+
+/// The visible history: a header that collapses, and a list that jumps.
+///
+/// **[Rule 3](../../../docs/03-principles.md)'s other half.** `Ctrl+Z` walks back
+/// every mutation, which is the half that was done; this is the half that says
+/// *what* it would walk back and lets a person land anywhere on the line rather
+/// than counting keystrokes. The shape is the one every design tool uses, because
+/// it is the one people have already learned: oldest at the top, the present
+/// marked, and the future you undid still listed below it in grey.
+fn history_at(
+    painter: &mut Painter<'_>,
+    edits: &crate::edit::Edits,
+    strip: Area,
+    open: bool,
+    offset: f32,
+    hovered: Option<usize>,
+    hits: &mut Hits,
+) {
+    if strip.height <= 0.0 {
+        hits.history_header = None;
+        return;
+    }
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let parts = HistoryParts::of(strip, &metrics);
+    let ground = painter.rect(strip.x, strip.y, strip.width, strip.height);
+    painter.list.rect(ground, theme.palette.chrome, 0.0);
+    painter.hairline(strip.x, strip.y, strip.width, theme.palette.divider);
+
+    // The chevron says which way pressing goes, the way a band heading's does.
+    let facing = if open { Direction::Down } else { Direction::Right };
+    painter.triangle(
+        strip.x + metrics.gutter,
+        parts.header.y + (parts.header.height - DISCLOSE) / 2.0,
+        DISCLOSE,
+        DISCLOSE,
+        theme.palette.dim,
+        facing,
+    );
+    let text_x = strip.x + metrics.gutter + DISCLOSE + 6.0;
+    let baseline = painter.baseline(parts.header.y, parts.header.height, metrics.header_size);
+    let bold = TextStyle {
+        weight: Weight::Bold,
+        size: metrics.header_size,
+        color: theme.palette.heading,
+        align: Align::Left,
+    };
+    let room = (strip.right() - metrics.gutter - text_x).max(1.0);
+    let drawn = line(painter, i18n::lookup("history.title"), bold, text_x, room, baseline);
+    let counted = i18n::plural(
+        "history.count",
+        edits.history.len() as u64,
+        &[&format::grouped(edits.history.len())],
+    );
+    let dim = TextStyle::new(metrics.header_size, theme.palette.dim);
+    let count_x = text_x + painter.logical(drawn) + 8.0;
+    let count_room = (strip.right() - metrics.gutter - count_x).max(1.0);
+    line(painter, &counted, dim, count_x, count_room, baseline);
+    hits.history_header = Some(parts.header);
+
+    hits.history_rows.clear();
+    if !open || parts.rows.height <= 0.0 {
+        return;
+    }
+    let clip = painter.rect(parts.rows.x, parts.rows.y, parts.rows.width, parts.rows.height);
+    painter.list.push_clip(clip);
+    let applied = edits.history.applied();
+    for (index, change) in edits.history.timeline().enumerate() {
+        let top = parts.rows.y + index as f32 * metrics.row_height - offset;
+        if top + metrics.row_height < parts.rows.y || top > parts.rows.bottom() {
+            continue;
+        }
+        history_row(painter, change, index, applied, hovered, top, parts.rows);
+        hits.history_rows.push((index, Area { y: top, height: metrics.row_height, ..parts.rows }));
+    }
+    painter.list.pop_clip();
+}
+
+/// One row of the history list.
+///
+/// **Three states and each one means something.** An entry at or before the present
+/// has happened; the one *at* the present is where the list would come back to and
+/// carries the accent bar; everything after it is the future that was undone, drawn
+/// dim because it is not true of the disk right now.
+fn history_row(
+    painter: &mut Painter<'_>,
+    change: &sk_fs::ops::Change,
+    index: usize,
+    applied: usize,
+    hovered: Option<usize>,
+    top: f32,
+    strip: Area,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let undone = index >= applied;
+    let present = index + 1 == applied;
+    if hovered == Some(index) {
+        let fill = painter.rect(strip.x, top, strip.width, metrics.row_height);
+        painter.list.rect(fill, theme.palette.hover, 0.0);
+    }
+    if present {
+        // A bar at the leading edge rather than a fill: the row is not selected,
+        // it is *where we are*, and a selection colour would say the wrong thing.
+        let bar = painter.rect(strip.x, top, 2.0, metrics.row_height);
+        painter.list.rect(bar, theme.palette.accent, 0.0);
+    }
+    let (key, argument) = change.summary();
+    let text = i18n::format(key, &[&argument]); // skerry-allow: missing-string
+    let colour = if undone { theme.palette.dim } else { theme.palette.text };
+    let style = TextStyle::new(metrics.text_size, colour);
+    let x = strip.x + metrics.gutter + DISCLOSE + 6.0;
+    let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
+    let room = (strip.right() - metrics.gutter - x).max(1.0);
+    line(painter, &text, style, x, room, baseline);
+}
+
 fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
     let theme = *painter.theme;
     let table = table_of(layout, pane);
@@ -3705,7 +3889,7 @@ mod tests {
     ) -> Vec<(sk_text::GlyphKey, u32, u32)> {
         let logical = Size::new(1000.0, 620.0);
         let layout =
-            Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, false);
+            Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, false, 0.0);
         let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
         let widths = crate::layout::Columns::default();
         panes.layout(layout.content, &theme.metrics, widths, &mut leaves, &mut dividers);
@@ -3727,6 +3911,9 @@ mod tests {
         {
             let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
             let chrome = Chrome {
+                edits: None,
+                history: (false, 0.0),
+                hovered_edit: None,
                 keys: None,
                 stats: false,
                 typed: None,

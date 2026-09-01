@@ -74,6 +74,11 @@ pub struct Layout {
     /// ([ADR 0010](../adr/0010-a-split-tree-of-tab-strips.md)) and live in
     /// [`crate::panes::PaneLayout`].
     pub content: Area,
+    /// The visible history, between the list and the status line.
+    ///
+    /// Zero height where there is no history to show, which is every window until
+    /// somebody changes something — see `App::history_height`.
+    pub history: Area,
     /// The status strip.
     pub status: Area,
 
@@ -300,7 +305,13 @@ impl Layout {
     /// [`crate::panes::PaneLayout`]'s answer, because a leaf is the thing that
     /// has a path, a history and a sort.
     #[must_use]
-    pub fn compute_with(size: Size, metrics: &Metrics, frame: Frame, sidebar: bool) -> Self {
+    pub fn compute_with(
+        size: Size,
+        metrics: &Metrics,
+        frame: Frame,
+        sidebar: bool,
+        history: f32,
+    ) -> Self {
         let full = size.width.max(1.0);
         // Only the buttons the compositor actually offers, packed against the
         // right edge: a slot left empty for an absent action reads as a bug, and
@@ -342,27 +353,42 @@ impl Layout {
             width: full,
             height: metrics.status_height,
         };
+        // **The history strip, between the list and the status line.** Whose
+        // height the caller decides, because what is in it — nothing, a header, or
+        // a header and some rows — is a question about the undo stack rather than
+        // about the window. Capped at a third of what is left, so a long history
+        // cannot take the list: a panel that grows until there is nowhere to look
+        // at files is a panel that has stopped being a panel.
+        let room = (status.y - title.bottom()).max(0.0);
+        let strip = history.clamp(0.0, room / 3.0);
+        let ledger = if strip > 0.0 {
+            Area { x: 0.0, y: status.y - strip, width: full, height: strip }
+        } else {
+            Area { y: status.y, ..Area::default() }
+        };
+        let middle = (ledger.y.min(status.y) - title.bottom()).max(0.0);
         // Shed below the width where the list would be narrower than the
         // sidebar: a window too small for both is a window that came for the
         // list. The same rule the metadata columns follow.
         let aside = if sidebar && full - metrics.sidebar_width >= 320.0 {
-            Area {
-                x: 0.0,
-                y: title.bottom(),
-                width: metrics.sidebar_width,
-                height: (status.y - title.bottom()).max(0.0),
-            }
+            Area { x: 0.0, y: title.bottom(), width: metrics.sidebar_width, height: middle }
         } else {
             Area::default()
         };
-        let content = Area {
-            x: aside.width,
-            y: title.bottom(),
-            width: full - aside.width,
-            height: (status.y - title.bottom()).max(0.0),
-        };
+        let content =
+            Area { x: aside.width, y: title.bottom(), width: full - aside.width, height: middle };
 
-        Self { window: size, title, sidebar: aside, content, status, buttons, drag, resize_border }
+        Self {
+            window: size,
+            title,
+            sidebar: aside,
+            content,
+            history: ledger,
+            status,
+            buttons,
+            drag,
+            resize_border,
+        }
     }
 
     /// The window button at a point, if any.
@@ -433,6 +459,7 @@ mod tests {
             &metrics,
             Frame::Own { edges: true, minimize: true, maximize: true },
             false,
+            0.0,
         );
         assert!(all.buttons.iter().all(|button| button.width > 0.0));
         assert!((all.buttons[2].right() - 1100.0).abs() < f32::EPSILON, "close is not at the edge");
@@ -443,6 +470,7 @@ mod tests {
             &metrics,
             Frame::Own { edges: true, minimize: false, maximize: true },
             false,
+            0.0,
         );
         assert!(two.buttons[0].width <= 0.0, "an absent action was given a slot");
         assert!((two.buttons[2].right() - 1100.0).abs() < f32::EPSILON);
@@ -452,7 +480,7 @@ mod tests {
         // **And a compositor-drawn frame leaves no strip at all.** A title bar
         // with nothing in it above a pane that carries its own path is 44
         // logical pixels of list given away for nothing.
-        let served = Layout::compute_with(size, &metrics, Frame::None, false);
+        let served = Layout::compute_with(size, &metrics, Frame::None, false, 0.0);
         assert!(served.buttons.iter().all(|button| button.width <= 0.0));
         assert!(served.drag.width <= 0.0, "a compositor-drawn title bar is not ours to drag");
         assert!(served.title.height <= 0.0, "an empty title strip took height");
@@ -466,7 +494,7 @@ mod tests {
     #[test]
     fn the_sidebar_takes_the_left_and_the_list_starts_where_it_ends() {
         let metrics = Metrics::default();
-        let open = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, true);
+        let open = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, true, 0.0);
         assert!((open.sidebar.width - metrics.sidebar_width).abs() < f32::EPSILON);
         assert!(open.sidebar.x <= f32::EPSILON);
         // Below the title strip, down to the status strip, with no gap at either.
@@ -480,7 +508,8 @@ mod tests {
         assert!(open_pane.icon.x > open.sidebar.right(), "a row's mark draws under the sidebar");
         assert!((open_pane.body.right() - 1100.0).abs() < f32::EPSILON);
 
-        let closed = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let closed =
+            Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false, 0.0);
         assert!(closed.sidebar.width <= 0.0);
         assert!(closed.content.x <= f32::EPSILON);
         let closed_pane = one_leaf(&closed, &metrics);
@@ -490,7 +519,8 @@ mod tests {
         );
 
         // Narrow enough that the list would be smaller than the sidebar.
-        let narrow = Layout::compute_with(Size::new(500.0, 720.0), &metrics, Frame::None, true);
+        let narrow =
+            Layout::compute_with(Size::new(500.0, 720.0), &metrics, Frame::None, true, 0.0);
         assert!(narrow.sidebar.width <= 0.0, "the sidebar did not shed");
         assert!((narrow.content.width - 500.0).abs() < f32::EPSILON);
     }
@@ -505,6 +535,7 @@ mod tests {
             &Metrics::default(),
             Frame::Own { edges: true, minimize: true, maximize: true },
             false,
+            0.0,
         );
         assert_eq!(layout.edge_at(1.0, 1.0), Some(Edge::TopLeft));
         assert_eq!(layout.edge_at(799.0, 1.0), Some(Edge::TopRight));
@@ -528,6 +559,7 @@ mod tests {
             &Metrics::default(),
             Frame::Own { edges: false, minimize: true, maximize: true },
             false,
+            0.0,
         );
         assert!(fixed.resize_border <= 0.0);
         assert_eq!(fixed.edge_at(1.0, 1.0), None);
@@ -551,6 +583,7 @@ mod tests {
             &Metrics::default(),
             Frame::Own { edges: true, minimize: true, maximize: true },
             false,
+            0.0,
         );
         for (button, area) in Button::ALL.into_iter().zip(layout.buttons) {
             let (x, y) = (area.x + area.width / 2.0, area.y + area.height / 2.0);
@@ -562,7 +595,8 @@ mod tests {
     #[test]
     fn the_regions_tile_the_window_with_no_gap_and_no_overlap() {
         let metrics = Metrics::default();
-        let layout = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let layout =
+            Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false, 0.0);
         assert!((layout.title.bottom() - layout.content.y).abs() < f32::EPSILON);
         assert!((layout.content.bottom() - layout.status.y).abs() < f32::EPSILON);
         assert!((layout.status.bottom() - 720.0).abs() < f32::EPSILON);
@@ -582,7 +616,7 @@ mod tests {
         let metrics = Metrics::default();
         for width in [420.0, 700.0, 1100.0, 2878.0] {
             let window =
-                Layout::compute_with(Size::new(width, 720.0), &metrics, Frame::None, false);
+                Layout::compute_with(Size::new(width, 720.0), &metrics, Frame::None, false, 0.0);
             let layout = one_leaf(&window, &metrics);
             assert!((layout.icon.right() - layout.name.x).abs() < f32::EPSILON, "at {width}");
             assert!((layout.name.right() - layout.size.x).abs() < f32::EPSILON, "at {width}");
@@ -597,7 +631,8 @@ mod tests {
     fn an_ultrawide_pane_stops_the_name_at_its_ceiling() {
         let metrics = Metrics::default();
         let widths = Columns::default();
-        let window = Layout::compute_with(Size::new(2878.0, 720.0), &metrics, Frame::None, false);
+        let window =
+            Layout::compute_with(Size::new(2878.0, 720.0), &metrics, Frame::None, false, 0.0);
         let layout = one_leaf(&window, &metrics);
         assert!((layout.name.width - widths.name).abs() < f32::EPSILON, "{}", layout.name.width);
         // And the space past the last column is empty rather than shared out.
@@ -610,7 +645,8 @@ mod tests {
     #[test]
     fn a_pane_narrower_than_the_ceiling_gives_the_name_what_is_left() {
         let metrics = Metrics::default();
-        let window = Layout::compute_with(Size::new(700.0, 720.0), &metrics, Frame::None, false);
+        let window =
+            Layout::compute_with(Size::new(700.0, 720.0), &metrics, Frame::None, false, 0.0);
         let layout = one_leaf(&window, &metrics);
         assert!(layout.name.width < Columns::default().name, "{}", layout.name.width);
         // Everything but the gutter and the scrollbar's strip, which the columns
@@ -670,7 +706,7 @@ mod tests {
         let metrics = Metrics::default();
         let at = |width: f32| {
             let window =
-                Layout::compute_with(Size::new(width, 720.0), &metrics, Frame::None, false);
+                Layout::compute_with(Size::new(width, 720.0), &metrics, Frame::None, false, 0.0);
             one_leaf(&window, &metrics)
         };
         let wide = at(1100.0);
@@ -688,7 +724,8 @@ mod tests {
     #[test]
     fn a_window_shorter_than_its_chrome_still_produces_a_valid_layout() {
         let metrics = Metrics::default();
-        let layout = Layout::compute_with(Size::new(400.0, 20.0), &metrics, Frame::None, false);
+        let layout =
+            Layout::compute_with(Size::new(400.0, 20.0), &metrics, Frame::None, false, 0.0);
         assert!(layout.content.height >= 0.0);
         assert!(one_leaf(&layout, &metrics).body.height >= 0.0);
     }
@@ -696,7 +733,8 @@ mod tests {
     #[test]
     fn a_click_maps_to_the_row_under_it_at_any_scroll_offset() {
         let metrics = Metrics::default();
-        let window = Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false);
+        let window =
+            Layout::compute_with(Size::new(1100.0, 720.0), &metrics, Frame::None, false, 0.0);
         let layout = one_leaf(&window, &metrics);
         let top = layout.body.y;
         // The row arithmetic that used to live here is `crate::cells` now — one

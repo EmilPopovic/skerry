@@ -287,6 +287,27 @@ action.group_kind = Group by kind
 action.columns_reset = Reset column widths
 # How many entries a band holds, drawn beside its name.
 band.count = ({0})
+# The visible history — one row per edit, oldest first. The counted forms are a
+# pair rather than a plural: one names a file and the other counts them, which
+# ADR 0016 calls two messages rather than two forms of one.
+history.title = History
+action.history = Show the history
+history.nothing = Nothing yet
+history.created = New folder {0}
+history.created_many = {0} new folders
+history.renamed = Renamed {0}
+history.renamed_many = Renamed {0} items
+history.copied = Copied {0}
+history.copied_many = Copied {0} items
+history.trashed = Moved {0} to Trash
+history.trashed_many = Moved {0} items to Trash
+history.erased = Deleted {0} for good
+history.erased_many = Deleted {0} items for good
+history.changed_many = Changed {0} items
+# Where the present is: the row below this one is what a redo would do again.
+history.now = now
+history.count[one] = {0} edit
+history.count[other] = {0} edits
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday

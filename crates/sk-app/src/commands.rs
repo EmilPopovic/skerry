@@ -834,6 +834,16 @@ fn file(registry: &mut Registry<App>) {
             run: App::copy_content,
         },
         CommandSpec {
+            id: "edit.history",
+            name: "action.history",
+            group: Group::Edit,
+            // `H` for history, and `Ctrl+H` is Show hidden files — so this is the
+            // shifted one, which for a letter is a chord of its own.
+            keys: &["ctrl+shift+h"],
+            enabled: |app: &App| app.has_history(),
+            run: App::toggle_history,
+        },
+        CommandSpec {
             id: "edit.pause",
             name: "action.pause",
             group: Group::Edit,
@@ -947,6 +957,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("select.none", "a click on empty space"));
     reach.push(("select.toggle", "the check box over an entry's mark"));
     reach.push(("view.band_toggle", "a press on a band's heading"));
+    reach.push(("edit.history", "a press on the history strip's header"));
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));

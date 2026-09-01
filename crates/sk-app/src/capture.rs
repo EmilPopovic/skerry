@@ -35,6 +35,114 @@ const SELECTED: std::ops::Range<usize> = 2..5;
 const CURSOR: usize = 3;
 const HOVERED: usize = 7;
 
+/// What one captured frame is of. One value, because these five arrive together
+/// and `warm_and_draw` is at the argument limit without them.
+struct Drawing<'a> {
+    request: &'a Capture,
+    sample: &'a Sample<'a>,
+    panes: &'a crate::panes::Panes,
+    layout: &'a Layout,
+    now: i64,
+}
+
+/// Draws until the glyph atlas owes nothing, and returns the last frame's figures.
+///
+/// **The first pass rasterizes and the second draws from a warm atlas.** A frame is
+/// repeated only while texels are still queued, so a capture is never an image with
+/// holes in the text.
+fn warm_and_draw(
+    session: &mut crate::headless::Session,
+    drawing: &Drawing<'_>,
+    list: &mut DrawList,
+    cache: &mut LayoutCache,
+    frames: &mut Frames,
+    theme: &sk_ui::Theme,
+) -> FrameStats {
+    let mut stats = FrameStats::default();
+    for pass in 0..MAX_PASSES {
+        if pass >= 2 && session.renderer.pending_uploads() == 0 {
+            break;
+        }
+        list.begin(session.physical);
+        let mut diagnostics = crate::headless::offscreen(
+            &session.renderer,
+            session.pool_stats(),
+            session.physical,
+            frames,
+            stats,
+            cache.len(),
+            drawing.request.scale_120,
+        );
+        {
+            let mut painter =
+                Painter { list, fonts: &mut session.fonts, cache, theme, scale: session.scale };
+            let chrome = sample_chrome(drawing.request, drawing.sample);
+            view::draw(
+                &mut painter,
+                drawing.panes,
+                drawing.layout,
+                drawing.now,
+                &chrome,
+                &mut diagnostics,
+                &mut crate::view::Hits::default(),
+            );
+        }
+        stats = session.renderer.draw(list, &mut session.fonts, theme.palette.background);
+    }
+    stats
+}
+
+/// The history strip's height, the same way `App::history_height` works it out.
+fn history_height(request: &Capture, metrics: &sk_ui::Metrics) -> f32 {
+    if !request.history {
+        return 0.0;
+    }
+    metrics.header_height
+        + (SAMPLE_EDITS.min(crate::view::HISTORY_ROWS) as f32) * metrics.row_height
+}
+
+/// An undo stack for the frame, with a sample history on it where one was asked
+/// for.
+fn sample_edits(request: &Capture, session: &crate::headless::Session) -> crate::edit::Edits {
+    let mut edits = crate::edit::Edits::new(session.waker.handle());
+    if request.history {
+        sample_history(&mut edits, &request.path);
+    }
+    edits
+}
+
+/// How many edits the sample history holds, and how many rows it therefore draws.
+const SAMPLE_EDITS: usize = 5;
+
+/// Puts a history on the stack, with one of it undone.
+///
+/// **The interesting state, not the easy one.** A history with nothing undone shows
+/// four rows the same colour and says nothing about what the panel is for; one step
+/// back from the end draws the present marker with a future under it in grey, which
+/// is the whole of the design in one frame.
+///
+/// The kinds are chosen to cover every `Change::summary` shape a person can reach:
+/// a folder, a rename, a batch that reports a count, and a trash.
+fn sample_history(edits: &mut crate::edit::Edits, root: &std::path::Path) {
+    use sk_fs::ops::Change;
+    let at = |name: &str| root.join(name);
+    edits.history.record(Change::Created { path: at("build") });
+    edits.history.record(Change::Renamed { from: at("old.txt"), to: at("étude.txt") });
+    edits.history.record(Change::Batch(vec![
+        Change::Copied { source: at("a"), destination: at("img2.png") },
+        Change::Copied { source: at("b"), destination: at("img10.png") },
+        Change::Copied { source: at("c"), destination: at("report.pdf") },
+    ]));
+    edits.history.record(Change::Trashed {
+        original: at("Makefile"),
+        stored: at("Makefile"),
+        info: at("Makefile.trashinfo"),
+    });
+    edits.history.record(Change::Renamed { from: at("draft"), to: at("holiday.jpeg") });
+    // One step back, so the last row is a future rather than the present.
+    let _ = edits.history.undo(|_| true);
+}
+
 /// Rows a capture will measure folder totals for.
 const MEASURED: usize = 120;
 
@@ -104,6 +212,8 @@ pub struct Capture {
     /// beside it, and two more open below — which is the only way to see that a
     /// collapse takes the rows and leaves the heading.
     pub collapsed: bool,
+    /// Whether to draw the visible history, expanded, with edits in it.
+    pub history: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -653,6 +763,8 @@ struct Sample<'a> {
     dividers: &'a [crate::panes::Divider],
     drop_tab: Option<(crate::panes::PaneId, usize)>,
     erasing: Option<(&'a [String], usize, bool)>,
+    /// The undo stack the history strip lists, with a sample on it.
+    edits: &'a crate::edit::Edits,
 }
 
 /// The chrome of the frame this capture was asked for.
@@ -660,6 +772,10 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
     Chrome {
         keys: sample.keys,
         stats: request.stats,
+        edits: Some(sample.edits),
+        history: (request.history, 0.0),
+        // The second row, so the frame shows the hover as well as the present.
+        hovered_edit: request.history.then_some(1),
         typed: None,
         band: None,
         watching: true,
@@ -768,7 +884,13 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     } else {
         Frame::None
     };
-    let layout = Layout::compute_with(logical, &theme.metrics, frame, request.sidebar);
+    let layout = Layout::compute_with(
+        logical,
+        &theme.metrics,
+        frame,
+        request.sidebar,
+        history_height(request, &theme.metrics),
+    );
     // One leaf: a capture is a frame of one directory, and a split is its own
     // frame rather than a variant of every other.
     let crate::panes::Single { mut panes, mut leaves, mut dividers, mut here } =
@@ -813,7 +935,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // from a warm atlas. A frame is repeated only while texels are still queued,
     // so a capture is never an image with holes in the text.
     let keyboard_hint = crate::commands::hint(&crate::commands::registry());
+    let edits = sample_edits(request, &session);
     let sample = Sample {
+        edits: &edits,
         overlays: &overlays,
         places: &places,
         types: &types,
@@ -824,42 +948,14 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         drop_tab,
         erasing: request.erase.then_some((doomed.as_slice(), 9, false)),
     };
-    let mut stats = FrameStats::default();
-    for pass in 0..MAX_PASSES {
-        if pass >= 2 && session.renderer.pending_uploads() == 0 {
-            break;
-        }
-        list.begin(session.physical);
-        let mut diagnostics = crate::headless::offscreen(
-            &session.renderer,
-            session.pool_stats(),
-            session.physical,
-            &mut frames,
-            stats,
-            cache.len(),
-            request.scale_120,
-        );
-        {
-            let mut painter = Painter {
-                list: &mut list,
-                fonts: &mut session.fonts,
-                cache: &mut cache,
-                theme: &theme,
-                scale: session.scale,
-            };
-            let chrome = sample_chrome(request, &sample);
-            view::draw(
-                &mut painter,
-                &panes,
-                &layout,
-                now,
-                &chrome,
-                &mut diagnostics,
-                &mut crate::view::Hits::default(),
-            );
-        }
-        stats = session.renderer.draw(&mut list, &mut session.fonts, theme.palette.background);
-    }
+    let stats = warm_and_draw(
+        &mut session,
+        &Drawing { request, sample: &sample, panes: &panes, layout: &layout, now },
+        &mut list,
+        &mut cache,
+        &mut frames,
+        &theme,
+    );
 
     let pixels = session.renderer.capture().ok_or_else(|| {
         Problem::plain(ProblemKind::NoGpu, "the offscreen target could not be read back")

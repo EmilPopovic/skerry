@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 111
+FEWEST_SCENARIOS = 112
 
 
 def scenario(name, fresh: bool = False):
@@ -1408,6 +1408,115 @@ def headings_of(state: dict[str, str]) -> list[tuple[int, float, float, str]]:
         band, x, y, shut = entry.split(":")
         found.append((int(band), float(x), float(y), shut))
     return found
+
+
+def aims_of(state: dict[str, str]) -> dict[object, str]:
+    """The history strip's aims by key: `"header"`, and an int per drawn row."""
+    if state["history_aim"] == "none":
+        return {}
+    found: dict[object, str] = {}
+    for entry in state["history_aim"].split(","):
+        name, _, point = entry.partition(":")
+        found["header" if name == "header" else int(name)] = point
+    return found
+
+
+@scenario("the-history-lists-edits-and-travels-to-one", fresh=True)
+def the_history_lists_edits_and_travels_to_one(run: Run, fixture: Path) -> None:
+    """**[Rule 3](../docs/03-principles.md)'s other half.** `Ctrl+Z` walks back
+    every mutation, which was done; this is the panel that says *what* it would
+    walk back and lets a person land anywhere on the line rather than counting
+    keystrokes.
+
+    Four claims, and only a scenario reaches any of them — the panel is chrome whose
+    height is a function of the undo stack, and every one of these is a press:
+
+    * the strip is not there until something has been changed, and then it is;
+    * its header collapses the list and expands it again;
+    * a press on a row travels to the point **after** that edit, which is `n`
+      undos — so the two folders made after it are gone and the first is still
+      there;
+    * and a press below the present travels forward again, because the entries a
+      walk undid are still on the list and still clickable.
+    """
+    settled = listed(run)
+    if settled["history"] != "0/0":
+        raise Failure(f"a window that has changed nothing has a history: {settled['history']}")
+    if settled["history_aim"] != "none":
+        raise Failure("a window with no history drew history rows")
+
+    # **Three renames of one file, and not three new folders.** A new folder is a
+    # `Created` *and* a `Renamed` — two entries a person made with one gesture, both
+    # of them undoable — so three of them are a history of six and which row is
+    # "after the first folder" is arithmetic. A rename is exactly one entry, so the
+    # timeline below is unambiguous and the file's name says which point we are at,
+    # which is the whole claim the panel makes.
+    run.drive("key home\nsleep 300\n")
+    for name in ("step-one", "step-two", "step-three"):
+        run.drive(f"key f2\nsleep 400\nkey ctrl+a\ntext {name}\nkey enter\nsleep 800\n")
+        if run.answered(settle=300) is None:
+            raise Failure(f"the window stopped answering while renaming to {name}")
+    after = until(run, history="3/3")
+    if not (fixture / "step-three").exists():
+        raise Failure(f"the last rename did not land: {sorted(p.name for p in fixture.iterdir())}")
+
+    # Collapsed by default: the header is drawn and the rows are not.
+    if after["history_open"] != "false":
+        raise Failure("the history opened itself")
+    if any(key != "header" for key in aims_of(after)):
+        raise Failure(f"a collapsed history drew rows: {after['history_aim']}")
+
+    # `Ctrl+Shift+H` expands it, and now the rows are there.
+    run.drive("key ctrl+shift+h\nsleep 400\n")
+    opened = run.answered(settle=300)
+    if opened is None or opened["history_open"] != "true":
+        raise Failure(f"Ctrl+Shift+H left it {opened and opened['history_open']}")
+    rows = aims_of(opened)
+    if sorted(key for key in rows if key != "header") != [0, 1, 2]:
+        raise Failure(f"the list drew rows {sorted(rows)}, not three")
+
+    # **A press on the first row travels to the point *after* the first edit** —
+    # two undos, run one at a time — so the file is called what the first rename
+    # called it. Not what it was called before: after the edit, not before it.
+    x, _, y = rows[0].partition(":")
+    at = aim(run, opened, float(x), float(y))
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 200\n")
+    until(run, history="1/3")
+    if not (fixture / "step-one").exists():
+        raise Failure(
+            "travelling to the first edit did not leave the first rename applied: "
+            f"{sorted(entry.name for entry in fixture.iterdir())}"
+        )
+    for name in ("step-two", "step-three"):
+        if (fixture / name).exists():
+            raise Failure(f"{name} is still there, so the walk stopped short")
+
+    # And forward again, by pressing the row below the present.
+    ahead = run.answered(settle=300)
+    if ahead is None:
+        raise Failure("the window stopped answering after the walk")
+    rows = aims_of(ahead)
+    x, _, y = rows[2].partition(":")
+    at = aim(run, ahead, float(x), float(y))
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 200\n")
+    until(run, history="3/3")
+    if not (fixture / "step-three").exists():
+        raise Failure("travelling forward did not put the last rename back")
+
+    # **And the header collapses it**, which is the pointer surface `commands.rs`
+    # claims for `edit.history` — so a person who never learns the chord can still
+    # get the panel out of the way.
+    back = run.answered(settle=300)
+    if back is None:
+        raise Failure("the window stopped answering before the header press")
+    x, _, y = aims_of(back)["header"].partition(":")
+    at = aim(run, back, float(x), float(y))
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 400\n")
+    shut = run.answered(settle=300)
+    if shut is None or shut["history_open"] != "false":
+        raise Failure(f"the header left it {shut and shut['history_open']}")
+    if shut["history_aim"] == "none":
+        raise Failure("collapsing took the header away, so it cannot be reopened")
 
 
 @scenario("a-hung-mount-never-blocks-the-frame-loop", fresh=True)

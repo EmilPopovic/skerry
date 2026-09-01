@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 628
-tests, 110 GUI scenarios **on both Wayland and X11**, forty-five golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 633
+tests, 112 GUI scenarios **on both Wayland and X11**, forty-seven golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
@@ -18,7 +18,10 @@ breadcrumbs** — so the window draws a title bar only where the compositor draw
 no frame — a command registry
 behind every key, a context menu and a fuzzy palette over the same registry,
 new-folder / rename / **copy / cut / paste / duplicate / Move to Trash** with one
-undo stack over all of it — and **delete for good**, which asks in a panel that names what goes and says
+undo stack over all of it — **and the stack is visible**: a strip above the status
+line, collapsed to its header until somebody expands it, one row per edit oldest
+first with the present marked and the undone future still listed in grey, where a
+press on any row walks to the point *after* that edit — and **delete for good**, which asks in a panel that names what goes and says
 it cannot be undone, and is on no stack, because rule 3 calls it "an explicit,
 differently-shaped action"
 — a status line that counts what a copy has done, files that open in the
@@ -169,7 +172,7 @@ arguments. The full reasoning is one link away; do not re-derive it in review.
 
 | Invariant | Fails if | Where |
 | --- | --- | --- |
-| The UI thread issues zero filesystem syscalls | any frame exceeds 8 ms with a mount hung mid-listing | rule 1 |
+| The UI thread issues zero filesystem syscalls | any frame exceeds 8 ms with a mount hung mid-listing — `tools/hung-mount`, and `a-hung-mount-never-blocks-the-frame-loop` runs it | rule 1 |
 | The frame loop sleeps on descriptors, never on a timer | `skerry` accrues any CPU with an idle window | rule 1, [09](docs/09-performance-budgets.md#what-m0-measured) |
 | Dependencies point strictly downward through the levels | `tools/check-layering.py` reports an edge | [04](docs/04-architecture.md#layers) |
 | No GLib, GTK, Qt, KIO, GVfs, GStreamer, libdbus — ever | any appears in the graph | rule 9, [06](docs/06-portability.md) |

@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 573 tests, 98 GUI scenarios on two display servers and thirty-five golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates, 633 tests, 112 GUI scenarios on two display servers and forty-seven golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -166,7 +166,7 @@ measured the negotiated action reported zero times and `dnd_finished` delivered 
 some peers and not others, and deleting an original on a confirmation that may
 never arrive is how a drag loses somebody's files.
 
-**The 98 GUI scenarios run on both servers, and the X11 half needs no seat.**
+**The GUI scenarios run on both servers, and the X11 half needs no seat.**
 That was the reason they were out of CI: Wayland's virtual-input protocols need a
 compositor that will hand out a seat, and a runner has none. `XTEST` under `Xvfb`
 needs neither, so the same scenarios — not a second set written against X11 — are
@@ -413,7 +413,7 @@ to have run.
 | 4 | ~~**Copy, move and permanent delete**~~ **Done.** Spike E's engine is `sk-fs::copy`: reflink, `copy_file_range` per extent, a hole-preserving floor, temp-then-rename, the three-step placement chain, recursive trees, symlinks recreated, and cancellation | M3 | Per-extent `copy_file_range` and the placement chain survive as tests rather than being rediscovered — met. The sparse test was watched failing against the naive loop: **131,072 blocks against 32** |
 | 5 | ~~**The queue: honest progress, cancel, an ETA and pause**~~ **Done, and conflict resolution with it.** A walk runs beside the copy and counts what there is, so the line adds a rate and then a time left, and the status strip's divider becomes a determinate bar. `sk_util::Pause` is a latch the job waits on between files, which is where a cancel also lands. A taken name stops the queue and asks, with both files' sizes and dates | M3, [rule 7](03-principles.md#7-honest-progress) | Real throughput, a real ETA and per-file conflict resolution — met. **Replace trashes what it replaces**, as one `Change::Batch`, because [rule 3](03-principles.md#3-everything-is-reversible) does not let anything here destroy a file; where the trash refuses, the answer fails and says so. The one clause still unmet is *resumable*: a copy stopped part way is recorded as a change rather than as something to pick up |
 | 6 | ~~**A paste that pastes files, and Cut**~~ **Done.** `Ctrl+V` pastes what the clipboard names, `Ctrl+X` cuts, both undoable, both on the menus. `Ctrl+V` took over from *Go to the copied folder*, which moved to `Ctrl+Shift+V` | M0 owed | `x-special/gnome-copied-files` is published *and* read, so a peer's verb wins: a scenario has `wl-copy` own the selection with a `cut` in it and asserts the original is gone and `Ctrl+Z` brings it back. Watched failing against a paste that ignored the verb. What is still owed is narrower than the row used to say: the bytes are the documented format rather than Nautilus's own, because PyGObject cannot offer custom clipboard targets — `set_with_data` and `set_with_owner` are both unbound — so the GTK peer that covers drag-and-drop cannot cover this |
-| 7 | **Undo across copy and move** — done — **and a visible history**, which is not | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation: met, and asserted through the window for a file, a cut and a whole folder. Undoing a copy removes only what the copy made, which is why its inverse may be recursive at all |
+| 7 | ~~**Undo across copy and move**~~ **and ~~a visible history~~ — both done.** A strip above the status line, collapsed to its header until somebody expands it: one row per edit oldest first, the present marked, the undone future still listed in grey, and a press on any row walking to the point *after* that edit — N single undos or redos, each the same inverse `Ctrl+Z` uses | M3, [rule 3](03-principles.md#3-everything-is-reversible) | `Ctrl+Z` walks back every operation: met, and asserted through the window for a file, a cut and a whole folder. Undoing a copy removes only what the copy made, which is why its inverse may be recursive at all |
 
 Four and five were one decision apart and were not split: a copy with no progress
 is a frozen window on a 4 GiB file, and [rule 1](03-principles.md#1-never-block-the-frame)
@@ -486,17 +486,21 @@ machine, plus four injected faults; the four loop-device filesystems are
 
 ### Owed, and cheap now that there is somewhere to run them
 
-Three rows claim a gate that does not exist. Each is a job in
-[check.yml](../.github/workflows/check.yml) rather than a milestone:
+~~Three rows claim a gate that does not exist.~~ **All three are closed**, each a
+job in [check.yml](../.github/workflows/check.yml) rather than a milestone:
 
-- **A clean-container build**, which is the whole evidence behind *"no C toolchain
-  required"* in [07-dependencies.md](07-dependencies.md#budgets-and-enforcement).
-- **`cargo-deny`**, which is the whole evidence behind *"permissive licences only,
-  rejected at the gate"* in the same table.
+- ~~**A clean-container build**~~ **Done**, and not as a container: `rustc` drives
+  linking through `cc`, so an image with no compiler fails at the link step and says
+  nothing about whether a dependency compiled C. `tools/no-cc` asks the question
+  that can be answered — the `cc` crate honours `$CC` and the linker does not — and
+  the `no-c-toolchain` job runs it on a cold target directory.
+- ~~**`cargo-deny`**~~ **Done**: the `supply` job runs `licenses`, `bans`, `sources`
+  and `advisories`, the last of which needs the network CI has and a person does
+  not. `tools/check` runs the offline half where the tool is installed.
 - ~~**The sixty GUI scenarios**~~ **Done**, and by the X11 backend rather than by
   a headless compositor: `XTEST` under `Xvfb` needs no seat, so
-  [check.yml](../.github/workflows/check.yml)'s `scenarios` job runs all 93 at
-  100% and at 125%. What that job was quietly not getting is a *reliable* answer —
+  [check.yml](../.github/workflows/check.yml)'s `scenarios` job runs every one of
+  them at 100% and at 125%. What that job was quietly not getting is a *reliable* answer —
   one or two scenarios per sweep failed on timing, and
   [12-measurement.md](12-measurement.md#a-suite-is-a-load-test-of-whatever-else-is-running)
   records both the four defects and the wrong conclusion that had excused them.

@@ -60,6 +60,7 @@ struct Overlays {
     rename: bool,
     checked: bool,
     collapsed: bool,
+    history: bool,
 }
 
 impl Overlays {
@@ -94,6 +95,7 @@ impl Overlays {
             "--grouped-kind" => &mut self.grouped_kind,
             "--checked" => &mut self.checked,
             "--collapsed" => &mut self.collapsed,
+            "--history" => &mut self.history,
             "--search" => &mut self.search,
             "--carrying" => &mut self.carrying,
             "--path-entry" => &mut self.path_entry,
@@ -155,6 +157,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         grouped_kind: overlays.grouped_kind,
         checked: overlays.checked,
         collapsed: overlays.collapsed,
+        history: overlays.history,
         search: overlays.search,
         carrying: overlays.carrying,
         path_entry: overlays.path_entry,

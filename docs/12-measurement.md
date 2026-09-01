@@ -1967,3 +1967,45 @@ was the corner with the defect in it — which is
 [the reference nobody looked at](#a-golden-frame-is-a-reference-for-whatever-somebody-looked-at)
 again, at a smaller scale: I had checked those frames for the thing I had just
 changed, and the status line was not it.
+
+## The accessor written for a caller that never arrived was also the wrong shape
+
+`History::entries` returned the changes on the undo stack, oldest first. Its doc
+comment said what it was for and admitted the rest:
+
+> For the visible history rule 3 asks for. Not yet drawn anywhere, which is why it
+> is the one method here with no caller — and why deleting it would be deleting the
+> reason the stack keeps its entries at all.
+
+The caller arrived, months later, and could not use it. A history panel lists the
+**whole timeline** — the applied entries *and* the undone ones, which are the future
+a person can travel back into — and it needs to know where the present is. `entries`
+returned one branch and no marker. It was replaced by `timeline` and `applied`, and
+`entries` is gone.
+
+So the accessor was not merely unused. **It was unusable, and the comment defending
+it made that harder to see**: a reader arriving at the panel would reasonably start
+from the method that claimed to be for it, and the shape it hands back is wrong in a
+way that is only obvious once you know the undone branch is stored as a stack —
+`undone.last()` is the *next* redo, so listing it as stored puts the future
+backwards.
+
+Two more of the same in one afternoon, both caught by clippy rather than by
+judgement: `Edits::walking`, written "so the panel can say so and refuse a second",
+which the panel had no reason to refuse; and `HistoryParts::row_at`, written for a
+hit test that ended up reading the rectangles the frame recorded instead, because
+those account for scrolling and clipping and the arithmetic did not.
+
+The pattern across all four is one thing, and it is not "delete dead code":
+
+**Speculative API is a design decision made without the constraint that decides
+it.** Every one of these was written while imagining the caller, and every one was
+the wrong shape when the caller turned up with a real requirement — a scrolled list,
+a clipped row, a stack stored backwards. The comment explaining why it has no caller
+yet is the tell: it is an argument for keeping a guess, and the guess costs more
+than the keystrokes to write it again.
+
+The rule that follows is narrow enough to act on: **write the accessor in the commit
+that calls it.** If the data structure needs to keep something for a future feature,
+keep the *data* — `History` keeping its entries was always right — and let the
+feature bring its own way of reading them.

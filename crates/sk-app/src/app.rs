@@ -885,6 +885,16 @@ pub struct App {
     filtering: bool,
     typed_at: Instant,
     pointer: Point,
+    /// Whether the history strip is showing its list or only its header.
+    ///
+    /// Collapsed by default and remembered across the process, which is
+    /// [rule 6](../../../docs/03-principles.md): a panel a person opened is part
+    /// of how the window was left.
+    history_open: bool,
+    /// The history row under the pointer, if the list is open and it is over one.
+    hovered_edit: Option<usize>,
+    /// The history list's own scroll, because it has more rows than it draws.
+    history_scroll: sk_ui::Scroll,
     /// How wide the list's columns are, and what a drag on a header boundary
     /// changes.
     ///
@@ -968,6 +978,7 @@ impl App {
             self.theme = if dark { Theme::dark() } else { Theme::light() };
         }
         self.sidebar.open = options.sidebar.unwrap_or(session.sidebar);
+        self.history_open = session.history;
         self.zoom = session.zoom.min(ZOOM.len() - 1);
         self.columns = session.columns.clamped();
         self.panes = crate::panes::Panes::restore(&session.tree, &self.jobs);
@@ -985,6 +996,7 @@ impl App {
         crate::session::Session {
             dark: self.theme.dark,
             sidebar: self.sidebar.open,
+            history: self.history_open,
             hidden: self.panes.focused().show_hidden,
             zoom: self.zoom,
             window: (self.logical.width as u32, self.logical.height as u32),
@@ -1066,7 +1078,8 @@ impl App {
         let mut app = Self {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
-            layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window), true),
+            // No history yet, by construction: nothing has been changed.
+            layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window), true, 0.0),
             renderer,
             window,
             fonts,
@@ -1148,6 +1161,9 @@ impl App {
             filtering: false,
             typed_at: now,
             pointer: Point::default(),
+            history_open: false,
+            hovered_edit: None,
+            history_scroll: sk_ui::Scroll::default(),
             columns: crate::layout::Columns::default(),
             column_drag: None,
             band: None,
@@ -2962,7 +2978,94 @@ impl App {
             }
             return true;
         }
-        false
+        self.press_in_the_history(position)
+    }
+
+    /// A press on the history strip: its header collapses, its rows jump. Whether
+    /// it was one.
+    ///
+    /// **Aimed at the rectangles the frame recorded**, which is what makes a
+    /// scrolled and clipped list clickable at all: only the drawn rows are in
+    /// `hits.history_rows`, and each carries its index in the timeline rather than
+    /// its position in the vector.
+    fn press_in_the_history(&mut self, position: Point) -> bool {
+        if self.hits.history_header.is_some_and(|at| at.contains(position.x, position.y)) {
+            self.toggle_history();
+            return true;
+        }
+        let found = self
+            .hits
+            .history_rows
+            .iter()
+            .find(|(_, at)| at.contains(position.x, position.y))
+            .map(|(index, _)| *index);
+        if let Some(index) = found {
+            // **To the point *after* that edit**, which is what a person means by
+            // pressing a row in a history: the state the world was in once that
+            // change had been made. So the row at index `i` is `i + 1` applied.
+            self.edits.walk_to(index + 1, &self.jobs);
+            self.dirty = true;
+            return true;
+        }
+        // A press anywhere else in the strip is spent rather than falling through
+        // to a pane that is no longer under it.
+        self.layout.history.height > 0.0 && self.layout.history.contains(position.x, position.y)
+    }
+
+    /// Follows the pointer across the sidebar. Whether the row under it changed.
+    fn hover_the_sidebar(&mut self, position: Point) -> bool {
+        let place = self.place_at(position);
+        if self.sidebar.hover == place {
+            return false;
+        }
+        self.sidebar.hover = place;
+        true
+    }
+
+    /// Follows the pointer across the history list.
+    ///
+    /// From the rectangles the frame recorded rather than from arithmetic, for the
+    /// reason [`crate::view::HistoryParts`] gives: only the drawn rows exist, and
+    /// the first of them is not row zero.
+    fn hover_the_history(&mut self, position: Point) {
+        let edit = self
+            .hits
+            .history_rows
+            .iter()
+            .find(|(_, at)| at.contains(position.x, position.y))
+            .map(|(index, _)| *index);
+        if self.hovered_edit != edit {
+            self.hovered_edit = edit;
+            self.dirty = true;
+        }
+    }
+
+    /// Whether there is any history at all — anything done or anything undone.
+    ///
+    /// What decides whether the strip exists, and therefore whether the command
+    /// that collapses it can run.
+    #[must_use]
+    pub(crate) fn has_history(&self) -> bool {
+        !self.edits.history.is_empty()
+    }
+
+    /// Opens the history list, or collapses it to its header.
+    pub(crate) fn toggle_history(&mut self) {
+        self.history_open = !self.history_open;
+        self.relayout();
+        self.settle_history();
+        self.dirty = true;
+    }
+
+    /// Keeps the history list's scroll extent current.
+    ///
+    /// Called wherever the list's length or its box changes, which is a toggle, a
+    /// recorded edit and a window resize — the same three things the pane's own
+    /// extent is settled for.
+    fn settle_history(&mut self) {
+        let parts = crate::view::HistoryParts::of(self.layout.history, &self.theme.metrics);
+        let content = self.edits.history.len() as f32 * self.theme.metrics.row_height;
+        self.history_scroll.set_extent(content, parts.rows.height);
     }
 
     /// A press on a divider, a tab, or a pane that does not have the keyboard.
@@ -3130,6 +3233,15 @@ impl App {
             if let Some(menu) = self.menu.as_mut() {
                 menu.wheel(delta.y, room);
             }
+        } else if self.history_open && self.layout.history.contains(self.pointer.x, self.pointer.y)
+        {
+            // **The panel under the pointer takes the wheel**, which is the rule
+            // the panes already follow: scrolling belongs to the thing you are
+            // pointing at. Without it the list behind the strip moved while the
+            // rows the hand was over did not.
+            self.settle_history();
+            self.history_scroll.by(delta.y, precise, time);
+            self.dirty = true;
         } else {
             let (id, column) = self.scrolling_column();
             let sideways = mods.shift;
@@ -4592,6 +4704,17 @@ search_active={active:?}",
     /// Takes delivery of a finished mutation.
     fn drain_edits(&mut self) {
         let Some(landed) = self.edits.drain() else { return };
+        // Before the notice is built: a walk of four steps should not put four
+        // notices up, and the next step going out now is what makes it one.
+        self.edits.continue_walking(&self.jobs);
+        // **The strip may have just appeared, or grown a row.** Its height is a
+        // function of the stack, so the window's regions move when the stack does
+        // — which is why this is a relayout and not only a redraw.
+        let wanted = self.history_height();
+        if (self.layout.history.height - wanted).abs() > 0.01 {
+            self.relayout();
+        }
+        self.settle_history();
         let message = match landed {
             crate::edit::Landed::Notice(message, subject) => {
                 // The listing does not know yet — the watcher will bring it in
@@ -4820,6 +4943,31 @@ search_active={active:?}",
         self.relayout();
     }
 
+    /// How tall the history strip wants to be, in logical pixels.
+    ///
+    /// **Nothing until there is something to show.** A window that has changed
+    /// nothing has no history, and a permanent empty strip is a row of chrome
+    /// earning its keep on no window at all. Once the stack has an entry it stays —
+    /// `record` only grows within a session and an undo moves entries to the other
+    /// branch rather than dropping them — so the strip appears once and does not
+    /// flicker.
+    ///
+    /// Collapsed is the header alone. Expanded adds a row per entry up to
+    /// [`crate::view::HISTORY_ROWS`], and [`crate::layout::Layout::compute_with`]
+    /// clamps the whole thing to a third of the window besides.
+    fn history_height(&self) -> f32 {
+        if self.edits.history.is_empty() {
+            return 0.0;
+        }
+        let metrics = &self.theme.metrics;
+        if self.history_open {
+            let rows = self.edits.history.len().min(crate::view::HISTORY_ROWS) as f32;
+            metrics.header_height + rows * metrics.row_height
+        } else {
+            metrics.header_height
+        }
+    }
+
     /// Recomputes every region, including whose frame this window is drawing.
     fn relayout(&mut self) {
         self.layout = Layout::compute_with(
@@ -4827,6 +4975,7 @@ search_active={active:?}",
             &self.theme.metrics,
             frame_of(&self.window),
             self.sidebar.open,
+            self.history_height(),
         );
         self.divide();
     }
@@ -4912,9 +5061,13 @@ search_active={active:?}",
         let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
         let collapsed = self.panes.focused().hidden_count();
         let headings = self.headings_state();
+        let history = format!("{}/{}", self.edits.history.applied(), self.edits.history.len());
+        let history_open = self.history_open;
+        let history_aim = self.history_aim();
         format!(
             "mode={} grouping={} bands={} remembered={} columns={} cell={:.1}x{:.1} \
 collapsed={collapsed} headings={headings} \
+history={history} history_open={history_open} history_aim={history_aim} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -4924,6 +5077,26 @@ index={index} indexing={indexing} search_indexed={searched}",
             cells.cell().0,
             cells.cell().1,
         )
+    }
+
+    /// Every drawn history row as `index:x:y`, or `none`.
+    ///
+    /// **From the rectangles the frame recorded**, for the reason `column_aim` and
+    /// `check_aim` are: the list is scrolled and clipped, so which rows exist and
+    /// where they are is something only the frame knows — and a harness that worked
+    /// it out from `row_h` would be a second copy of the panel's layout.
+    fn history_aim(&self) -> String {
+        let middle =
+            |at: &crate::layout::Area| format!("{:.1}:{:.1}", at.x + 40.0, at.y + at.height / 2.0);
+        // The header first, because it is a control too — the pointer surface
+        // `commands.rs` claims for `edit.history` — and a scenario that could not
+        // aim at it would be testing the chord twice.
+        let mut aims: Vec<String> =
+            self.hits.history_header.iter().map(|at| format!("header:{}", middle(at))).collect();
+        aims.extend(
+            self.hits.history_rows.iter().map(|(index, at)| format!("{index}:{}", middle(at))),
+        );
+        if aims.is_empty() { "none".to_owned() } else { aims.join(",") }
     }
 
     /// Every on-screen heading as `band:x:y:state`, or `none`.
@@ -7156,9 +7329,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.hovered_tool = tool;
             self.dirty = true;
         }
-        let place = self.place_at(position);
-        if self.sidebar.hover != place {
-            self.sidebar.hover = place;
+        self.hover_the_history(position);
+        if self.hover_the_sidebar(position) {
             self.dirty = true;
         }
         if self.drag_a_tab(position) {
@@ -7363,6 +7535,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_mode,
             sidebar,
             edits,
+            history_open,
+            history_scroll,
+            hovered_edit,
             filtering,
             desktop,
             window_state,
@@ -7427,6 +7602,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let chrome = Chrome {
             keys: rows.as_deref(),
             stats: *show_stats,
+            edits: Some(edits),
+            history: (*history_open, history_scroll.offset()),
+            hovered_edit: *hovered_edit,
             typed: (!typed.is_empty()).then_some(typed.as_str()),
             band: *band,
             watching: *watching,

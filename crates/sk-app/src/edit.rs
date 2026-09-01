@@ -101,6 +101,11 @@ struct Running {
 pub struct Edits {
     /// One stack for every mutation — [rule 3](../../../docs/03-principles.md).
     pub history: History<Change>,
+    /// Where a walk through the history is heading, as a count of applied entries.
+    ///
+    /// `None` when nothing is walking, which is every ordinary undo and redo —
+    /// those are a walk of one step that nobody has to track.
+    walking: Option<usize>,
     /// The name being typed, if one is.
     pub naming: Option<Naming>,
     /// A name to open a field on once the listing containing it lands.
@@ -328,6 +333,7 @@ impl Edits {
         // amount of memory. Rule 3 asks for visible history, not infinite.
         Self {
             history: History::new(200),
+            walking: None,
             naming: None,
             name_after_load: None,
             naming_owed: false,
@@ -710,6 +716,56 @@ impl Edits {
         self.start(Pending::Redoing, jobs, move |_| Outcome::Redid(ops::apply(&change)));
     }
 
+    /// Walks the history to the point where `applied` entries have been applied.
+    ///
+    /// **A jump is N single steps, not a new operation.** Every one of them is the
+    /// same `revert` or `apply` that `Ctrl+Z` uses, run one at a time on a job,
+    /// because that is the only path whose inverses have been tested — and because
+    /// a batch of thirty files is already a queue, so a jump over four of them is
+    /// not something to run concurrently.
+    ///
+    /// Nothing starts here if something is already running: the step machinery
+    /// below takes over as each one lands.
+    pub fn walk_to(&mut self, applied: usize, jobs: &Jobs) {
+        let wanted = applied.min(self.history.len());
+        if wanted == self.history.applied() {
+            self.walking = None;
+            return;
+        }
+        self.walking = Some(wanted);
+        self.take_a_step(jobs);
+    }
+
+    /// One step towards the point a walk is heading for, or an end to the walk.
+    ///
+    /// **A refused step ends the walk where it stands.** `History::undo` puts the
+    /// entry back when its revert fails — a folder somebody has since put files in
+    /// — and retrying it would be an infinite loop over a message the person has
+    /// already read. So the walk stops and what has been undone stays undone,
+    /// which is also what pressing `Ctrl+Z` four times by hand would have left.
+    fn take_a_step(&mut self, jobs: &Jobs) {
+        let Some(wanted) = self.walking else { return };
+        if self.pending.is_some() {
+            return;
+        }
+        let at = self.history.applied();
+        if at == wanted {
+            self.walking = None;
+            return;
+        }
+        let before = at;
+        if at > wanted {
+            self.undo(jobs);
+        } else {
+            self.redo(jobs);
+        }
+        // Nothing started, so there is nothing to wait for and no progress to be
+        // made: an empty branch is an end to the walk rather than a spin.
+        if self.pending.is_none() && self.history.applied() == before {
+            self.walking = None;
+        }
+    }
+
     /// Takes delivery of a finished operation.
     pub fn drain(&mut self) -> Option<Landed> {
         let outcome = self.done.try_recv().ok()?;
@@ -805,15 +861,33 @@ impl Edits {
                 ))
             }
             Outcome::Did(Err(problem)) | Outcome::Redid(Err(problem)) => {
-                // The rest of a queue goes with the one that failed.
+                // The rest of a queue goes with the one that failed, and so does
+                // the rest of a walk.
+                self.walking = None;
                 self.queue.clear();
                 self.queued = 0;
                 Some(Landed::Failed(problem.message()))
             }
-            Outcome::Undid(Err(problem)) => Some(Landed::Failed(problem.message())),
+            Outcome::Undid(Err(problem)) => {
+                // A refused step ends the walk where it stands — see `take_a_step`.
+                self.walking = None;
+                Some(Landed::Failed(problem.message()))
+            }
             // Taken above, before the queue's bookkeeping runs: a clash is the
             // absence of an outcome, not one of them.
             Outcome::Clashed(_) => None,
+        }
+    }
+
+    /// Issues the next step of a walk, if one is still going.
+    ///
+    /// **Called after every drain**, because `drain` has no `Jobs` to start work
+    /// with — and putting one there would make taking delivery of an outcome and
+    /// starting the next operation the same call, which is the half-done shape
+    /// `History`'s own API is built to avoid.
+    pub fn continue_walking(&mut self, jobs: &Jobs) {
+        if self.walking.is_some() {
+            self.take_a_step(jobs);
         }
     }
 

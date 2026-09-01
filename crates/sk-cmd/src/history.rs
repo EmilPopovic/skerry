@@ -105,14 +105,40 @@ impl<T> History<T> {
         !self.undone.is_empty()
     }
 
-    /// Everything that has been done, oldest first.
+    /// Every entry, oldest first, applied ones and then undone ones.
     ///
-    /// For the visible history rule 3 asks for. Not yet drawn anywhere, which is
-    /// why it is the one method here with no caller — and why deleting it would
-    /// be deleting the reason the stack keeps its entries at all.
+    /// **This is what a visible history is a list of** — the thing rule 3 asks for
+    /// and the reason the stack keeps its entries rather than only its top. The
+    /// undone ones come back **in the order they would be redone**, which is the
+    /// reverse of the branch they are stacked on: `undone.last()` is the next redo
+    /// and therefore the *earliest* step of the future.
+    ///
+    /// So the whole timeline reads top to bottom in the order things happened, with
+    /// [`Self::applied`] marking where the present is.
     #[must_use]
-    pub fn entries(&self) -> impl DoubleEndedIterator<Item = &T> + '_ {
-        self.done.iter()
+    pub fn timeline(&self) -> impl DoubleEndedIterator<Item = &T> + '_ {
+        self.done.iter().chain(self.undone.iter().rev())
+    }
+
+    /// How many of [`Self::timeline`] have been applied.
+    ///
+    /// The index of the present: entry `applied() - 1` is the last thing that
+    /// happened, and entry `applied()` is the next thing a redo would do.
+    #[must_use]
+    pub fn applied(&self) -> usize {
+        self.done.len()
+    }
+
+    /// How many entries there are on both branches.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.done.len() + self.undone.len()
+    }
+
+    /// Whether there is no history at all — nothing done and nothing undone.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.done.is_empty() && self.undone.is_empty()
     }
 }
 
@@ -173,8 +199,9 @@ mod tests {
         assert!(history.undo(|_| true));
         assert!(history.redo(|_| Some("trashed as notes.txt.2")));
 
-        let entries: Vec<_> = history.entries().copied().collect();
+        let entries: Vec<_> = history.timeline().copied().collect();
         assert_eq!(entries, vec!["trashed as notes.txt.2"]);
+        assert_eq!(history.applied(), 1, "the redone entry is not applied");
     }
 
     #[test]
@@ -195,12 +222,53 @@ mod tests {
         for index in 0..10 {
             history.record(index);
         }
-        let entries: Vec<_> = history.entries().copied().collect();
+        let entries: Vec<_> = history.timeline().copied().collect();
         assert_eq!(entries, vec![7, 8, 9]);
         // And a redo cannot push it past the cap either.
         assert!(history.undo(|_| true));
         assert!(history.redo(|entry| Some(*entry)));
-        assert_eq!(history.entries().count(), 3);
+        assert_eq!(history.timeline().count(), 3);
+    }
+
+    /// **The timeline is what a visible history draws, and its order is the whole
+    /// of it.** The undone branch is a stack — its last entry is the next redo —
+    /// so listing it as stored would put the future in backwards, and a panel a
+    /// person clicks to travel through would send them to the wrong point.
+    #[test]
+    fn the_timeline_reads_in_the_order_things_happened() {
+        let mut history = History::new(8);
+        for entry in ["one", "two", "three", "four"] {
+            history.record(entry);
+        }
+        assert_eq!(history.applied(), 4);
+        assert_eq!(history.len(), 4);
+
+        // Two steps back: the timeline keeps all four, in order, and the present
+        // moves rather than the list.
+        assert!(history.undo(|_| true));
+        assert!(history.undo(|_| true));
+        let entries: Vec<_> = history.timeline().copied().collect();
+        assert_eq!(entries, vec!["one", "two", "three", "four"]);
+        assert_eq!(history.applied(), 2, "the present did not move");
+        assert_eq!(history.len(), 4, "an undone entry left the timeline");
+        // Which is the property a panel needs: entry `applied()` is the next redo.
+        assert_eq!(history.timeline().nth(history.applied()), history.peek_redo());
+        assert_eq!(history.timeline().nth(history.applied() - 1), history.peek_undo());
+
+        // Forwards again, and the order is unchanged.
+        assert!(history.redo(|entry| Some(*entry)));
+        assert_eq!(history.timeline().copied().collect::<Vec<_>>(), entries);
+        assert_eq!(history.applied(), 3);
+
+        // An empty stack has an empty timeline, and one entry undone is not empty:
+        // the strip stays once it exists rather than flickering away on `Ctrl+Z`.
+        let mut fresh: History<&str> = History::new(4);
+        assert!(fresh.is_empty());
+        fresh.record("only");
+        assert!(fresh.undo(|_| true));
+        assert!(!fresh.is_empty(), "the last entry undone emptied the history");
+        assert_eq!(fresh.applied(), 0);
+        assert_eq!(fresh.len(), 1);
     }
 
     /// What a caller whose revert is a job does: read, hand a copy to the pool,

@@ -115,6 +115,13 @@ fn chrome_of<'a>(
     Chrome {
         keys: None,
         stats: false,
+        // **A bench has no history and draws none.** The strip is zero-height in
+        // `Layout::compute_with` here, so this is the empty stack it agrees with:
+        // measuring a frame with a panel nobody opened would be measuring the
+        // wrong frame.
+        edits: None,
+        history: (false, 0.0),
+        hovered_edit: None,
         typed: None,
         band: None,
         watching: true,
@@ -197,7 +204,13 @@ fn fixed(request: &Bench) -> Fixed {
     Fixed {
         types: std::sync::Arc::new(sk_desktop::MimeDatabase::load()),
         places: crate::sidebar::sample(&request.path),
-        layout: Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, true),
+        layout: Layout::compute_with(
+            logical,
+            &theme.metrics,
+            crate::layout::Frame::None,
+            true,
+            0.0,
+        ),
         theme,
         hint: crate::commands::hint(&crate::commands::registry()),
     }

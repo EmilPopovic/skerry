@@ -102,6 +102,43 @@ impl Change {
         }
     }
 
+    /// A catalogue key naming this change, and the one argument that key takes.
+    ///
+    /// **Keys rather than text**, so this crate needs no catalogue and a
+    /// translation of the history list is a translation like any other. What comes
+    /// back is either a name — `Renamed report.pdf` — or a count, and never both:
+    /// the two forms take different arguments, which is the distinction [ADR
+    /// 0016](../../../docs/adr/0016-plural-forms-are-bracketed-keys-in-the-catalogue.md)
+    /// draws between a plural form and a different message.
+    ///
+    /// **A batch is named by its last change and counted by its length**, which is
+    /// the same choice [`Change::subject`] makes and for the same reason: the
+    /// gesture is what the last thing it did looks like. A `Replace` batch trashes
+    /// what it replaces and then copies, so it reads as a copy — which is what a
+    /// person asked for.
+    #[must_use]
+    pub fn summary(&self) -> (&'static str, String) {
+        let named = |path: &Path| {
+            path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
+        };
+        match self {
+            Self::Batch(changes) => match changes.as_slice() {
+                [] => ("history.nothing", String::new()),
+                [only] => only.summary(),
+                many => {
+                    let (key, _) =
+                        many.last().map_or(("history.nothing", String::new()), Change::summary);
+                    (many_key(key), many.len().to_string())
+                }
+            },
+            Self::Created { path } => ("history.created", named(path)),
+            Self::Renamed { to, .. } => ("history.renamed", named(to)),
+            Self::Copied { destination, .. } => ("history.copied", named(destination)),
+            Self::Trashed { original, .. } => ("history.trashed", named(original)),
+            Self::Erased { path } => ("history.erased", named(path)),
+        }
+    }
+
     /// Where the file is once this change has been **reverted**, if anywhere.
     ///
     /// The other end of [`Change::subject`], and the row a cursor belongs on
@@ -123,6 +160,23 @@ impl Change {
             Self::Copied { source, .. } => Some(source),
             Self::Trashed { original, .. } => Some(original),
         }
+    }
+}
+
+/// The counted form of a `history.*` key.
+///
+/// A pair rather than a plural, because the two forms take different arguments —
+/// one names a file and the other counts them. Unknown keys fall back to the
+/// generic count, which is what an empty batch and a shape nobody has added yet
+/// both are.
+fn many_key(one: &'static str) -> &'static str {
+    match one {
+        "history.created" => "history.created_many",
+        "history.renamed" => "history.renamed_many",
+        "history.copied" => "history.copied_many",
+        "history.trashed" => "history.trashed_many",
+        "history.erased" => "history.erased_many",
+        _ => "history.changed_many",
     }
 }
 

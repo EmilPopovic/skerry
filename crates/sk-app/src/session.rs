@@ -13,6 +13,7 @@
 //! skerry 1
 //! theme dark            dark | light
 //! sidebar on            on | off
+//! history on            on | off — whether the visible history is expanded
 //! hidden off            on | off
 //! zoom 2                an index into App::ZOOM
 //! window 1100x720       logical pixels
@@ -55,6 +56,14 @@ pub struct Session {
     pub dark: bool,
     /// Whether the list of places was open.
     pub sidebar: bool,
+    /// Whether the history strip is expanded.
+    ///
+    /// **[Rule 6](../../../docs/03-principles.md), which is about the layout and
+    /// not about the stack.** The entries themselves are not written down — they
+    /// name paths whose inverses may no longer be possible after a restart, and an
+    /// undo stack that survives a process is an offer to revert a change the
+    /// filesystem has moved on from. What survives is whether the panel was open.
+    pub history: bool,
     /// Whether dotfiles were shown.
     pub hidden: bool,
     /// Which zoom step, as an index.
@@ -193,6 +202,7 @@ pub fn render(session: &Session) -> String {
     let mut out = format!("skerry {VERSION}\n");
     out.push_str(if session.dark { "theme dark\n" } else { "theme light\n" });
     out.push_str(if session.sidebar { "sidebar on\n" } else { "sidebar off\n" });
+    out.push_str(if session.history { "history on\n" } else { "history off\n" });
     out.push_str(if session.hidden { "hidden on\n" } else { "hidden off\n" });
     let _ = writeln!(out, "zoom {}", session.zoom);
     let _ = writeln!(out, "window {}x{}", session.window.0, session.window.1);
@@ -290,6 +300,7 @@ pub fn parse(text: &str) -> Option<Session> {
     let mut session = Session {
         dark: true,
         sidebar: true,
+        history: false,
         hidden: false,
         zoom: crate::app::ZOOM_DEFAULT,
         window: (1100, 720),
@@ -304,6 +315,7 @@ pub fn parse(text: &str) -> Option<Session> {
         match word {
             "theme" => session.dark = value != "light",
             "sidebar" => session.sidebar = value == "on",
+            "history" => session.history = value == "on",
             "hidden" => session.hidden = value == "on",
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
             "columns" => session.columns = read_columns(value),
@@ -467,6 +479,7 @@ mod tests {
         Session {
             dark: false,
             sidebar: false,
+            history: false,
             hidden: true,
             zoom: 4,
             window: (1440, 900),
