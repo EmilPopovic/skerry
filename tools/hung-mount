@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""A filesystem that never answers, for the one test rule 1 has never had.
+
+    tools/hung-mount /path/to/mountpoint      # holds until killed
+    tools/hung-mount --self-test              # proves it hangs, and tears down
+
+The budget row in [09-performance-budgets.md](../docs/09-performance-budgets.md)
+says *"frame during a hung mount, < 8 ms, sshfs to a suspended host, unplugged
+mid-listing — rule 1's canonical test"*, and nothing had ever run it: of the eight
+expensive-to-undo invariants in CLAUDE.md, rule 1 was the only one with no gate.
+
+**A FUSE mount rather than sshfs, and it is the better instrument.** An sshfs to a
+suspended host needs a network, a key and a second machine, and what it produces is
+a filesystem whose server has stopped answering. This is that, with nothing in
+between: `fusermount3` is setuid so no root is needed, and the server holds the
+`/dev/fuse` descriptor and reads nothing from it. Every request queues, and the
+caller blocks for as long as the mount stands — which is `getdents64` on an NFS
+mount to a host that has gone away.
+
+**It answers no request at all, `FUSE_INIT` included, and that was measured rather
+than assumed.** A first version replied to the handshake on the theory that an
+unhandshaked mount would fail calls rather than queue them. It does not: `stat`,
+`ls` and `open` block past three seconds either way, and `/proc/self/mountinfo`
+shows the same line for both. Ninety lines of versioned `fuse_init_out` layout for
+no observable difference, so they are gone — and the self-test below could not tell
+the two apart, which is how it was caught.
+
+**It unmounts itself, on every exit path.** A hung mount is contagious: anything
+that walks its parent blocks too, a harness's own cleanup included, and a blocked
+process sits in uninterruptible sleep until the mount goes. Teardown is asserted by
+`--self-test`, not just attempted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+
+def mount(where: Path) -> tuple[int, subprocess.Popen[bytes]]:
+    """Mounts a FUSE filesystem at `where` and returns its device descriptor.
+
+    `fusermount3` hands `/dev/fuse` back over a socket named in `_FUSE_COMMFD`
+    rather than through a return value, which is the only reason there is a socket
+    pair here.
+    """
+    where.mkdir(parents=True, exist_ok=True)
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        environment = {**os.environ, "_FUSE_COMMFD": str(child.fileno())}
+        # `ro` because nothing can be written to a filesystem that never answers,
+        # and `fsname` so `mount` output and a hunt for a stray one both name it.
+        started = subprocess.Popen(
+            ["fusermount3", "-o", "fsname=skerry-hung,ro", str(where)],
+            env=environment,
+            pass_fds=(child.fileno(),),
+        )
+        if started.wait(timeout=20) != 0:
+            raise SystemExit(f"fusermount3 refused to mount {where}")
+        # **A deadline, because the failure without one is a hang.** Replacing
+        # `fusermount3` with `true` — the only way to test what happens when
+        # nothing is mounted — left `recv_fds` waiting for a descriptor that was
+        # never coming, so the self-test hung for two minutes instead of failing in
+        # one line. A rig whose failure mode is a hang is a rig that will one day
+        # stop a whole sweep.
+        parent.settimeout(20)
+        try:
+            _message, descriptors, _flags, _address = socket.recv_fds(parent, 1, 1)
+        except (TimeoutError, OSError) as why:
+            raise SystemExit(f"fusermount3 sent no descriptor for {where}: {why}") from why
+        if not descriptors:
+            raise SystemExit(f"fusermount3 sent an empty descriptor set for {where}")
+        return descriptors[0], started
+    finally:
+        parent.close()
+        child.close()
+
+
+def unmount(where: Path) -> None:
+    """Tears the mount down, lazily, and never raises.
+
+    `-z` so it detaches with callers still blocked on it; closing the server's
+    descriptor is what releases them.
+    """
+    try:
+        subprocess.run(
+            ["fusermount3", "-u", "-z", str(where)],
+            check=False,
+            capture_output=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def hold(where: Path) -> None:
+    """Mounts, says so, and waits to be killed."""
+    device, server = mount(where)
+    try:
+        # The line a caller waits for. A `sleep` on the other side instead would be
+        # a guess about how long a mount takes, which is the mistake
+        # [12-measurement.md](../docs/12-measurement.md) names most often.
+        print(f"hung {where}", flush=True)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+        while True:
+            time.sleep(3600)
+    finally:
+        os.close(device)
+        unmount(where)
+        try:
+            server.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def self_test() -> int:
+    """Proves the mount blocks, and that it goes away afterwards.
+
+    **Both halves, because either alone is a lie.** A mount that does not block
+    makes every assertion over it pass for free; a mount that does not tear down
+    hangs the next thing that walks its parent.
+    """
+    root = Path(tempfile.mkdtemp(prefix="skerry-hung-"))
+    where = root / "mnt"
+    server = subprocess.Popen(
+        [sys.executable, __file__, str(where)], stdout=subprocess.PIPE, text=True
+    )
+    failures: list[str] = []
+    try:
+        assert server.stdout is not None
+        line = server.stdout.readline().strip()
+        if not line.startswith("hung "):
+            failures.append(f"the server said {line!r} rather than mounting")
+            return report(failures)
+
+        # The three calls a listing makes, and each has to block rather than fail:
+        # a mount that *errors* is broken, not hung, and proves nothing about a
+        # frame loop.
+        for what, argv in (
+            ("stat", ["stat", str(where)]),
+            ("readdir", ["ls", "-a", str(where)]),
+            ("open", ["cat", str(where / "anything")]),
+        ):
+            began = time.monotonic()
+            try:
+                subprocess.run(argv, check=False, capture_output=True, timeout=3)
+                failures.append(
+                    f"{what} returned after {time.monotonic() - began:.2f}s instead of "
+                    "blocking — the mount is broken, not hung"
+                )
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            server.kill()
+        unmount(where)
+
+    # And it is gone: the same call that blocked now answers.
+    try:
+        subprocess.run(["ls", str(where)], check=False, capture_output=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        failures.append(f"{where} still hangs after teardown")
+    else:
+        try:
+            where.rmdir()
+            root.rmdir()
+        except OSError as why:
+            failures.append(f"the mount point could not be removed: {why}")
+    return report(failures)
+
+
+def report(failures: list[str]) -> int:
+    for failure in failures:
+        print(f"  FAIL  {failure}")
+    if failures:
+        return 1
+    print("  ok    a filesystem that answers nothing blocks every call, and unmounts")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mountpoint", nargs="?", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    # For a caller's teardown: the unmount is what releases anything still blocked,
+    # so it has to be reachable without the server that started the mount.
+    parser.add_argument("--unmount", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.self_test:
+        return self_test()
+    if arguments.unmount:
+        if arguments.mountpoint is None:
+            parser.error("--unmount needs a mount point")
+        unmount(arguments.mountpoint)
+        return 0
+    if arguments.mountpoint is None:
+        parser.error("a mount point, or --self-test")
+    hold(arguments.mountpoint)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

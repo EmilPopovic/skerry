@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 110
+FEWEST_SCENARIOS = 111
 
 
 def scenario(name, fresh: bool = False):
@@ -1408,6 +1408,110 @@ def headings_of(state: dict[str, str]) -> list[tuple[int, float, float, str]]:
         band, x, y, shut = entry.split(":")
         found.append((int(band), float(x), float(y), shut))
     return found
+
+
+@scenario("a-hung-mount-never-blocks-the-frame-loop", fresh=True)
+def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
+    """**Rule 1's canonical test, and until now the only one of the eight without
+    one.** A filesystem that has stopped answering has to degrade to a row that
+    never fills in, never to a window that stops drawing.
+
+    `tools/hung-mount` is the mount: a FUSE server that holds `/dev/fuse` and reads
+    nothing from it, so every `getdents64` and every `statx` under it queues and the
+    caller blocks for as long as the mount stands. That is `sshfs` to a suspended
+    host without the network, the key or the second machine — see that script for
+    why it answers no request at all, `FUSE_INIT` included.
+
+    **Every liveness check goes through `answered`, not `state`.** That is the whole
+    difference between this test and a decoration: `state` returns the last line in
+    the log, and `reports_reached` gives up quietly after a frame — so a frozen
+    frame loop hands back the dump from *before* the question, which looks pristine.
+    Measured here, not assumed: with a `read_dir` on the pane's path spliced into the
+    frame path, the first draft failed on *"the pane went to <fixture> rather than
+    the mount"* — a stale answer from before the navigation — rather than on the
+    window having stopped. `answered` returns nothing when nothing fresh arrived,
+    which is the only form of "it is still drawing" that can fail.
+
+    Three claims, in order:
+
+    * a read that never lands leaves the window drawing and answering keys;
+    * navigating away lands a real listing — which is the **per-device queue** in
+      `sk_util::Pool` doing its job, since one blocked device must not starve the
+      pool that every other read shares. Spike B measured a hung-mount arm at
+      28,000 ms, which is what that design is for;
+    * and the pane says it is still loading rather than claiming the folder is
+      empty, because "this folder is empty" over a mount that has gone away is the
+      one answer that is worse than no answer.
+    """
+    import subprocess
+
+    # **Outside the fixture, on purpose.** A hung mount is contagious: anything that
+    # walks its parent blocks too, and the harness deletes the fixture at the end.
+    where = run.work / "hung-mount"
+    server = subprocess.Popen(
+        ["python3", str(ROOT / "tools" / "hung-mount"), str(where)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert server.stdout is not None
+        line = server.stdout.readline().strip()
+        if not line.startswith("hung "):
+            raise Skipped(f"no hung mount to test against: {line or 'the server said nothing'}")
+
+        rows = listed(run)["rows"]
+
+        # Into the mount. The read is issued and never lands.
+        run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
+        run.drive(f"text {where}\nkey enter\nsleep 900\n")
+        hung = run.answered(settle=300)
+        if hung is None:
+            raise Failure("the window stopped answering when the pane reached a hung mount")
+        if hung["path"] != str(where):
+            raise Failure(f"the pane went to {hung['path']} rather than the mount")
+        if hung["loading"] != "true":
+            raise Failure(
+                f"a read that cannot land reported loading={hung['loading']!r} and "
+                f"rows={hung['rows']!r} — a mount that has gone away is not an empty folder"
+            )
+
+        # **Three fresh answers, with a keystroke between them.** Each one is a
+        # frame the loop drew while a read of this pane's own directory was blocked
+        # in the pool, which is rule 1 stated as an experiment.
+        for attempt in range(3):
+            run.drive("key down\nsleep 120\n")
+            alive = run.answered(settle=200)
+            if alive is None:
+                raise Failure(f"the window stopped answering keys over a hung mount ({attempt})")
+            if int(alive["frame_p99_us"]) > 8000:
+                raise Failure(f"a frame took {alive['frame_p99_us']}us over a hung mount")
+
+        # And out again, to a directory that answers. This is the pool's per-device
+        # queue: the blocked read still holds a thread and this one has to land.
+        run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
+        run.drive(f"text {fixture}\nkey enter\nsleep 900\n")
+        back = listed(run)
+        if back["path"] != str(fixture):
+            raise Failure(f"the pane could not leave the mount: {back['path']}")
+        if back["rows"] != rows:
+            raise Failure(f"the fixture read {back['rows']} rows, not the {rows} it began with")
+        if int(back["frame_p99_us"]) > 8000:
+            raise Failure(f"a frame took {back['frame_p99_us']}us after the hung mount")
+    finally:
+        # **Unmount before anything else.** It is what releases the read still
+        # blocked in the pool; without it that thread sits in uninterruptible sleep
+        # and the window cannot exit, which would hang the sweep rather than fail it.
+        subprocess.run(
+            ["python3", str(ROOT / "tools" / "hung-mount"), "--unmount", str(where)],
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        server.terminate()
+        try:
+            server.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server.kill()
 
 
 @scenario("collapse-a-group", fresh=True)

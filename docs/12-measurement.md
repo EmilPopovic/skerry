@@ -1867,3 +1867,58 @@ inheritance is the widest possible leak — one record reaches every scenario ov
 that path and every path beneath it. Auditing the other scenarios for the same
 shape took one regular expression and found one more, safe for a reason worth
 knowing: a folder's record holds a layout and a grouping, so a sort leaks nowhere.
+
+## A comment that claims a measurement, from a measurement never taken
+
+Rule 1's canonical test needed a filesystem that stops answering. The first version
+of `tools/hung-mount` replied to the kernel's `FUSE_INIT` and then to nothing, on
+the theory that an unhandshaked mount would *fail* calls rather than queue them —
+ninety lines of versioned `fuse_init_out` layout, with a comment beside them that
+read:
+
+> **Measured** — a first draft that only held the device fd made `stat` exit 1 and
+> `ls` exit 2, which would have made every assertion below pass against a
+> filesystem that was merely broken.
+
+**That measurement was never taken.** What had happened was a `timeout 2 stat`
+whose exit code I read as the command's rather than as `timeout`'s, in a shell
+block that had already gone wrong for another reason. Asked properly — two
+variants, three calls each, durations printed — `stat`, `ls` and `open` block past
+three seconds *either way*, and `/proc/self/mountinfo` shows the same line for
+both. The handshake bought nothing observable, so it is gone, and the file now says
+that instead.
+
+This project's rule is that every claim about performance is a number with a
+method. The failure mode nobody warns about is the claim that *has* a number and a
+method and neither one happened: it reads exactly like evidence, it justifies code
+that then cannot be removed without an argument, and it is a sentence a reviewer
+has no way to check. **A number in a comment is a promise that it can be
+reproduced.** Two of them here could not be.
+
+What caught it was trying to watch the test fail. Deleting the handshake left the
+self-test green — and the first reflex, that the negative control was badly chosen,
+was wrong: the control was fine and the code was decoration. This file already
+records the same shape from the fling work, where two clears and a gap constant
+were all unreachable. The difference this time is that a comment had been written
+to defend one.
+
+Two smaller findings from the same afternoon, both worth the line each:
+
+**A rig whose failure mode is a hang.** Substituting `true` for `fusermount3` — the
+only way to ask what happens when nothing gets mounted — left `recv_fds` waiting
+for a descriptor that was never coming, so the self-test hung for two minutes
+instead of failing in one line. A deadline on the socket turned it into
+`fusermount3 sent no descriptor: timed out`. A test rig that can hang will one day
+stop a whole sweep rather than fail one scenario in it.
+
+**And "the window is still answering" cannot be asserted with `state`.** The
+scenario's first draft read `run.state()` after each keystroke, on the reasoning
+that a frozen frame loop could not produce an answer and the scenario would time
+out. It does not: `state` returns the last line in the log and `reports_reached`
+gives up quietly after a frame, so a frozen window hands back the dump from before
+the question. Spliced a `read_dir` into the frame path to watch it fail, and it
+failed on *"the pane went to <fixture> rather than the mount"* — a stale answer
+from before the navigation, three assertions away from the real one. Through
+`answered`, which returns nothing when nothing fresh arrived, the same violation
+fails on *"the window stopped answering when the pane reached a hung mount"*. **A
+liveness assertion has to be built on a call that can say no.**

@@ -15,7 +15,7 @@ with integrated graphics) and, for the frame rows, also on llvmpipe.
 | Sort 1M entries | < 120 ms | 300 ms | Off-thread; the UI stays interactive throughout, which is asserted separately |
 | First search result | < 50 ms | 120 ms | From the first keystroke on a warm 1M-file tree |
 | Thumbnail appears | < 200 ms | 500 ms | For a visible JPEG not yet in the shared cache |
-| Frame during a hung mount | < 8 ms | 16 ms | sshfs to a suspended host, unplugged mid-listing — rule 1's canonical test |
+| Frame during a hung mount | < 8 ms | 16 ms | A FUSE filesystem that answers nothing — `tools/hung-mount` — under the pane, driven by `a-hung-mount-never-blocks-the-frame-loop`. Rule 1's canonical test, and see below |
 
 ## Footprint
 
@@ -60,6 +60,7 @@ the same renderer and the same glyph atlas the window uses.
 | First search result | < 50 ms | **0.7 ms** median of 7 over 817,288 entries, **2.9 ms** over 563,605 | met by 17×, and see below for what it does not say |
 | Repeat search over an index | < 50 ms | **6.99 ms** median of 3 over 563,605 entries, against **639.9 ms** to walk the same tree for the same complete answer | met by 7×, and it is the *complete* answer rather than the first result |
 | Load an index | < 250 ms at 1M | **31.7 ms** warm, median of 3 at 563,605 — 45 bytes an entry | met warm; **cold is unmeasured here**, and [Spike F](../spikes/f-index-and-search/README.md) measured 195 ms cold at 1M on a Pi 5 |
+| Frame during a hung mount | < 8 ms | **p99 inside budget across three keystrokes**, each one a fresh answer, while a read of the pane's own directory was blocked in the pool — and a normal directory landed afterwards | met, and see below |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window, on **both** display servers. On X11 the frame loop was traced across a three-second idle window and made **zero syscalls** | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
 | RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |

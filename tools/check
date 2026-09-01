@@ -26,6 +26,17 @@ if [ -f Cargo.toml ]; then
     cargo test --workspace || status=1
 fi
 
+# **Rule 1's test rig, checked rather than assumed.** `tools/hung-mount` is what
+# `a-hung-mount-never-blocks-the-frame-loop` mounts, and a rig that stopped hanging
+# would make that scenario pass over a filesystem that answers — which is the
+# "gate nobody has watched fail" shape. Five seconds, and it skips where FUSE is
+# not available to an unprivileged user rather than failing.
+if command -v fusermount3 >/dev/null 2>&1 && [ -c /dev/fuse ]; then
+    python3 tools/hung-mount --self-test || status=1
+else
+    echo "  skip  hung-mount: no fusermount3 or /dev/fuse for an unprivileged user"
+fi
+
 # Golden frames. Last because it needs a release binary and renders seven of
 # them; it runs on lavapipe, so it needs no GPU and no display server, and it
 # says so and passes where lavapipe or Pillow is missing.
