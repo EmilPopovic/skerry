@@ -7,6 +7,11 @@
 # translated.
 #
 # `{0}`, `{1}` are positional and may be reordered by a translation.
+#
+# A key with a bracket carries one plural form — ADR 0016. `plural.rule` names
+# which rule picks between them, and a rule this build does not implement is a
+# test failure rather than a silently wrong sentence.
+plural.rule = one-other
 
 app.name = Skerry
 
@@ -16,14 +21,19 @@ column.size = Size
 column.modified = Modified
 
 # The status line. Numbers are positional so a translation can reorder them.
-status.counts = {0} items, {1} selected
-status.counts.none = {0} items
+status.counts[one] = {0} item, {1} selected
+status.counts[other] = {0} items, {1} selected
+status.counts.none[one] = {0} item
+status.counts.none[other] = {0} items
 status.loading = Reading {0}…
 status.empty = This folder is empty
-status.filtered = {0} of {1} items match “{2}”
+status.filtered[one] = {0} of {1} item matches “{2}”
+status.filtered[other] = {0} of {1} items match “{2}”
 # A group is collapsed, so the list is showing fewer than it holds.
-status.hidden = {0} of {1} items, {2} selected
-status.hidden.none = {0} of {1} items
+status.hidden[one] = {0} of {1} item, {2} selected
+status.hidden[other] = {0} of {1} items, {2} selected
+status.hidden.none[one] = {0} of {1} item
+status.hidden.none[other] = {0} of {1} items
 # The prompt while the filter has the keyboard, caret included: one string, so a
 # translation can put the caret where its script wants it.
 
@@ -252,13 +262,19 @@ clash.for_the_rest = Do this for the other {0}
 search.title = Find under {0}
 search.type = Type to search everything under this folder
 search.running = {0} so far, {1} looked at…
-search.done = {0} found in {1} entries
-search.capped = the first {0}, of {1} entries — narrow the search
+search.done[one] = {0} found in {1} entry
+search.done[other] = {0} found in {1} entries
+search.capped[one] = the first {0}, of {1} entry — narrow the search
+search.capped[other] = the first {0}, of {1} entries — narrow the search
 search.none = Nothing under here is called that
-search.indexed = {0} found in {1} indexed entries · indexed {2}
-search.indexed_capped = the first {0}, of {1} indexed entries · indexed {2}
-index.building = Indexing… {0} entries so far
-index.building_of = Indexing… {0} of {1} entries
+search.indexed[one] = {0} found in {1} indexed entry · indexed {2}
+search.indexed[other] = {0} found in {1} indexed entries · indexed {2}
+search.indexed_capped[one] = the first {0}, of {1} indexed entry · indexed {2}
+search.indexed_capped[other] = the first {0}, of {1} indexed entries · indexed {2}
+index.building[one] = Indexing… {0} entry so far
+index.building[other] = Indexing… {0} entries so far
+index.building_of[one] = Indexing… {0} of {1} entry
+index.building_of[other] = Indexing… {0} of {1} entries
 action.search = Find a file
 action.search_results = Show all results in this pane
 action.view_details = Details
@@ -308,7 +324,8 @@ action.index_build = Index this folder
 action.index_forget = Delete this folder's index
 
 # Properties.
-properties.items = {0} items
+properties.items[one] = {0} item
+properties.items[other] = {0} items
 properties.kind = Kind
 properties.target = Points to
 properties.where = Where

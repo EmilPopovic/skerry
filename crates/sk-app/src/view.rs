@@ -3351,9 +3351,14 @@ fn status(
     } else if pane.loading {
         i18n::format("status.loading", &[&format::grouped(rows)])
     } else if !pane.filter.is_empty() {
-        i18n::format(
+        // **The noun agrees with the total, not with the matches.** "1 of 9 items
+        // match" and "3 of 1 item matches" — the second is impossible, but the
+        // count that governs is still the one the noun belongs to.
+        let held = pane.listing.len();
+        i18n::plural(
             "status.filtered",
-            &[&format::grouped(rows), &format::grouped(pane.listing.len()), &pane.filter],
+            held as u64,
+            &[&format::grouped(rows), &format::grouped(held), &pane.filter],
         )
     } else if hidden > 0 {
         // **Ahead of the plain count and behind the filter**, which is where it
@@ -3364,14 +3369,18 @@ fn status(
         let shown = format::grouped(rows - hidden.min(rows));
         let held = format::grouped(rows);
         if selected > 0 {
-            i18n::format("status.hidden", &[&shown, &held, &format::grouped(selected)])
+            i18n::plural("status.hidden", rows as u64, &[&shown, &held, &format::grouped(selected)])
         } else {
-            i18n::format("status.hidden.none", &[&shown, &held])
+            i18n::plural("status.hidden.none", rows as u64, &[&shown, &held])
         }
     } else if selected > 0 {
-        i18n::format("status.counts", &[&format::grouped(rows), &format::grouped(selected)])
+        i18n::plural(
+            "status.counts",
+            rows as u64,
+            &[&format::grouped(rows), &format::grouped(selected)],
+        )
     } else {
-        i18n::format("status.counts.none", &[&format::grouped(rows)])
+        i18n::plural("status.counts.none", rows as u64, &[&format::grouped(rows)])
     };
     let left = if chrome.watching { left } else { i18n::format("status.unwatched", &[&left]) };
     // Full strength while something is running. The dim grey is right for a row

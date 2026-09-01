@@ -26,6 +26,67 @@ pub fn lookup(key: &'static str) -> &'static str {
     catalogue().get(key).copied().unwrap_or(key)
 }
 
+/// Looks up the form of `key` that agrees with `count`, and interpolates `args`.
+///
+/// **[ADR 0016](../../../docs/adr/0016-plural-forms-are-bracketed-keys-in-the-catalogue.md).**
+/// The forms live under bracketed keys and the catalogue names the rule that picks
+/// between them:
+///
+/// ```text
+/// plural.rule = one-other
+/// properties.items[one]   = {0} item
+/// properties.items[other] = {0} items
+/// ```
+///
+/// **`count` is its own argument and not `args[0]`.** Which number governs
+/// agreement is per string: `{0} items` agrees with the first and `{0} of {1} items
+/// match` agrees with the *second*, so a mechanism that read it off the arguments
+/// would be right by coincidence in half the catalogue.
+///
+/// Falls back to `[other]` and then to the bare key, so a translation missing a
+/// form reads as a slightly wrong sentence rather than as `properties.items[few]`.
+#[must_use]
+pub fn plural(key: &'static str, count: u64, args: &[&dyn std::fmt::Display]) -> String {
+    interpolate(form(key, count), args)
+}
+
+/// The line for `key` in the category `count` falls in.
+fn form(key: &'static str, count: u64) -> &'static str {
+    let categories = catalogue();
+    let wanted = category(categories.get("plural.rule").copied().unwrap_or(ENGLISH), count);
+    // Two allocations at most, on a path that runs once per counted string per
+    // frame — measured against the shaping that follows it, which is orders more.
+    for category in [wanted, "other"] {
+        if let Some(line) = categories.get(format!("{key}[{category}]").as_str()) {
+            return line;
+        }
+    }
+    lookup(key)
+}
+
+/// The rule every catalogue is assumed to use when it names none.
+const ENGLISH: &str = "one-other";
+
+/// Which CLDR category `count` falls in, under the rule named `rule`.
+///
+/// **One rule, and the seam is the name rather than a table.** Arms for languages
+/// with no catalogue would be code with no test; a rule this build does not
+/// implement is caught by `the_catalogue_names_a_plural_rule_this_build_knows`
+/// rather than by a silent fall through, because falling through to `other` would
+/// put `1 items` back on screen and call it localization.
+fn category(rule: &str, count: u64) -> &'static str {
+    match rule {
+        "one-other" if count == 1 => "one",
+        _ => "other",
+    }
+}
+
+/// Whether `rule` is one [`category`] actually implements.
+#[must_use]
+pub fn knows_plural_rule(rule: &str) -> bool {
+    matches!(rule, "one-other")
+}
+
 /// Looks up a message and substitutes `{0}`, `{1}`, … from `args`.
 ///
 /// Positional rather than in-order, because a translation reorders clauses: the
@@ -85,13 +146,37 @@ fn parse(text: &'static str) -> HashMap<&'static str, &'static str> {
 ///
 /// ```ignore
 /// let header = t!("column.name");                       // &'static str
-/// let status = t!("status.counts", total, selected);     // String
+/// let asking = t!("status.loading", total);              // String
+/// // A key with plural forms needs `tp!` — `t!` on one draws the key.
 /// ```
 #[macro_export]
 macro_rules! t {
     ($key:literal) => { $crate::i18n::lookup($key) };
     ($key:literal, $($arg:expr),+ $(,)?) => {
         $crate::i18n::format($key, &[$(&$arg as &dyn ::std::fmt::Display),+])
+    };
+}
+
+/// Resolves the form of a catalogue key that agrees with a count.
+///
+/// The count is given twice on purpose — once to choose the form and once as an
+/// argument — because those are two jobs and a string may not interpolate the
+/// number it agrees with at all. See [ADR
+/// 0016](../../../docs/adr/0016-plural-forms-are-bracketed-keys-in-the-catalogue.md).
+///
+/// ```ignore
+/// let items = tp!("properties.items", n, n);          // "1 item" / "9 items"
+/// let matched = tp!("status.filtered", total, shown, total, query);
+/// ```
+#[macro_export]
+macro_rules! tp {
+    ($key:literal, $count:expr) => { $crate::i18n::plural($key, $count as u64, &[]) };
+    ($key:literal, $count:expr, $($arg:expr),+ $(,)?) => {
+        $crate::i18n::plural(
+            $key,
+            $count as u64,
+            &[$(&$arg as &dyn ::std::fmt::Display),+],
+        )
     };
 }
 
@@ -135,9 +220,81 @@ mod tests {
         assert_eq!(interpolate("unclosed {0", &args), "unclosed {0");
     }
 
+    /// **The rule the catalogue names has to be one `category` implements.**
+    ///
+    /// Not a fall through to `other`, which would put `1 items` back on screen and
+    /// call it localization — see [ADR
+    /// 0016](../../../docs/adr/0016-plural-forms-are-bracketed-keys-in-the-catalogue.md).
+    #[test]
+    fn the_catalogue_names_a_plural_rule_this_build_knows() {
+        let named = catalogue().get("plural.rule").copied().unwrap_or(super::ENGLISH);
+        assert!(super::knows_plural_rule(named), "no rule called `{named}` is implemented");
+    }
+
+    /// Every plural key has an `[other]` form, and no bracket holds a category
+    /// that is not one of CLDR's six.
+    ///
+    /// **The `[other]` half is the load-bearing one.** It is what a count in a
+    /// category this catalogue has no line for falls back to, so a key with only
+    /// `[one]` renders as the key itself for every count but 1 — which is the
+    /// failure mode a translation in progress hits first.
+    #[test]
+    fn every_plural_key_has_an_other_form_and_a_real_category() {
+        const CLDR: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
+        let mut bracketed: Vec<(&str, &str)> = Vec::new();
+        for key in catalogue().keys() {
+            if let Some((stem, rest)) = key.split_once('[') {
+                let category =
+                    rest.strip_suffix(']').unwrap_or_else(|| panic!("`{key}` has no closing ]"));
+                assert!(CLDR.contains(&category), "`{key}` names no CLDR category");
+                bracketed.push((stem, category));
+            }
+        }
+        assert!(bracketed.len() >= 12, "only {} plural forms parsed", bracketed.len());
+        let mut stems: Vec<&str> = bracketed.iter().map(|(stem, _)| *stem).collect();
+        stems.sort_unstable();
+        stems.dedup();
+        for stem in stems {
+            assert!(
+                bracketed.iter().any(|(at, category)| *at == stem && *category == "other"),
+                "`{stem}` has plural forms but no [other]"
+            );
+            // And no bare line beside them: two spellings of one key is two
+            // answers, and whichever `lookup` finds first is the one on screen.
+            assert!(catalogue().get(stem).is_none(), "`{stem}` has plural forms *and* a bare line");
+        }
+    }
+
+    /// One and not-one, through the macro a call site uses.
+    #[test]
+    fn a_count_of_one_agrees_with_its_noun() {
+        assert_eq!(tp!("properties.items", 1, 1), "1 item");
+        assert_eq!(tp!("properties.items", 9, 9), "9 items");
+        assert_eq!(tp!("properties.items", 0, 0), "0 items");
+        // The status line, where the count that governs is not the only argument.
+        assert_eq!(tp!("status.counts", 1, 1, 1), "1 item, 1 selected");
+        assert_eq!(tp!("status.counts", 3, 3, 1), "3 items, 1 selected");
+        // And where it is the *second* argument: "1 of 1 item matches".
+        assert_eq!(tp!("status.filtered", 1, 1, 1, "a"), "1 of 1 item matches “a”");
+        assert_eq!(tp!("status.filtered", 9, 1, 9, "a"), "1 of 9 items match “a”");
+    }
+
+    /// A key with no forms at all falls back to its bare line, and a key with
+    /// forms falls back to `[other]` for a category the catalogue does not carry.
+    #[test]
+    fn a_plural_of_a_key_with_no_forms_is_the_key() {
+        // `search.running` has no noun to agree with and no bracketed line.
+        assert_eq!(super::form("search.running", 1), lookup("search.running"));
+        // `two` is a real category with no line here, so `[other]` answers.
+        assert_eq!(super::form("properties.items", 2), "{0} items");
+        // And a key in no catalogue at all is still itself, which is the visible
+        // fallback `a_missing_key_renders_as_itself` is about.
+        assert_eq!(super::form("nothing.here", 1), "nothing.here"); // skerry-allow: missing-string
+    }
+
     #[test]
     fn the_macro_resolves_both_forms() {
         assert_eq!(t!("app.name"), "Skerry");
-        assert_eq!(t!("status.counts", 3, 1), "3 items, 1 selected");
+        assert_eq!(t!("status.loading", 3), "Reading 3…");
     }
 }

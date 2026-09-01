@@ -167,7 +167,10 @@ impl Search {
         if let Some(built) = self.indexed.filter(|_| self.found.complete) {
             let key = if self.found.capped { "search.indexed_capped" } else { "search.indexed" };
             let when = sk_ui::format::modified(built, now());
-            return sk_model::i18n::format(key, &[&self.found.hits.len(), &scanned, &when]);
+            // The entries walked, which is the noun in all four of these keys —
+            // the hit count has none of its own.
+            let walked = self.found.scanned;
+            return sk_model::i18n::plural(key, walked, &[&self.found.hits.len(), &scanned, &when]);
         }
         let key = if self.found.capped {
             "search.capped"
@@ -176,7 +179,9 @@ impl Search {
         } else {
             "search.running"
         };
-        sk_model::i18n::format(key, &[&self.found.hits.len(), &scanned])
+        // `search.running` has no plural form and needs none — it says "so far",
+        // with no noun to agree. `plural` falls back to the bare key for it.
+        sk_model::i18n::plural(key, self.found.scanned, &[&self.found.hits.len(), &scanned])
     }
 }
 

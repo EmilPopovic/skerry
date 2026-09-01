@@ -136,9 +136,24 @@ BACKEND_NAME = re.compile(
 # Every string a person can see goes through the catalogue, and a key that is not
 # in it resolves to itself — so a typo ships as `notice.trashed` on screen.
 CATALOGUE = ROOT / "crates/sk-model/catalogue/en.txt"
+# **`plural` and `tp!` are here too, and the key may be on the next line.** A
+# plural key has no bare line in the catalogue — ADR 0016 — so asking for one
+# through `format` renders `properties.items` as a title, which is exactly what
+# this gate exists to stop. And `\s*` now crosses newlines, because the call it
+# missed was `i18n::format(\n    "properties.items",` — a line-by-line scan sees
+# the call on one line and the key on another and matches neither.
 STRING_KEY = re.compile(
-    r'(?:i18n::lookup|i18n::format|\blookup|\bformat|t!)\(\s*"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"'
+    r'(?:i18n::)?(lookup|format|plural|t!|tp!)'
+    r'\(\s*"([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)"',
+    re.DOTALL,
 )
+
+# Which callers want a plural key and which want a bare one.
+#
+# **Both directions are a defect.** A plural key has no bare line — ADR 0016 — so
+# `format("properties.items", …)` draws the key as a title; and a bare key asked
+# for through `plural` falls back to itself, which is the same thing one call away.
+PLURAL_CALLERS = {"plural", "tp!"}
 
 
 def catalogue_check(report: Report) -> None:
@@ -155,15 +170,25 @@ def catalogue_check(report: Report) -> None:
         if line and not line.startswith("#") and "=" in line:
             keys.add(line.split("=", 1)[0].strip())
     for source in rust_sources("crates", "bin"):
-        for number, line in enumerate(source.read_text().splitlines(), 1):
-            if suppressed(line, "missing-string"):
+        text = source.read_text()
+        lines = text.splitlines()
+        for found in STRING_KEY.finditer(text):
+            caller, key = found.group(1), found.group(2)
+            plural = caller in PLURAL_CALLERS
+            wanted = f"{key}[other]" if plural else key
+            if wanted in keys:
                 continue
-            for key in STRING_KEY.findall(line):
-                if key not in keys:
-                    report.fail(
-                        f"{rel(source)}:{number}",
-                        f"`{key}` is not in the catalogue, so it would show as itself",
-                    )
+            # The line the *key* is on, which is where a reader will look for it
+            # and where a suppression has to be written.
+            number = text.count("\n", 0, found.start(2)) + 1
+            if suppressed(lines[number - 1], "missing-string"):
+                continue
+            because = (
+                f"`{key}` has no `[other]` form, so `{caller}` would draw the key"
+                if plural
+                else f"`{key}` is not in the catalogue, so it would show as itself"
+            )
+            report.fail(f"{rel(source)}:{number}", because)
 
 
 def spliced_comment_check(report: Report) -> None:

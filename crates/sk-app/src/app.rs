@@ -7392,10 +7392,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             // denominator the bar is drawn from — a bar with no number beside it
             // is a bar a person has to trust rather than read.
             indexes.counted().map_or_else(
-                || sk_model::i18n::format("index.building", &[&done]),
+                || sk_model::i18n::plural("index.building", count as u64, &[&done]),
                 |total| {
                     let all = sk_ui::format::grouped(total);
-                    sk_model::i18n::format("index.building_of", &[&done, &all])
+                    sk_model::i18n::plural("index.building_of", total as u64, &[&done, &all])
                 },
             )
         });

@@ -44,9 +44,11 @@ impl Properties {
     pub(crate) fn title(&self) -> String {
         match self.paths.as_slice() {
             [one] => crate::panes::title_of(one).to_owned(),
-            many => {
-                sk_model::i18n::format("properties.items", &[&sk_ui::format::grouped(many.len())])
-            }
+            many => sk_model::i18n::plural(
+                "properties.items",
+                many.len() as u64,
+                &[&sk_ui::format::grouped(many.len())],
+            ),
         }
     }
 

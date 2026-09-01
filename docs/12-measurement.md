@@ -1922,3 +1922,48 @@ from before the navigation, three assertions away from the real one. Through
 `answered`, which returns nothing when nothing fresh arrived, the same violation
 fails on *"the window stopped answering when the pane reached a hung mount"*. **A
 liveness assertion has to be built on a call that can say no.**
+
+## The same gate, two blind spots, one day — and a fifth of it was dark
+
+The catalogue gate proves that every key a source file asks for exists, because a
+missing one renders as itself: `properties.items` as a panel title. This morning it
+turned out it could not see a key held in an array — twenty-nine of them in
+`Grouping::label` — and that is
+[written up above](#a-gate-that-matches-a-syntax-cannot-see-a-table). This
+afternoon, adding plural forms, it turned out it could not see this either:
+
+```rust
+sk_model::i18n::format(
+    "properties.items",
+    &[&sk_ui::format::grouped(many.len())],
+)
+```
+
+The scan was line by line. The call is on one line and the key is on the next, so
+the regex matched neither. **Measured before fixing it: 19 of 95 call sites were
+invisible — one in five.** Among them `status.counts`, `notice.progress_eta`,
+`notice.paused` and four of the statistics overlay's.
+
+So the gate was reporting on 80% of what it claimed, and which 80% was decided by
+`rustfmt` — a call that fitted on one line was checked and the same call wrapped by
+one character was not. Nothing about the code's correctness moved it in or out.
+
+Both repairs are the same shape: **match the whole file, not the line.** `re.DOTALL`
+over the source text with the line number computed from the match offset, so a
+wrapped call is seen and the failure still points at the line the key is on. The
+array case needed a unit test instead, because no regex reaches a table.
+
+Two things worth keeping separately.
+
+**A gate's coverage is measurable, and almost never measured.** Counting what a
+tightened pattern newly matches took twelve lines and turned "this gate is fine"
+into "this gate was 80%". Any gate built on a pattern can be asked the same
+question, and the answer is a number rather than an opinion.
+
+**And the plural work found the bug in three committed golden frames.** `columns`,
+`columns-200` and `check-box-columns` all showed **`1 items`** in the status line,
+blessed by me, one of them the same day. The corner of the frame nobody was reading
+was the corner with the defect in it — which is
+[the reference nobody looked at](#a-golden-frame-is-a-reference-for-whatever-somebody-looked-at)
+again, at a smaller scale: I had checked those frames for the thing I had just
+changed, and the status line was not it.
