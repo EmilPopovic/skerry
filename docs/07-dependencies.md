@@ -31,11 +31,36 @@ row is a review blocker.
 | Crate | Why |
 | --- | --- |
 | `nucleo` | Fuzzy matching that is already faster than what we would write, with an API that matches our arena layout. |
-| `resvg` / `tiny-skia` | SVG icon rendering. Writing an SVG renderer to draw a theme's icons is not a file manager project. |
+| ~~`resvg` / `tiny-skia`~~ | Moved to tier 3: it is in a helper rather than in the product, which is what ADR 0006 wanted and better than this row assumed. |
 | `thiserror` | Error enums. Zero runtime cost, no tree. |
 | `serde` + `toml` | Config and state. The one place where hand-rolling is worse for users, because error messages matter. |
 | `bitflags`, `memchr`, `smallvec` | Each a single file's worth of well-tested primitive. |
 | `libc` | One function: `localtime_r`. A local time is a timezone database, a DST history and a leap-second table, and the machine already has all three; the alternative is parsing TZif ourselves or taking a date-time crate. It is already in the graph through `rustix` and `xkbcommon`, so it adds **zero** crates to the count. Confined to `sk-ui::format`. |
+
+## Tier 3 — the decoder tree, and it is in no library
+
+**None of these is in the `skerry` binary's graph**, which is
+[ADR 0006](adr/0006-out-of-process-decoders.md)'s dependency argument made
+mechanical: a decoder runs in a helper executable, a helper is a separate package,
+and `tools/dep-budget.py` measures the product's tree. They are named here because
+`declared()` walks every manifest — a dependency is argued once wherever it lands.
+
+Each still buys the same three things ADR 0006 wanted out of process: an attack
+surface that cannot reach the window, a tree that cannot reach the budget, and a
+hang that costs one preview.
+
+| Crate | Why | Where |
+| --- | --- | --- |
+| `png` | The format the XDG thumbnail cache is written in, so it is needed to *share* the cache whether or not anything else decodes. Pure Rust, no C, and the encoder half is what puts a thumbnail where Nautilus can read it. | `skerry-thumbnailer`, `skerry-preview-doc` |
+| `zune-jpeg` | JPEG, which is most of the pictures on any machine. Chosen over `jpeg-decoder` for having no `unsafe` in the hot path and a smaller tree; either would do and the exit is the other one. | `skerry-thumbnailer` |
+| `resvg` (with `usvg` and `tiny-skia`) | SVG, which is most of the icons and diagrams. Already named in tier 1 for a purpose it was never used for; this is that entry becoming real, in a helper rather than in the product, which is strictly better than the tier-1 row assumed. | `skerry-thumbnailer` |
+
+A document renderer is deliberately **not** here. `skerry-preview-doc` drives
+`pdftoppm` or `mutool` found on `PATH` — an external tool, which ADR 0006 already
+provides for — because every pure-Rust PDF *renderer* is a research project and
+every complete one is a C library that
+[06-portability.md](06-portability.md) forbids linking into anything we ship by
+default. A machine with neither tool gets `Refusal::NoRenderer` and says so.
 
 ## Tier 2 — accepted with a stated exit
 

@@ -1,0 +1,22 @@
+[package]
+name = "skerry-thumbnailer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# **A helper, not a level.** tools/check-layering.py reads this; a binary is above
+# everything and is depended on by nothing, which is what lets it carry the decoder
+# tree that ADR 0006 keeps out of the product.
+[package.metadata.skerry]
+level = 5
+
+[dependencies]
+sk-preview = { workspace = true }
+png = { workspace = true }
+zune-jpeg = { workspace = true }
+resvg = { workspace = true }
+
+[lints]
+workspace = true

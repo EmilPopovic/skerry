@@ -1,0 +1,415 @@
+//! The host half: one child per kind, a batch at a time, on a job.
+//!
+//! **Nothing here decodes anything** — [ADR
+//! 0006](../../../docs/adr/0006-out-of-process-decoders.md) — and nothing here
+//! blocks the frame loop. A round trip to a child is a write, a blocking read and
+//! a wake-up, which is exactly the shape of a directory read, so it runs where a
+//! directory read runs: on the job pool, with the answer arriving through a
+//! channel.
+//!
+//! # Why a batch and not a request
+//!
+//! A grid of a hundred images wants a hundred thumbnails and
+//! [ADR 0017](../../../docs/adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md)
+//! puts one request in flight at a time. A job per request would be a hundred jobs
+//! queued behind each other on a pool that has other work; a job per *batch* is
+//! one, and it carries the child with it and hands it back when it is done. That
+//! is also what keeps "one in flight" true by construction rather than by a lock:
+//! while a batch is out, the host does not have the child to start another with.
+
+use std::io::{BufReader, BufWriter};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+
+use crate::wire::{Ask, Refusal, Reply, Request};
+
+/// How many requests one batch carries.
+///
+/// **A screenful, not a listing.** The batch holds the child for its whole run, so
+/// a batch of ten thousand would be a preview panel that cannot open until a grid
+/// has finished. Thirty-two is more than one screen of grid cells and short enough
+/// that a second kind of work is never far behind.
+const BATCH: usize = 32;
+
+/// How long the host waits for one reply before giving the child up for dead.
+///
+/// Five seconds, which is far longer than any honest decode and short enough that
+/// a wedged child costs one batch rather than a session. The child's own
+/// `RLIMIT_CPU` is the other half — see [`crate::sandbox`].
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Which helper answers a request.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Kind {
+    /// `skerry-thumbnailer`: raster images and SVG, decoded in pure Rust.
+    Image,
+    /// `skerry-preview-doc`: the first page of a document, through a renderer
+    /// found on `PATH`.
+    Document,
+}
+
+impl Kind {
+    /// The executable's name, looked for beside this binary.
+    const fn program(self) -> &'static str {
+        match self {
+            Self::Image => "skerry-thumbnailer",
+            Self::Document => "skerry-preview-doc",
+        }
+    }
+}
+
+/// What the host wants and has not got.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Want {
+    /// Which helper to ask.
+    pub kind: Kind,
+    /// Thumbnail or preview.
+    pub ask: Ask,
+    /// The file.
+    pub path: PathBuf,
+    /// Its modification time, which is half of what makes a thumbnail stale.
+    pub mtime: i64,
+    /// The box the answer must fit inside, in device pixels.
+    pub within: (u32, u32),
+}
+
+impl Want {
+    /// What this want is keyed by: the file, when it changed, and how big.
+    ///
+    /// **The mtime is in the key** — [ADR
+    /// 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md)
+    /// — so a re-encoded photograph is a different thumbnail rather than a stale
+    /// one, and it costs no `statx` because the listing already has it.
+    #[must_use]
+    pub fn key(&self) -> Key {
+        Key { path: self.path.clone(), mtime: self.mtime, within: self.within }
+    }
+}
+
+/// What an answer is filed under.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Key {
+    /// The file.
+    pub path: PathBuf,
+    /// Its modification time when the answer was asked for.
+    pub mtime: i64,
+    /// The box it was fitted inside.
+    pub within: (u32, u32),
+}
+
+/// One answer, on its way back to the frame loop.
+#[derive(Debug)]
+pub struct Answer {
+    /// What it answers.
+    pub key: Key,
+    /// Why there are no pixels, or [`Refusal::None`].
+    pub refusal: Refusal,
+    /// The image's own size, inside the box that was asked for.
+    pub size: (u32, u32),
+    /// Straight `RGBA8`.
+    pub pixels: Vec<u8>,
+}
+
+/// A batch that has come back, with the child it borrowed.
+struct Landed {
+    kind: Kind,
+    /// `None` where the child died and has to be spawned again.
+    child: Option<Child>,
+    answers: Vec<Answer>,
+}
+
+/// The preview host: what is wanted, what is in flight, and the children.
+pub struct Previews {
+    /// Wants that have not been asked yet, oldest first.
+    queue: Vec<Want>,
+    /// The child of each kind, when one is not out with a batch.
+    children: Vec<(Kind, Child)>,
+    /// The kinds whose batch is out, so a second is not started.
+    busy: Vec<Kind>,
+    /// Where a directory holding the helpers was found, or nothing.
+    beside: Option<PathBuf>,
+    landed: mpsc::Sender<Landed>,
+    arriving: mpsc::Receiver<Landed>,
+    /// Whether a helper could not be started, so the caller says so once.
+    pub missing: Vec<Kind>,
+}
+
+impl Default for Previews {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Previews {
+    /// A host with no children and nothing wanted.
+    ///
+    /// **Spawns nothing.** A window that opens no image never starts a helper,
+    /// which is what makes the whole feature free where it is not used.
+    #[must_use]
+    pub fn new() -> Self {
+        let (landed, arriving) = mpsc::channel();
+        Self {
+            queue: Vec::new(),
+            children: Vec::new(),
+            busy: Vec::new(),
+            beside: std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_owned)),
+            landed,
+            arriving,
+            missing: Vec::new(),
+        }
+    }
+
+    /// Asks for something, unless the same thing is already asked for.
+    pub fn want(&mut self, want: Want) {
+        if self.queue.contains(&want) {
+            return;
+        }
+        self.queue.push(want);
+    }
+
+    /// Forgets everything not yet asked for.
+    ///
+    /// For a listing that has been left: the thumbnails of a folder nobody is
+    /// looking at are work the pool has better uses for. What is already in flight
+    /// finishes, because a batch cannot be recalled and its answers are cheap to
+    /// throw away.
+    pub fn forget_what_is_waiting(&mut self) {
+        self.queue.clear();
+    }
+
+    /// How many wants are queued, for the diagnostic line.
+    #[must_use]
+    pub fn waiting(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Sends the next batch of each idle kind, if there is one to send.
+    ///
+    /// Called once a frame. Does nothing at all when the queue is empty, which is
+    /// every frame in a folder of text files.
+    pub fn pump(&mut self, pool: &sk_util::Pool, wake: &sk_util::WakeHandle) {
+        if self.queue.is_empty() {
+            return;
+        }
+        for kind in [Kind::Image, Kind::Document] {
+            if self.busy.contains(&kind) || !self.queue.iter().any(|want| want.kind == kind) {
+                continue;
+            }
+            let mut batch = Vec::with_capacity(BATCH);
+            self.queue.retain(|want| {
+                if want.kind == kind && batch.len() < BATCH {
+                    batch.push(want.clone());
+                    return false;
+                }
+                true
+            });
+            if batch.is_empty() {
+                continue;
+            }
+            let child = self.take_child(kind);
+            if child.is_none() {
+                // No helper to talk to. The wants are dropped rather than requeued:
+                // asking again every frame for a binary that is not installed is a
+                // spin, and `missing` is how the caller says so once.
+                if !self.missing.contains(&kind) {
+                    self.missing.push(kind);
+                }
+                continue;
+            }
+            self.busy.push(kind);
+            let landed = self.landed.clone();
+            let wake = wake.clone();
+            pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |cancel| {
+                let _ = landed.send(run_batch(kind, child, &batch, cancel));
+                // The frame loop sleeps on descriptors and this is the descriptor
+                // — rule 1. Without it a thumbnail sits in the channel until
+                // something else happens to wake the window.
+                wake.wake();
+            });
+        }
+    }
+
+    /// Takes delivery of every batch that has come back.
+    ///
+    /// Returns what arrived, and puts the children back. Never blocks.
+    pub fn drain(&mut self) -> Vec<Answer> {
+        let mut answers = Vec::new();
+        while let Ok(batch) = self.arriving.try_recv() {
+            self.busy.retain(|kind| *kind != batch.kind);
+            if let Some(child) = batch.child {
+                self.children.push((batch.kind, child));
+            }
+            answers.extend(batch.answers);
+        }
+        answers
+    }
+
+    /// The child of a kind, spawning one where there is none.
+    fn take_child(&mut self, kind: Kind) -> Option<Child> {
+        if let Some(at) = self.children.iter().position(|(had, _)| *had == kind) {
+            return Some(self.children.remove(at).1);
+        }
+        spawn(kind, self.beside.as_deref())
+    }
+}
+
+use std::path::Path;
+
+/// Starts a helper, from beside this binary and then from `PATH`.
+///
+/// **Beside first.** A development build and an installed one are different
+/// binaries, and a helper found on `PATH` could be either — which is a version
+/// skew the protocol refuses rather than survives. `PATH` is the fallback for an
+/// installation that splits `bin` from `libexec`.
+fn spawn(kind: Kind, beside: Option<&Path>) -> Option<Child> {
+    let mut tried = Vec::new();
+    if let Some(directory) = beside {
+        tried.push(directory.join(kind.program()));
+    }
+    tried.push(PathBuf::from(kind.program()));
+    tried.into_iter().find_map(|program| {
+        Command::new(program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .ok()
+    })
+}
+
+/// One batch, on a job: write, read, repeat, and hand the child back.
+///
+/// **A dead child ends the batch rather than the run.** Everything already
+/// answered is kept and everything after it is dropped; the next pump spawns a
+/// fresh child, and the wants that were lost come back the next time a frame asks
+/// for them, because a want is derived from what is on screen rather than
+/// remembered.
+fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util::Cancel) -> Landed {
+    let Some(mut child) = child else {
+        return Landed { kind, child: None, answers: Vec::new() };
+    };
+    let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        return Landed { kind, child: None, answers: Vec::new() };
+    };
+    let mut writing = BufWriter::new(input);
+    let mut reading = BufReader::new(output);
+    let mut answers = Vec::with_capacity(batch.len());
+    let mut alive = true;
+    for want in batch {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let request = Request {
+            ask: want.ask,
+            within: want.within,
+            path: want.path.as_os_str().as_encoded_bytes().to_vec(),
+        };
+        let asked = std::time::Instant::now();
+        let answered = request.write_to(&mut writing).and_then(|()| Reply::read_from(&mut reading));
+        match answered {
+            Ok(reply) if asked.elapsed() < DEADLINE => answers.push(Answer {
+                key: want.key(),
+                refusal: reply.refusal,
+                size: reply.size,
+                pixels: reply.pixels,
+            }),
+            // A reply that arrived late is still a reply, and throwing it away
+            // would be throwing away work that is already done — but a child that
+            // is answering late is a child to replace before the next batch.
+            Ok(reply) => {
+                answers.push(Answer {
+                    key: want.key(),
+                    refusal: reply.refusal,
+                    size: reply.size,
+                    pixels: reply.pixels,
+                });
+                alive = false;
+                break;
+            }
+            Err(_) => {
+                alive = false;
+                break;
+            }
+        }
+    }
+    // **The pipes go back on the child, or the child does not go back.** A
+    // `BufWriter` that cannot give up its inner writer has a buffered write that
+    // never reached the pipe, which is a child mid-request — not one to hand to
+    // the next batch.
+    child.stdout = Some(reading.into_inner());
+    match writing.into_inner() {
+        Ok(input) if alive => {
+            child.stdin = Some(input);
+            Landed { kind, child: Some(child), answers }
+        }
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Landed { kind, child: None, answers }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Kind, Previews, Want};
+    use crate::wire::Ask;
+    use std::path::PathBuf;
+
+    fn want(path: &str) -> Want {
+        Want {
+            kind: Kind::Image,
+            ask: Ask::Thumbnail,
+            path: PathBuf::from(path),
+            mtime: 7,
+            within: (128, 128),
+        }
+    }
+
+    /// **A host that is not asked for anything starts nothing**, which is what
+    /// makes a folder of text files cost what it did before this existed.
+    #[test]
+    fn a_host_with_nothing_wanted_spawns_nothing() {
+        let mut previews = Previews::new();
+        assert_eq!(previews.waiting(), 0);
+        assert!(previews.drain().is_empty());
+        // `pump` with an empty queue must not reach the spawn path at all, which
+        // is what `missing` staying empty says.
+        let pool = sk_util::Pool::with_width(1);
+        let waker = sk_util::Waker::new().unwrap();
+        previews.pump(&pool, &waker.handle());
+        assert!(previews.missing.is_empty());
+    }
+
+    /// The same file wanted twice is one want: a grid redraws every frame and each
+    /// of those frames asks for what it can see.
+    #[test]
+    fn the_same_want_twice_is_one_request() {
+        let mut previews = Previews::new();
+        previews.want(want("/a/one.png"));
+        previews.want(want("/a/one.png"));
+        previews.want(want("/a/two.png"));
+        assert_eq!(previews.waiting(), 2);
+
+        // A different modification time is a different want, because it is a
+        // different picture — ADR 0018.
+        let mut changed = want("/a/one.png");
+        changed.mtime = 8;
+        previews.want(changed.clone());
+        assert_eq!(previews.waiting(), 3);
+        assert_ne!(want("/a/one.png").key(), changed.key());
+    }
+
+    #[test]
+    fn leaving_a_folder_drops_what_was_only_wanted() {
+        let mut previews = Previews::new();
+        previews.want(want("/a/one.png"));
+        previews.want(want("/a/two.png"));
+        previews.forget_what_is_waiting();
+        assert_eq!(previews.waiting(), 0);
+    }
+}

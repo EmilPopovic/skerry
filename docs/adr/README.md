@@ -24,6 +24,8 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0014](0014-a-column-view-is-a-trail-of-panes.md) | A column view is a trail of panes, and only the last one is the pane | **Superseded by [0015](0015-a-column-is-a-directory-and-a-choice.md)** |
 | [0015](0015-a-column-is-a-directory-and-a-choice.md) | A column is a directory and a choice, not a pane | Accepted |
 | [0016](0016-plural-forms-are-bracketed-keys-in-the-catalogue.md) | Plural forms are bracketed keys in the catalogue | Accepted |
+| [0017](0017-one-preview-child-per-kind-answering-one-request-at-a-time.md) | One preview child per kind, answering one request at a time | Accepted |
+| [0018](0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md) | Thumbnails are slots in one atlas; a preview is not | Accepted |
 
 ## Triggers that have been answered
 

@@ -105,9 +105,15 @@ def run() -> int:
     if ours:
         report.fail("Cargo.lock", f"duplicate versions: {', '.join(ours)}")
     if theirs:
-        # Inside the GPU stack we do not choose the versions, and the count is
-        # already charged against the separate GPU budget above.
-        report.note(f"duplicate versions inside the GPU stack, not ours to resolve: {', '.join(theirs)}")
+        # **Not "inside the GPU stack" any more.** `theirs` is everything that is
+        # not in the product's non-GPU set, which since the preview helpers landed
+        # includes their trees as well — a duplicate inside `resvg` costs the
+        # helper's binary and never the product's, which is the same argument the
+        # budget above makes and the same reason neither is ours to resolve.
+        report.note(
+            "duplicate versions outside the product's own tree, not ours to "
+            f"resolve: {', '.join(theirs)}"
+        )
     return report.finish()
 
 

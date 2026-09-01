@@ -10,9 +10,12 @@ members = [
     "crates/sk-desktop",
     "crates/sk-gpu",
     "crates/sk-index",
+    "crates/sk-preview",
     "crates/sk-ui",
     "crates/sk-app",
     "bin/skerry",
+    "bin/skerry-thumbnailer",
+    "bin/skerry-preview-doc",
     "tools/skerry-drive",
 ]
 
@@ -38,6 +41,7 @@ sk-cmd = { path = "crates/sk-cmd" }
 sk-desktop = { path = "crates/sk-desktop" }
 sk-gpu = { path = "crates/sk-gpu" }
 sk-index = { path = "crates/sk-index" }
+sk-preview = { path = "crates/sk-preview" }
 sk-ui = { path = "crates/sk-ui" }
 sk-app = { path = "crates/sk-app" }
 
@@ -64,6 +68,15 @@ x11rb = { version = "0.14", default-features = false, features = [
 libc = "0.2"
 swash = "0.2"
 wgpu = { version = "27", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+
+# **The decoder tree, and it is in no library.** These three are named here so the
+# versions are argued once, and depended on only by `bin/skerry-thumbnailer` and
+# `bin/skerry-preview-doc` — which are separate binaries, so none of them is in the
+# `skerry` graph `tools/dep-budget.py` measures. That is ADR 0006's dependency
+# argument made mechanical rather than aspirational.
+png = { version = "0.18", default-features = false }
+zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
 
 # One lint set for the workspace, so a rule is argued once. The per-crate
 # `deny(unwrap_used, expect_used)` stays in each lib.rs because
