@@ -15,7 +15,6 @@
 //!   walks. The cap defers rather than refuses: the next frame asks again, and
 //!   the next frame arrives because a running walk reported.
 
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -51,7 +50,7 @@ impl Measurer {
     /// Called once per frame. Applying every frame rather than on arrival is what
     /// makes a new listing show what is already known immediately: the cache is
     /// the truth and the listing is a view of it.
-    pub fn update(&mut self, pane: &mut Pane, rows: Range<usize>, jobs: &Jobs) {
+    pub fn update(&mut self, pane: &mut Pane, rows: impl Iterator<Item = usize>, jobs: &Jobs) {
         // What you are looking at wins. Walks started in a directory you have
         // left keep running — their results still fill the cache — but they give
         // up their slots, or arriving anywhere while a source checkout was being

@@ -59,6 +59,7 @@ struct Overlays {
     tab_drop: bool,
     rename: bool,
     checked: bool,
+    collapsed: bool,
 }
 
 impl Overlays {
@@ -92,6 +93,7 @@ impl Overlays {
             "--grouped-size" => &mut self.grouped_size,
             "--grouped-kind" => &mut self.grouped_kind,
             "--checked" => &mut self.checked,
+            "--collapsed" => &mut self.collapsed,
             "--search" => &mut self.search,
             "--carrying" => &mut self.carrying,
             "--path-entry" => &mut self.path_entry,
@@ -152,6 +154,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         grouped_size: overlays.grouped_size,
         grouped_kind: overlays.grouped_kind,
         checked: overlays.checked,
+        collapsed: overlays.collapsed,
         search: overlays.search,
         carrying: overlays.carrying,
         path_entry: overlays.path_entry,

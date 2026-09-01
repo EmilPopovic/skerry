@@ -352,6 +352,8 @@ pub(crate) fn cells_of(
         row_height,
         &[],
         level.dir.listing.rows(),
+        // A column is never grouped, so it has no band anybody could close.
+        crate::groups::Closed::default(),
     )
 }
 

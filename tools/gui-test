@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 109
+FEWEST_SCENARIOS = 110
 
 
 def scenario(name, fresh: bool = False):
@@ -1255,6 +1255,15 @@ def scenario(name, fresh: bool = False):
     both required of anything that changes the directory it is looking at, since
     every other scenario counts the rows in the shared one, and since the Trash
     a test fills must not be the Trash the person running it has.
+
+    **Also required of anything that changes what is *remembered* about that
+    directory.** `XDG_STATE_HOME` is shared by the whole sweep, so a scenario that
+    sorts, groups or switches the view mode writes a record against the path it is
+    standing in — and every later scenario over that path, and every folder under
+    it through the ancestor inheritance, opens with it. A grouping recorded on the
+    shared fixture gave `alpha` and `beta` a heading, and the three scenarios that
+    click a row by arithmetic over `row_h` clicked one row too far. A fresh fixture
+    fixes it because the record is keyed by a path nobody else opens.
     """
 
     def register(function):
@@ -1384,6 +1393,123 @@ def point_at_the_check_box(run: Run, row: int) -> dict[str, str]:
     if moved["hover"] != str(row):
         raise Failure(f"moving into the box left the pointer on row {moved['hover']}")
     return moved
+
+
+def headings_of(state: dict[str, str]) -> list[tuple[int, float, float, str]]:
+    """The on-screen band headings the window reports: band, x, y, and shut or open.
+
+    From `App::headings_state`, so the coordinates are the layout's own rather than
+    a harness's second copy of it.
+    """
+    if state["headings"] == "none":
+        return []
+    found = []
+    for entry in state["headings"].split(","):
+        band, x, y, shut = entry.split(":")
+        found.append((int(band), float(x), float(y), shut))
+    return found
+
+
+@scenario("collapse-a-group", fresh=True)
+def collapse_a_group(run: Run, fixture: Path) -> None:
+    """A press on a band's heading hides that group's rows, and gives them back.
+
+    **Filtering by group, which is what a heading is for.** Three things only a
+    scenario reaches: that a press on a heading is taken by the heading rather than
+    falling through to the list — where `index_at` answers `None` and the pane reads
+    that as empty space and clears the selection — that the rows come back, and that
+    `Ctrl+A` afterwards does not select what is behind a shut one.
+
+    Grouped by *kind*, not by time: every file in a fresh fixture shares one
+    modification time, so time is a single band and a scenario over it would pass
+    without the feature existing.
+
+    **`fresh`, and the reason is not the one in `scenario`'s docstring.** This
+    changes nothing in the directory; it changes what `views` *remembers* about it,
+    and `Ctrl+9` writes that to a file the whole sweep shares. Against the shared
+    fixture it grouped every later scenario over that path — and every folder under
+    it, through the ancestor inheritance — so `alpha` and `beta` grew a heading, and
+    three scenarios that click a row by arithmetic over `row_h` clicked one row too
+    far. `navigation-buttons` and `breadcrumb-navigation` both ended up in `beta`
+    wanting `alpha`.
+    """
+    run.drive("sleep 400\nkey f12\nsleep 100\n")
+    rows = int(run.state()["rows"])
+    if rows < 4:
+        raise Failure(f"the fixture read too little: {rows} rows")
+
+    run.drive("key ctrl+9\nsleep 400\nkey f12\nsleep 200\n")
+    grouped = run.state()
+    if grouped["grouping"] != "by-kind":
+        raise Failure(f"Ctrl+9 left the pane {grouped['grouping']!r}")
+    bands = headings_of(grouped)
+    if len(bands) < 2:
+        raise Failure(f"grouping by kind gave {len(bands)} bands: {grouped['headings']}")
+    if any(state == "shut" for _, _, _, state in bands):
+        raise Failure(f"a band was already collapsed: {grouped['headings']}")
+    if grouped["collapsed"] != "0":
+        raise Failure(f"nothing is shut and {grouped['collapsed']} rows are hidden")
+
+    # Something selected first, so a press that fell through to the list would be
+    # visible as a selection that got cleared rather than as nothing at all.
+    pointing = point_at(run, 0)
+    run.drive("click\nsleep 250\nkey f12\nsleep 200\n")
+    expect(run.state(), selected="1")
+
+    # The second band's heading. Not the first, whose rows include the one just
+    # selected — this has to hide rows without touching that selection.
+    band, x, y, _ = headings_of(run.state())[1]
+    at = aim(run, run.state(), x, y)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nclick\nsleep 300\nkey f12\nsleep 200\n")
+    shut = run.state()
+    hidden = int(shut["collapsed"])
+    if hidden == 0:
+        raise Failure(f"the press hid nothing: {shut['headings']}")
+    if not any(kind == band and state == "shut" for kind, _, _, state in headings_of(shut)):
+        raise Failure(f"band {band} is not the one that shut: {shut['headings']}")
+    if shut["selected"] != "1":
+        raise Failure(f"the press cleared the selection: {shut['selected']} selected")
+    if shut["rows"] != str(rows):
+        raise Failure(f"the listing changed size: {shut['rows']} against {rows}")
+
+    # **`Ctrl+A` selects what is shown.** A selection holding rows behind a shut
+    # heading is one a later Delete acts on by surprise.
+    run.drive("key ctrl+a\nsleep 300\nkey f12\nsleep 200\n")
+    picked = run.state()
+    if picked["selected"] != str(rows - hidden):
+        raise Failure(
+            f"Ctrl+A selected {picked['selected']} of {rows} with {hidden} hidden"
+        )
+
+    # A second press on the same heading gives the rows back.
+    run.drive("click\nsleep 300\nkey f12\nsleep 200\n")
+    reopened = run.state()
+    if reopened["collapsed"] != "0":
+        raise Failure(f"pressing again left {reopened['collapsed']} rows hidden")
+    if any(state == "shut" for _, _, _, state in headings_of(reopened)):
+        raise Failure(f"a band stayed shut: {reopened['headings']}")
+
+    # **And the keyboard's half**, which rule 5 requires: Ctrl+G on the cursor's
+    # band, Ctrl+Shift+G to open everything again.
+    run.drive("key ctrl+g\nsleep 300\nkey f12\nsleep 200\n")
+    by_key = run.state()
+    if by_key["collapsed"] == "0":
+        raise Failure(f"Ctrl+G hid nothing: {by_key['headings']}")
+    run.drive("key ctrl+shift+g\nsleep 300\nkey f12\nsleep 200\n")
+    if run.state()["collapsed"] != "0":
+        raise Failure(f"Ctrl+Shift+G left {run.state()['collapsed']} rows hidden")
+
+    # And a navigation clears it, because band four is a different set of files in
+    # every folder.
+    run.drive("key ctrl+g\nsleep 300\nkey f12\nsleep 200\n")
+    if run.state()["collapsed"] == "0":
+        raise Failure("Ctrl+G hid nothing the second time")
+    run.drive("text alpha\nsleep 300\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    walked = run.state()
+    if not walked["path"].rstrip('"').endswith("alpha"):
+        raise Failure(f"the walk did not arrive: {walked['path']}")
+    if walked["collapsed"] != "0":
+        raise Failure(f"a collapsed band followed the navigation: {walked['headings']}")
 
 
 @scenario("check-box-selects")

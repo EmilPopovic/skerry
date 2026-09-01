@@ -105,6 +105,16 @@ impl Selection {
         self.cursor = Some(id);
     }
 
+    /// Takes `id` out of the selection, leaving the anchor and the cursor alone.
+    ///
+    /// **Not [`Self::toggle`], which moves both.** This is for entries that stopped
+    /// being visible rather than entries somebody chose — a collapsed band's, whose
+    /// rows have to leave a selection they can no longer be seen in. Moving the
+    /// cursor onto one of them would be putting it where nothing is drawn.
+    pub fn deselect(&mut self, id: EntryId) {
+        self.bits.remove(id.index());
+    }
+
     /// Selects everything between the anchor and `id`, given the display order.
     ///
     /// `rows` maps a display position to an entry. With no anchor this behaves

@@ -4910,8 +4910,11 @@ search_active={active:?}",
             .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
         let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
         let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
+        let collapsed = self.panes.focused().hidden_count();
+        let headings = self.headings_state();
         format!(
             "mode={} grouping={} bands={} remembered={} columns={} cell={:.1}x{:.1} \
+collapsed={collapsed} headings={headings} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -4921,6 +4924,31 @@ index={index} indexing={indexing} search_indexed={searched}",
             cells.cell().0,
             cells.cell().1,
         )
+    }
+
+    /// Every on-screen heading as `band:x:y:state`, or `none`.
+    ///
+    /// **The aim comes from the program**, for the reason `column_aim` and
+    /// `check_aim` do: a harness that worked a heading's middle out from
+    /// `body_top` and `row_h` would be a second copy of the band layout, and this
+    /// file's own lesson is that a coordinate derived from another region is a
+    /// coordinate that moves. The state is `shut` or `open`, so a scenario can
+    /// assert what it pressed did what it meant rather than that something moved.
+    fn headings_state(&self) -> String {
+        let pane = self.panes.focused();
+        let found = self.cells().headings(pane.scroll.offset());
+        if found.is_empty() {
+            return "none".to_owned();
+        }
+        found
+            .iter()
+            .map(|it| {
+                let (x, y) = (it.at.x + it.at.width / 2.0, it.at.y + it.at.height / 2.0);
+                let state = if it.closed { "shut" } else { "open" };
+                format!("{}:{x:.1}:{y:.1}:{state}", it.kind)
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// What the pane is showing.
@@ -5479,7 +5507,34 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.theme.metrics.row_height,
             &pane.bands,
             pane.listing.rows(),
+            pane.closed,
         )
+    }
+
+    /// Collapses the band `band`, or opens it.
+    pub(crate) fn toggle_band(&mut self, band: u8) {
+        if self.panes.focused_mut().toggle_band(band) {
+            self.after_bands_moved();
+        }
+    }
+
+    /// Opens every collapsed band in the focused pane.
+    pub(crate) fn show_every_band(&mut self) {
+        if self.panes.focused_mut().show_every_band() {
+            self.after_bands_moved();
+        }
+    }
+
+    /// **The list got shorter or longer without the order changing.** Which is
+    /// three things and not one: the scrollbar's extent is now wrong, the cursor
+    /// may be off screen, and the frame is stale. The same three `set_mode` does,
+    /// for the same reason — a listing whose height moved under a fixed offset.
+    fn after_bands_moved(&mut self) {
+        let content = self.cells().content_height();
+        let body = self.placement.here.body.height;
+        self.panes.focused_mut().scroll.set_extent(content, body);
+        self.reveal_cursor();
+        self.dirty = true;
     }
 
     /// Cuts the focused pane into headings, or stops.
@@ -5488,6 +5543,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
         self.panes.focused_mut().grouping = grouping;
+        // **A band number means something else now.** Band six is "Older" under
+        // time and "Tiny" under size, so keeping the set would collapse a group
+        // nobody chose — and there is no mapping between the two taxonomies to
+        // carry it across.
+        self.panes.focused_mut().show_every_band();
         self.remember_view();
         self.rebandif_needed();
         self.reveal_cursor();
@@ -5534,37 +5594,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         commands: &Registry<Self>,
     ) {
         self.pointer = position;
-        // First, and it takes every press: the question has no dismissal, so a
-        // press that fell through to the list behind it would move a selection
-        // the queue is about to act on.
-        if self.press_in_the_clash(position) {
-            return;
-        }
-        if self.press_in_the_erasing(position) {
-            return;
-        }
-        if self.press_in_the_status(position) {
-            return;
-        }
-        if self.palette.is_some() {
-            self.palette_press(position, commands);
-            return;
-        }
-        if self.press_in_the_search(position) {
-            return;
-        }
-        if self.properties.take().is_some() {
-            self.dirty = true;
-            return;
-        }
-        if self.press_in_the_openers(position) {
-            return;
-        }
-        if self.press_in_the_crumb_menu(position) {
-            return;
-        }
-        if self.menu.is_some() {
-            self.menu_press(position, commands);
+        if self.press_in_an_overlay(position, commands) {
             return;
         }
         if self.press_in_a_field(position) {
@@ -5643,6 +5673,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
 
+        if self.press_on_a_heading(position) {
+            return;
+        }
         let Some(row) = self.row_under(position) else {
             self.press_on_empty_space(position);
             return;
@@ -6051,6 +6084,65 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// is not known until the pointer moves or does not — so the selection is
     /// deferred to the release. Deciding here is what made dragging three files
     /// drag one of them.
+    /// A press taken by something drawn over the list: a panel, a menu, a field.
+    ///
+    /// **First, and in this order, because each is more specific than what is
+    /// under it.** Split out of [`Self::press`] to keep that function inside the
+    /// hundred-line limit; it is one idea — a surface over the list gets the press
+    /// before the list does — and the chain below it is the other, which is the
+    /// window's own furniture and then the rows.
+    fn press_in_an_overlay(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+        // First, and it takes every press: the question has no dismissal, so a
+        // press that fell through to the list behind it would move a selection
+        // the queue is about to act on.
+        if self.press_in_the_clash(position) {
+            return true;
+        }
+        if self.press_in_the_erasing(position) {
+            return true;
+        }
+        if self.press_in_the_status(position) {
+            return true;
+        }
+        if self.palette.is_some() {
+            self.palette_press(position, commands);
+            return true;
+        }
+        if self.press_in_the_search(position) {
+            return true;
+        }
+        if self.properties.take().is_some() {
+            self.dirty = true;
+            return true;
+        }
+        if self.press_in_the_openers(position) {
+            return true;
+        }
+        if self.press_in_the_crumb_menu(position) {
+            return true;
+        }
+        if self.menu.is_some() {
+            self.menu_press(position, commands);
+            return true;
+        }
+        false
+    }
+
+    /// A press on a band's heading collapses it, or opens it. Whether it was one.
+    ///
+    /// **Asked before the row hit test.** A heading is not an entry, so
+    /// [`crate::groups::Bands::index_at`] answers `None` on one — and the caller
+    /// reads `None` as empty space and clears the selection. This is the other half
+    /// of that sentence: a heading is not an entry, and it is a control.
+    fn press_on_a_heading(&mut self, position: Point) -> bool {
+        let offset = self.panes.focused().scroll.offset();
+        let Some(band) = self.cells().heading_under(position.x, position.y, offset) else {
+            return false;
+        };
+        self.toggle_band(band);
+        true
+    }
+
     /// A press below the last row: nothing is chosen, and a rubber band is armed.
     fn press_on_empty_space(&mut self, position: Point) {
         self.panes.focused_mut().selection.clear();
@@ -6628,6 +6720,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.theme.metrics.row_height,
             &[],
             level.dir.listing.rows(),
+            crate::groups::Closed::default(),
         );
         let at = cells.at(row, level.scroll.offset());
         Some((at.x + at.width / 2.0, at.y + at.height / 2.0))

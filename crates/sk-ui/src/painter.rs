@@ -162,6 +162,22 @@ impl Painter<'_> {
         logical * self.scale
     }
 
+    /// Device pixels back to logical ones.
+    ///
+    /// **The inverse of [`Self::px`], for the one direction that needs it.** A
+    /// shaped advance comes back in device pixels, because a glyph is measured in
+    /// them; everything above the `Painter` places things in logical ones. Crossing
+    /// back was a bare division somebody had to remember to write, and a band
+    /// heading's rule was drawn without it — correct at 100%, a quarter of the
+    /// label's width too far right at 125%, and a whole label's width out at 200%.
+    #[must_use]
+    pub fn logical(&self, device: f32) -> f32 {
+        if self.scale <= 0.0 {
+            return device;
+        }
+        device / self.scale
+    }
+
     /// Logical pixels to a whole device pixel.
     ///
     /// For anything with an edge a person can see: a hairline, a row boundary, a

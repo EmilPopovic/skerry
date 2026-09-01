@@ -21,6 +21,9 @@ status.counts.none = {0} items
 status.loading = Reading {0}…
 status.empty = This folder is empty
 status.filtered = {0} of {1} items match “{2}”
+# A group is collapsed, so the list is showing fewer than it holds.
+status.hidden = {0} of {1} items, {2} selected
+status.hidden.none = {0} of {1} items
 # The prompt while the filter has the keyboard, caret included: one string, so a
 # translation can put the caret where its script wants it.
 
@@ -259,11 +262,15 @@ index.building_of = Indexing… {0} of {1} entries
 action.search = Find a file
 action.search_results = Show all results in this pane
 action.view_details = Details
+action.band_toggle = Collapse or expand group
+action.bands_show = Show every group
 action.group_none = No grouping
 action.group_time = Group by time
 action.group_size = Group by size
 action.group_kind = Group by kind
 action.columns_reset = Reset column widths
+# How many entries a band holds, drawn beside its name.
+band.count = ({0})
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday

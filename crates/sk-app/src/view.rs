@@ -2818,9 +2818,10 @@ fn body(
         metrics.row_height,
         &pane.bands,
         rows,
+        pane.closed,
     );
-    for (band, at) in cells.headings(pane.scroll.offset()) {
-        heading_at(painter, pane.grouping, band, at);
+    for heading in cells.headings(pane.scroll.offset()) {
+        heading_at(painter, pane.grouping, heading);
     }
     for row in cells.visible(pane.scroll.offset()) {
         let context = RowContext {
@@ -2914,15 +2915,30 @@ struct RowContext<'a> {
     drop_row: Option<usize>,
 }
 
-/// One band's heading: the name of a stretch of time, over a rule.
+/// The disclosure at the head of a band's heading, square.
+const DISCLOSE: f32 = 8.0;
+
+/// One band's heading: a disclosure, a name, a count, and a rule.
 ///
-/// **Not a row.** It carries no selection, no hover and no cursor ring, because
-/// it is not an entry and a click on it selects nothing — which is what
-/// [`crate::groups::Bands::index_at`] answers and what this has to look like.
-fn heading_at(painter: &mut Painter<'_>, grouping: crate::groups::Grouping, band: u8, at: Area) {
+/// **Not a row, and not furniture either.** It carries no selection, no hover and
+/// no cursor ring, because it is not an entry and a click on one selects nothing —
+/// which is what [`crate::groups::Bands::index_at`] answers. It *is* a control: a
+/// press on it collapses the band, which is what the disclosure says and what
+/// [`crate::groups::Bands::heading_under`] answers.
+///
+/// **The count is what makes collapsing honest.** A band with its rows hidden still
+/// says how many it is holding, so nothing goes missing without a line on screen
+/// saying how much — which is the difference between this and the name filter, and
+/// the reason this one is allowed to keep working while a person navigates around
+/// inside a folder.
+fn heading_at(
+    painter: &mut Painter<'_>,
+    grouping: crate::groups::Grouping,
+    heading: crate::groups::Heading,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let label = i18n::lookup(grouping.label(band));
+    let at = heading.at;
     let baseline = painter.baseline(at.y, at.height, metrics.header_size);
     let style = TextStyle {
         weight: Weight::Bold,
@@ -2930,9 +2946,38 @@ fn heading_at(painter: &mut Painter<'_>, grouping: crate::groups::Grouping, band
         color: theme.palette.heading,
         align: Align::Left,
     };
-    let width = (at.width - metrics.gutter * 2.0).max(1.0);
-    let advance = line(painter, label, style, at.x + metrics.gutter, width, baseline);
-    // A rule from the end of the label to the pane's edge, which is what says the
+
+    // Right when it is shut and down when it is open, which is what a tree's
+    // disclosure has always done — see `sk_gpu::Direction`, which exists because
+    // four marks like this one would otherwise be four font glyphs.
+    let facing = if heading.closed { Direction::Right } else { Direction::Down };
+    painter.triangle(
+        at.x + metrics.gutter,
+        at.y + (at.height - DISCLOSE) / 2.0,
+        DISCLOSE,
+        DISCLOSE,
+        theme.palette.dim,
+        facing,
+    );
+
+    let text_x = at.x + metrics.gutter + DISCLOSE + 6.0;
+    let room = (at.right() - metrics.gutter - text_x).max(1.0);
+    // **`line` answers in device pixels**, because a shaped advance is measured in
+    // them, and every coordinate here is logical. Crossing back once per run is
+    // what `Painter::logical` is for: the rule below was placed without it, and
+    // was a quarter of the label's width too far right at 125%.
+    let label = i18n::lookup(grouping.label(heading.kind));
+    let drawn = line(painter, label, style, text_x, room, baseline);
+    let named = painter.logical(drawn);
+    let counted = i18n::format("band.count", &[&format::grouped(heading.held)]);
+    let dim = TextStyle::new(metrics.header_size, theme.palette.dim);
+    let count_x = text_x + named + 6.0;
+    let count_room = (at.right() - metrics.gutter - count_x).max(1.0);
+    let drawn = line(painter, &counted, dim, count_x, count_room, baseline);
+    let numbered = painter.logical(drawn);
+    let advance = named + 6.0 + numbered;
+
+    // A rule from the end of the text to the pane's edge, which is what says the
     // heading covers everything under it without drawing a box around it.
     //
     // **In logical pixels.** `hairline` takes logical and snaps for itself, while
@@ -2940,7 +2985,7 @@ fn heading_at(painter: &mut Painter<'_>, grouping: crate::groups::Grouping, band
     // already-scaled number and put the rule at 1.56× its y at 125%, correct at
     // 100% and wrong at every other scale. The heading's own rectangle is
     // logical, so its middle is the honest way to ask.
-    let from = at.x + metrics.gutter + advance + metrics.gutter;
+    let from = text_x + advance + metrics.gutter;
     let to = at.right() - metrics.gutter;
     if to > from {
         painter.hairline(from, at.y + at.height * 0.5, to - from, theme.palette.divider);
@@ -3078,6 +3123,7 @@ fn row_at(
             metrics.row_height,
             &pane.bands,
             pane.listing.rows(),
+            pane.closed,
         );
         let top = cells.at(row, pane.scroll.offset()).y;
         let flags = pane.listing.flags(id);
@@ -3240,6 +3286,7 @@ fn scrollbar(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
         theme.metrics.row_height,
         &pane.bands,
         pane.listing.rows(),
+        pane.closed,
     )
     .content_height();
     let Some((position, thumb)) = sk_ui::thumb(pane.scroll.offset(), content, table.height) else {
@@ -3295,6 +3342,7 @@ fn status(
 
     let rows = pane.listing.rows();
     let selected = pane.selection.count();
+    let hidden = pane.hidden_count();
     // **No special case for the filter any more.** The query used to own this line
     // and be the only place it appeared; it is a panel over the list now, and one
     // mode marker is enough.
@@ -3307,6 +3355,19 @@ fn status(
             "status.filtered",
             &[&format::grouped(rows), &format::grouped(pane.listing.len()), &pane.filter],
         )
+    } else if hidden > 0 {
+        // **Ahead of the plain count and behind the filter**, which is where it
+        // belongs: like the filter it says the list is narrowed, and unlike the
+        // filter the headings on screen already say by what. Two keys rather than
+        // one appended clause, because a catalogue string that is two sentences
+        // glued together is a string no translator can reorder.
+        let shown = format::grouped(rows - hidden.min(rows));
+        let held = format::grouped(rows);
+        if selected > 0 {
+            i18n::format("status.hidden", &[&shown, &held, &format::grouped(selected)])
+        } else {
+            i18n::format("status.hidden.none", &[&shown, &held])
+        }
     } else if selected > 0 {
         i18n::format("status.counts", &[&format::grouped(rows), &format::grouped(selected)])
     } else {

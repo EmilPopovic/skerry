@@ -202,6 +202,11 @@ FRAMES = [
     # every other scale, which is the one class of defect only a second scale
     # catches.
     ("grouped-200", ["--size", "900x520", "--scale", "200", "--grouped"]),
+    # **Filtering by group**: yesterday's band collapsed. What this shows is that a
+    # collapse takes the rows and leaves the heading, holding the count of what is
+    # behind it — which is the difference between this and the name filter, and the
+    # reason it is allowed to persist while a person works inside a folder.
+    ("grouped-collapsed", ["--size", "900x520", "--scale", "125", "--grouped", "--collapsed"]),
     # The other two groupings, which are the same mechanism over two other
     # quantities. `grouped-kind` is the one frame where a heading and the marks
     # under it come from the same taxonomy, so a row that is an image to its mark

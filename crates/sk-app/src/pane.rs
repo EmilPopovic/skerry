@@ -209,6 +209,14 @@ pub struct Pane {
     /// the whole order, and at two hundred thousand entries a frame that did it
     /// would be the frame. The bands only move when the order does.
     pub bands: Vec<(u8, usize)>,
+    /// Which bands are collapsed, which is this pane's filter by group.
+    ///
+    /// **Not in the order, in the layout.** Leaving the entries out of
+    /// `compute_order` would be a re-sort per press and would take the heading with
+    /// them — a band with no heading is a band nobody can open again, which is the
+    /// trap the whole design is avoiding. So the run stays and
+    /// [`crate::groups::Bands`] lends out none of its rows.
+    pub closed: crate::groups::Closed,
     /// The band byte per entry the current order was computed with, indexed by
     /// [`EntryId`], and empty for every banding but [`Banding::Kind`].
     ///
@@ -388,6 +396,7 @@ impl Pane {
             grouping: crate::groups::Grouping::default(),
             view_owed: true,
             bands: Vec::new(),
+            closed: crate::groups::Closed::default(),
             kinds: Vec::new(),
             filter: String::new(),
             show_hidden: false,
@@ -499,6 +508,12 @@ impl Pane {
         self.scroll.to(0.0);
         self.problem = None;
         self.hover = None;
+        // **And every collapsed band.** Band four is a different set of files in
+        // every folder — 30 days old here, "Archives" there — so carrying one
+        // across a navigation closes something nobody chose. The heading would say
+        // what it was holding, which is why this is tidiness rather than the trap
+        // below; it is still not what anybody asked for.
+        self.closed = crate::groups::Closed::default();
         // The filter goes too. It narrows *this* directory, and following you
         // into the next one means arriving somewhere that silently hides most
         // of what is there — with the only explanation a line in the status bar
@@ -839,6 +854,12 @@ impl Pane {
     /// order, which is why it is not per frame — see [`Self::bands`].
     pub fn reband(&mut self) {
         self.bands = crate::groups::runs_of(&self.listing, self.sort.bands, &self.kinds);
+        // **The runs moved under a set of collapsed band numbers.** A file whose
+        // mtime changed, or a rename that reordered the names, can put a selected
+        // entry — or the cursor — inside a band that was already shut. Restoring the
+        // invariant here rather than at the eight places that reorder is what makes
+        // it an invariant.
+        self.forget_what_is_hidden();
     }
 
     /// Rebuilds the display order, on this thread or on a job.
@@ -920,6 +941,103 @@ impl Pane {
     #[must_use]
     pub fn view(&self) -> View {
         View { sort: self.sort, show_hidden: self.show_hidden, filter: self.filter.clone() }
+    }
+
+    /// Which band a display row is in, or nothing when the pane is not grouped.
+    #[must_use]
+    pub fn band_of_row(&self, row: usize) -> Option<u8> {
+        self.bands.iter().rev().find(|(_, first)| row >= *first).map(|(band, _)| *band)
+    }
+
+    /// Collapses a band, or opens it. Whether anything changed.
+    ///
+    /// **Filtering by group, and it costs no sort.** The entries stay in the
+    /// display order and [`crate::groups::Bands`] simply lends out none of that
+    /// band's rows, so a press is a bitmask flip rather than a re-sort of two
+    /// hundred thousand keys — and the heading stays, holding its count, which is
+    /// what a person presses to get the rows back.
+    pub fn toggle_band(&mut self, band: u8) -> bool {
+        if self.bands.is_empty() {
+            return false;
+        }
+        self.closed.toggle(band);
+        self.forget_what_is_hidden();
+        true
+    }
+
+    /// Opens every collapsed band. Whether any of them were.
+    ///
+    /// Nothing to forget on the way out: opening a band hides nothing, so the
+    /// selection and the cursor are already somewhere a person can see.
+    pub fn show_every_band(&mut self) -> bool {
+        self.closed.open_everything()
+    }
+
+    /// Drops what a collapsed band holds out of the selection, and the cursor out
+    /// of a collapsed band.
+    ///
+    /// **Because a selection cannot contain what nobody can see.** That sentence is
+    /// `sk_model::Selection::select_all`'s, about hidden files, and it applies word
+    /// for word: `Delete` acting on four rows behind a shut heading is the surprise
+    /// it warns about. The cursor moves to the first row still on screen, because a
+    /// ring drawn nowhere is a keyboard nobody can find.
+    fn forget_what_is_hidden(&mut self) {
+        let runs = self.bands.clone();
+        let (rows, closed, cursor) = (self.listing.rows(), self.closed, self.selection.cursor());
+        let mut gone = Vec::new();
+        let mut cursor_hidden = false;
+        crate::groups::each_band(&runs, rows, closed, |band, shut| {
+            if !shut {
+                return;
+            }
+            for row in band {
+                let Some(id) = self.listing.at(row) else { continue };
+                if self.selection.contains(id) {
+                    gone.push(id);
+                }
+                cursor_hidden |= cursor == Some(id);
+            }
+        });
+        for id in gone {
+            self.selection.deselect(id);
+        }
+        if cursor_hidden {
+            let row = crate::groups::first_open(&runs, closed);
+            self.selection.set_cursor(row.and_then(|row| self.listing.at(row)));
+        }
+    }
+
+    /// The entries the pane is showing: the display order, less any collapsed band.
+    ///
+    /// What `Ctrl+A` selects, and the only honest answer to "everything".
+    #[must_use]
+    pub fn shown_ids(&self) -> Vec<sk_model::EntryId> {
+        let order = self.listing.order();
+        if !self.closed.any() {
+            return order.to_vec();
+        }
+        let mut kept = Vec::with_capacity(order.len());
+        crate::groups::each_band(&self.bands, order.len(), self.closed, |band, shut| {
+            if !shut {
+                kept.extend_from_slice(&order[band]);
+            }
+        });
+        kept
+    }
+
+    /// How many entries collapsed bands are holding back.
+    #[must_use]
+    pub fn hidden_count(&self) -> usize {
+        if !self.closed.any() {
+            return 0;
+        }
+        let mut held = 0;
+        crate::groups::each_band(&self.bands, self.listing.rows(), self.closed, |band, shut| {
+            if shut {
+                held += band.len();
+            }
+        });
+        held
     }
 
     /// Narrows the list to names containing `filter`. Returns whether it moved.
@@ -1288,6 +1406,67 @@ mod tests {
         // And the runs the layout reads are contiguous rather than one per entry.
         pane.reband();
         assert_eq!(pane.bands.len(), 2, "{:?}", pane.bands);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A collapsed band takes its rows out of the selection, and the cursor with
+    /// them.** `Selection::select_all`'s own comment is the rule: a selection that
+    /// contains something invisible is a selection a later operation acts on by
+    /// surprise. `Delete` over four rows behind a shut heading is that surprise.
+    ///
+    /// Driven through a real read, and through the same `reband` a window calls, so
+    /// the runs are the ones the layout would see.
+    #[test]
+    fn collapsing_a_band_empties_it_of_selection_and_of_the_cursor() {
+        let root = fixture("closed-bands");
+        let harness = Harness::new();
+        let mut pane = Pane::new(root.clone());
+        // Two bands on size, which needs no clock: directories are band 0 and
+        // every file in this fixture is empty, so band 7.
+        pane.sort.bands = sk_model::Banding::Size(sk_model::Cuts::new(&sk_ui::format::SIZE_EDGES));
+        pane.reload(&harness.jobs);
+        harness.settle(&mut pane);
+        pane.reband();
+        assert!(pane.bands.len() >= 2, "the fixture is one band: {:?}", pane.bands);
+
+        let rows = pane.listing.rows();
+        let everything = pane.shown_ids();
+        assert_eq!(everything.len(), rows, "nothing is closed and something is hidden");
+        assert_eq!(pane.hidden_count(), 0);
+
+        // Everything selected, and the cursor inside the band about to close.
+        pane.selection.select_all(&everything);
+        let (last_band, first) = *pane.bands.last().unwrap();
+        pane.selection.set_cursor(pane.listing.at(first));
+        assert_eq!(pane.selection.count(), rows);
+
+        assert!(pane.toggle_band(last_band), "a grouped pane refused to collapse a band");
+        let held = rows - first;
+        assert_eq!(pane.hidden_count(), held, "the count of what is hidden is wrong");
+        assert_eq!(pane.shown_ids().len(), rows - held);
+        assert_eq!(
+            pane.selection.count(),
+            rows - held,
+            "rows behind a shut heading stayed selected"
+        );
+        // The cursor moved to the first row anybody can see, not to nowhere and
+        // not to a row that is no longer drawn.
+        let cursor = pane.selection.cursor().expect("the cursor was thrown away");
+        let at = pane.listing.row_of(cursor).expect("the cursor is not in the order");
+        assert!(at < first, "the cursor is still inside the collapsed band");
+
+        // Opening it again gives back the rows and takes nothing away: a band that
+        // opens hides nothing, so there is nothing to forget.
+        let kept = pane.selection.count();
+        assert!(pane.show_every_band());
+        assert_eq!(pane.hidden_count(), 0);
+        assert_eq!(pane.shown_ids().len(), rows);
+        assert_eq!(pane.selection.count(), kept, "opening a band changed the selection");
+        assert!(!pane.show_every_band(), "opening nothing reported a change");
+
+        // And an ungrouped pane has no band to collapse at all.
+        pane.bands.clear();
+        assert!(!pane.toggle_band(0), "an ungrouped pane collapsed something");
         let _ = std::fs::remove_dir_all(&root);
     }
 

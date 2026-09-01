@@ -136,6 +136,96 @@ impl Grouping {
     }
 }
 
+/// Which of a grouping's bands are collapsed.
+///
+/// **A bitmask over band bytes, not a set of them.** A grouping has at most nine
+/// bands — seven stretches of time, eight sizes, nine kinds — so the whole answer
+/// fits in sixteen bits, is `Copy`, and compares in one instruction. A collection
+/// would allocate to say "nothing is closed", which is what it says almost always.
+///
+/// **A collapse and not a filter, which is the difference that makes it honest.**
+/// A closed band keeps its heading, and the heading says how many entries are
+/// behind it. The name filter clears on every navigation because "arriving
+/// somewhere that silently hides most of what is there is not a view, it is a
+/// trap" — this hides nothing silently. It clears on navigation all the same, for
+/// the other half of that reason: band four means a different set of files in every
+/// folder, so carrying one across a navigation would close something nobody chose.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Closed(u16);
+
+impl Closed {
+    /// The most bands this can speak about: sixteen, against the nine any
+    /// grouping produces.
+    ///
+    /// A byte past the end is **clamped rather than dropped**, exactly the way
+    /// [`Grouping::label`] clamps. The byte and the label have to agree about which
+    /// band they mean, or a heading would close a band other than the one it names.
+    const MOST: u8 = 16;
+
+    fn bit(band: u8) -> u16 {
+        1 << band.min(Self::MOST - 1)
+    }
+
+    /// Whether `band` is collapsed.
+    #[must_use]
+    pub fn has(self, band: u8) -> bool {
+        self.0 & Self::bit(band) != 0
+    }
+
+    /// Collapses `band`, or opens it.
+    pub fn toggle(&mut self, band: u8) {
+        self.0 ^= Self::bit(band);
+    }
+
+    /// Opens everything. Whether anything was closed.
+    pub fn open_everything(&mut self) -> bool {
+        std::mem::take(&mut self.0) != 0
+    }
+
+    /// Whether anything at all is collapsed.
+    #[must_use]
+    pub fn any(self) -> bool {
+        self.0 != 0
+    }
+}
+
+/// The first display row an open band holds, or nothing when all of them are shut.
+///
+/// Where a cursor goes when the band it was in closes under it.
+pub fn first_open(runs: &[(u8, usize)], closed: Closed) -> Option<usize> {
+    if runs.is_empty() {
+        return Some(0);
+    }
+    runs.iter().find(|(band, _)| !closed.has(*band)).map(|(_, first)| *first)
+}
+
+/// Calls `each` with each band's display rows and whether that band is collapsed.
+///
+/// **One walk, because the two questions that need it are opposites.** Which rows
+/// must leave a selection, and which rows `Ctrl+A` may put into one — and
+/// `sk_model::Selection::select_all`'s own comment says why they have to agree: a
+/// selection that contains something invisible is a selection a later operation
+/// acts on by surprise. Closing a band is the second way to make one, after hidden
+/// files.
+///
+/// An ungrouped listing is one band, open, which is what makes the ungrouped case
+/// the same code path rather than a branch at each caller.
+pub fn each_band(
+    runs: &[(u8, usize)],
+    count: usize,
+    closed: Closed,
+    mut each: impl FnMut(std::ops::Range<usize>, bool),
+) {
+    if runs.is_empty() {
+        each(0..count, false);
+        return;
+    }
+    for (at, (band, first)) in runs.iter().enumerate() {
+        let end = runs.get(at + 1).map_or(count, |(_, next)| *next);
+        each((*first).min(count)..end.min(count), closed.has(*band));
+    }
+}
+
 /// How tall a heading is, in row heights.
 ///
 /// Derived from `row_height` for the reason the grid cell is: `Ctrl+=` has to
@@ -158,14 +248,22 @@ struct Band {
     kind: u8,
     /// Its first entry in display order.
     first: usize,
+    /// How many entries the *run* holds, drawn or not.
+    ///
+    /// Not `cells.len()`, which is zero while the band is collapsed. The heading
+    /// says this number, which is the whole reason a collapse is not a filter:
+    /// nothing is hidden without a line on screen saying how much.
+    held: usize,
+    /// Whether it is collapsed: a heading, and no rows anybody can reach.
+    closed: bool,
     /// The y its heading sits at, in content coordinates.
     top: f32,
-    /// Its entries, over the strip below the heading.
+    /// Its entries, over the strip below the heading. Empty while collapsed.
     cells: Cells,
 }
 
 impl Band {
-    /// How many entries it holds. Never zero — an empty band is not placed.
+    /// How many entries it lays out. Zero while collapsed.
     const fn count(&self) -> usize {
         self.cells.len()
     }
@@ -199,6 +297,7 @@ impl Bands {
         row_height: f32,
         runs: &[(u8, usize)],
         count: usize,
+        closed: Closed,
     ) -> Self {
         let cells = Cells::new(mode, body, row_height, count);
         let heading = if runs.is_empty() { 0.0 } else { (HEADING * row_height).round() };
@@ -219,13 +318,40 @@ impl Bands {
             if held == 0 {
                 continue;
             }
-            bands.push(Band { kind: *kind, first: *first, top, cells: strip(top, held) });
-            top += heading + lines(held, cells.columns()) as f32 * cells.cell().1;
+            // **A collapsed band lays out no cells at all**, and that one line is
+            // what makes every method below answer "nothing" for its rows: an empty
+            // [`Cells`] has no lines, no content height and no index at any point,
+            // so `visible` yields an empty range for it, `touching` touches none of
+            // it, and `index_at` inside its strip is already `None` because a
+            // heading is not an entry. Guards in those three were the first draft
+            // and each was unreachable.
+            //
+            // Not cells of zero *height*: `Cells` answers from the rectangle it was
+            // given, and a rectangle with no height still contains its own top edge.
+            // The count is the thing that has to be zero.
+            let shut = closed.has(*kind);
+            let laid = if shut { 0 } else { held };
+            bands.push(Band {
+                kind: *kind,
+                first: *first,
+                held,
+                closed: shut,
+                top,
+                cells: strip(top, laid),
+            });
+            top += heading + lines(laid, cells.columns()) as f32 * cells.cell().1;
         }
         // A listing always has a band, so every method below can take one rather
         // than asking whether there is one.
         if bands.is_empty() {
-            bands.push(Band { kind: 0, first: 0, top: 0.0, cells: strip(0.0, count) });
+            bands.push(Band {
+                kind: 0,
+                first: 0,
+                held: count,
+                closed: false,
+                top: 0.0,
+                cells: strip(0.0, count),
+            });
         }
         Self { cells, body, heading, placed: bands }
     }
@@ -264,8 +390,18 @@ impl Bands {
     }
 
     /// Where one entry is drawn, at this scroll offset.
+    ///
+    /// **A collapsed band's heading, for a row inside one.** Nothing draws such a
+    /// row, so there is no honest rectangle — and an empty [`Cells`] would answer
+    /// with its own origin, which is a position on top of the heading rather than
+    /// a statement that there is none. A re-sort can move the cursor's entry into a
+    /// band that was already shut, so this is reachable however carefully the
+    /// selection is tidied.
     pub(crate) fn at(&self, index: usize, offset: f32) -> Area {
         let band = self.band_of(index);
+        if band.closed {
+            return Area { y: self.body.y + band.top - offset, height: self.heading, ..self.body };
+        }
         band.cells.at(index.saturating_sub(band.first), offset)
     }
 
@@ -276,6 +412,11 @@ impl Bands {
     /// is scrolled off and the pane says nothing about which band it is in.
     pub(crate) fn span(&self, index: usize) -> (f32, f32) {
         let band = self.band_of(index);
+        if band.closed {
+            // Revealing a row nothing draws reveals the heading it is behind,
+            // which is the thing a person has to press to see it.
+            return (band.top, band.top + self.heading);
+        }
         let local = index.saturating_sub(band.first);
         let (top, bottom) = band.cells.span(local);
         let origin = band.cells_top(self.heading);
@@ -321,82 +462,120 @@ impl Bands {
     /// column** when they cross into another band, clamped to what that band's
     /// edge line actually holds.
     pub(crate) fn step(&self, from: usize, step: Step) -> usize {
-        let total: usize = self.placed.iter().map(Band::count).sum();
-        if total == 0 {
-            return 0;
-        }
-        let last = total - 1;
-        let from = from.min(last);
+        // **A collapsed band is not somewhere a key can land.** Every direction
+        // below walks `placed` rather than counting indices, because with a band
+        // shut the indices are no longer contiguous: a listing of twelve can show
+        // rows 0–2 and 7–11, and `from + 1` from row 2 is a row nobody can see.
+        let Some(here) = self.open_at(from) else {
+            return self.first_shown().unwrap_or(0);
+        };
         match step {
-            Step::Left => from.saturating_sub(1),
-            Step::Right => (from + 1).min(last),
-            Step::Up => self.vertically(from, false),
-            Step::Down => self.vertically(from, true),
+            Step::Left => self.neighbour(here, from, false),
+            Step::Right => self.neighbour(here, from, true),
+            Step::Up => self.vertically(here, from, false),
+            Step::Down => self.vertically(here, from, true),
         }
     }
 
-    /// One line down or up, crossing into the neighbouring band where it must.
-    fn vertically(&self, from: usize, down: bool) -> usize {
+    /// The open band an index falls in, if it falls in one.
+    fn open_at(&self, index: usize) -> Option<&Band> {
+        self.placed
+            .iter()
+            .find(|band| !band.closed && index >= band.first && index < band.first + band.held)
+    }
+
+    /// The first row any open band holds.
+    fn first_shown(&self) -> Option<usize> {
+        self.placed.iter().find(|band| !band.closed).map(|band| band.first)
+    }
+
+    /// The open band after this one, or before it.
+    fn beside(&self, band: &Band, forward: bool) -> Option<&Band> {
+        if forward {
+            self.placed.iter().find(|it| it.first > band.first && !it.closed)
+        } else {
+            self.placed.iter().rev().find(|it| it.first < band.first && !it.closed)
+        }
+    }
+
+    /// The previous or next entry in reading order, skipping what is collapsed.
+    fn neighbour(&self, band: &Band, from: usize, forward: bool) -> usize {
+        if forward {
+            if from + 1 < band.first + band.held {
+                return from + 1;
+            }
+            self.beside(band, true).map_or(from, |next| next.first)
+        } else {
+            if from > band.first {
+                return from - 1;
+            }
+            self.beside(band, false).map_or(from, |prior| prior.first + prior.held - 1)
+        }
+    }
+
+    /// One line down or up, crossing into the neighbouring open band where it must.
+    fn vertically(&self, band: &Band, from: usize, down: bool) -> usize {
         let columns = self.columns();
-        let band = *self.band_of(from);
         let local = from.saturating_sub(band.first);
         let column = local % columns;
         if down {
-            if local + columns < band.count() {
+            if local + columns < band.held {
                 return from + columns;
             }
-            let Some(next) = self.placed.iter().find(|it| it.first > band.first) else {
-                return from;
-            };
-            next.first + column.min(next.count() - 1)
+            let Some(next) = self.beside(band, true) else { return from };
+            next.first + column.min(next.held - 1)
         } else {
             if local >= columns {
                 return from - columns;
             }
-            let Some(prior) = self.placed.iter().rev().find(|it| it.first < band.first) else {
-                return from;
-            };
+            let Some(prior) = self.beside(band, false) else { return from };
             // The last line of the band above, at the same column where it has
             // one — a ragged last line is shorter than the columns.
-            let lines_above = prior.cells.lines();
-            let last_line = prior.first + (lines_above - 1) * columns;
-            (last_line + column).min(prior.first + prior.count() - 1)
+            let last_line = prior.first + (lines(prior.held, columns) - 1) * columns;
+            (last_line + column).min(prior.first + prior.held - 1)
         }
     }
 
-    /// The entries that are on screen at this offset.
-    pub(crate) fn visible(&self, offset: f32) -> std::ops::Range<usize> {
+    /// The entries that are on screen at this offset, in display order.
+    ///
+    /// **Not one range, because with a band collapsed the rows are not
+    /// contiguous.** A listing of twelve with the middle band shut shows rows 0–3
+    /// and 8–11, and a bounding range over those two would hand the caller four
+    /// rows that are drawn nowhere — which is what a draw loop then draws, on top
+    /// of the closed band's heading. One range per open band, chained.
+    pub(crate) fn visible(&self, offset: f32) -> impl Iterator<Item = usize> + '_ {
         let (top, bottom) = (offset, offset + self.body.height);
         let height = self.cell().1;
-        let mut from = usize::MAX;
-        let mut to = 0;
-        for band in &self.placed {
+        let columns = self.columns();
+        let heading = self.heading;
+        self.placed.iter().flat_map(move |band| {
             // **Not `band.cells.visible`.** That asks "what fits in this band's
             // own strip", and the question here is what fits in the *pane's*
             // viewport, which is a different rectangle and usually a larger one.
-            let cells_top = band.cells_top(self.heading);
-            let band_lines = band.cells.lines();
+            let cells_top = band.cells_top(heading);
             if cells_top + band.cells.content_height() < top || cells_top > bottom {
-                continue;
+                return band.first..band.first;
             }
             let first_line = ((top - cells_top) / height).floor().max(0.0) as usize;
             let last_line =
-                (((bottom - cells_top) / height).ceil().max(0.0) as usize).min(band_lines);
-            from = from.min(band.first + first_line * self.columns());
-            to = to.max((band.first + last_line * self.columns()).min(band.first + band.count()));
-        }
-        if from == usize::MAX { 0..0 } else { from..to.max(from) }
+                (((bottom - cells_top) / height).ceil().max(0.0) as usize).min(band.cells.lines());
+            let from = band.first + first_line * columns;
+            let to = (band.first + last_line * columns).min(band.first + band.count());
+            from.min(to)..to
+        })
     }
 
     /// Every entry whose cell the rectangle touches, in index order.
     pub(crate) fn touching(&self, rect: Area, offset: f32, mut each: impl FnMut(usize)) {
         for band in &self.placed {
+            // A collapsed band's `Cells` is empty, so a rubber band cannot reach
+            // into one — see `Bands::new`.
             band.cells.touching(rect, offset, |local| each(band.first + local));
         }
     }
 
-    /// Each heading that is on screen: which band it names, and where it goes.
-    pub(crate) fn headings(&self, offset: f32) -> Vec<(u8, Area)> {
+    /// Each heading that is on screen.
+    pub(crate) fn headings(&self, offset: f32) -> Vec<Heading> {
         if self.heading <= 0.0 {
             return Vec::new();
         }
@@ -405,13 +584,37 @@ impl Bands {
             .filter_map(|band| {
                 let y = self.body.y + band.top - offset;
                 let on_screen = y + self.heading > self.body.y && y < self.body.bottom();
-                on_screen.then_some((
-                    band.kind,
-                    Area { x: self.body.x, y, width: self.body.width, height: self.heading },
-                ))
+                on_screen.then_some(Heading {
+                    kind: band.kind,
+                    at: Area { x: self.body.x, y, width: self.body.width, height: self.heading },
+                    held: band.held,
+                    closed: band.closed,
+                })
             })
             .collect()
     }
+
+    /// Which band's heading is under a point, if one is.
+    ///
+    /// **The pointer's way in.** [`Self::index_at`] already answers `None` on a
+    /// heading, because a heading is not an entry; this is the other half of that
+    /// sentence — it is not an entry, and it *is* a control.
+    pub(crate) fn heading_under(&self, x: f32, y: f32, offset: f32) -> Option<u8> {
+        self.headings(offset).into_iter().find(|it| it.at.contains(x, y)).map(|it| it.kind)
+    }
+}
+
+/// One band's heading, on screen.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct Heading {
+    /// Which band it names.
+    pub(crate) kind: u8,
+    /// Where it is drawn, and what a press on it hits.
+    pub(crate) at: Area,
+    /// How many entries the band holds, drawn or not.
+    pub(crate) held: usize,
+    /// Whether the band is collapsed.
+    pub(crate) closed: bool,
 }
 
 /// How many lines `count` entries make at `columns` across.
@@ -448,7 +651,9 @@ pub fn runs_of(
 
 #[cfg(test)]
 mod tests {
-    use super::{Bands, Grouping, lines};
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Bands, Closed, Grouping, lines};
     use crate::cells::{Mode, Step};
     use crate::layout::Area;
 
@@ -458,13 +663,13 @@ mod tests {
 
     /// Three bands of four, laid out as one column so the arithmetic is legible.
     fn stacked() -> Bands {
-        Bands::new(Mode::Details, body(), 20.0, &[(1, 0), (2, 4), (6, 8)], 12)
+        Bands::new(Mode::Details, body(), 20.0, &[(1, 0), (2, 4), (6, 8)], 12, Closed::default())
     }
 
     /// No runs is one band with no heading, which is the ungrouped pane.
     #[test]
     fn no_grouping_is_one_band_and_no_heading_at_all() {
-        let flat = Bands::new(Mode::Details, body(), 20.0, &[], 10);
+        let flat = Bands::new(Mode::Details, body(), 20.0, &[], 10, Closed::default());
         assert_eq!(flat.count(), 0, "an ungrouped pane drew a heading");
         assert!(flat.headings(0.0).is_empty());
         // And it places entries exactly where the plain cell geometry would.
@@ -494,7 +699,7 @@ mod tests {
     #[test]
     fn a_heading_is_not_an_entry() {
         let bands = stacked();
-        let (_, first) = bands.headings(0.0)[0];
+        let first = bands.headings(0.0)[0].at;
         assert_eq!(bands.index_at(first.x + 4.0, first.y + 2.0, 0.0), None);
         // And the entry under it is found.
         let below = bands.at(0, 0.0);
@@ -511,7 +716,14 @@ mod tests {
     #[test]
     fn every_entry_is_found_where_it_is_drawn() {
         for mode in [Mode::Details, Mode::Grid] {
-            let bands = Bands::new(mode, body(), 20.0, &[(1, 0), (2, 5), (4, 6), (6, 13)], 20);
+            let bands = Bands::new(
+                mode,
+                body(),
+                20.0,
+                &[(1, 0), (2, 5), (4, 6), (6, 13)],
+                20,
+                Closed::default(),
+            );
             for index in 0..20 {
                 // Scrolled so the entry is on screen, because a hit test outside
                 // the body is `None` by design and would prove nothing.
@@ -529,7 +741,7 @@ mod tests {
         // Four columns, two bands: 0..6 and 6..9. The width is chosen so the
         // cell arithmetic lands on four rather than asserted to.
         let wide = Area { x: 0.0, y: 0.0, width: 500.0, height: 400.0 };
-        let bands = Bands::new(Mode::Grid, wide, 26.0, &[(1, 0), (5, 6)], 9);
+        let bands = Bands::new(Mode::Grid, wide, 26.0, &[(1, 0), (5, 6)], 9, Closed::default());
         assert_eq!(bands.columns(), 4, "the fixture is not four columns wide");
         // Entry 1 is line 0 column 1; down is entry 5, still column 1.
         assert_eq!(bands.step(1, Step::Down), 5);
@@ -567,9 +779,16 @@ mod tests {
     #[test]
     fn an_empty_band_is_not_given_a_heading() {
         // Two runs beginning at the same row: the first holds nothing.
-        let bands = Bands::new(Mode::Details, body(), 20.0, &[(1, 0), (3, 0), (6, 4)], 8);
+        let bands = Bands::new(
+            Mode::Details,
+            body(),
+            20.0,
+            &[(1, 0), (3, 0), (6, 4)],
+            8,
+            Closed::default(),
+        );
         assert_eq!(bands.count(), 2, "an empty band was drawn");
-        let kinds: Vec<u8> = bands.headings(0.0).into_iter().map(|(kind, _)| kind).collect();
+        let kinds: Vec<u8> = bands.headings(0.0).into_iter().map(|it| it.kind).collect();
         assert_eq!(kinds, [3, 6]);
     }
 
@@ -577,14 +796,15 @@ mod tests {
     #[test]
     fn the_visible_range_walks_the_bands_it_overlaps() {
         let bands = stacked();
-        let range = bands.visible(0.0);
-        assert_eq!(range.start, 0);
-        assert!(range.end >= 4, "the first screen holds at least a band");
-        // Scrolled to the bottom, the range ends at the last entry.
-        let deep = bands.visible(bands.content_height());
-        assert!(deep.end <= 12);
-        // And never past the end.
-        assert!(bands.visible(1e9).end <= 12);
+        let shown: Vec<usize> = bands.visible(0.0).collect();
+        assert_eq!(shown.first(), Some(&0));
+        assert!(shown.len() >= 4, "the first screen holds at least a band");
+        // In display order, and every row exactly once.
+        assert!(shown.windows(2).all(|pair| pair[0] < pair[1]), "out of order: {shown:?}");
+        // Scrolled to the bottom, and past it, nothing is past the last entry.
+        for offset in [bands.content_height(), 1e9] {
+            assert!(bands.visible(offset).all(|row| row < 12), "a row past the end at {offset}");
+        }
     }
 
     /// A band selects a block, and the band above it is left alone.
@@ -609,7 +829,7 @@ mod tests {
     /// against the geometry the pane actually uses.
     #[test]
     fn one_column_makes_the_four_directions_two() {
-        let flat = Bands::new(Mode::Details, body(), 20.0, &[], 10);
+        let flat = Bands::new(Mode::Details, body(), 20.0, &[], 10, Closed::default());
         assert_eq!(flat.columns(), 1);
         for from in [0usize, 4, 9] {
             assert_eq!(flat.step(from, Step::Left), flat.step(from, Step::Up), "at {from}");
@@ -624,14 +844,156 @@ mod tests {
     #[test]
     fn a_page_is_a_screenful_and_at_least_one_entry() {
         // 400 tall over 20-pixel rows is twenty rows, one column.
-        assert_eq!(Bands::new(Mode::Details, body(), 20.0, &[], 100).page(), 20);
+        assert_eq!(Bands::new(Mode::Details, body(), 20.0, &[], 100, Closed::default()).page(), 20);
         // The grid pages by lines times columns.
-        let grid = Bands::new(Mode::Grid, body(), 20.0, &[], 100);
+        let grid = Bands::new(Mode::Grid, body(), 20.0, &[], 100, Closed::default());
         let lines = (400.0 / grid.cell().1).floor() as usize;
         assert_eq!(grid.page(), lines * grid.columns());
         // A body shorter than one cell still pages by something.
         let squat = Area { x: 0.0, y: 0.0, width: 800.0, height: 4.0 };
-        assert!(Bands::new(Mode::Details, squat, 20.0, &[], 50).page() >= 1);
+        assert!(Bands::new(Mode::Details, squat, 20.0, &[], 50, Closed::default()).page() >= 1);
+    }
+
+    /// Band 2 of `stacked` shut: three bands of four, the middle one collapsed.
+    fn with_the_middle_shut() -> (Bands, Closed) {
+        let mut closed = Closed::default();
+        closed.toggle(2);
+        let bands = Bands::new(Mode::Details, body(), 20.0, &[(1, 0), (2, 4), (6, 8)], 12, closed);
+        (bands, closed)
+    }
+
+    /// **A collapsed band keeps its heading and lends out no rows.** Which is the
+    /// whole design: the heading is what a person presses to get the rows back, so
+    /// a collapse that took it away would be a filter nobody could undo.
+    #[test]
+    fn a_collapsed_band_keeps_its_heading_and_hides_its_rows() {
+        let (shut, _) = with_the_middle_shut();
+        let open = stacked();
+
+        // Three headings either way, and the shut one says how many it holds.
+        assert_eq!(shut.count(), 3, "a collapsed band lost its heading");
+        let headings = shut.headings(0.0);
+        assert_eq!(headings.len(), 3);
+        assert_eq!(headings.iter().filter(|it| it.closed).count(), 1);
+        let middle = headings.iter().find(|it| it.kind == 2).expect("band 2 has no heading");
+        assert!(middle.closed);
+        assert_eq!(middle.held, 4, "the heading forgot what it is holding");
+        assert!(headings.iter().filter(|it| !it.closed).all(|it| it.held == 4));
+
+        // Exactly four rows' worth shorter: the heading stays, the lines go.
+        let lost = open.content_height() - shut.content_height();
+        assert!((lost - 4.0 * 20.0).abs() < 0.01, "it shrank by {lost}, not four rows");
+
+        // None of its rows are drawn, and the ones around it still are.
+        let rows: Vec<usize> = shut.visible(0.0).collect();
+        assert!(rows.contains(&0) && rows.contains(&8), "an open band went with it");
+        assert!(!rows.iter().any(|row| (4..8).contains(row)), "a shut band drew rows: {rows:?}");
+
+        // A press inside its strip is not an entry, and a rubber band over the
+        // whole pane does not reach in.
+        let strip = middle.at;
+        assert_eq!(shut.index_at(strip.x + 50.0, strip.y + 2.0, 0.0), None);
+        let mut touched = Vec::new();
+        shut.touching(body(), 0.0, |row| touched.push(row));
+        assert!(!touched.iter().any(|row| (4..8).contains(row)), "touched: {touched:?}");
+        assert_eq!(touched.len(), 8, "the open bands lost rows too");
+    }
+
+    /// **The keys walk over a collapsed band rather than into it.** With the
+    /// indices no longer contiguous, `from + 1` from row 3 is a row nobody can see
+    /// — which is why every direction asks `placed` instead of counting.
+    #[test]
+    fn every_direction_steps_over_a_collapsed_band() {
+        let (shut, _) = with_the_middle_shut();
+        // One column, so Down and Right are the same move and both are testable.
+        assert_eq!(shut.columns(), 1);
+
+        for forward in [Step::Right, Step::Down] {
+            assert_eq!(shut.step(3, forward), 8, "{forward:?} landed inside the shut band");
+            assert_eq!(shut.step(8, forward), 9);
+            assert_eq!(shut.step(11, forward), 11, "{forward:?} ran off the end");
+        }
+        for back in [Step::Left, Step::Up] {
+            assert_eq!(shut.step(8, back), 3, "{back:?} landed inside the shut band");
+            assert_eq!(shut.step(1, back), 0);
+            assert_eq!(shut.step(0, back), 0, "{back:?} ran off the front");
+        }
+
+        // And a cursor that is already inside one — which a re-sort can arrange —
+        // is taken to the first row anybody can see rather than left there.
+        assert_eq!(shut.step(5, Step::Down), 0);
+    }
+
+    /// A row nothing draws still answers `at` and `span`, with its heading.
+    ///
+    /// **Reachable however carefully the selection is tidied**: a re-sort can move
+    /// the cursor's entry into a band that was already shut. An empty `Cells` would
+    /// answer with its own origin, which is a rectangle on top of the heading
+    /// pretending to be a row.
+    #[test]
+    fn a_hidden_row_is_where_its_heading_is() {
+        let (shut, _) = with_the_middle_shut();
+        let heading =
+            shut.headings(0.0).into_iter().find(|it| it.kind == 2).expect("band 2 has no heading");
+        for row in 4..8 {
+            let at = shut.at(row, 0.0);
+            assert!((at.y - heading.at.y).abs() < 0.01, "row {row} is at {}", at.y);
+            let (top, bottom) = shut.span(row);
+            assert!(bottom > top, "row {row} has no span");
+            assert!(bottom - top <= 24.01, "row {row} spans {} of nothing", bottom - top);
+        }
+    }
+
+    /// The bitmask clamps a byte past its width, exactly as `label` clamps.
+    ///
+    /// The byte and the label have to agree about which band they mean, or a
+    /// heading would close a band other than the one it names.
+    #[test]
+    fn a_band_byte_past_the_mask_is_clamped_and_not_dropped() {
+        let mut closed = Closed::default();
+        assert!(!closed.any());
+        closed.toggle(u8::MAX);
+        assert!(closed.any(), "a byte past the end was dropped");
+        assert!(closed.has(u8::MAX));
+        assert!(closed.has(15), "the clamp is not the same on both sides");
+        assert!(!closed.has(0));
+        assert!(closed.open_everything());
+        assert!(!closed.open_everything(), "opening nothing reported a change");
+    }
+
+    /// Every band's rows, once, whether or not the pane is grouped.
+    #[test]
+    fn each_band_covers_the_listing_exactly_once() {
+        let mut closed = Closed::default();
+        closed.toggle(2);
+        let runs = [(1u8, 0usize), (2, 4), (6, 8)];
+        let mut seen: Vec<usize> = Vec::new();
+        let mut hidden: Vec<usize> = Vec::new();
+        super::each_band(&runs, 12, closed, |rows, shut| {
+            for row in rows {
+                seen.push(row);
+                if shut {
+                    hidden.push(row);
+                }
+            }
+        });
+        assert_eq!(seen, (0..12).collect::<Vec<_>>());
+        assert_eq!(hidden, vec![4, 5, 6, 7]);
+        assert_eq!(super::first_open(&runs, closed), Some(0));
+
+        // An ungrouped listing is one open band, which is what keeps the callers
+        // free of a special case.
+        let mut flat = Vec::new();
+        super::each_band(&[], 5, closed, |rows, shut| flat.push((rows, shut)));
+        assert_eq!(flat, vec![(0..5, false)]);
+        assert_eq!(super::first_open(&[], closed), Some(0));
+
+        // Everything shut: there is nowhere for a cursor to go.
+        let mut all = Closed::default();
+        for band in [1u8, 2, 6] {
+            all.toggle(band);
+        }
+        assert_eq!(super::first_open(&runs, all), None);
     }
 
     /// An empty listing answers every question without dividing by zero.
@@ -639,8 +1001,8 @@ mod tests {
     fn an_empty_listing_has_no_cells_and_no_arithmetic_faults() {
         for mode in [Mode::Details, Mode::Grid] {
             for runs in [&[][..], &[(1u8, 0usize)][..]] {
-                let bands = Bands::new(mode, body(), 20.0, runs, 0);
-                assert_eq!(bands.visible(0.0), 0..0, "{mode:?} {runs:?}");
+                let bands = Bands::new(mode, body(), 20.0, runs, 0, Closed::default());
+                assert_eq!(bands.visible(0.0).count(), 0, "{mode:?} {runs:?}");
                 assert_eq!(bands.step(0, Step::Down), 0);
                 assert_eq!(bands.index_at(200.0, body().y + 2.0, 0.0), None);
                 assert!(bands.page() >= 1);

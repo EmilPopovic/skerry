@@ -98,6 +98,12 @@ pub struct Capture {
     /// and the state that says "this one is chosen" was in none of them. Row zero,
     /// which is the one row every fixture has — a trail's own column holds three.
     pub checked: bool,
+    /// Whether to collapse one time band, which is filtering by group.
+    ///
+    /// Yesterday's, so the frame holds an open band, a shut one with its count
+    /// beside it, and two more open below — which is the only way to see that a
+    /// collapse takes the rows and leaves the heading.
+    pub collapsed: bool,
     /// Whether to draw the subtree search, with results in it.
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
@@ -189,6 +195,7 @@ fn group_the_sample(
     pane: &mut Pane,
     grouping: crate::groups::Grouping,
     types: &sk_desktop::MimeDatabase,
+    collapse: bool,
 ) {
     const DAY: i64 = 86_400;
     pane.grouping = grouping;
@@ -220,6 +227,13 @@ fn group_the_sample(
     // of them recorded a heading that named the wrong window as correct.
     pane.sort.bands = grouping.banding(base);
     pane.resort_now(None);
+    if collapse {
+        // Band two is yesterday. `reband` first, because `toggle_band` refuses a
+        // pane whose runs have not been worked out — an ungrouped pane has no band
+        // to collapse, and one that has not been banded yet looks the same.
+        pane.reband();
+        pane.toggle_band(2);
+    }
 }
 
 /// Which grouping the flags asked for, if any.
@@ -761,7 +775,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         crate::panes::single(pane, layout.content, &theme.metrics);
     mode_the_sample(&mut panes, request, &session, here.body.width);
     if let Some(grouping) = requested_grouping(request) {
-        group_the_sample(panes.focused_mut(), grouping, &types);
+        group_the_sample(panes.focused_mut(), grouping, &types, request.collapsed);
     }
     if request.split {
         // **Stacked, and two tabs in the lower half.** A `Below` split is the

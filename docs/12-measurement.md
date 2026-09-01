@@ -1782,3 +1782,88 @@ The cheap repair is a unit test where the table is: every label of every groupin
 asserted to resolve to something other than itself. It is one assertion inside a
 loop that already existed, it fails loudly on a rename, and it lives beside the
 array rather than in a Python script that would have to learn Rust to find it.
+
+## A frame cannot show you a gap that has no right answer
+
+A band heading is a label and then a hairline running to the pane's edge. The
+hairline's x was `at.x + gutter + advance + gutter`, where `advance` is what
+`Painter::label` returns — the width of the shaped run, **in device pixels**,
+because a glyph is measured in them. Every other term on that line is logical.
+
+So the rule started a quarter of the label's width too far right at 125% and a
+whole label's width out at 200%, and had done since headings were written. Three
+golden frames covered the grouped view, two of them at scales chosen precisely
+because "right at one scale and wrong at another" is what a second scale exists to
+catch. All three were green. I had looked at all three.
+
+**They were green because a golden frame fails on a change, and a reference can
+only be as good as a quantity somebody could have checked.** The distance between
+a label and a decorative rule has no correct value a person can see: twelve pixels
+or thirty both look like a gap. Blessing it recorded whatever was there, and every
+later run agreed with it — which is the same failure as blessing a frame unread,
+arrived at from the other side. The frame *was* read. There was nothing in it to
+read the defect off of.
+
+What exposed it was adding a second thing to the same line. A count beside the
+label turned an arbitrary gap into a relationship between two pieces of text,
+which does have an obviously right answer — and at 200% it was visibly wrong.
+
+Two things to take:
+
+- **A decorative offset is not covered by a frame that contains it.** Only a
+  measurable relationship is: two runs of text side by side, an edge against
+  another edge, a box against the mark it covers. When arithmetic has to be
+  correct and its result is a gap, put something on the other side of the gap or
+  assert the number in a test.
+- **The boundary needs a named crossing in both directions.** `Painter::px` went
+  logical to device and there was no inverse, so the way back was a bare division
+  somebody had to remember to write. `Painter::logical` is that inverse, and the
+  reason it is a method rather than a `/ scale` at the call site is that a named
+  crossing is one a reviewer can look for.
+
+## Load makes a scenario late; a bug makes it wrong the same way twice
+
+Four scenarios failed in a full sweep. I had run `tools/check` beside it — a build
+and forty-five lavapipe frames — so I wrote that the sweep was contaminated, said
+so out loud, and re-ran it. Three failed again. I blamed my own foreground
+`cargo test` and re-ran a third time.
+
+The failures were saying something else the whole time:
+
+```
+navigation-buttons:      path is '…/fixture/beta', wanted '…/fixture/alpha'
+breadcrumb-navigation:   wanted {'path': '…/alpha', 'rows': '2'}, last saw {'…/beta', '1'}
+```
+
+**Two scenarios, the same wrong answer, off by exactly one row.** Load does not do
+that. Contention makes a scenario *late* — a read that has not landed, a cursor
+that is still empty, a progress line one step behind — and late is a different
+name every time. A consistent wrong answer is a consistent cause, and the third
+failure named the mechanism: a heading had appeared where none was expected, so
+every row was 1.2 rows lower than the arithmetic that clicked it assumed.
+
+The cause was mine. `collapse-a-group` presses `Ctrl+9`, `set_grouping` calls
+`remember_view`, and `XDG_STATE_HOME` is shared by the whole sweep — so a scenario
+that was not `fresh` recorded `by-kind` against the *shared* fixture, and the
+per-folder inheritance handed it to `alpha` and `beta` as well. Three scenarios
+that click a row by arithmetic over `row_h` then clicked one row too far.
+
+This file already contains the correction I needed, one section up: the
+load-contamination entry says in as many words that its own first conclusion "was
+wrong, and it was wrong in the direction that costs most", having excused four real
+defects as somebody else's load. Reading it afterwards is not the same as reaching
+for it first. So, as a discriminator rather than a principle:
+
+- **Late and differently each time** — a missing wait, and load is the instrument
+  that reveals it.
+- **Wrong, identically, twice** — a defect, and the machine is innocent. Read the
+  two messages side by side before touching anything; the difference between them
+  is the diagnosis.
+
+And the mechanical half, which is the part a harness can enforce: `fresh` is needed
+by anything that changes what is **remembered about** the shared fixture, not only
+by anything that changes what is in it. A per-folder setting with subtree
+inheritance is the widest possible leak — one record reaches every scenario over
+that path and every path beneath it. Auditing the other scenarios for the same
+shape took one regular expression and found one more, safe for a reason worth
+knowing: a folder's record holds a layout and a grouping, so a sort leaks nowhere.

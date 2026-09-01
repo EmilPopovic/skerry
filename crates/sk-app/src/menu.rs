@@ -42,6 +42,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
         "view.group_time",
         "view.group_size",
         "view.group_kind",
+        "view.bands_show",
     ],
     &["view.columns_reset", "view.hidden", "view.theme", "view.sidebar"],
     &["tab.new", "tab.close", "tab.reopen"],

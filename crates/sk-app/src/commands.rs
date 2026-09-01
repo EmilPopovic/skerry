@@ -236,7 +236,12 @@ fn select(registry: &mut Registry<App>) {
             keys: &["ctrl+a"],
             enabled: |app: &App| app.panes.focused().listing.rows() > 0,
             run: |app: &mut App| {
-                let rows = app.panes.focused().listing.order().to_vec();
+                // **What is shown, not what the order holds.** A collapsed band's
+                // rows are in the order and on no part of the screen, and
+                // `Selection::select_all` is the comment that says why that
+                // matters: a selection containing something invisible is a
+                // selection a later operation acts on by surprise.
+                let rows = app.panes.focused().shown_ids();
                 app.panes.focused_mut().selection.select_all(&rows);
             },
         },
@@ -716,6 +721,32 @@ fn grouping(registry: &mut Registry<App>) {
             run: |app: &mut App| app.set_mode(crate::cells::Mode::Columns),
         },
         CommandSpec {
+            id: "view.band_toggle",
+            name: "action.band_toggle",
+            group: Group::View,
+            // `G` for group, beside the four groupings on the digits. Shift is part
+            // of a letter's identity — `Chord::shift_matters` — so this and the one
+            // below are two chords rather than one that answers to both.
+            keys: &["ctrl+g"],
+            enabled: |app: &App| {
+                app.panes.focused().grouping != crate::groups::Grouping::None
+                    && app.panes.focused().cursor_row().is_some()
+            },
+            run: |app: &mut App| {
+                let Some(row) = app.panes.focused().cursor_row() else { return };
+                let Some(band) = app.panes.focused().band_of_row(row) else { return };
+                app.toggle_band(band);
+            },
+        },
+        CommandSpec {
+            id: "view.bands_show",
+            name: "action.bands_show",
+            group: Group::View,
+            keys: &["ctrl+shift+g"],
+            enabled: |app: &App| app.panes.focused().closed.any(),
+            run: App::show_every_band,
+        },
+        CommandSpec {
             id: "view.group_none",
             name: "action.group_none",
             group: Group::View,
@@ -915,6 +946,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("view.menu", "the secondary pointer button"));
     reach.push(("select.none", "a click on empty space"));
     reach.push(("select.toggle", "the check box over an entry's mark"));
+    reach.push(("view.band_toggle", "a press on a band's heading"));
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));

@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 621
-tests, 108 GUI scenarios **on both Wayland and X11**, forty-two golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 628
+tests, 110 GUI scenarios **on both Wayland and X11**, forty-five golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
@@ -54,7 +54,11 @@ and archives and code —
 orthogonally to either, with each band sorted on its own
 because the band is a prefix byte ahead of the sort's column, **remembered per
 folder** with the nearest ancestor inherited, so Downloads can be a grouped list
-while Pictures is a grid;
+while Pictures is a grid; **a heading is a control**, so a press on one collapses
+that band — filtering by group, at no sort, with the heading left holding the count
+of what is behind it and the status line saying `9 of 12 items`; **a check box over
+an entry's mark** selects with the pointer alone, the same `Selection::toggle`
+`Ctrl`-click has always had and `Ctrl+Space` now has too;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and
