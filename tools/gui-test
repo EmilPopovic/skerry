@@ -1245,7 +1245,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 107
+FEWEST_SCENARIOS = 108
 
 
 def scenario(name, fresh: bool = False):
@@ -1653,6 +1653,64 @@ def column_view_survives_a_remembered_view(run: Run, fixture: Path) -> None:
     out = run.state()
     if out["mode"] != "details":
         raise Failure(f"stepping out of a folder set to details found {out['mode']!r}")
+
+
+@scenario("grouping-survives-a-trail", fresh=True)
+def grouping_survives_a_trail(run: Run, fixture: Path) -> None:
+    """A folder grouped by time is still grouped after a trail walks through it.
+
+    **The reported defect.** Downloads was grouped by time. Walking into it in a
+    column view left the pane carrying the grouping of wherever it had come from,
+    and pressing Details wrote *that* over the one Downloads had chosen — so the
+    folder was un-grouped, permanently, by nothing more than being walked through.
+
+    **Only a scenario reaches it, because the wrong state is not drawn.** A column
+    is never banded, so between the walk and the press there is no heading on
+    screen either way: the pane looks identical whether it is holding the folder's
+    grouping or somebody else's. What tells them apart is what comes out the other
+    side, which is two navigations and a mode switch away from the mistake.
+    """
+    (fixture / "one").mkdir()
+    for _ in range(40):
+        run.drive("sleep 150\nkey f12\nsleep 50\n")
+        if int(run.state()["rows"]) >= 10:
+            break
+    else:
+        raise Failure(f"the folder never arrived: {run.state()['rows']} rows")
+
+    # Into `one`, group it by time, and out again: `one` now remembers by-time,
+    # and the pane above it is flat — which is the grouping it will carry back in.
+    run.drive("text one\nsleep 300\nkey enter\nsleep 600\nkey ctrl+7\nsleep 400\nkey f12\nsleep 200\n")
+    if run.state()["grouping"] != "by-time":
+        raise Failure(f"Ctrl+7 left the pane {run.state()['grouping']!r}")
+    run.drive("key alt+up\nsleep 700\nkey f12\nsleep 200\n")
+    above = run.state()
+    if above["grouping"] != "flat":
+        raise Failure(f"the parent is {above['grouping']!r}, so the pane carries nothing wrong")
+
+    # Into columns, and walk in. Nothing on screen changes; the pane's grouping
+    # has to change all the same, because it is what the next choice writes down.
+    run.drive("key ctrl+3\nsleep 500\nkey f12\nsleep 200\n")
+    if run.state()["mode"] != "columns":
+        raise Failure(f"Ctrl+3 left the pane in {run.state()['mode']!r}")
+    run.drive("text one\nsleep 300\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    walked = run.state()
+    if not walked["path"].rstrip('"').endswith("one"):
+        raise Failure(f"the walk did not arrive: {walked['path']}")
+    if walked["grouping"] != "by-time":
+        raise Failure(f"a trail arrived in a grouped folder holding {walked['grouping']!r}")
+
+    # Out of columns: the heading appears, and it is the one the folder chose.
+    run.drive("key ctrl+1\nsleep 500\nkey f12\nsleep 200\n")
+    if run.state()["grouping"] != "by-time":
+        raise Failure(f"leaving columns left the folder {run.state()['grouping']!r}")
+
+    # And the record itself, which is the half that does not come back: out, in,
+    # and it is still grouped.
+    run.drive("key alt+up\nsleep 700\ntext one\nsleep 300\nkey enter\nsleep 700\nkey f12\nsleep 200\n")
+    again = run.state()
+    if again["grouping"] != "by-time":
+        raise Failure(f"the folder's record was overwritten: it is {again['grouping']!r}")
 
 
 @scenario("column-scroll", fresh=True)

@@ -147,6 +147,25 @@ impl Views {
         View::default()
     }
 
+    /// The record `path` is left with when a pane in `mode` chooses `grouping`.
+    ///
+    /// **A pane in columns chooses a grouping and no layout.** It is showing a
+    /// path rather than a folder, so it has nothing to say about how this one is
+    /// laid out — and [`Layout`] has no way to write it down, which is the whole
+    /// reason that type exists. The layout half stays at whatever the folder
+    /// already answers, its own or an ancestor's, so the choice that *was* made
+    /// is the only thing that moves.
+    ///
+    /// Not [`Layout::default`] for the columns case. It reads the same on a
+    /// folder nobody has chosen for and is wrong on every album under a
+    /// `~/Pictures` set to a grid: grouping one of them from a trail would write
+    /// `details` over the grid it inherits and un-grid it.
+    #[must_use]
+    pub fn chosen(&self, path: &Path, mode: Mode, grouping: crate::groups::Grouping) -> View {
+        let layout = Layout::of(mode).unwrap_or_else(|| self.for_path(path).layout);
+        View { layout, grouping }
+    }
+
     /// What `path` would get with no record of its own.
     fn inherited(&self, path: &Path) -> View {
         path.parent().map_or_else(View::default, |parent| self.for_path(parent))
@@ -499,5 +518,30 @@ mod tests {
             grid(),
             "the rest still reads"
         );
+    }
+
+    /// A pane in columns does not hand a subtree the default layout either.
+    ///
+    /// The columns case cannot write `Layout::default()`: on an album under a
+    /// `~/Pictures` that is a grid it reads identically on the folder itself and
+    /// takes the grid away from it.
+    #[test]
+    fn grouping_from_a_trail_leaves_an_inherited_grid_alone() {
+        use crate::cells::Mode;
+        use crate::groups::Grouping;
+
+        let mut views = Views::default();
+        views.remember(Path::new("/home/a/Pictures"), grid());
+        let album = Path::new("/home/a/Pictures/2001");
+
+        let held = views.chosen(album, Mode::Columns, Grouping::Time);
+        assert_eq!(held.layout, Layout::Grid, "the album lost the grid it inherits");
+        assert_eq!(held.grouping, Grouping::Time);
+
+        views.remember(album, held);
+        assert_eq!(views.for_path(album), View { layout: Layout::Grid, grouping: Grouping::Time });
+        // And the album with no grouping is redundant again, so nothing is kept.
+        assert!(views.remember(album, views.chosen(album, Mode::Columns, Grouping::None)));
+        assert_eq!(views.len(), 1, "an album back to what it inherits was recorded");
     }
 }

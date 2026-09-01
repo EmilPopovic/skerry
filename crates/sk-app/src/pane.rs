@@ -569,28 +569,34 @@ impl Pane {
         );
     }
 
-    /// Applies a folder's remembered layout, and says whether anything moved.
+    /// Applies a folder's remembered view, and says whether anything moved.
     ///
-    /// **A pane showing a trail keeps it.** The per-folder record in
-    /// [`crate::views`] says how a folder is laid out *when you come to look at
-    /// it*, and walking through one in a column view is not that: the columns are
-    /// the path, and every directory on it is a step rather than a destination.
-    /// Applying the record mid-walk took the pane out of column mode the moment it
-    /// reached a folder that remembers Details — which is every folder anybody has
-    /// ever set one on, so a trail could be walked exactly as far as the first one.
+    /// **A pane showing a trail keeps its columns and takes its grouping**, because
+    /// the two halves of a record are not the same kind of statement. The layout
+    /// says how a folder looks *when you come to look at it*, and walking through
+    /// one in a column view is not that: the columns are the path, and every
+    /// directory on it is a step rather than a destination. Applying it mid-walk
+    /// took the pane out of column mode at the first folder that remembers Details
+    /// — which is every folder anybody has ever set one on. The grouping says how
+    /// a folder's contents are cut up, which is true of the contents whatever is
+    /// drawing them.
     ///
-    /// The asymmetry is deliberate and it is the same sentence read twice: arriving
-    /// somewhere from a details list *is* coming to look at it, so the record
-    /// applies and can put the pane into columns. Once it is in them, where it goes
-    /// next is navigation.
+    /// **Refusing the grouping here is what made a folder forget it.** A column is
+    /// never banded, so it looked like nothing until the pane left columns: the
+    /// pane was still carrying whatever grouping some earlier folder had set, and
+    /// `App::remember_view` wrote that over the one this folder had chosen.
+    /// Walking into a grouped Downloads in a trail and pressing Details un-grouped
+    /// it, permanently.
     pub fn apply_view(&mut self, view: crate::views::View) -> bool {
-        if self.mode == crate::cells::Mode::Columns {
+        // A record cannot name columns, so a pane in them is one somebody put
+        // there: the layout is the pane's own, and only the grouping is the
+        // folder's to say.
+        let mode =
+            if self.mode == crate::cells::Mode::Columns { self.mode } else { view.layout.mode() };
+        if self.mode == mode && self.grouping == view.grouping {
             return false;
         }
-        if self.mode == view.layout.mode() && self.grouping == view.grouping {
-            return false;
-        }
-        self.mode = view.layout.mode();
+        self.mode = mode;
         self.grouping = view.grouping;
         true
     }
@@ -1477,15 +1483,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// And the filter does not follow you into the next directory: it narrows
-    /// *this* one, and arriving somewhere that silently hides most of what is
-    /// there is not a view, it is a trap.
-    /// **A pane walking a trail keeps its columns.** Every folder anybody has ever
-    /// set a view on remembers Details or Grid, so applying the record on arrival
-    /// took the pane out of column mode at the first such folder — which for one
-    /// person was Downloads, two steps in.
+    /// **A pane walking a trail keeps its columns and still takes the grouping.**
+    /// Every folder anybody has ever set a view on remembers Details or Grid, so
+    /// applying the layout on arrival took the pane out of column mode at the
+    /// first such folder — which for one person was Downloads, two steps in.
+    ///
+    /// The grouping is the other half and it goes the other way. Nothing on screen
+    /// shows it while a trail is drawn, which is why refusing it here was invisible
+    /// until the pane left columns carrying the wrong one.
     #[test]
-    fn a_pane_in_columns_declines_a_folders_remembered_view() {
+    fn a_pane_in_columns_declines_a_layout_and_takes_a_grouping() {
         let mut pane = Pane::new(PathBuf::from("/tmp"));
         let details = crate::views::View {
             layout: crate::views::Layout::Details,
@@ -1500,11 +1507,54 @@ mod tests {
         // put there. Once it is, walking through a folder is not arriving at one.
         pane.mode = crate::cells::Mode::Columns;
         pane.grouping = crate::groups::Grouping::None;
-        assert!(!pane.apply_view(details), "a trail was taken out of column mode");
-        assert_eq!(pane.mode, crate::cells::Mode::Columns);
-        assert_eq!(pane.grouping, crate::groups::Grouping::None, "nor regrouped");
+        assert!(pane.apply_view(details), "a trail did not take the folder's grouping");
+        assert_eq!(pane.mode, crate::cells::Mode::Columns, "a trail was taken out of columns");
+        assert_eq!(pane.grouping, crate::groups::Grouping::Time, "and it is not grouped");
+
+        // Which is now the whole of it: a second arrival at the same record moves
+        // nothing, so a trail is not redrawn once per folder it walks through.
+        assert!(!pane.apply_view(details), "the same record moved the pane twice");
     }
 
+    /// **The reported defect, as the sequence that produced it.** Downloads was a
+    /// grid grouped by time. Walking into it in a column view left the pane
+    /// carrying the grouping of wherever it had come from, and pressing Details
+    /// then wrote *that* over the one Downloads had chosen. It was gone for good,
+    /// and nothing in between had drawn a heading to say so.
+    ///
+    /// **Both halves are needed and this fails without either.** Refusing the
+    /// grouping on arrival leaves the pane with the wrong one to write; recording
+    /// `Layout::default()` for a pane in columns takes the grid away instead.
+    #[test]
+    fn a_trail_walking_through_a_folder_leaves_its_view_where_it_found_it() {
+        use crate::cells::Mode;
+        use crate::groups::Grouping;
+        use crate::views::{Layout, View, Views};
+
+        let downloads = Path::new("/home/emil/Downloads");
+        let chosen = View { layout: Layout::Grid, grouping: Grouping::Time };
+        let mut views = Views::default();
+        views.remember(downloads, chosen);
+
+        // A trail arrives, carrying the grouping of wherever it came from.
+        let mut pane = Pane::new(downloads.to_path_buf());
+        pane.mode = Mode::Columns;
+        pane.grouping = Grouping::None;
+        pane.apply_view(views.for_path(downloads));
+
+        // What the pane would record standing there, and after pressing Details.
+        assert_eq!(views.chosen(downloads, pane.mode, pane.grouping), chosen, "a trail wrote");
+        pane.mode = Mode::Details;
+        assert_eq!(
+            views.chosen(downloads, pane.mode, pane.grouping),
+            View { layout: Layout::Details, grouping: Grouping::Time },
+            "leaving columns un-grouped the folder"
+        );
+    }
+
+    /// The filter does not follow you into the next directory: it narrows *this*
+    /// one, and arriving somewhere that silently hides most of what is there is
+    /// not a view, it is a trap.
     #[test]
     fn navigating_clears_the_filter() {
         let root = fixture("filter-nav");

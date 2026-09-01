@@ -40,7 +40,8 @@ pub enum Grouping {
     /// One band, no headings.
     #[default]
     None,
-    /// Today, yesterday, this week, this month, this year, and older.
+    /// Today, yesterday, the previous week, the previous month, this year, and
+    /// older — see [`sk_ui::format::day_bands`], which decides where each begins.
     Time,
     /// Gigantic down to empty, with folders ahead of them.
     Size,
@@ -73,8 +74,8 @@ impl Grouping {
 
     /// The catalogue key for one of this grouping's bands, first band first.
     ///
-    /// A band with nothing in it is never drawn, which is what happens to
-    /// "earlier this week" on a Monday, to "in the future" almost always, and to
+    /// A band with nothing in it is never drawn, which is what happens to "in
+    /// the future" almost always, to "earlier this year" through January, and to
     /// six of the nine kinds in most folders.
     ///
     /// **Clamped, deliberately.** A byte past the end is the band for "anything
@@ -88,8 +89,8 @@ impl Grouping {
                 "band.future",
                 "band.today",
                 "band.yesterday",
-                "band.this_week",
-                "band.this_month",
+                "band.previous_7_days",
+                "band.previous_30_days",
                 "band.this_year",
                 "band.older",
             ],
@@ -662,7 +663,13 @@ mod tests {
             let mut seen: Vec<&str> = Vec::new();
             for band in 0..=u8::MAX {
                 let key = grouping.label(band);
-                assert!(!key.is_empty());
+                // **And it resolves.** These keys sit in an array rather than
+                // inside a `lookup(…)` call, which is the one shape
+                // `tools/check-invariants.py` cannot see — verified by putting a
+                // key that is in no catalogue here and watching it report `ok`.
+                // A missing key renders as itself, so a renamed band with no
+                // catalogue line would draw `band.previous_7_days` as a heading.
+                assert_ne!(sk_model::i18n::lookup(key), key, "{key} is not in the catalogue");
                 if !seen.contains(&key) {
                     seen.push(key);
                 }

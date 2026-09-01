@@ -137,20 +137,28 @@ pub const SIZE_EDGES: [i64; SIZE_BANDS - 2] =
 /// a timezone database, which is here because `localtime_r` is here.
 ///
 /// Six edges, seven bands: after tomorrow begins is *the future*, then today,
-/// yesterday, this week, this month, this year, and everything before that.
+/// yesterday, the seven days before that, the thirty days before that, the rest
+/// of this year, and everything older.
 ///
-/// **Non-increasing, forced.** On a Monday "this week" begins today, which is
-/// *after* yesterday — so the raw edges are not in order and the band between
-/// them would be a band that contains impossible times. Each edge is clamped to
-/// the one before it, which collapses that band to nothing and leaves Sunday's
-/// files in "earlier this month", where they belong.
+/// **Windows measured back from today, not calendar weeks and months.** The two
+/// middle edges were the start of the week and the start of the month, and both
+/// vanish exactly where they are needed. On Tuesday 1 September 2026 the week
+/// began on Monday — yesterday — and the month began that morning, so both bands
+/// were empty and a file two days old was drawn under *Earlier this year*, in
+/// among files from March. A window counted back from today has the same width
+/// on every day of every month, so no band it bounds can collapse.
 ///
-/// **A day is 86,400 seconds here, and twice a year it is not.** The edges for
-/// yesterday, the week, the month and the year are counted back in whole days
-/// from local midnight, so across a daylight-saving change one of them is an
-/// hour out and a file within that hour of the boundary is filed under the
-/// neighbouring heading. The alternative is civil-date arithmetic for an hour of
-/// error in a heading, twice a year.
+/// The last edge is still the calendar's, and it can still climb past the one
+/// above it: on 5 January the year began four days ago and thirty days ago was
+/// December. It is clamped like the rest, which empties "earlier this year" —
+/// and that emptiness is the true answer, because no part of that year is more
+/// than thirty days old.
+///
+/// **A day is 86,400 seconds here, and twice a year it is not.** Every edge is
+/// counted back in whole days from local midnight, so across a daylight-saving
+/// change one of them is an hour out and a file within that hour of the boundary
+/// is filed under the neighbouring heading. The alternative is civil-date
+/// arithmetic for an hour of error in a heading, twice a year.
 #[must_use]
 pub fn day_bands(now: i64) -> [i64; BANDS - 1] {
     const DAY: i64 = 86_400;
@@ -163,8 +171,8 @@ pub fn day_bands(now: i64) -> [i64; BANDS - 1] {
         midnight + DAY,
         midnight,
         midnight - DAY,
-        midnight - i64::from(parts.weekday) * DAY,
-        midnight - (i64::from(parts.day) - 1) * DAY,
+        midnight - 7 * DAY,
+        midnight - 30 * DAY,
         midnight - i64::from(parts.day_of_year) * DAY,
     ];
     for at in 1..edges.len() {
@@ -192,8 +200,6 @@ struct Parts {
     hour: u8,
     minute: u8,
     second: u8,
-    /// Days since Monday, so week arithmetic is a subtraction.
-    weekday: u8,
     day_of_year: u16,
 }
 
@@ -220,8 +226,6 @@ fn local(epoch_seconds: i64) -> Option<Parts> {
         minute: out.tm_min.clamp(0, 59) as u8,
         // A leap second is 60 and there is no band edge it could move.
         second: out.tm_sec.clamp(0, 60) as u8,
-        // `tm_wday` counts from Sunday; a week here starts on Monday.
-        weekday: ((out.tm_wday.clamp(0, 6) + 6) % 7) as u8,
         day_of_year: out.tm_yday.clamp(0, 365) as u16,
     })
 }
@@ -252,24 +256,60 @@ fn month_name(month: u8) -> &'static str {
 mod band_tests {
     use super::{BANDS, SIZE_BANDS, SIZE_EDGES, day_bands};
 
-    /// The edges run newest first and never climb, whatever day it is.
+    /// Fourteen months of hours, so no assertion below rests on today's date.
     ///
-    /// **Every day of the week, not today's.** The Monday case is the one that
-    /// breaks the ordering — "this week" begins after "yesterday" — and a test
-    /// run on a Wednesday would never see it.
-    #[test]
-    fn the_edges_never_climb_on_any_day_of_the_week() {
-        // A fortnight, hour by hour, which covers every weekday and both sides
-        // of a month boundary on most months this runs in.
+    /// Every weekday, every month boundary, both sides of a daylight-saving
+    /// change and both sides of a new year. The defect this file was rewritten
+    /// for was invisible on a Wednesday in the middle of a month.
+    fn every_hour_of_fourteen_months(mut check: impl FnMut(i64, [i64; BANDS - 1])) {
         let now = super::super::format::now_for_tests();
-        for hours in 0..(24 * 14) {
+        for hours in 0..(24 * 425) {
             let at = now - hours * 3_600;
-            let edges = day_bands(at);
+            check(at, day_bands(at));
+        }
+    }
+
+    /// The edges run newest first, and the five that bound a window never meet.
+    ///
+    /// **Two strengths, because only one edge is allowed to collapse.** The
+    /// windows are counted back from today and cannot close on each other; the
+    /// last edge is the start of the year and in January it climbs past thirty
+    /// days ago, where clamping empties "earlier this year" on purpose.
+    #[test]
+    fn the_edges_never_climb_and_only_the_year_may_collapse() {
+        every_hour_of_fourteen_months(|at, edges| {
             assert_eq!(edges.len(), BANDS - 1);
             for pair in edges.windows(2) {
                 assert!(pair[0] >= pair[1], "edges climb at {at}: {edges:?}");
             }
-        }
+            for pair in edges[..5].windows(2) {
+                assert!(pair[0] > pair[1], "a window closed at {at}: {edges:?}");
+            }
+        });
+    }
+
+    /// A file a few days old is never filed under a heading naming the year.
+    ///
+    /// **The reported defect, as an assertion.** On Tuesday 1 September 2026 the
+    /// calendar week had begun the day before and the calendar month that
+    /// morning, so "earlier this week" and "earlier this month" were both empty
+    /// and Sunday's downloads were drawn under *Earlier this year*, above files
+    /// from March.
+    ///
+    /// Asserted on offsets from `now` rather than on dates, which is what makes
+    /// it hold on every one of the fourteen months it runs over — and what a
+    /// daylight-saving change cannot move, because the edges are arithmetic on
+    /// the local midnight the offsets are measured from.
+    #[test]
+    fn a_file_a_few_days_old_lands_in_a_window_and_not_in_the_year() {
+        const DAY: i64 = 86_400;
+        every_hour_of_fourteen_months(|at, edges| {
+            let band_of = |when: i64| edges.iter().filter(|edge| when < **edge).count();
+            assert_eq!(band_of(at - 2 * DAY), 3, "two days old is not in the week at {at}");
+            assert_eq!(band_of(at - 6 * DAY), 3, "six days old is not in the week at {at}");
+            assert_eq!(band_of(at - 8 * DAY), 4, "eight days old is not in the month at {at}");
+            assert_eq!(band_of(at - 29 * DAY), 4, "a month old is not in the month at {at}");
+        });
     }
 
     /// Now falls in the band called today, and a second before midnight does not.

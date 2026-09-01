@@ -174,8 +174,10 @@ fn sample_row_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu>
 /// times are spread here rather than on disk: every other frame reads the same
 /// fixture, and a Modified column that moved would re-bless all of them.
 ///
-/// The edges come from the fixture rather than from the clock, so the frame means
-/// the same thing tomorrow.
+/// The edges are the product's, asked about the fixture's newest file rather than
+/// about now, so the frame means the same thing tomorrow: every offset below is a
+/// whole number of days from a local midnight, and which band each falls in is the
+/// same arithmetic on any day of any year.
 fn group_the_sample(
     pane: &mut Pane,
     grouping: crate::groups::Grouping,
@@ -197,21 +199,19 @@ fn group_the_sample(
         .map(|id| pane.listing.mtime(id))
         .max()
         .unwrap_or_default();
-    let spread = [0i64, -1, -2, -4];
+    // Four bands, and one day inside each: today, yesterday, and the two windows.
+    let spread = [0i64, -1, -3, -10];
     let ids: Vec<_> = (0..pane.listing.rows()).filter_map(|row| pane.listing.at(row)).collect();
     for (at, id) in ids.iter().enumerate() {
         let size = pane.listing.size(*id);
         let days = spread[at % spread.len()];
         pane.listing.set_meta(*id, size, base + days * DAY, sk_model::Flags::NONE);
     }
-    // Four bands: today, yesterday, earlier this week, earlier this month.
-    pane.sort.bands = sk_model::Banding::Time(sk_model::Cuts::new(&[
-        base + DAY,
-        base,
-        base - DAY,
-        base - 2 * DAY,
-        base - 7 * DAY,
-    ]));
+    // **The product's own edges, asked about the fixture's newest file.** Cutting
+    // them here by hand drew four headings too, and never called `day_bands` — so
+    // the frame agreed with this function rather than with the program, and three
+    // of them recorded a heading that named the wrong window as correct.
+    pane.sort.bands = grouping.banding(base);
     pane.resort_now(None);
 }
 

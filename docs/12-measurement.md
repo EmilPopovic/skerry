@@ -1707,3 +1707,78 @@ not exist, holding a defect that cannot be seen.
 
 `no-listing` and `no-listing-columns` are two of those sentences. The remaining
 ones are worth writing down when somebody next reaches for this file.
+
+## A reference the test computed itself agrees with the test
+
+A folder grouped by time drew **Earlier this year** over a file from two days
+ago, in among files from March. Everything was green: two unit tests over the band
+edges, three golden frames of the grouped view, forty-two frames in total.
+
+The near bands were the calendar's — "earlier this week" from Monday, "earlier
+this month" from the first. On Tuesday 1 September 2026 the week had begun the day
+before and the month that morning, so both were empty by construction and the
+first heading with room in it was the year's. That is not a rare alignment: the
+week's band is empty every Monday and holds one day every Tuesday, and the month's
+is empty on every first. **The taxonomy was thinnest exactly where a file was
+newest.**
+
+The unit test asserted that the edges never climb. That is the *clamp* — the line
+that collapses the band — so the test asserted the collapse happened cleanly. It
+could not have failed.
+
+The frames are the interesting half. `grouped`, `grouped-grid` and `grouped-200`
+each drew four headings over four days of files, at two scales and in two
+geometries. They were rendered from edges the capture wrote by hand:
+
+```
+Cuts::new(&[base + DAY, base, base - DAY, base - 2 * DAY, base - 7 * DAY])
+```
+
+Four edges, four bands, four headings, all present and correctly spaced — and
+`day_bands`, the function that decides where a band begins in the product, is not
+called anywhere in that frame. The capture had computed the answer itself, so the
+frame agreed with the capture rather than with the program, whatever the program
+said. The fiction only became visible when the headings were renamed to name their
+windows: the fourth band held a file four days old, under *Previous 30 days*.
+
+The capture asks the product now — `grouping.banding(base)`, the real edges taken
+about the fixture's newest file rather than about the clock. It is still
+reproducible tomorrow, because every mtime in the fixture is a whole number of
+days from one local midnight and which band each falls in is the same arithmetic
+on any day of any year. The frames changed when it landed, which is the whole
+point: they had been asserting the wrong thing at ΔE 0.
+
+**So: a reference has to come from the thing under test or from outside the
+project, never from a second implementation written next to it.** This file
+already says a byte-for-byte comparison is not a correctness test and that an
+assertion between two derived numbers can pass while both are wrong. This is the
+version with a picture attached, and pictures are the ones that feel like
+evidence.
+
+And the assertion that does catch it is about meaning rather than mechanism: *a
+file two days old is in the week's window, and one eight days old is in the
+month's* — written as offsets from `now` rather than as dates, so it holds on every
+one of the fourteen months of hours it runs over. Against the calendar edges it
+fails on the first iteration, naming today's timestamp.
+
+## A gate that matches a syntax cannot see a table
+
+Every user-visible string goes through the catalogue, and
+`tools/check-invariants.py` proves the key exists by matching
+`lookup("some.key")` in the source. Renaming two band headings and forgetting the
+catalogue passes every gate — put a key that is in no catalogue into
+`Grouping::label` and `check-invariants.py` reports `ok`, which is how this was
+confirmed rather than assumed. `label` does not call `lookup`: it holds
+twenty-nine keys in four arrays and hands one back, and the call is somewhere else
+entirely, with a variable in it.
+
+A missing key renders as itself, so this would have shipped a heading reading
+`band.previous_7_days`. The gate is not wrong; it covers the call sites written in
+the shape it matches, which is most of them. **A table of the same strings is
+invisible to it, and a table is where the strings collect once there are more than
+three.**
+
+The cheap repair is a unit test where the table is: every label of every grouping,
+asserted to resolve to something other than itself. It is one assertion inside a
+loop that already existed, it fails loudly on a rename, and it lives beside the
+array rather than in a Python script that would have to learn Rust to find it.

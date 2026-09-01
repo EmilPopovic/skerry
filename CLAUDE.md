@@ -6,8 +6,8 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 618
-tests, 107 GUI scenarios **on both Wayland and X11**, forty-two golden frames, every
+**M0, in progress, and something you can use for a day.** Eleven crates, 621
+tests, 108 GUI scenarios **on both Wayland and X11**, forty-two golden frames, every
 gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
@@ -49,7 +49,8 @@ path decomposed);
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —
-today and yesterday, gigantic down to empty, or images and archives and code —
+today, yesterday and the seven days before that, gigantic down to empty, or images
+and archives and code —
 orthogonally to either, with each band sorted on its own
 because the band is a prefix byte ahead of the sort's column, **remembered per
 folder** with the nearest ancestor inherited, so Downloads can be a grouped list

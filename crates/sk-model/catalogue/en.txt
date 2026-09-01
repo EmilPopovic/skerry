@@ -266,8 +266,8 @@ action.columns_reset = Reset column widths
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday
-band.this_week = Earlier this week
-band.this_month = Earlier this month
+band.previous_7_days = Previous 7 days
+band.previous_30_days = Previous 30 days
 band.this_year = Earlier this year
 band.older = Older
 # The size bands, largest first. A folder's size is a recursive total that may

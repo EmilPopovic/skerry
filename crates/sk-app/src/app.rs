@@ -4718,17 +4718,24 @@ search_active={active:?}",
         }
     }
 
-    /// Records the focused pane's layout against the folder it is showing.
+    /// Records the focused pane's view against the folder it is showing.
+    ///
+    /// **A pane in columns records its grouping and no layout.** It is showing a
+    /// path, so it has said nothing about the folder it happens to be standing in
+    /// — and a record naming columns would be inherited by every directory beneath
+    /// that one, which is how switching a single destination back to a details
+    /// list put a whole subtree into columns. The grouping is not that: it is
+    /// about the folder's contents, and somebody in a trail who groups by time
+    /// means it.
+    ///
+    /// So the layout half is left at whatever the folder already answers — its own
+    /// record or an ancestor's — and only the grouping moves. Writing
+    /// `Layout::default()` instead would look identical on the folder that was
+    /// chosen for and quietly un-grid every album under a `~/Pictures` that is one.
     fn remember_view(&mut self) {
         let pane = self.panes.focused();
-        // **A pane in columns records nothing.** It is showing a path, and the
-        // folder it happens to be standing in has not been said anything about —
-        // where a record saying so would be inherited by every directory beneath
-        // it, which is how switching one destination back to a details list put a
-        // whole subtree into columns.
-        let Some(layout) = crate::views::Layout::of(pane.mode) else { return };
-        let view = crate::views::View { layout, grouping: pane.grouping };
-        let path = pane.path.clone();
+        let (mode, grouping, path) = (pane.mode, pane.grouping, pane.path.clone());
+        let view = self.views.chosen(&path, mode, grouping);
         if !self.views.remember(&path, view) {
             return;
         }
