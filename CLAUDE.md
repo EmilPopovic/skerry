@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 689 tests, 115 GUI scenarios **on both Wayland and X11**,
-fifty-four golden frames, every gate green: a Details view
+sandboxed helpers, 697 tests, 116 GUI scenarios **on both Wayland and X11**,
+fifty-five golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
@@ -75,7 +75,10 @@ written to expect — drawn as runs carrying a tone so a highlighter replaces on
 function and nothing else, where **`←`/`→` walk the files and `↑`/`↓` the pages**
 ([ADR 0019](docs/adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md):
 a request names a page and the child holds nothing, because page 400 of 1200 costs
-what page 1 costs);
+what page 1 costs) — and the **two pages ahead are already on the GPU**, a few
+whole textures bounded by 24 MiB rather than by a count
+([ADR 0020](docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md)),
+so a turn onto one is a field assignment;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and

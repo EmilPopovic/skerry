@@ -220,6 +220,17 @@ pub(crate) enum Item {
         rect: Rect,
         alpha: Color,
     },
+    /// A thumbnail standing in for a picture that is still being fetched.
+    ///
+    /// **The same texture as [`Self::Image`] and the opposite scaling rule.** An
+    /// image in a row is never enlarged, because a 16-pixel icon blown up to a
+    /// cell is a worse icon; a thumbnail standing in for a preview is *always*
+    /// enlarged, because it has to land where the picture it precedes will be.
+    Standby {
+        key: crate::images::ImageKey,
+        rect: Rect,
+        alpha: Color,
+    },
 }
 
 /// A run of items sharing one scissor rectangle.
@@ -271,7 +282,9 @@ impl DrawList {
     pub fn glyphs(&self) -> impl Iterator<Item = (GlyphKey, f32, f32)> + '_ {
         self.items.iter().filter_map(|item| match item {
             Item::Glyph { key, x, y, .. } => Some((*key, *x, *y)),
-            Item::Quad(_) | Item::Image { .. } | Item::Preview { .. } => None,
+            Item::Quad(_) | Item::Image { .. } | Item::Preview { .. } | Item::Standby { .. } => {
+                None
+            }
         })
     }
 
@@ -382,6 +395,35 @@ impl DrawList {
             return;
         }
         self.items.push(Item::Preview { key, rect, alpha });
+    }
+
+    /// A thumbnail filling `rect`, standing in for the picture that will replace it.
+    pub fn standby(&mut self, key: crate::images::ImageKey, rect: Rect, alpha: Color) {
+        if rect.is_empty() || alpha.is_invisible() {
+            return;
+        }
+        self.items.push(Item::Standby { key, rect, alpha });
+    }
+
+    /// Which preview this frame draws, if it draws one.
+    ///
+    /// **The first, and a frame draws at most one.** A panel shows one page, so
+    /// the renderer binds this and rebuilds the bind group only when it changes;
+    /// a frame naming two would draw whichever got bound, which the assertion
+    /// below is there to catch rather than to tolerate.
+    #[must_use]
+    pub fn first_preview(&self) -> Option<crate::images::ImageKey> {
+        let mut found: Option<crate::images::ImageKey> = None;
+        for item in &self.items {
+            if let Item::Preview { key, .. } = item {
+                debug_assert!(
+                    found.is_none_or(|first| first == *key),
+                    "a frame named two different previews, and one of them would not draw"
+                );
+                found = Some(*key);
+            }
+        }
+        found
     }
 
     /// Closes the last group. Called by the renderer before submitting, so a

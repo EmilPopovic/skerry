@@ -154,6 +154,7 @@ fn sample_quick_look(
     // in the round *after* asking for the full size, so every document frame was
     // blessed on the third-size draft.
     let mut served = None;
+    let mut minted = u64::MAX;
     while std::time::Instant::now() < deadline {
         if look.wants(within) {
             let shot = look.shot(within);
@@ -165,6 +166,7 @@ fn sample_quick_look(
                 mtime,
                 within: shot.within,
                 page: shot.page,
+                ahead: false,
             });
         } else if look.image.is_some() && served == look.asked {
             break;
@@ -178,12 +180,17 @@ fn sample_quick_look(
                 look.pages = answer.pages;
             }
             if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
-                // A fixed key, because a capture draws exactly one preview and
-                // has no `Thumbs` counter to mint from — and the top of the range
-                // is the one number a thumbnail's counter cannot reach.
-                let key = sk_gpu::ImageKey(u64::MAX);
+                // **A key per answer, counting down from the top of the
+                // range.** It was one fixed key, on the grounds that a capture
+                // draws exactly one preview — which stopped being true when a
+                // document began arriving as a draft and then a full render:
+                // the second `hold` was refused as a key already held, and the
+                // frame was blessed on the draft, upscaled and soft. Counting
+                // down keeps these clear of `Thumbs`, which counts up.
+                minted -= 1;
+                let key = sk_gpu::ImageKey(minted);
                 session.renderer.hold_preview(key, answer.size, &answer.pixels);
-                look.took(key, answer.size);
+                look.took(key, answer.size, answer.key.page);
                 served = Some(crate::quicklook::Shot {
                     within: answer.key.within,
                     page: answer.key.page,
@@ -1167,7 +1174,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) {
     eprintln!(
         "skerry: wrote {} — {}×{} at {}%, {} entries, {} quads, {} draws, {} glyphs, \
-{} thumbnails",
+{} thumbnails, {} pages holding {} KiB",
         request.file.display(),
         session.physical.0,
         session.physical.1,
@@ -1180,6 +1187,8 @@ fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) 
         // fallback marks** — and blessing one of those as if it showed the feature
         // is exactly the mistake docs/12 keeps recording.
         session.renderer.image_stats().0,
+        session.renderer.preview_stats().0,
+        session.renderer.preview_stats().1 / 1024,
     );
     for path in session.fonts.paths() {
         eprintln!("skerry: face {}", path.display());

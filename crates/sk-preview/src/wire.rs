@@ -93,6 +93,15 @@ pub enum Refusal {
     NoRenderer = 4,
     /// It would need more memory than the child is allowed.
     TooLarge = 5,
+    /// The helper stopped, or the pipe broke, before it answered.
+    ///
+    /// **Not the file's fault and not silence either.** A child that dies
+    /// mid-request used to leave the host with nothing at all — no pixels, no
+    /// reason — and a panel that had already recorded what it asked for would
+    /// never ask again: blank, with a title and a page number, until the window
+    /// was resized. Rule 7 says what is in force, and "the helper did not answer"
+    /// is a thing that is in force.
+    Interrupted = 7,
     /// The document has no such page.
     ///
     /// **Not a message**, because the only way to ask for one is to press `↓` on
@@ -113,6 +122,7 @@ impl Refusal {
             4 => Self::NoRenderer,
             5 => Self::TooLarge,
             6 => Self::NoSuchPage,
+            7 => Self::Interrupted,
             _ => Self::Undecodable,
         }
     }
@@ -128,6 +138,7 @@ impl Refusal {
             Self::Unreadable => Some("preview.unreadable"),
             Self::Undecodable => Some("preview.undecodable"),
             Self::NoRenderer => Some("preview.no_renderer"),
+            Self::Interrupted => Some("preview.interrupted"),
             Self::TooLarge => Some("preview.too_large"),
         }
     }

@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates and two sandboxed helpers, 689 tests, 115 GUI scenarios on two display servers and fifty-four golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates and two sandboxed helpers, 697 tests, 116 GUI scenarios on two display servers and fifty-five golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -376,8 +376,26 @@ context menu.
 changes that came out of one measurement — the thumbnail already on the GPU stands
 in for a picture (**0 ms**, was 67–155), a page is drafted at a third size first
 (**61–76 ms**, was 135–200), and a preview no longer queues behind a grid's
-thumbnails (**480 ms** worst case, was 1.9 s). The numbers and the method are in
+thumbnails (**480 ms** worst case, was 1.9 s). A stand-in is drawn where its
+replacement will be, to within a logical pixel, so nothing moves when it arrives.
+The numbers and the method are in
 [12-measurement.md](12-measurement.md#where-a-previews-latency-actually-was-and-where-it-looked-like-it-was).
+
+**And a panel that shows nothing says why.** Two states could leave an open
+preview blank for ever — a page the renderer had evicted but the host still
+believed in, and a helper that died without pushing an answer — and three refusals
+deliberately have no sentence because they decide whether the panel *opens*. All
+of them are legible now, with a golden frame of the catch-all; the reasoning is in
+[12-measurement.md](12-measurement.md#two-ways-to-be-blank-and-neither-of-them-said-anything).
+
+**A page turn is free where it has been guessed.**
+[ADR 0020](adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md) supersedes
+0018's "a preview is one texture": it is a few of them, keyed by what they are of,
+**bounded by 24 MiB rather than by a count** — because a page of A4 is 4 MB at a
+1200-pixel panel and 11.5 MB at 4K, so a count would be a memory figure that
+depends on the monitor. The two pages after the one on screen are rendered before
+anybody asks for them, one request at a time and never ahead of something a person
+pressed.
 
 **The product's dependency count did not move**, which is ADR 0006's whole
 argument: a helper is a separate binary and `tools/dep-budget.py` measures the

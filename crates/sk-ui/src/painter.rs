@@ -462,6 +462,14 @@ impl Painter<'_> {
         self.list.image(key, box_rect, tint);
     }
 
+    /// A thumbnail standing in for a picture, filling `box_rect` exactly.
+    ///
+    /// Unlike [`Self::image`], which never enlarges: a stand-in has to land where
+    /// the picture it precedes will land, or the panel jumps when it arrives.
+    pub fn standby(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
+        self.list.standby(key, box_rect, tint);
+    }
+
     /// The one preview picture, filling `box_rect` exactly.
     ///
     /// The caller has already fitted it: a preview is rendered at the size it will

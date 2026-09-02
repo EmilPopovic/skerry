@@ -1248,6 +1248,7 @@ impl App {
             }
             self.drain_edits();
             self.drain_previews();
+            self.drain_the_look_text();
             if self.sidebar.drain() {
                 self.dirty = true;
             }
@@ -5006,8 +5007,8 @@ search_active={active:?}",
         // opens and one that appears sixty milliseconds later.
         if shows == crate::previews::Shows::Picture {
             let (_, image) = self.thumbs.name(&path, mtime);
-            if self.renderer.holds_image(image) {
-                look.standby = Some(image);
+            if let Some(size) = self.renderer.image_size(image) {
+                look.standby = Some((image, size));
             }
         }
         self.quick_look = Some(look);
@@ -5090,16 +5091,36 @@ search_active={active:?}",
 
     /// Keeps the quick look fed: asks for its picture, takes delivery of its text.
     fn settle_quick_look(&mut self) {
-        let within = self.quick_look_box();
-        let Some(look) = &mut self.quick_look else { return };
-        if look.drain() {
-            self.dirty = true;
-        }
-        if !look.wants(within) {
+        // **One place that sees the panel gone, whatever closed it.** `Escape`,
+        // `Space`, a click away and a walk to another file all put it away, and a
+        // renderer still holding twenty-four megabytes of pages for a document
+        // nobody is looking at is the shape of leak that only shows up as an RSS
+        // number nobody can explain.
+        if self.quick_look.is_none() {
+            self.renderer.forget_previews();
             return;
         }
-        let shot = look.shot(within);
-        look.asked = Some(shot);
+        let within = self.quick_look_box();
+        // **The one place that can see both stores.** The renderer's budget and
+        // this map are bounded separately, and only the renderer knows what it
+        // dropped — so what it has is asked here, before anything is shown from a
+        // key it may no longer hold.
+        let renderer = &self.renderer;
+        let Some(look) = &mut self.quick_look else { return };
+        look.retain_held(|key| renderer.preview_size(key).is_some());
+        // A page already on the GPU is a turn with no wait at all — ADR 0020.
+        if look.show_held(within) {
+            self.dirty = true;
+        }
+        let owed = look.wants(within).then(|| {
+            let shot = look.shot(within);
+            look.asked = Some(shot);
+            shot
+        });
+        let guess = look.next_ahead();
+        if let Some(page) = guess {
+            look.ahead = Some(page);
+        }
         let (kind, path, mtime) = (look.shows, look.path.clone(), look.mtime);
         let helper = match kind {
             crate::previews::Shows::Picture => sk_preview::Kind::Image,
@@ -5111,14 +5132,31 @@ search_active={active:?}",
         // answer that can never match: the draft went out at full size, came back
         // keyed to full size, and was dropped against a coarse `asked` — a panel
         // that waited for ever, which is what the arrows scenario caught.
-        self.previews.want(sk_preview::Want {
-            kind: helper,
-            ask: sk_preview::Ask::Preview,
-            path,
-            mtime,
-            within: shot.within,
-            page: shot.page,
-        });
+        if let Some(shot) = owed {
+            self.previews.want(sk_preview::Want {
+                kind: helper,
+                ask: sk_preview::Ask::Preview,
+                path: path.clone(),
+                mtime,
+                within: shot.within,
+                page: shot.page,
+                ahead: false,
+            });
+        }
+        // The guess goes at the full size, because it is the one that will be
+        // shown: a draft of a page nobody has turned to yet would be a render
+        // spent on a picture that is replaced before it is seen.
+        if let Some(page) = guess {
+            self.previews.want(sk_preview::Want {
+                kind: helper,
+                ask: sk_preview::Ask::Preview,
+                path,
+                mtime,
+                within,
+                page,
+                ahead: true,
+            });
+        }
     }
 
     /// Asks for the thumbnails of what is on screen, and forgets the rest.
@@ -5176,6 +5214,22 @@ search_active={active:?}",
         }
     }
 
+    /// Takes delivery of a text preview's read.
+    ///
+    /// **In the loop, not in the frame**, which is the whole of the bug it fixes.
+    /// It used to be the first line of `settle_quick_look`, and that runs from
+    /// `before_frame`, and *that* runs only when something is already dirty — so
+    /// the job finished, woke the loop, and found nothing that would draw: the
+    /// text sat in the channel until an unrelated event marked the window dirty
+    /// for its own reasons. The same shape as the preview pump one layer along,
+    /// and the same rule: **a drain belongs beside the other drains**, where the
+    /// wake-up lands, not inside the frame the drain is supposed to cause.
+    fn drain_the_look_text(&mut self) {
+        if self.quick_look.as_mut().is_some_and(crate::quicklook::QuickLook::drain) {
+            self.dirty = true;
+        }
+    }
+
     /// Puts finished thumbnails into the atlas.
     fn drain_previews(&mut self) {
         let answers = self.previews.drain();
@@ -5200,7 +5254,7 @@ search_active={active:?}",
                 } else if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
                     let key = self.thumbs.name_preview();
                     self.renderer.hold_preview(key, answer.size, &answer.pixels);
-                    look.took(key, answer.size);
+                    look.took(key, answer.size, answer.key.page);
                 } else {
                     look.refusal = Some(answer.refusal);
                 }
@@ -5644,6 +5698,9 @@ search_active={active:?}",
                     format!("{}:{}-{}:{}", from.line, from.byte, to.line, to.byte)
                 },
             );
+        // How many pages are rendered and on the GPU, which is what says the
+        // prefetch ran: one is the page on screen alone — ADR 0020.
+        let look_held = self.quick_look.as_ref().map_or(0, |look| look.held.len());
         let look_page = self.quick_look.as_ref().map_or_else(
             || "none".to_owned(),
             |look| {
@@ -5661,6 +5718,7 @@ search_active={active:?}",
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
 looking={looking} look_page={look_page} look_aim={look_aim:?} \
+look_held={look_held} \
 look_chosen={look_chosen} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),

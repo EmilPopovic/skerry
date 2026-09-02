@@ -134,7 +134,15 @@ pub(crate) const THUMBNAIL: (u32, u32) = (sk_gpu::THUMBNAIL_SLOT, sk_gpu::THUMBN
 
 /// A want for one file's thumbnail.
 pub(crate) fn thumbnail(path: PathBuf, mtime: i64) -> Want {
-    Want { kind: Kind::Image, ask: Ask::Thumbnail, path, mtime, within: THUMBNAIL, page: 0 }
+    Want {
+        kind: Kind::Image,
+        ask: Ask::Thumbnail,
+        path,
+        mtime,
+        within: THUMBNAIL,
+        page: 0,
+        ahead: false,
+    }
 }
 
 #[cfg(test)]

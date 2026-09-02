@@ -113,6 +113,12 @@ impl Images {
     /// path and stamps the frame that eviction sorts on; a caller deciding whether
     /// to *fetch* something must not make it look more recently used than it is,
     /// or the least-recently-drawn entry would be whatever nobody asked about.
+    /// The size held under `key`, without marking it as drawn either.
+    #[must_use]
+    pub fn size_of(&self, key: ImageKey) -> Option<(u32, u32)> {
+        self.entries.get(&key).map(|slot| (slot.width, slot.height))
+    }
+
     #[must_use]
     pub fn holds(&self, key: ImageKey) -> bool {
         self.entries.contains_key(&key)
@@ -236,38 +242,147 @@ impl Images {
 /// module exists to avoid; a texture of its own is neither.
 #[derive(Default)]
 pub struct Preview {
-    /// The key the current picture answers to, so a stale reply draws nothing.
-    key: Option<ImageKey>,
-    size: (u32, u32),
-    pending: Option<Vec<u8>>,
+    /// What is held, oldest-drawn first is not guaranteed — `frame` decides.
+    held: Vec<Kept>,
+    /// Pixels waiting for the queue, in arrival order.
+    pending: Vec<(ImageKey, (u32, u32), Vec<u8>)>,
+    /// Which key the renderer's bind group currently points at.
+    bound: Option<ImageKey>,
+    frame: u64,
 }
 
+/// One held picture: what it is of, how big, and when it was last drawn.
+struct Kept {
+    key: ImageKey,
+    size: (u32, u32),
+    /// The frame this was last drawn in, which is what eviction sorts on.
+    frame: u64,
+}
+
+impl Kept {
+    /// What it costs, in bytes of RGBA.
+    fn bytes(&self) -> usize {
+        self.size.0 as usize * self.size.1 as usize * 4
+    }
+}
+
+/// The most bytes of preview held at once.
+///
+/// **Twenty-four mebibytes, and a byte budget rather than a count** — [ADR
+/// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
+/// A page of A4 at a 1200-pixel panel is 4.07 MB and the same page on a 4K panel
+/// is 11.5 MB, so a count would be sixteen megabytes on one machine and
+/// forty-six on another. This is the same promise everywhere and holds fewer
+/// pages where each is dearer.
+const MOST_HELD_BYTES: usize = 24 * 1024 * 1024;
+
 impl Preview {
-    /// Replaces whatever was there. The next `flush` allocates and uploads.
+    /// Takes a picture. The next `flush` allocates a texture and uploads it.
+    ///
+    /// **The size is recorded now and the pixels later**, which is not tidiness:
+    /// the quads for a frame are resolved *before* the frame's uploads run, and
+    /// resolving asks `size_of`. Registering only on upload meant the frame a page
+    /// arrived on drew nothing at all, then the next one drew it — a page that
+    /// appeared one frame late, every time.
     pub fn hold(&mut self, key: ImageKey, size: (u32, u32), pixels: &[u8]) {
         if size.0 == 0 || size.1 == 0 || pixels.len() != (size.0 as usize * size.1 as usize * 4) {
             return;
         }
-        self.key = Some(key);
-        self.size = size;
-        self.pending = Some(pixels.to_vec());
+        if self.held.iter().any(|kept| kept.key == key) {
+            return;
+        }
+        self.held.push(Kept { key, size, frame: self.frame });
+        self.pending.push((key, size, pixels.to_vec()));
     }
 
-    /// The size held under `key`, if that is what is held.
+    /// The size held under `key`, if it is held.
     #[must_use]
     pub fn size_of(&self, key: ImageKey) -> Option<(u32, u32)> {
-        (self.key == Some(key)).then_some(self.size)
+        self.held.iter().find(|kept| kept.key == key).map(|kept| kept.size)
     }
 
-    /// Whether a new picture is waiting for the queue.
+    /// Whether anything is waiting for the queue.
     #[must_use]
     pub fn owes_upload(&self) -> bool {
-        self.pending.is_some()
+        !self.pending.is_empty()
     }
 
-    /// The pixels waiting, and the size to make a texture for.
-    pub fn take(&mut self) -> Option<(Vec<u8>, (u32, u32))> {
-        Some((self.pending.take()?, self.size))
+    /// The next picture waiting, and what to make a texture for.
+    pub fn take(&mut self) -> Option<(ImageKey, (u32, u32), Vec<u8>)> {
+        self.pending.pop()
+    }
+
+    /// Marks `key` as drawn this frame, so eviction leaves it alone.
+    pub fn drawn(&mut self, key: ImageKey) {
+        let frame = self.frame;
+        if let Some(kept) = self.held.iter_mut().find(|kept| kept.key == key) {
+            kept.frame = frame;
+        }
+    }
+
+    /// Advances the frame counter. Called once per frame by the renderer.
+    pub fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// Which key the bind group points at, and whether it has to be repointed.
+    #[must_use]
+    pub fn is_bound(&self, key: ImageKey) -> bool {
+        self.bound == Some(key)
+    }
+
+    /// Which key the bind group points at.
+    #[must_use]
+    pub fn bound(&self) -> Option<ImageKey> {
+        self.bound
+    }
+
+    /// Records that the bind group now points at `key`.
+    pub fn bound_to(&mut self, key: Option<ImageKey>) {
+        self.bound = key;
+    }
+
+    /// The keys to drop so the budget holds, least recently drawn first.
+    ///
+    /// **Never this frame's**, which is the atlas's rule applied to a second
+    /// store: a full store degrades to a page that has to be rendered again, and
+    /// never to the wrong page on screen.
+    pub fn over_budget(&mut self) -> Vec<ImageKey> {
+        let mut total: usize = self.held.iter().map(Kept::bytes).sum();
+        let mut dropped = Vec::new();
+        while total > MOST_HELD_BYTES && self.held.len() > 1 {
+            let current = self.frame;
+            let Some(at) = self
+                .held
+                .iter()
+                .enumerate()
+                .filter(|(_, kept)| kept.frame != current)
+                .min_by_key(|(_, kept)| kept.frame)
+                .map(|(at, _)| at)
+            else {
+                break;
+            };
+            total -= self.held[at].bytes();
+            let gone = self.held.remove(at);
+            if self.bound == Some(gone.key) {
+                self.bound = None;
+            }
+            dropped.push(gone.key);
+        }
+        dropped
+    }
+
+    /// Forgets everything. For a panel that has closed.
+    pub fn forget_all(&mut self) -> Vec<ImageKey> {
+        self.pending.clear();
+        self.bound = None;
+        self.held.drain(..).map(|kept| kept.key).collect()
+    }
+
+    /// How many pictures are held and how many bytes they are, for a diagnostic.
+    #[must_use]
+    pub fn stats(&self) -> (usize, usize) {
+        (self.held.len(), self.held.iter().map(Kept::bytes).sum())
     }
 }
 

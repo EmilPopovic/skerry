@@ -35,6 +35,14 @@ use crate::previews::Shows;
 /// same reason.
 const TEXT_LIMIT: usize = 256 * 1024;
 
+/// How many pages are rendered before they are asked for.
+///
+/// **Two** — [ADR
+/// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
+/// It is the figure that fits the byte budget beside the page on screen on a 4K
+/// panel, where one page is 11.5 MB of the 24 MiB allowed.
+const AHEAD: u32 = 2;
+
 /// The most lines held. Beyond this a file is longer than the panel can show and
 /// the rest is what an editor is for.
 const LINES: usize = 400;
@@ -190,9 +198,20 @@ pub(crate) struct QuickLook {
     /// quad and turns a 60–155 ms wait into no wait at all. Pictures only: a
     /// document has no thumbnail, by ADR 0018, because a page costs a process.
     ///
-    /// A key and no size, because the atlas knows the size and the drawing fits
-    /// the slot inside whatever rectangle it is given.
-    pub(crate) standby: Option<ImageKey>,
+    /// A key and the thumbnail's own size, which is the picture's aspect — that
+    /// is what places the stand-in where its replacement will go.
+    pub(crate) standby: Option<(ImageKey, (u32, u32))>,
+    /// The pages already rendered and on the GPU, by page number.
+    ///
+    /// **What makes a turn instant** — [ADR
+    /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
+    /// The renderer holds a texture each, bounded by bytes and evicted by what was
+    /// last drawn; this is the host's half of that, which is the page number a key
+    /// stands for. An entry here whose texture has been evicted resolves to
+    /// nothing and is rendered again, which is the right degradation.
+    pub(crate) held: std::collections::HashMap<u32, (ImageKey, (u32, u32))>,
+    /// The page being fetched ahead of being wanted, if any.
+    pub(crate) ahead: Option<u32>,
     /// Whether the next ask is the quick coarse one rather than the full size.
     ///
     /// **Documents only.** A page's cost is proportional to what is drawn —
@@ -229,6 +248,8 @@ impl QuickLook {
             shows,
             image: None,
             standby: None,
+            held: std::collections::HashMap::new(),
+            ahead: None,
             coarse: shows == Shows::Page,
             text: None,
             refusal: None,
@@ -293,15 +314,20 @@ impl QuickLook {
         Shot { within, page: self.page }
     }
 
-    /// Whether this look answers to `key` — the file, when it changed, the box
-    /// it was asked at and the page.
+    /// Whether this look answers to `key` — the file, when it changed, and the
+    /// box it is currently asking at.
     ///
-    /// **All four, because a reply can be stale in four ways.** Two `↓` presses
-    /// put two requests in one batch, and a page-3 reply arriving after the panel
-    /// has moved to page 4 must not be drawn as page 4.
+    /// **The page is deliberately not part of it**, and it was: a reply for a page
+    /// other than the one on screen is not stale, it is the *prefetch* — ADR 0020
+    /// — and matching on the page dropped every one of them, silently, leaving
+    /// `look_held` at one for ever. Which page a reply is of is
+    /// [`Self::took`]'s business, and that is where "a page-3 reply must not be
+    /// drawn as page 4" lives.
+    ///
+    /// The box still is part of it, and that is what makes a *draft* reply stale
+    /// once the full size has been asked for.
     pub(crate) fn answers_to(&self, key: &sk_preview::Key) -> bool {
-        self.is_of(&key.path, key.mtime)
-            && self.asked == Some(Shot { within: key.within, page: key.page })
+        self.is_of(&key.path, key.mtime) && self.asked.is_some_and(|shot| shot.within == key.within)
     }
 
     /// Turns `delta` pages, and says whether the page moved.
@@ -332,12 +358,67 @@ impl QuickLook {
     /// too soft to read the words of, so the full size is asked for as soon as the
     /// draft is on screen — and the draft stays up until it arrives, because a
     /// panel that blanked between the two would be worse than one that waited.
-    pub(crate) fn took(&mut self, key: ImageKey, size: (u32, u32)) {
+    pub(crate) fn took(&mut self, key: ImageKey, size: (u32, u32), page: u32) {
+        // **A draft is not remembered.** Only the full render goes in `held`, or a
+        // turn back to a page would show the third-size version of it for ever.
+        if !self.coarse && self.shows == Shows::Page {
+            self.held.insert(page, (key, size));
+        }
+        if page == self.page {
+            self.image = Some((key, size));
+            // The stand-in has done its job and must stop being drawn under a
+            // picture with transparency in it.
+            self.standby = None;
+            self.coarse = false;
+        }
+    }
+
+    /// Drops pages whose textures the renderer no longer has.
+    ///
+    /// **Because the two stores are bounded separately and only one of them
+    /// knows.** The renderer holds 24 MiB of pages and evicts by what was last
+    /// drawn — [ADR
+    /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md)
+    /// — and at a large panel a page is 11.9 MB, so opening a document evicts a
+    /// prefetch almost at once. This map kept the key anyway, `show_held` handed
+    /// it out, and the drawing emitted no quad for a key the atlas has never heard
+    /// of: **a blank panel with a title and a page number, for ever**, and
+    /// `wants` false because the shot matched. ADR 0020 says an evicted page "is
+    /// rendered again, which is the right degradation" — this is the line that
+    /// makes that true rather than aspirational.
+    pub(crate) fn retain_held(&mut self, still_there: impl Fn(ImageKey) -> bool) {
+        self.held.retain(|_, (key, _)| still_there(*key));
+        if self.image.is_some_and(|(key, _)| !still_there(key)) {
+            self.image = None;
+            self.asked = None;
+        }
+    }
+
+    /// Shows a page that is already on the GPU. Whether there was one.
+    ///
+    /// **The whole of what the prefetch buys.** A turn to a held page is a field
+    /// assignment and a frame, with no child, no render and no wait.
+    pub(crate) fn show_held(&mut self, within: (u32, u32)) -> bool {
+        let Some(&(key, size)) = self.held.get(&self.page) else { return false };
         self.image = Some((key, size));
-        // The stand-in has done its job and must stop being drawn under a picture
-        // with transparency in it.
         self.standby = None;
         self.coarse = false;
+        self.asked = Some(Shot { within, page: self.page });
+        true
+    }
+
+    /// The next page worth rendering before anybody asks for it.
+    ///
+    /// **Two ahead, and only once the page on screen is finished.** Guessing while
+    /// the current page is still being drafted would put the guess in front of the
+    /// thing being waited for — see [`sk_preview::Want::is_urgent`].
+    pub(crate) fn next_ahead(&self) -> Option<u32> {
+        if self.shows != Shows::Page || self.coarse || self.image.is_none() {
+            return None;
+        }
+        (1..=AHEAD)
+            .map(|step| self.page + step)
+            .find(|page| (self.pages == 0 || *page <= self.pages) && !self.held.contains_key(page))
     }
 
     /// Puts the page back after a child said there is no such page.
@@ -347,6 +428,13 @@ impl QuickLook {
     /// message would be scolding somebody for reaching the end: the page it has
     /// stays on screen and the count is now known.
     pub(crate) fn no_such_page(&mut self, pages: u32) {
+        // **Unless there is no page on screen to keep.** Saying nothing is right
+        // when `↓` runs off the end of a document somebody is reading; it is a
+        // blank panel with nothing to explain it when the very first request comes
+        // back this way, which is the one thing an open panel must never be.
+        if self.image.is_none() {
+            self.refusal = Some(Refusal::NoSuchPage);
+        }
         if pages > 0 {
             self.pages = pages;
             self.page = self.page.min(pages).max(1);
@@ -365,8 +453,16 @@ impl QuickLook {
     }
 
     /// The sentence to draw when there is no picture and no text.
-    pub(crate) fn message(&self) -> Option<&'static str> {
-        self.refusal.and_then(Refusal::message)
+    ///
+    /// **Nothing while nothing has been refused, and never nothing after.** A
+    /// refusal that reaches an open panel has to be legible even where the wire
+    /// has no message for it — `NotItsKind` means the helper and
+    /// `previews::shows` disagree, and a well-formed reply with no pixels means
+    /// something odder still. Either way the panel says one sentence rather than
+    /// looking like a program that has stopped.
+    pub(crate) fn said(&self) -> Option<&'static str> {
+        let refusal = self.refusal?;
+        Some(refusal.message().unwrap_or("preview.unavailable"))
     }
 
     /// Selects the whole file — `Ctrl+A`.
@@ -502,9 +598,9 @@ mod tests {
     #[test]
     fn taking_a_picture_puts_the_stand_in_away_and_ends_the_coarse_pass() {
         let mut look = paged(3);
-        look.standby = Some(sk_gpu::ImageKey(9));
+        look.standby = Some((sk_gpu::ImageKey(9), (128, 72)));
         look.coarse = true;
-        look.took(sk_gpu::ImageKey(10), (800, 600));
+        look.took(sk_gpu::ImageKey(10), (800, 600), look.page);
         assert_eq!(look.standby, None, "the thumbnail is still under the picture");
         assert!(!look.coarse, "the draft is still owed after the full size arrived");
         assert_eq!(look.image, Some((sk_gpu::ImageKey(10), (800, 600))));
@@ -534,6 +630,130 @@ mod tests {
         assert_eq!(page.shot((90, 60)).within, (64, 42));
     }
 
+    /// **A page whose texture the renderer dropped is rendered again, not shown.**
+    ///
+    /// The two stores are bounded separately — 24 MiB of textures against a map
+    /// of page numbers — and only the renderer knows what it evicted. Without
+    /// this the map handed out a dead key, the drawing emitted no quad for it,
+    /// and the panel was blank with a title and a page number and no way back:
+    /// `wants` was false because the shot matched what had been asked.
+    #[test]
+    fn a_page_the_renderer_dropped_is_asked_for_again() {
+        let mut look = paged(9);
+        look.coarse = false;
+        look.took(sk_gpu::ImageKey(1), (848, 1200), 1);
+        look.took(sk_gpu::ImageKey(2), (848, 1200), 2);
+        assert_eq!(look.held.len(), 2);
+
+        // The renderer kept page 1 and dropped page 2, which is what a big panel
+        // and a 24 MiB budget produce as soon as a prefetch lands.
+        look.retain_held(|key| key == sk_gpu::ImageKey(1));
+        assert_eq!(look.held.len(), 1);
+
+        // A turn onto the dropped page shows nothing and asks again, rather than
+        // showing a key nothing is behind.
+        assert!(look.turn(1));
+        assert!(!look.show_held((800, 600)), "a dropped page was shown");
+        assert!(look.wants((800, 600)), "a dropped page was not asked for again");
+
+        // And the page on screen going away takes the picture with it, so the
+        // panel asks rather than drawing a hole.
+        look.page = 1;
+        assert!(look.show_held((800, 600)));
+        look.retain_held(|_| false);
+        assert_eq!(look.image, None);
+        assert!(look.wants((800, 600)));
+    }
+
+    /// **An open panel is never blank with nothing to say.**
+    ///
+    /// Three refusals have no sentence of their own, because they decide whether
+    /// the panel *opens* rather than what it says. Reaching an open one, each has
+    /// to be legible: a person cannot tell an empty panel from a program that has
+    /// stopped.
+    #[test]
+    fn every_refusal_that_reaches_an_open_panel_says_something() {
+        for refusal in [
+            Refusal::None,
+            Refusal::NotItsKind,
+            Refusal::Unreadable,
+            Refusal::Undecodable,
+            Refusal::NoRenderer,
+            Refusal::TooLarge,
+            Refusal::NoSuchPage,
+            Refusal::Interrupted,
+        ] {
+            let mut look = paged(0);
+            look.refusal = Some(refusal);
+            let said = look.said().expect("a refusal with nothing to say");
+            assert_ne!(
+                sk_model::i18n::lookup(said),
+                said,
+                "`{said}` for {refusal:?} is not in the catalogue"
+            );
+        }
+        // And nothing is said while nothing has been refused, because the draft
+        // arrives in sixty milliseconds.
+        assert_eq!(paged(3).said(), None);
+    }
+
+    /// A `↓` past the end keeps the page it has — and says so where it has none.
+    #[test]
+    fn running_off_the_end_with_no_page_on_screen_explains_itself() {
+        let mut look = paged(0);
+        look.no_such_page(0);
+        assert!(look.said().is_some(), "a first request that found no page said nothing");
+
+        // With a page on screen it stays silent, because reaching the end of a
+        // document is not an error to report.
+        let mut reading = paged(3);
+        reading.coarse = false;
+        reading.took(sk_gpu::ImageKey(1), (848, 1200), 1);
+        reading.no_such_page(3);
+        assert_eq!(reading.said(), None);
+        assert!(reading.image.is_some());
+    }
+
+    /// **A turn to a held page is instant, and a guess never precedes the wait.**
+    ///
+    /// The two halves of [ADR
+    /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md):
+    /// what has been rendered is shown without asking, and nothing is guessed
+    /// while the page on screen is still a draft — because a guess queued then
+    /// would sit in front of the thing being waited for.
+    #[test]
+    fn a_held_page_is_shown_at_once_and_a_draft_guesses_nothing() {
+        let mut look = paged(9);
+        // Still drafting: nothing to guess yet, whatever else is true.
+        look.coarse = true;
+        assert_eq!(look.next_ahead(), None, "a draft asked for a page ahead");
+
+        // The draft lands, then the full size — only the second is remembered.
+        look.took(sk_gpu::ImageKey(1), (283, 400), 1);
+        assert!(look.held.is_empty(), "a draft was remembered as the page");
+        look.coarse = false;
+        look.took(sk_gpu::ImageKey(2), (848, 1200), 1);
+        assert_eq!(look.held.len(), 1);
+        assert_eq!(look.next_ahead(), Some(2));
+
+        // Once two are held it asks for the one after them, and stops at the end.
+        look.took(sk_gpu::ImageKey(3), (848, 1200), 2);
+        look.took(sk_gpu::ImageKey(4), (848, 1200), 3);
+        assert_eq!(look.next_ahead(), None, "it guessed past the two it holds");
+
+        // And a turn onto a held page needs no child at all.
+        assert!(look.turn(1));
+        assert!(look.show_held((800, 600)), "a held page was not shown");
+        assert_eq!(look.image, Some((sk_gpu::ImageKey(3), (848, 1200))));
+        assert!(!look.wants((800, 600)), "a held page was asked for again");
+        assert!(!look.coarse, "a held page still owed a draft");
+
+        // A turn onto one that is not held does want a render.
+        look.page = 7;
+        assert!(look.wants((800, 600)));
+        assert!(!look.show_held((800, 600)));
+    }
+
     /// A look with no child behind it, for the page arithmetic.
     fn paged(pages: u32) -> QuickLook {
         QuickLook {
@@ -546,6 +766,8 @@ mod tests {
             page: 1,
             pages,
             standby: None,
+            held: std::collections::HashMap::new(),
+            ahead: None,
             coarse: false,
             asked: Some(super::Shot { within: (800, 600), page: 1 }),
             scroll: sk_ui::Scroll::default(),
@@ -649,6 +871,10 @@ mod tests {
     #[test]
     fn an_unknown_count_lets_a_turn_ask_past_the_end() {
         let mut look = paged(0);
+        // A page on screen, which is the state reaching the end is reached *from*:
+        // `↓` past the last page is somebody reading, not a first request.
+        look.coarse = false;
+        look.took(sk_gpu::ImageKey(1), (848, 1200), 1);
         assert!(look.turn(1) && look.page == 2);
         assert!(look.turn(1) && look.page == 3);
 
@@ -711,13 +937,15 @@ mod tests {
             Refusal::NoRenderer,
             Refusal::TooLarge,
             Refusal::NoSuchPage,
+            Refusal::Interrupted,
         ] {
             let wanted = match refusal {
                 Refusal::None | Refusal::NotItsKind | Refusal::NoSuchPage => false,
                 Refusal::Unreadable
                 | Refusal::Undecodable
                 | Refusal::NoRenderer
-                | Refusal::TooLarge => true,
+                | Refusal::TooLarge
+                | Refusal::Interrupted => true,
             };
             let Some(key) = refusal.message() else {
                 assert!(!wanted, "{refusal:?} lost its sentence");

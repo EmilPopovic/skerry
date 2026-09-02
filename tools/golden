@@ -235,6 +235,12 @@ FRAMES = [
     ("quick-look-chosen",
      ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-selected"],
      "pictures"),
+    # **A refusal, said out loud.** Three refusals mean "nothing to say", which is
+    # right when they decide whether the panel opens and wrong once it is open: an
+    # empty panel cannot be told apart from a program that has stopped. This is the
+    # frame that proves the catch-all reaches the screen.
+    ("quick-look-refused",
+     ["--size", "900x600", "--scale", "125", "--look", "broken.pdf"], "pictures"),
     # **The visible history**, expanded, with one step undone — which is the state
     # that shows the whole design in one frame: the present marked with an accent
     # bar, the future below it in grey, and a hovered row. Every `Change::summary`
@@ -496,6 +502,11 @@ def build_pictures() -> None:
     # the only fixture whose *rendering* is somebody else's, which is the point:
     # `skerry-preview-doc` drives whatever is on `PATH`.
     (directory / "paper.pdf").write_bytes(three_page_pdf())
+    # **A file the databases call a PDF and the helper does not.** No `%PDF-`
+    # header, so `skerry-preview-doc` answers `NotItsKind` — a refusal with no
+    # sentence of its own, which is exactly the one that used to leave an open
+    # panel blank with nothing in it but a title.
+    (directory / "broken.pdf").write_bytes(b"not a document at all\n" * 8)
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
 

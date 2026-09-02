@@ -68,8 +68,15 @@ pub struct Renderer {
     color: wgpu::Texture,
     /// The thumbnail atlas's texture — ADR 0018's grid of equal slots.
     images: wgpu::Texture,
-    /// The one preview, which is not in that grid and is not the same size twice.
-    preview: wgpu::Texture,
+    /// The pages held, each its own texture, keyed by what it is of — [ADR
+    /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
+    ///
+    /// **One is bound at a time**, because a frame draws one page: the bind group
+    /// is repointed when the drawn key changes, which is on a turn and not per
+    /// frame. `placeholder` is what a frame with no preview binds, since `wgpu`
+    /// has no null binding.
+    pages: std::collections::HashMap<ImageKey, wgpu::Texture>,
+    placeholder: wgpu::Texture,
     /// What is held there and what is waiting for the queue.
     looking: crate::images::Preview,
     atlas: Atlas,
@@ -214,7 +221,8 @@ impl Renderer {
             color,
             layout,
             images,
-            preview,
+            pages: std::collections::HashMap::new(),
+            placeholder: preview,
             looking: crate::images::Preview::default(),
             atlas: Atlas::new(),
             pictures: Images::default(),
@@ -309,7 +317,12 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&view(&self.preview)),
+                    resource: wgpu::BindingResource::TextureView(&view(
+                        self.looking
+                            .bound()
+                            .and_then(|key| self.pages.get(&key))
+                            .unwrap_or(&self.placeholder),
+                    )),
                 },
             ],
         });
@@ -330,43 +343,66 @@ impl Renderer {
         self.looking.size_of(key)
     }
 
-    /// Makes the preview's texture and uploads it, if one is waiting.
+    /// Makes a texture for each waiting page and uploads it.
     ///
-    /// **Its own texture every time, rather than a resize.** A preview is asked for
-    /// at the panel's size, so a new one is usually a new size — and a texture
-    /// that has to be reallocated on most uploads is a texture with no reason to
-    /// be kept.
-    fn upload_the_preview(&mut self) {
-        if !self.looking.owes_upload() {
+    /// **Its own texture each, rather than one that is resized.** A preview is
+    /// asked for at the panel's size and a page is asked for at the same size
+    /// every time, so these are interchangeable in shape and separate in identity
+    /// — which is what lets the one on screen and the two ahead of it coexist.
+    fn upload_the_previews(&mut self) {
+        while self.looking.owes_upload() {
+            let Some((key, size, pixels)) = self.looking.take() else { break };
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("preview"),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size.0 * 4),
+                    rows_per_image: Some(size.1),
+                },
+                wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            );
+            self.pages.insert(key, texture);
+        }
+        for gone in self.looking.over_budget() {
+            self.pages.remove(&gone);
+        }
+    }
+
+    /// Points the bind group at the page this frame draws, if it is not already.
+    ///
+    /// **Once per frame at most, and usually never.** A frame draws one page, so
+    /// this is a bind-group rebuild on a turn rather than on every frame — the
+    /// same trade the atlas's placeholder swap makes.
+    fn bind_the_drawn_page(&mut self, list: &DrawList) {
+        let wanted = list.first_preview();
+        if wanted.is_none_or(|key| self.looking.is_bound(key)) {
             return;
         }
-        let Some((pixels, size)) = self.looking.take() else { return };
-        self.preview = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("preview"),
-            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.preview,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(size.0 * 4),
-                rows_per_image: Some(size.1),
-            },
-            wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-        );
+        self.looking.bound_to(wanted);
         self.rebuild_bindings();
+    }
+
+    /// Forgets every held page. For a panel that has closed.
+    pub fn forget_previews(&mut self) {
+        for gone in self.looking.forget_all() {
+            self.pages.remove(&gone);
+        }
     }
 
     /// Puts a thumbnail in the atlas, or says it did not fit.
@@ -389,6 +425,27 @@ impl Renderer {
     #[must_use]
     pub fn holds_image(&self, key: ImageKey) -> bool {
         self.pictures.holds(key)
+    }
+
+    /// How many pages are held and how many bytes they are.
+    ///
+    /// **For the memory ADR 0020 spends.** A page of A4 at a 1200-pixel panel is
+    /// 4 MB and the budget is 24 MiB, so this is the line somebody reads when an
+    /// RSS figure needs explaining.
+    #[must_use]
+    pub fn preview_stats(&self) -> (usize, usize) {
+        self.looking.stats()
+    }
+
+    /// The size of the thumbnail held under `key`, without marking it as drawn.
+    ///
+    /// **For a stand-in's aspect.** A thumbnail preserves its picture's aspect, so
+    /// its own dimensions are what a panel needs to place the picture before it
+    /// has one. Like [`Self::holds_image`] and not like `get`: asking a question
+    /// must not stamp the frame the atlas evicts by.
+    #[must_use]
+    pub fn image_size(&self, key: ImageKey) -> Option<(u32, u32)> {
+        self.pictures.size_of(key)
     }
 
     /// Thumbnails held, how full the atlas is, and how many uploads are waiting.
@@ -444,6 +501,7 @@ impl Renderer {
         // to advance exactly once per frame — a caller who forgot would make every
         // entry look equally old and eviction arbitrary.
         self.pictures.begin_frame();
+        self.looking.begin_frame();
         let (width, height) = self.size();
 
         let acquire_started = std::time::Instant::now();
@@ -476,7 +534,8 @@ impl Renderer {
         let boundaries = self.resolve(list, fonts, &mut stats);
         self.atlas.flush(&self.queue, &self.mask, &self.color);
         self.grow_the_image_atlas();
-        self.upload_the_preview();
+        self.upload_the_previews();
+        self.bind_the_drawn_page(list);
         self.pictures.flush(&self.queue, &self.images);
 
         if self.quads.len() > self.capacity {
@@ -635,6 +694,9 @@ impl Renderer {
                         None => stats.dropped += 1,
                     },
                     Item::Preview { key, rect, alpha } => {
+                        // Marked drawn so eviction leaves the page on screen
+                        // alone, which is the atlas's rule in a second store.
+                        self.looking.drawn(*key);
                         if let Some(size) = self.looking.size_of(*key) {
                             self.quads.push(Quad {
                                 rect: [rect.x, rect.y, rect.width, rect.height],
@@ -644,6 +706,11 @@ impl Renderer {
                                 radius: 0.0,
                                 border: 0.0,
                             });
+                        }
+                    }
+                    Item::Standby { key, rect, alpha } => {
+                        if let Some(slot) = self.pictures.get(*key) {
+                            self.quads.push(filled_quad(slot, *rect, alpha.packed()));
                         }
                     }
                     Item::Image { key, rect, alpha } => {
@@ -788,6 +855,28 @@ fn image_quad(slot: crate::images::Slot, rect: crate::Rect, color: u32) -> Quad 
             (rect.y + (rect.height - height) / 2.0).round(),
             width.round().max(1.0),
             height.round().max(1.0),
+        ],
+        uv: [slot.x as f32, slot.y as f32, slot.width as f32, slot.height as f32],
+        color,
+        kind: KIND_IMAGE,
+        radius: 0.0,
+        border: 0.0,
+    }
+}
+
+/// The same as [`image_quad`] with the never-enlarge rule taken out.
+///
+/// A stand-in is drawn where the picture it precedes will be, so it fills the
+/// rectangle it is given: the caller has fitted that rectangle to the *aspect*,
+/// which is the same for the thumbnail and for the picture, so filling it is
+/// landing in the right place rather than stretching.
+fn filled_quad(slot: crate::images::Slot, rect: crate::Rect, color: u32) -> Quad {
+    Quad {
+        rect: [
+            rect.x.round(),
+            rect.y.round(),
+            rect.width.round().max(1.0),
+            rect.height.round().max(1.0),
         ],
         uv: [slot.x as f32, slot.y as f32, slot.width as f32, slot.height as f32],
         color,

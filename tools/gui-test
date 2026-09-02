@@ -1246,7 +1246,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 115
+FEWEST_SCENARIOS = 116
 
 
 def scenario(name, fresh: bool = False):
@@ -1733,8 +1733,12 @@ def arrows_walk_the_look_and_a_pdfs_pages(run: Run, fixture: Path) -> None:
     until(run, cursor="look-d.pdf")
     run.drive("key space\nsleep 900\n")
     until_looking(run, "look-d.pdf", "page")
-    first = holds(run, lambda it: it["look_page"] == "1/3", "page 1 of 3")
-    del first
+    holds(run, lambda it: it["look_page"] == "1/3", "page 1 of 3")
+
+    # **The pages ahead arrive before anybody asks for them** — ADR 0020. Three
+    # held on a three-page document is all of it: the one on screen and the two
+    # guessed. Without the prefetch this stays at one for ever.
+    holds(run, lambda it: int(it["look_held"]) >= 3, "three pages held")
 
     run.drive("key down\nsleep 900\n")
     holds(run, lambda it: it["look_page"] == "2/3", "page 2 of 3")
@@ -1766,6 +1770,47 @@ def arrows_walk_the_look_and_a_pdfs_pages(run: Run, fixture: Path) -> None:
     aimed = look_aim(run, "next_file")
     run.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 900\n")
     until_looking(run, "look-d.pdf", "page")
+
+
+@scenario("a-text-preview-appears-without-being-prodded", fresh=True)
+def a_text_preview_appears_without_being_prodded(run: Run, fixture: Path) -> None:
+    """**The window draws the text when the read lands, not when it is next asked.**
+
+    This is the one scenario here that cannot assert what it wants directly, and
+    the reason is worth writing down: every observation this harness makes drives
+    an `F12`, and a keystroke marks the window dirty — so a preview that only
+    draws when prodded looks identical to one that draws on its own, and the bug
+    survived two rounds of testing because *asking about it fixed it*.
+
+    What is observable is the **frame counter** across an interval with no input
+    at all: the text arriving draws a frame only if something marked the window
+    dirty when it did. Measured on this fixture, three runs each way: **four
+    frames with the drain in the loop and three with it in the frame**, and the
+    first version of this assertion said "at least three" — which passed against
+    the bug it was written for, three times, and was decoration until the numbers
+    were taken rather than guessed.
+    """
+    (fixture / "notes.txt").write_text("first line\nsecond line\n")
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text notes\nsleep 400\n")
+    quiet = until(run, cursor="notes.txt")
+
+    # **One script, and nothing in it but the key and a wait.** Two `drive` calls
+    # would be two processes, and starting one is input.
+    run.drive("key space\nsleep 900\nkey f12\nsleep 200\n")
+    after = run.state()
+    if after["looking"] != "notes.txt:text":
+        raise Failure(f"the look is {after['looking']!r}")
+    drawn = int(after["frames"]) - int(quiet["frames"])
+    if drawn < 4:
+        raise Failure(
+            f"only {drawn} frames between opening the look and reading it back, where "
+            "four is the window drawing the text as it landed and three is it waiting "
+            "to be asked"
+        )
 
 
 @scenario("a-text-preview-selects-and-copies", fresh=True)

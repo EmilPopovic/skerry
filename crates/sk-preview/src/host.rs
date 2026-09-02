@@ -81,6 +81,13 @@ pub struct Want {
     /// Which page, one-based, or zero for the first — ADR 0019. Zero for
     /// everything that has no pages, which is every image and every thumbnail.
     pub page: u32,
+    /// Whether this is a guess rather than something somebody is waiting for.
+    ///
+    /// **A page rendered before it is asked for** — [ADR
+    /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
+    /// It queues behind everything a person actually pressed, because what was
+    /// guessed must never overtake what was asked.
+    pub ahead: bool,
 }
 
 impl Want {
@@ -91,7 +98,7 @@ impl Want {
     /// [`Previews::pump`].
     #[must_use]
     pub fn is_urgent(&self) -> bool {
-        self.ask == Ask::Preview
+        self.ask == Ask::Preview && !self.ahead
     }
 
     /// What this want is keyed by: the file, when it changed, and how big.
@@ -192,6 +199,25 @@ impl Previews {
     pub fn want(&mut self, want: Want) {
         if self.queue.contains(&want) {
             return;
+        }
+        // **A preview at a new size supersedes every queued one at an old size.**
+        // Dragging a window edge changes the box on every frame, and each box is a
+        // *different* want that the dedup above cannot see — so a two-second drag
+        // queued dozens of renders at 150 ms each, the panel showed none of them
+        // because a reply is matched against the box currently asked for, and it
+        // sat blank for the four seconds it took to drain a queue of work that was
+        // already superseded when it was enqueued.
+        //
+        // A prefetch is dropped too: it was guessed at the old size, and a page
+        // rendered for a panel that has changed shape is a page nobody will draw.
+        // One stale render can still be in flight, because a batch cannot be
+        // recalled, and that is the bound.
+        if want.ask == Ask::Preview {
+            self.queue.retain(|queued| {
+                queued.ask != Ask::Preview
+                    || queued.path != want.path
+                    || queued.within == want.within
+            });
         }
         self.queue.push(want);
     }
@@ -343,8 +369,10 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
     let mut reading = BufReader::new(output);
     let mut answers = Vec::with_capacity(batch.len());
     let mut alive = true;
+    let mut abandoned = false;
     for want in batch {
         if cancel.is_cancelled() {
+            abandoned = true;
             break;
         }
         let request = Request {
@@ -383,6 +411,27 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
             }
         }
     }
+    // **Every want in the batch comes back with something.** A request that broke
+    // the pipe, and every one behind it that was never sent, used to be dropped in
+    // silence — and a preview records what it asked for, so it would never ask
+    // again: a blank panel with a title and no way back. Whether a helper died or
+    // a deadline expired, the answer is that it did not answer.
+    //
+    // **Except a batch that was cancelled**, which is a folder somebody has left:
+    // nothing is waiting for those answers, and a refusal would be a sentence in a
+    // panel about a file nobody asked about.
+    for want in batch.iter().skip(answers.len()) {
+        if abandoned {
+            break;
+        }
+        answers.push(Answer {
+            key: want.key(),
+            refusal: Refusal::Interrupted,
+            size: (0, 0),
+            pages: 0,
+            pixels: Vec::new(),
+        });
+    }
     // **The pipes go back on the child, or the child does not go back.** A
     // `BufWriter` that cannot give up its inner writer has a buffered write that
     // never reached the pipe, which is a child mid-request — not one to hand to
@@ -406,8 +455,9 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Kind, Previews, Want};
-    use crate::wire::Ask;
+    use crate::wire::{Ask, Refusal};
     use std::path::PathBuf;
+    use std::process::Stdio;
 
     fn want(path: &str) -> Want {
         Want {
@@ -417,7 +467,93 @@ mod tests {
             mtime: 7,
             within: (128, 128),
             page: 0,
+            ahead: false,
         }
+    }
+
+    /// **A resize does not queue a backlog of renders nobody will draw.**
+    ///
+    /// Every frame of a window drag is a different box and therefore a different
+    /// want, which the identity dedup cannot see. Left alone, a two-second drag
+    /// queued dozens of 150 ms renders and the panel stayed blank until they had
+    /// all been done and all been discarded — a reply is matched against the box
+    /// currently asked for.
+    #[test]
+    fn a_preview_at_a_new_size_replaces_the_ones_queued_at_old_sizes() {
+        let mut host = Previews::new();
+        let preview = |width: u32, page: u32, ahead: bool| Want {
+            kind: Kind::Document,
+            ask: Ask::Preview,
+            path: PathBuf::from("/a/doc.pdf"),
+            mtime: 7,
+            within: (width, 900),
+            page,
+            ahead,
+        };
+        // A drag: thirty frames, thirty boxes, and a prefetch queued along the way.
+        for width in 0..30 {
+            host.want(preview(1000 + width, 1, false));
+        }
+        host.want(preview(1029, 2, true));
+        assert_eq!(host.waiting(), 2, "the drag left a backlog: {}", host.waiting());
+
+        // One more frame of the drag, and the prefetch for the old box goes too.
+        host.want(preview(1100, 1, false));
+        assert_eq!(host.waiting(), 1);
+        assert_eq!(host.queued()[0].within, (1100, 900));
+
+        // **A thumbnail is not a preview and is left alone**, or scrolling a grid
+        // while a panel is open would throw away the thumbnails it asked for.
+        let mut grid = Previews::new();
+        for index in 0..5 {
+            grid.want(want(&format!("/a/{index}.png")));
+        }
+        grid.want(preview(1000, 1, false));
+        assert_eq!(grid.waiting(), 6, "a preview took the thumbnails with it");
+    }
+
+    /// **A helper that dies answers anyway, with the reason.**
+    ///
+    /// This is the shape of a preview that broke and stayed broken: no pixels and
+    /// no refusal meant the panel recorded what it had asked for and never asked
+    /// again — blank, with a title and a page number. Driven with a program that
+    /// exits at once, which is what a killed child looks like from this side.
+    #[test]
+    fn a_batch_whose_child_dies_still_answers_every_want() {
+        let child = std::process::Command::new("/bin/true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("/bin/true is not on this machine");
+        let batch = [want("/a/one.png"), want("/a/two.png"), want("/a/three.png")];
+        let landed = super::run_batch(Kind::Image, Some(child), &batch, &sk_util::Cancel::new());
+
+        assert_eq!(landed.answers.len(), batch.len(), "a want was dropped in silence");
+        for (answer, asked) in landed.answers.iter().zip(&batch) {
+            assert_eq!(answer.refusal, Refusal::Interrupted);
+            assert_eq!(answer.key, asked.key());
+            assert!(answer.pixels.is_empty());
+        }
+        assert!(landed.child.is_none(), "a child that stopped was handed back");
+    }
+
+    /// A batch nobody is waiting for answers nothing.
+    ///
+    /// **The other half of the rule above.** A cancelled batch is a folder
+    /// somebody has left, so a refusal for each of its wants would be a sentence
+    /// in a panel about a file nobody asked about.
+    #[test]
+    fn a_cancelled_batch_answers_nothing() {
+        let child = std::process::Command::new("/bin/true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("/bin/true is not on this machine");
+        let cancel = sk_util::Cancel::new();
+        cancel.cancel();
+        let batch = [want("/a/one.png")];
+        let landed = super::run_batch(Kind::Image, Some(child), &batch, &cancel);
+        assert!(landed.answers.is_empty(), "a cancelled batch answered anyway");
     }
 
     /// **A preview leaves the queue before a thumbnail that was asked first.**

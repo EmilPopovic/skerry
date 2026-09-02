@@ -2263,3 +2263,83 @@ Two things to take from it. **A flake rate is a number and can be measured in tw
 minutes** — sixteen runs of one scenario — so "probably unrelated" is never the
 last word available. And **the same experiment settles both questions at once**:
 whether the failure is yours, and how bad it was before you arrived.
+
+## The same bug twice, one layer apart
+
+A preview stayed blank until something else happened, and it was fixed:
+[the pump ran before the thing that filled its
+queue](#a-queue-pumped-before-the-thing-that-fills-it). Then a *text* preview
+stayed blank until something else happened, and it was the same bug one layer
+along — the drain rather than the pump.
+
+`QuickLook::drain` was the first line of `settle_quick_look`, which runs from
+`before_frame`, which runs **only when something is already dirty**. So the read
+finished, woke the loop, and found nothing that would draw a frame: the text sat
+in its channel until an unrelated event marked the window dirty for its own
+reasons.
+
+The rule, stated once for both: **a pump and a drain belong beside the other
+drains, where the wake-up lands — never inside the frame they are supposed to
+cause.** A frame is a consequence of state changing; anything that changes state
+cannot be inside it.
+
+**And the first attempt at a test for it was decoration.** Every observation this
+harness makes drives an `F12`, and a keystroke marks the window dirty — so *asking
+about the bug fixed it*, which is why it survived two rounds. What is observable
+is the frame counter across an interval with no input at all, and the first
+version of that assertion said "at least three frames". Measured: **three with
+the bug and four without it.** It passed against the bug three times out of three
+before the numbers were taken rather than guessed.
+
+That is the third time in this document a threshold has been wrong in the safe
+direction. The habit that catches it is cheap and has no exceptions: **write the
+assertion, then run it against the defect on purpose.** A gate that has not been
+watched failing is a gate that has not been tested, and the version of it that
+takes two minutes is to break the code back and run it.
+
+## Two ways to be blank, and neither of them said anything
+
+A PDF preview came back as an empty panel with a title, a page number of `1 / 28`,
+and nothing else — for ever. The count proved a reply had arrived, so the child
+was working; the panel simply had nothing to draw and nothing to say about it.
+
+Reading the code for **states that draw nothing and explain nothing** found two,
+and the honest thing to record is that neither was reproduced from the report.
+Forty real PDFs driven through the helper at a large box produced no refusal at
+all, so the trigger stayed out of reach — but both paths are reachable by
+construction, and one of them is a hole this document had already been told about:
+
+**An evicted page the host still believed in.**
+[ADR 0020](../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md) says,
+in its own words, that "an entry here whose texture has been evicted resolves to
+nothing and is rendered again, which is the right degradation" — and the code did
+not do it. The renderer holds 24 MiB of pages; at a large panel one page is
+**11.9 MB**, so opening a document with two prefetches behind it evicts almost at
+once. The host's page-number map kept the key, handed it out, and the drawing
+emitted no quad for a key the renderer had never heard of. `wants` was false
+because the shot matched what had been asked. **An ADR's consequence is not
+implemented by being written down.**
+
+**A child that died with nothing to say.** `run_batch` broke out of its loop on a
+pipe error without pushing an `Answer`, so the host learned nothing: no pixels, no
+refusal, and a panel that had recorded its request and would never make another.
+Every want in a batch now comes back with something — `Refusal::Interrupted`,
+which says the helper stopped rather than that the file is bad — except a batch
+that was cancelled, which is a folder somebody has left.
+
+And a third thing, which is the design rule the pair of them argues for:
+**a refusal that reaches an open panel is never allowed to be silent.** Three of
+them — `NotItsKind`, a well-formed reply with no pixels, and running off the end
+of a document — deliberately have no sentence, because they decide whether the
+panel *opens*. Once it is open the same value means an empty rectangle, which a
+person cannot tell from a program that has stopped. There is a catch-all now, and
+a golden frame of it: a junk `.pdf` in the fixture, whose refusal has no message of
+its own, drawing "This file could not be shown."
+
+The general rule is about *states*, not about bugs. **Enumerate the states in
+which a surface shows nothing, and require each of them to be either transient
+with a known bound or legible.** The panel had four — a picture, text, a message,
+and "not yet" — and "not yet" turned out to be reachable permanently by two routes
+and for four and a half seconds at a time by a third. None of them was a wrong
+pixel; all three were an absence, and an absence is the one defect a screenshot
+cannot diagnose and a state table can.

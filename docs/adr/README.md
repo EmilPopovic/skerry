@@ -25,8 +25,9 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0015](0015-a-column-is-a-directory-and-a-choice.md) | A column is a directory and a choice, not a pane | Accepted |
 | [0016](0016-plural-forms-are-bracketed-keys-in-the-catalogue.md) | Plural forms are bracketed keys in the catalogue | Accepted |
 | [0017](0017-one-preview-child-per-kind-answering-one-request-at-a-time.md) | One preview child per kind, answering one request at a time | **Superseded by [0019](0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md)** |
-| [0018](0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md) | Thumbnails are slots in one atlas; a preview is not | Accepted |
+| [0018](0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md) | Thumbnails are slots in one atlas; a preview is not | **Superseded by [0020](0020-a-preview-is-a-few-textures-bounded-by-bytes.md)** |
 | [0019](0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md) | A preview request names a page, and the child stays stateless | Accepted |
+| [0020](0020-a-preview-is-a-few-textures-bounded-by-bytes.md) | A preview is a few textures, bounded by bytes, and the pages ahead are rendered early | Accepted |
 
 ## Triggers that have been answered
 

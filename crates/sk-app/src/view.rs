@@ -1049,36 +1049,39 @@ fn quick_look(
         // **Fitted here, and this is the only place that fits it.** The child was
         // asked for a box and answered with what fitted inside it, so the size that
         // came back is already right — all that is left is to centre it.
-        painter.preview(key, fitted(painter, inner, size), theme.palette.text);
+        painter.preview(key, fitted(painter, inner, size, look.coarse), theme.palette.text);
         return;
     }
-    if let Some(key) = look.standby {
-        // **The thumbnail, at its own size, centred.** Already on the GPU — the
-        // row it belongs to was on screen — so this is the only free thing in the
-        // whole path, and it answers the question a person actually has while
-        // waiting: *which* picture is this.
+    if let Some((key, aspect)) = look.standby {
+        // **The thumbnail, drawn where the picture will be.** Already on the GPU —
+        // the row it belongs to was on screen — so it is the only free thing in
+        // the whole path, and it answers the question a person has while waiting:
+        // *which* picture is this.
         //
-        // Not enlarged to fill the panel. `image_quad` refuses to, for a good
-        // reason of its own, and 128 pixels blown up to a thousand is mush; a
-        // sharp stamp that grows into place reads better than a blurred fill that
-        // sharpens. From the *atlas*, so it is `image` and not `preview`.
-        painter.image(
-            key,
-            painter.rect(inner.x, inner.y, inner.width, inner.height),
-            theme.palette.text,
-        );
+        // Fitted from the thumbnail's own aspect, which is the picture's, so the
+        // rectangle is the one the picture will occupy: fitting a shape of a given
+        // aspect into a box has one answer whatever size the shape is. Soft for
+        // the sixty milliseconds it is up, and in the right place, which is the
+        // trade a stand-in exists to make.
+        painter.standby(key, fitted(painter, inner, aspect, true), theme.palette.text);
         return;
     }
     if let Some(text) = &look.text {
         quick_look_text(painter, look, text, inner);
         return;
     }
-    // Neither yet. A refusal says why; anything else is still being fetched, and a
-    // spinner for something that takes ten milliseconds is worse than nothing —
+    // Neither yet. **A refusal always says something**, its own sentence where it
+    // has one and a catch-all where it has not: three of them mean "nothing to
+    // say", which is right when it decides whether the panel *opens* and wrong
+    // once it is open — an empty panel is indistinguishable from a program that
+    // has stopped. Where nothing has been refused, nothing is drawn: the draft
+    // arrives in sixty milliseconds and a spinner for that is worse than nothing —
     // [rule 7](../../../docs/03-principles.md).
-    let Some(message) = look.message() else { return };
+    let Some(message) = look.said() else { return };
     let baseline = painter.baseline(inner.y + inner.height / 2.0, 0.0, metrics.path_size);
-    let style = TextStyle::new(metrics.path_size, theme.palette.dim);
+    // Centred, because it is a statement about the whole panel rather than an
+    // entry in it — the same reason the Properties panel centres its title.
+    let style = TextStyle::new(metrics.path_size, theme.palette.dim).centred();
     line(painter, i18n::lookup(message), style, inner.x + 14.0, inner.width - 28.0, baseline);
 }
 
@@ -1152,12 +1155,21 @@ fn look_button(
 
 /// A picture's rectangle, centred in `inner` with its aspect kept.
 ///
-/// **Never larger than it came back at**, because the child was asked for a box
-/// and answered with what fitted inside it: enlarging here would be a picture
-/// scaled twice, once by a box filter and once by a sampler.
-fn fitted(painter: &Painter<'_>, inner: Area, size: (u32, u32)) -> sk_gpu::Rect {
-    let scale =
-        (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32).min(1.0);
+/// **Never larger than it came back at, unless it stands in for one that will
+/// be.** A finished render was asked for a box and answered with what fitted
+/// inside it, so enlarging it would be a picture scaled twice — once by a box
+/// filter and once by a sampler. A draft or a thumbnail is the opposite case: it
+/// has to occupy the rectangle its replacement will, or the panel jumps when the
+/// replacement lands — and since both preserve the same aspect, that rectangle is
+/// the same one.
+///
+/// The one case this gets wrong is a picture *smaller* than the panel: its
+/// stand-in is drawn at the panel's size and its replacement at its own, so it
+/// shrinks. Getting that right needs the source's dimensions, which are not on
+/// the wire, and it lasts the sixty milliseconds an image takes.
+fn fitted(painter: &Painter<'_>, inner: Area, size: (u32, u32), standing_in: bool) -> sk_gpu::Rect {
+    let fit = (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32);
+    let scale = if standing_in { fit } else { fit.min(1.0) };
     let (width, height) = (size.0 as f32 * scale, size.1 as f32 * scale);
     painter.rect(
         inner.x + (inner.width - width) / 2.0,
@@ -4353,6 +4365,63 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    /// **A draft lands exactly where the picture it precedes will.**
+    ///
+    /// This is the arithmetic behind "a preview should be the same size on screen
+    /// as the final": both preserve the same aspect, and fitting one aspect into
+    /// one box has a single answer — so an *unclamped* fit of the draft is the
+    /// clamped fit of the full render.
+    ///
+    /// **Within one *logical* pixel**, and the tolerance is arithmetic rather than
+    /// slop: the child answers in whole pixels, so an A4 page comes back 283×400
+    /// at a third-size box and 848×1200 at a full one, and those two aspects
+    /// differ in the fourth decimal. Multiplied by the drawn width that is a
+    /// device pixel or two — which is why the bound is a logical pixel and not a
+    /// device one, since a device pixel at 200% is half of what a person sees.
+    /// Asserted at three scales, because a fit that agreed only at 100% would be
+    /// no use.
+    #[test]
+    fn a_draft_is_drawn_at_the_size_the_full_render_will_be() {
+        let mut fonts = Fonts::discover().expect("no usable font");
+        let mut cache = LayoutCache::new(64);
+        let mut list = sk_gpu::DrawList::default();
+        let theme = Theme::dark();
+        for scale in [1.0_f32, 1.25, 2.0] {
+            let painter = Painter {
+                list: &mut list,
+                fonts: &mut fonts,
+                cache: &mut cache,
+                theme: &theme,
+                scale,
+            };
+            let inner = super::Area { x: 48.0, y: 82.0, width: 1002.0, height: 470.0 };
+            // What the helper returns for an A4 page asked at a third of the long
+            // edge, and at the whole of it.
+            let draft = super::fitted(&painter, inner, (283, 400), true);
+            let full = super::fitted(&painter, inner, (848, 1200), false);
+            for (what, drafted, finished) in [
+                ("x", draft.x, full.x),
+                ("y", draft.y, full.y),
+                ("width", draft.width, full.width),
+                ("height", draft.height, full.height),
+            ] {
+                assert!(
+                    (drafted - finished).abs() <= painter.px(1.0),
+                    "at scale {scale} the draft's {what} is {drafted} and its \
+                     replacement's is {finished}"
+                );
+            }
+
+            // And a finished render smaller than the panel is *not* enlarged,
+            // which is the rule the stand-in deliberately breaks.
+            let small = super::fitted(&painter, inner, (64, 64), false);
+            assert!(
+                small.width <= painter.px(64.0) + 1.0,
+                "a small picture was blown up to the panel at scale {scale}"
+            );
+        }
+    }
 
     /// The glyphs a frame would draw, as something comparable.
     ///
