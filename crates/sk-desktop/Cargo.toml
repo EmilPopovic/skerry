@@ -12,6 +12,7 @@ level = 2
 
 [dependencies]
 sk-model = { workspace = true }
+sk-fs = { workspace = true }
 rustix = { workspace = true }
 libc = { workspace = true }
 

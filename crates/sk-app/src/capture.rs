@@ -361,6 +361,11 @@ pub struct Capture {
     pub rename: bool,
     /// Whether to draw the sidebar.
     pub sidebar: bool,
+    /// Whether the sidebar's sample carries a Pinned section.
+    ///
+    /// Off by default so that adding the section did not re-bless every frame
+    /// the sidebar is in, which is all of them.
+    pub pinned: bool,
     /// Whether to draw the window frame the program draws for itself.
     ///
     /// A capture has no compositor to ask, so it is told. Without this the
@@ -990,6 +995,8 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         hovered_mode: None,
         places: sample.places,
         hovered_place: None,
+        aside_grabbed: false,
+        place_drop: request.pinned.then_some(1),
         drop_row: None,
         drop_tab: sample.drop_tab,
         drop_pane: None,
@@ -1072,7 +1079,11 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // A fixed set rather than this machine's: the sidebar is part of the frame,
     // and a reference image that embeds somebody's `user-dirs.dirs` and mount
     // table is one nobody else can reproduce.
-    let places = if request.sidebar { crate::sidebar::sample(&request.path) } else { Vec::new() };
+    let places = if request.sidebar {
+        crate::sidebar::sample(&request.path, request.pinned)
+    } else {
+        Vec::new()
+    };
     let theme = if request.dark { Theme::dark() } else { Theme::light() };
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     let frame = if request.own_frame {
@@ -1084,7 +1095,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         logical,
         &theme.metrics,
         frame,
-        request.sidebar,
+        if request.sidebar { crate::sidebar::DEFAULT_WIDTH } else { 0.0 },
         history_height(request, &theme.metrics),
     );
     // One leaf: a capture is a frame of one directory, and a split is its own

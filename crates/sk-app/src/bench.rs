@@ -136,6 +136,8 @@ fn chrome_of<'a>(
         hovered_mode: None,
         places,
         hovered_place: None,
+        aside_grabbed: false,
+        place_drop: None,
         drop_row: None,
         drop_tab: None,
         drop_pane: None,
@@ -205,12 +207,12 @@ fn fixed(request: &Bench) -> Fixed {
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     Fixed {
         types: std::sync::Arc::new(sk_desktop::MimeDatabase::load()),
-        places: crate::sidebar::sample(&request.path),
+        places: crate::sidebar::sample(&request.path, false),
         layout: Layout::compute_with(
             logical,
             &theme.metrics,
             crate::layout::Frame::None,
-            true,
+            crate::sidebar::DEFAULT_WIDTH,
             0.0,
         ),
         theme,

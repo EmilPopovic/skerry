@@ -47,6 +47,20 @@ pub const ON_ROW: &[&[&str]] = &[
 /// no new furniture: the rows come out of the same registry the chords do.
 pub const IN_A_LOOK: &[&[&str]] = &[&["look.select_all", "look.copy"]];
 
+/// What a secondary click on a sidebar row offers.
+///
+/// **Three rows, and all three are about that row.** The background menu's
+/// entries are about the directory the list is showing, so offering them over a
+/// place would make New folder mean somewhere else — and the place's own two
+/// verbs have nowhere else to live. Which row it is comes from
+/// [`crate::app::App`]'s own target rather than from a command argument, because
+/// a command runs against `&mut App` and takes none:
+/// [ADR 0021](../../../docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md).
+///
+/// Pin is deliberately absent: every row of the sidebar is already a place, so
+/// the row would be dimmed every time the menu opened.
+pub const ON_A_PLACE: &[&[&str]] = &[&["place.unpin", "place.raise", "place.lower"]];
+
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],
@@ -65,7 +79,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["view.columns_reset", "view.hidden", "view.theme", "view.sidebar"],
     &["tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],
-    &["file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
+    &["place.pin", "file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
     &["view.palette", "help.keys"],
 ];
 

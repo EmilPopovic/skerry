@@ -162,6 +162,26 @@ struct Landing {
     into_pane: Option<crate::panes::PaneId>,
 }
 
+/// A pinned place being dragged into a different order.
+///
+/// **The pinned rows only**, which is the whole of what an order means here: the
+/// well-known directories are in the order
+/// [`sk_desktop::user_dirs`](sk_desktop::user_dirs) puts them and the volumes are
+/// in the order they are mounted, and neither is a choice somebody made.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct PlaceDrag {
+    /// Which pinned place was taken hold of, as an index into
+    /// [`crate::sidebar::Sidebar::pinned`].
+    from: usize,
+    /// Where it would land, as a gap: `0` is above the first row and `n` below
+    /// the last.
+    at: usize,
+    /// Where the press was, so four pixels of hand tremor is not a reorder.
+    started: Point,
+    /// Whether it has moved far enough to be a drag rather than a click.
+    active: bool,
+}
+
 /// What a drag would open if the hand stopped on it.
 #[derive(Clone, PartialEq, Eq)]
 enum Spring {
@@ -370,7 +390,12 @@ impl Background {
 
         // Open by default, which is what every file manager a person has met
         // does. Reading what goes in it is a job, started with the others.
-        let sidebar = crate::sidebar::Sidebar::new(&jobs, waker.handle(), true);
+        let sidebar = crate::sidebar::Sidebar::new(
+            &jobs,
+            waker.handle(),
+            true,
+            crate::sidebar::DEFAULT_WIDTH,
+        );
         let desktop_rx = read_desktop_databases(&jobs, &waker);
         let (watch_sender, changes) = mpsc::channel();
         let watcher = sk_fs::Watcher::new(watch_sender, waker.handle()).map_err(|error| {
@@ -588,6 +613,9 @@ struct Replies {
     /// What a job loading or building an index has to say.
     index_tx: std::sync::mpsc::Sender<crate::indexing::Note>,
     index_rx: Receiver<crate::indexing::Note>,
+    /// What a write to the list of places did, and whether it worked.
+    places_tx: std::sync::mpsc::Sender<(crate::sidebar::Edit, PathBuf, bool)>,
+    places_rx: Receiver<(crate::sidebar::Edit, PathBuf, bool)>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -613,6 +641,7 @@ impl Replies {
         let (found_tx, found_rx) = mpsc::channel();
         let (index_tx, index_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
+        let (places_tx, places_rx) = mpsc::channel();
         Self {
             paste_tx,
             paste_rx,
@@ -630,6 +659,8 @@ impl Replies {
             found_rx,
             index_tx,
             index_rx,
+            places_tx,
+            places_rx,
         }
     }
 }
@@ -918,6 +949,21 @@ pub struct App {
     columns: crate::layout::Columns,
     /// The column boundary being dragged, and the leaf whose header it started in.
     column_drag: Option<(crate::panes::PaneId, ColumnEdge)>,
+    /// Whether the sidebar's own divider has been taken hold of.
+    aside_drag: bool,
+    /// A pinned place being dragged into a different order.
+    place_drag: Option<PlaceDrag>,
+    /// The place a menu was opened over, while that menu is what is being acted
+    /// on.
+    ///
+    /// **The target `open_menu` said the registry had no shape for.** A command
+    /// runs against `&mut App` and takes no argument, so a place's menu rows need
+    /// somewhere to say *which* place — and that is a field, exactly as the
+    /// selection is the field that tells `file.trash` what to trash
+    /// ([ADR 0021](../../docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)).
+    /// Cleared with the menu, by [`App::close_menu`], and outliving it by exactly
+    /// one command — the one the menu was opened for.
+    menu_place: Option<PathBuf>,
     /// Where a rubber band started, and where it is now.
     band: Option<(Point, Point)>,
     /// A press on an already-selected row that may become a drag of files.
@@ -989,6 +1035,7 @@ impl App {
             self.theme = if dark { Theme::dark() } else { Theme::light() };
         }
         self.sidebar.open = options.sidebar.unwrap_or(session.sidebar);
+        self.sidebar.width = session.aside.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
         self.history_open = session.history;
         self.zoom = session.zoom.min(ZOOM.len() - 1);
         self.columns = session.columns.clamped();
@@ -1007,6 +1054,7 @@ impl App {
         crate::session::Session {
             dark: self.theme.dark,
             sidebar: self.sidebar.open,
+            aside: self.sidebar.width,
             history: self.history_open,
             hidden: self.panes.focused().show_hidden,
             zoom: self.zoom,
@@ -1090,7 +1138,13 @@ impl App {
             adapter: renderer.adapter().to_owned(),
             backend: renderer.backend().to_owned(),
             // No history yet, by construction: nothing has been changed.
-            layout: Layout::compute_with(logical, &theme.metrics, frame_of(&window), true, 0.0),
+            layout: Layout::compute_with(
+                logical,
+                &theme.metrics,
+                frame_of(&window),
+                crate::sidebar::DEFAULT_WIDTH,
+                0.0,
+            ),
             renderer,
             window,
             fonts,
@@ -1181,6 +1235,9 @@ impl App {
             history_scroll: sk_ui::Scroll::default(),
             columns: crate::layout::Columns::default(),
             column_drag: None,
+            aside_drag: false,
+            place_drag: None,
+            menu_place: None,
             band: None,
             files_drag: None,
             dropped: false,
@@ -1243,6 +1300,7 @@ impl App {
             self.drain_openers();
             self.drain_found();
             self.drain_index();
+            self.drain_places();
             if self.edits.drain_progress() {
                 self.dirty = true;
             }
@@ -1695,10 +1753,15 @@ impl App {
     /// site: the pointer and the keyboard both leave a request rather than a
     /// menu, so the two paths cannot drift into two different menus.
     fn settle_menu(&mut self, commands: &Registry<Self>) {
-        let Some((at, groups)) = self.menu_wanted.take() else { return };
+        // **Read rather than taken**, because a row's `enabled` may ask what the
+        // menu is *about* — `App::place_in_question` does — and taking the
+        // request first would answer that question as though no menu were being
+        // opened at all.
+        let Some((at, groups)) = self.menu_wanted else { return };
         self.menu = crate::menu::build(groups, commands, at, |id| {
             commands.find(id).is_some_and(|command| commands.enabled(command, self))
         });
+        self.menu_wanted = None;
         self.dirty = true;
     }
 
@@ -3141,7 +3204,23 @@ impl App {
     /// The four navigation buttons are a pane's now —
     /// [`Self::press_on_a_pane_bar`].
     fn press_on_the_chrome(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+        // **Before the rows**, because the band is on the sidebar's own edge and
+        // the row under it reaches to within a pixel of the same line: without
+        // this, every press that took hold of the divider also navigated.
+        if self.on_the_aside_divider(position) {
+            self.aside_drag = true;
+            return true;
+        }
         if let Some(index) = self.place_at(position) {
+            // A pinned row is also the start of a possible reorder. The
+            // navigation still happens on the press — dragging a place opens it,
+            // the way dragging a tab shows it, so there is nothing to defer to
+            // the release and nothing that behaves differently from the rows
+            // above it.
+            if let Some(from) = self.pinned_at(index) {
+                self.place_drag =
+                    Some(PlaceDrag { from, at: from, started: position, active: false });
+            }
             if let Some(entry) = self.sidebar.at(index) {
                 let path = entry.path.clone();
                 if path != self.panes.focused().path {
@@ -3189,6 +3268,229 @@ impl App {
         // A press anywhere else in the strip is spent rather than falling through
         // to a pane that is no longer under it.
         self.layout.history.height > 0.0 && self.layout.history.contains(position.x, position.y)
+    }
+
+    /// Whether `position` is in the grab band of the sidebar's own divider.
+    ///
+    /// The same four logical pixels a column boundary uses, either side of the
+    /// line the sidebar draws at its right edge — and nothing at all when the
+    /// sidebar is closed, where the band would be a strip of the list that
+    /// swallowed presses.
+    fn on_the_aside_divider(&self, position: Point) -> bool {
+        let aside = self.layout.sidebar;
+        aside.width > 0.0
+            && (position.x - aside.right()).abs() <= COLUMN_GRAB
+            && position.y >= aside.y
+            && position.y <= aside.bottom()
+    }
+
+    /// Moves the sidebar's divider to where the pointer is.
+    fn drag_the_aside(&mut self, position: Point) {
+        let width = crate::sidebar::Sidebar::dragged_to(position.x);
+        if (self.sidebar.width - width).abs() < f32::EPSILON {
+            return;
+        }
+        self.sidebar.width = width;
+        self.relayout();
+        self.dirty = true;
+    }
+
+    /// Where the pinned rows are in the flattened list.
+    ///
+    /// One contiguous run, because they are one section. Nothing where nothing is
+    /// pinned, which is also when there is no section and no heading.
+    fn pinned_run(&self) -> Option<std::ops::Range<usize>> {
+        let mut at = 0;
+        for section in &self.sidebar.sections {
+            if section.entries.iter().any(|entry| entry.pinned) {
+                return Some(at..at + section.entries.len());
+            }
+            at += section.entries.len();
+        }
+        None
+    }
+
+    /// A flattened row index as an index among the pinned places.
+    fn pinned_at(&self, row: usize) -> Option<usize> {
+        let run = self.pinned_run()?;
+        run.contains(&row).then(|| row - run.start)
+    }
+
+    /// The gap a reorder would drop into, from the pointer's height.
+    ///
+    /// A gap rather than a row: `0` is above the first pinned row and `n` is
+    /// below the last, which is the only way to express "put it at the end". Each
+    /// row's own midline is the boundary, so a row is displaced once the pointer
+    /// is past half of it.
+    fn place_gap_at(&self, y: f32) -> usize {
+        let Some(run) = self.pinned_run() else { return 0 };
+        let mut gap = 0;
+        for row in run.clone() {
+            let Some(area) = self.hits.places.get(row) else { continue };
+            if y > area.y + area.height / 2.0 {
+                gap = row - run.start + 1;
+            }
+        }
+        gap
+    }
+
+    /// Follows a reorder with the pointer.
+    fn drag_the_place(&mut self, position: Point) {
+        let Some(drag) = self.place_drag else { return };
+        let moved = (position.x - drag.started.x).abs().max((position.y - drag.started.y).abs());
+        if !drag.active && moved <= DRAG_THRESHOLD {
+            return;
+        }
+        let at = self.place_gap_at(position.y);
+        let Some(drag) = self.place_drag.as_mut() else { return };
+        if drag.active && drag.at == at {
+            return;
+        }
+        drag.active = true;
+        drag.at = at;
+        self.dirty = true;
+    }
+
+    /// Ends a reorder, applying it if the row actually moved. Whether it was one.
+    fn drop_the_place(&mut self) -> bool {
+        let Some(drag) = self.place_drag.take() else { return false };
+        if !drag.active {
+            return false;
+        }
+        let order = self.sidebar.pinned();
+        if let Some(moved) = crate::sidebar::moved(&order, drag.from, drag.at) {
+            self.reorder_places(moved);
+        }
+        true
+    }
+
+    /// The place a place command is about.
+    ///
+    /// The row a menu was opened over, and otherwise the folder the focused pane
+    /// is showing — so the same command means "this row" from the sidebar's menu
+    /// and "where I am" from the palette, a chord or the background menu, and
+    /// neither reading needs a second command.
+    fn place_in_question(&self) -> PathBuf {
+        self.menu_place.clone().unwrap_or_else(|| self.panes.focused().path.clone())
+    }
+
+    /// Whether the place in question could be added to the list.
+    #[must_use]
+    pub(crate) fn can_pin(&self) -> bool {
+        let path = self.place_in_question();
+        !self.sidebar.holds(&path) && self.panes.focused().path == path
+    }
+
+    /// Whether the place in question is one that can be taken off the list.
+    #[must_use]
+    pub(crate) fn can_unpin(&self) -> bool {
+        self.sidebar.is_pinned(&self.place_in_question())
+    }
+
+    /// Adds the place in question to the list of places.
+    pub(crate) fn pin_place(&mut self) {
+        let path = self.place_in_question();
+        self.write_the_places(crate::sidebar::Edit::Pinned, path.clone(), move || {
+            sk_desktop::pin(&path)
+        });
+    }
+
+    /// Takes it off the list.
+    pub(crate) fn unpin_place(&mut self) {
+        let path = self.place_in_question();
+        self.write_the_places(crate::sidebar::Edit::Unpinned, path.clone(), move || {
+            sk_desktop::unpin(&path)
+        });
+    }
+
+    /// Moves the place in question one row up the pinned list, or one row down.
+    ///
+    /// **The keyboard's half of the drag**, which is [rule
+    /// 5](../../docs/03-principles.md): a reorder that only a pointer can do is a
+    /// feature half the people using it cannot reach.
+    pub(crate) fn move_place(&mut self, down: bool) {
+        let path = self.place_in_question();
+        let mut order = self.sidebar.pinned();
+        let Some(from) = order.iter().position(|it| *it == path) else { return };
+        let to = if down { from + 1 } else { from.wrapping_sub(1) };
+        if to >= order.len() {
+            return;
+        }
+        order.swap(from, to);
+        self.reorder_places(order);
+    }
+
+    /// Whether the place in question has a pinned row above it.
+    #[must_use]
+    pub(crate) fn can_raise_place(&self) -> bool {
+        self.sidebar.pinned().first().is_some_and(|first| *first != self.place_in_question())
+            && self.can_unpin()
+    }
+
+    /// Whether it has one below it.
+    #[must_use]
+    pub(crate) fn can_lower_place(&self) -> bool {
+        self.sidebar.pinned().last().is_some_and(|last| *last != self.place_in_question())
+            && self.can_unpin()
+    }
+
+    /// Writes a new order for the pinned places.
+    fn reorder_places(&mut self, order: Vec<PathBuf>) {
+        let subject = order.first().cloned().unwrap_or_default();
+        self.write_the_places(crate::sidebar::Edit::Reordered, subject, move || {
+            sk_desktop::reorder(&order)
+        });
+    }
+
+    /// Runs one write of the list of places on a job, and reads the list again
+    /// afterwards.
+    ///
+    /// **On a job, and the reload is the job's own last act** — rule 1, and the
+    /// reason the sidebar cannot simply be told what it now holds: the file is
+    /// shared with every other file manager on the machine, so what it holds
+    /// after a write is what the file says rather than what we asked for.
+    fn write_the_places(
+        &mut self,
+        edit: crate::sidebar::Edit,
+        subject: PathBuf,
+        write: impl FnOnce() -> bool + Send + 'static,
+    ) {
+        let sender = self.replies.places_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let done = write();
+            if sender.send((edit, subject, done)).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of a write to the list of places.
+    fn drain_places(&mut self) {
+        let mut any = false;
+        while let Ok((edit, subject, done)) = self.replies.places_rx.try_recv() {
+            any = true;
+            let name = crate::panes::title_of(&subject).to_owned();
+            self.notice = Some((
+                match (edit, done) {
+                    (_, false) => sk_model::i18n::lookup("notice.places_refused").to_owned(),
+                    (crate::sidebar::Edit::Pinned, true) => {
+                        sk_model::i18n::format("notice.pinned", &[&name])
+                    }
+                    (crate::sidebar::Edit::Unpinned, true) => {
+                        sk_model::i18n::format("notice.unpinned", &[&name])
+                    }
+                    (crate::sidebar::Edit::Reordered, true) => {
+                        sk_model::i18n::lookup("notice.places_ordered").to_owned()
+                    }
+                },
+                Instant::now(),
+            ));
+        }
+        if any {
+            self.sidebar.reload(&self.jobs);
+            self.dirty = true;
+        }
     }
 
     /// Follows the pointer across the sidebar. Whether the row under it changed.
@@ -5547,13 +5849,21 @@ search_active={active:?}",
         }
     }
 
+    /// How wide the sidebar is asking to be, and zero when it is closed.
+    ///
+    /// One answer for the layout and for the divider's grab band, because a band
+    /// over a closed sidebar is a band over the list.
+    fn aside(&self) -> f32 {
+        if self.sidebar.open { self.sidebar.width } else { 0.0 }
+    }
+
     /// Recomputes every region, including whose frame this window is drawing.
     fn relayout(&mut self) {
         self.layout = Layout::compute_with(
             self.logical,
             &self.theme.metrics,
             frame_of(&self.window),
-            self.sidebar.open,
+            self.aside(),
             self.history_height(),
         );
         self.divide();
@@ -6196,6 +6506,62 @@ pane_body={bodies:?} pane_bar={bars:?}",
         (properties, facts, openers, opener)
     }
 
+    /// What the list of places is showing, for the diagnostic line.
+    ///
+    /// Its own method rather than twenty lines inside `chrome_state`, which is at
+    /// the hundred-line limit: the sidebar is one subject and this is everything
+    /// a scenario can ask about it.
+    fn places_state(&self) -> String {
+        let hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let name = self
+            .sidebar
+            .hover
+            .and_then(|index| self.sidebar.at(index))
+            .map(|entry| entry.label.clone())
+            .unwrap_or_default();
+        // The pinned places by name, in the order they are drawn, so a scenario
+        // can assert an order rather than a count — and the row a place menu is
+        // about, which is the target a command with no argument acts on.
+        let pinned = self
+            .sidebar
+            .pinned()
+            .iter()
+            .map(|path| crate::panes::title_of(path).to_owned())
+            .collect::<Vec<_>>()
+            .join(",");
+        let at = self.pinned_run().map_or(-1, |run| i64::try_from(run.start).unwrap_or(-1));
+        let menu = self
+            .menu_place
+            .as_deref()
+            .map(|path| crate::panes::title_of(path).to_owned())
+            .unwrap_or_default();
+        let drop = self
+            .place_drag
+            .filter(|drag| drag.active)
+            .map_or(-1, |drag| i64::try_from(drag.at).unwrap_or(-1));
+        // One point inside every row, in the flattened order, so a press can aim
+        // at a place without the harness owning a copy of the row height and the
+        // heading's — and the index the pinned run starts at, so "the second pin"
+        // is arithmetic rather than a guess about which sections exist.
+        let aim = self
+            .hits
+            .places
+            .iter()
+            .map(|area| format!("{:.0}:{:.0}", area.x + 30.0, area.y + area.height / 2.0))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
+place_hover={hover} place_name={name:?} pinned={pinned:?} pinned_at={at} place_menu={menu:?} \
+place_drop={drop} place_aim={aim:?} aside_grabbed={}",
+            self.layout.sidebar.width,
+            self.layout.sidebar.y,
+            self.sidebar.len(),
+            self.sidebar.loads,
+            self.aside_drag || self.on_the_aside_divider(self.pointer),
+        )
+    }
+
     fn chrome_state(&mut self) -> String {
         let frame = if self.window.needs_own_frame() { "own" } else { "server" };
         let frame_hover = match self.hovered_button {
@@ -6216,13 +6582,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
             sk_plat::Cursor::Divider { horizontal: true } => "divider-h".to_owned(),
             sk_plat::Cursor::Divider { horizontal: false } => "divider-v".to_owned(),
         };
-        let place_hover = self.sidebar.hover.map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
-        let place_name = self
-            .sidebar
-            .hover
-            .and_then(|index| self.sidebar.at(index))
-            .map(|entry| entry.label.clone())
-            .unwrap_or_default();
+        let places_report = self.places_state();
         // Where the path field's box is, so a scenario can drag inside it by
         // arithmetic over what the frame drew rather than over its own copy of the
         // metrics.
@@ -6258,8 +6618,7 @@ crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
 composing={composing:?} pointer={cursor_shape} \
-sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
-place_hover={place_hover} place_name={place_name:?} \
+{places_report} \
 path_field={path_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
@@ -6288,10 +6647,6 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.flings,
             self.window_state.maximized,
             self.layout.title.height,
-            self.layout.sidebar.width,
-            self.layout.sidebar.y,
-            self.sidebar.len(),
-            self.sidebar.loads,
             self.logical.width,
             self.logical.height,
             self.scale_120,
@@ -7039,11 +7394,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // The session is compared rather than tracked, so this only has to make
         // the frame happen.
         let sized = self.column_drag.take().is_some();
+        let widened = std::mem::take(&mut self.aside_drag);
+        let ordered = self.drop_the_place();
         // A press on the title bar that never moved is a click on a title bar,
         // and a title bar holds nothing to click: the path moved into the panes,
         // so there is nothing here for a press to be about.
         self.title_press = None;
-        if ended || released || dragged || divided || sized || chose {
+        if ended || released || dragged || divided || sized || chose || widened || ordered {
             self.dirty = true;
         }
     }
@@ -7127,6 +7484,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // Before the header's hand, for the same reason the press is: the
         // boundary is inside the header and is the more specific thing there.
         if self.column_drag.is_some() || self.column_edge_at(position).is_some() {
+            return sk_plat::Cursor::Divider { horizontal: true };
+        }
+        if self.aside_drag || self.on_the_aside_divider(position) {
             return sk_plat::Cursor::Divider { horizontal: true };
         }
         if self.placement.here.header.contains(position.x, position.y)
@@ -7283,7 +7643,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         // The menu takes the keyboard while it is up, the way the context menu
         // does — so anything else holding it lets go first.
-        self.menu = None;
+        self.close_menu();
         self.palette = None;
         self.crumb_menu = None;
         self.crumb_pending = Some(depth);
@@ -7428,7 +7788,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // path out of this function is a different menu or none, and leaving the
         // old one behind made a click on the sidebar look like it had opened the
         // list's menu.
-        if self.menu.take().is_some() {
+        if self.close_menu() {
             self.dirty = true;
         }
         // A secondary click inside a text field belongs to the field. Without
@@ -7446,14 +7806,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.window.show_window_menu(position);
             return;
         }
-        // **Not over the sidebar.** Every action on the background menu is about
-        // the directory the list is showing, and a sidebar row is a different
-        // directory — a menu offering New folder over `Downloads` would make it
-        // somewhere else. What a place's own menu should offer is that place in
-        // a new tab and Pin, and a command that runs against `&mut App` cannot
-        // be told which place: it needs a target, which the registry has no
-        // shape for yet.
+        // **A place's own menu, not the list's.** Every action on the background
+        // menu is about the directory the list is showing, and a sidebar row is a
+        // different directory — a menu offering New folder over `Downloads` would
+        // make it somewhere else. What a place offers instead is the two things
+        // that are about *it*, and the target a command needs is
+        // [`App::menu_place`].
         if self.layout.sidebar.contains(position.x, position.y) {
+            let over = self.place_at(position).and_then(|index| self.sidebar.at(index));
+            let Some(entry) = over else { return };
+            self.menu_place = Some(entry.path.clone());
+            self.menu_wanted = Some((position, crate::menu::ON_A_PLACE));
             return;
         }
         if self.edits.naming.is_some() {
@@ -7479,12 +7842,24 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.menu_wanted = Some((position, groups));
     }
 
+    /// Closes the menu that is up, and forgets what it was about. Whether one
+    /// was open.
+    ///
+    /// **One function rather than eight assignments**, because the target and the
+    /// menu have to disappear together: a `menu_place` that outlived its menu
+    /// would make the next `place.unpin` — from the palette, from a chord — act on
+    /// a row somebody clicked minutes ago.
+    fn close_menu(&mut self) -> bool {
+        self.menu_place = None;
+        self.menu.take().is_some()
+    }
+
     /// Opens the context menu from the keyboard, or closes an open one.
     ///
     /// At the cursor row rather than at the pointer, because a keyboard user's
     /// attention is on the cursor and the pointer may be on another monitor.
     pub(crate) fn toggle_menu(&mut self) {
-        if self.menu.take().is_some() {
+        if self.close_menu() {
             self.dirty = true;
             return;
         }
@@ -7735,6 +8110,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if let Some(id) = chosen.and_then(|id| commands.find(id)) {
             commands.run(id, self);
         }
+        // **The target outlives the menu by exactly one command**, which is the
+        // command the menu was opened for.
+        self.menu_place = None;
     }
 
     /// One key to an open menu. Returns whether it was consumed.
@@ -7750,7 +8128,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let Some(menu) = self.menu.as_mut() else { return false };
         let bare = event.mods.none();
         match event.key {
-            Key::Named(Named::Escape) => self.menu = None,
+            Key::Named(Named::Escape) => {
+                self.close_menu();
+            }
             Key::Named(Named::Down) if bare => {
                 menu.step(true);
                 menu.reveal(room);
@@ -7765,6 +8145,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 if let Some(id) = chosen.and_then(|id| commands.find(id)) {
                     commands.run(id, self);
                 }
+                self.menu_place = None;
             }
             _ => {
                 // **The diagnostic report passes through every mode, this one
@@ -7783,7 +8164,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 // Anything else dismisses, and dismisses only: a key that
                 // closes a menu must not also act behind it, which is the rule
                 // the pointer already follows.
-                self.menu = None;
+                self.close_menu();
                 self.dirty = true;
             }
         }
@@ -7962,6 +8343,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // line rather than aiming at one.
         if let Some((id, edge)) = self.column_drag {
             self.drag_the_column(id, edge, position);
+            return;
+        }
+        if self.aside_drag {
+            self.drag_the_aside(position);
+            return;
+        }
+        if self.place_drag.is_some() {
+            self.drag_the_place(position);
             return;
         }
         // A drag inside a field selects text. Before the palette's branch, because
@@ -8160,6 +8549,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
         let (physical, scale) = self.before_frame(commands);
         self.list.begin(physical);
+        // Two answers taken before the borrow is split, because both ask `self`
+        // a question about the pointer and the destructure below hands the
+        // pieces out.
+        let aside_grabbed = self.aside_drag || self.on_the_aside_divider(self.pointer);
+        let place_drop = self.place_drag.filter(|drag| drag.active).map(|drag| drag.at);
 
         let Self {
             list,
@@ -8281,6 +8675,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_mode: *hovered_mode,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,
+            aside_grabbed,
+            place_drop,
             drop_row: dropping.and_then(|drag| drag.landing.row),
             drop_tab: dropping.and_then(|drag| drag.landing.tab),
             drop_pane: dropping.and_then(|drag| drag.landing.into_pane),

@@ -1246,7 +1246,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 116
+FEWEST_SCENARIOS = 120
 
 
 def scenario(name, fresh: bool = False):
@@ -3135,15 +3135,23 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
     )
     expect(run.state(), menu="0", cursor=wanted, selected="1")
 
-    # And no menu over the sidebar, whose rows are a different directory from the
-    # one every action on the background menu is about.
+    # And over the sidebar it is the *place's* menu rather than the list's, whose
+    # every action is about a different directory: a background menu offering New
+    # folder over `Downloads` would make it somewhere else. Which place it is
+    # about is what `place_menu` reports; the three rows are
+    # `a-well-known-place-cannot-be-unpinned`'s subject.
     if float(opened["sidebar_w"]) > 0.0:
-        aside = aim(run, opened, float(opened["sidebar_w"]) / 2.0, float(opened["body_top"]) + 40.0)
+        aside = place_point(run, opened, 0)
         run.drive(
             f"move {aside[0]:.1f} {aside[1]:.1f}\n"
             "sleep 150\nclick right\nsleep 350\nkey f12\nsleep 150\n"
         )
-        expect(run.state(), menu="0", cursor=wanted)
+        over_place = run.state()
+        expect(over_place, menu="3", cursor=wanted)
+        if "file.new_folder" in over_place["menu_aim"]:
+            raise Failure("the sidebar answered with the list's own menu")
+        if not over_place["place_menu"]:
+            raise Failure("the menu is about no place at all")
 
 
 @scenario("mouse-only-trash-and-undo", fresh=True)
@@ -5149,6 +5157,266 @@ def sidebar_toggle(run: Run, fixture: Path) -> None:
     run.drive("key f9\nsleep 400\nkey f12\nsleep 200\n")
     again = run.state()
     expect(again, sidebar_w=open_state["sidebar_w"], name_x=open_state["name_x"])
+
+
+def place_logical(state: dict[str, str], index: int) -> tuple[float, float]:
+    """The middle of the sidebar row at `index`, in the window's own pixels.
+
+    From `place_aim`, which the window reports one point per drawn row: a row's
+    `y` depends on how many section headings came before it, and duplicating that
+    arithmetic here is how the harness and the window come to disagree.
+    """
+    points = [it for it in state["place_aim"].split(",") if it]
+    if index >= len(points):
+        raise Failure(f"no sidebar row {index}; there are {len(points)}")
+    across, down = (float(value) for value in points[index].split(":"))
+    return across, down
+
+
+def place_point(run: Run, state: dict[str, str], index: int) -> tuple[float, float]:
+    """Where to click the sidebar row at `index`, as the driver's percentages."""
+    return aim(run, state, *place_logical(state, index))
+
+
+def own_config(run: Run, label: str) -> dict:
+    """An environment whose config directory is this scenario's own.
+
+    **Required of anything that pins.** A pin is a line in
+    `$XDG_CONFIG_HOME/gtk-3.0/bookmarks`, which is the file Nautilus, Thunar and
+    Nemo read — so a scenario that wrote to the real one would put a temporary
+    fixture into the sidebar of every file manager on the machine running the
+    suite, and leave it there.
+    """
+    home = run.log.parent / f"config-{label}"
+    home.mkdir(parents=True, exist_ok=True)
+    return {
+        "XDG_CONFIG_HOME": str(home),
+        "XDG_STATE_HOME": str(run.log.parent / f"state-{label}"),
+    }
+
+
+@scenario("pinning-a-folder-keeps-it-through-kill-9", fresh=True)
+def pinning_a_folder(run: Run, fixture: Path) -> None:
+    """Rule 6, at the signal it names: `kill -9` does not lose a bookmark.
+
+    A pin is not on the undo stack — ADR 0021 — so what makes it reversible is
+    that it is written the moment it is made and that Unpin is one press away.
+    Both halves are here, and so is the file itself: the bytes on disk are
+    asserted, because the promise is interoperation with every other file manager
+    and a window that merely *believes* it pinned something keeps that promise to
+    nobody.
+    """
+    run.close()
+    place = own_config(run, "pin")
+    bookmarks = Path(place["XDG_CONFIG_HOME"]) / "gtk-3.0" / "bookmarks"
+
+    own = Run(run.display, run.log.parent, fixture / "alpha", [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("key f12\nsleep 150\n")
+        expect(own.state(), pinned="", pinned_at="-1")
+        own.drive("key ctrl+b\nsleep 500\nkey f12\nsleep 200\n")
+        pinned = until(own, pinned="alpha")
+        if int(pinned["pinned_at"]) < 1:
+            raise Failure(f"the pinned rows start at {pinned['pinned_at']}, so above the places")
+        if not bookmarks.is_file():
+            raise Failure(f"nothing was written to {bookmarks}")
+        text = bookmarks.read_text()
+        if text != f"file://{fixture / 'alpha'}\n":
+            raise Failure(f"the file holds {text!r}")
+        own.kill()
+    finally:
+        own.close()
+
+    # It comes back because the *file* holds it, not because a session was
+    # written: the same directory, opened by a second process after the first was
+    # killed rather than closed.
+    back = Run(run.display, run.log.parent, fixture / "alpha", [], run.instance, place)
+    try:
+        listed(back)
+        back.drive("key f12\nsleep 200\n")
+        until(back, pinned="alpha")
+        # And the way back out, which is the inverse rule 3 would have wanted a
+        # stack for.
+        back.drive("key ctrl+shift+b\nsleep 500\nkey f12\nsleep 200\n")
+        until(back, pinned="")
+        if bookmarks.read_text() != "":
+            raise Failure(f"unpinning left {bookmarks.read_text()!r}")
+    finally:
+        back.close()
+
+
+@scenario("a-well-known-place-cannot-be-unpinned", fresh=True)
+def a_default_place_is_not_unpinnable(run: Run, fixture: Path) -> None:
+    """The defaults are the machine's and the pins are yours.
+
+    A secondary click on a sidebar row opens the place's own menu — three rows,
+    all three about *that* row, which is the target `open_menu` used to say the
+    registry had no shape for. Over Home every one of them is dimmed; over a pin
+    they are not. Dimmed rather than absent, so the menu is the same shape every
+    time it opens.
+    """
+    run.close()
+    place = own_config(run, "unpin")
+    own = Run(run.display, run.log.parent, fixture / "alpha", [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("key ctrl+b\nsleep 500\nkey f12\nsleep 200\n")
+        state = until(own, pinned="alpha")
+
+        # Home, which is row 0 of the first section in every arrangement.
+        at = place_point(own, state, 0)
+        own.drive(
+            f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\n"
+            f"click right\nsleep 400\nkey f12\nsleep 200\n"
+        )
+        over_home = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        expect(over_home, menu="3")
+        for wanted in ("place.unpin", "place.raise", "place.lower"):
+            if wanted not in over_home["menu_dim"]:
+                raise Failure(f"{wanted} is not dimmed over Home: {over_home['menu_dim']!r}")
+        if "file.new_folder" in over_home["menu_aim"]:
+            raise Failure("a place's menu offered the list's own actions")
+
+        own.drive("key escape\nsleep 250\n")
+        at = place_point(own, state, int(state["pinned_at"]))
+        own.drive(
+            f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\n"
+            f"click right\nsleep 400\nkey f12\nsleep 200\n"
+        )
+        over_pin = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        expect(over_pin, place_menu="alpha")
+        if "place.unpin" in over_pin["menu_dim"]:
+            raise Failure(f"Unpin is dimmed over a pin: {over_pin['menu_dim']!r}")
+
+        # And the row runs the command against the place the menu was opened
+        # over, which is the whole of what the target is for.
+        aimed = menu_aim(own, over_pin, "place.unpin")
+        own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 600\nkey f12\nsleep 200\n")
+        until(own, pinned="")
+    finally:
+        own.close()
+
+
+@scenario("the-sidebars-divider-drags-and-is-remembered", fresh=True)
+def the_sidebar_divider(run: Run, fixture: Path) -> None:
+    """M2's resizable divider, and rule 6 over the width it sets.
+
+    The band is four logical pixels either side of the line the sidebar draws at
+    its right edge, so the first assertion is that the window *reports* being on
+    it — a drag that missed the band would move the pointer and change nothing,
+    which reads exactly like a divider that does not work.
+    """
+    run.close()
+    place = own_config(run, "divider")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    dragged = {}
+    try:
+        listed(own)
+        own.drive("key f12\nsleep 150\n")
+        before = own.state()
+        width = float(before["sidebar_w"])
+        if width <= 0.0:
+            raise Failure("the sidebar is closed")
+        middle = float(before["body_top"]) + 120.0
+        on_it = aim(own, before, width, middle)
+        own.drive(f"move {on_it[0]:.2f} {on_it[1]:.2f}\nsleep 200\nkey f12\nsleep 150\n")
+        expect(own.state(), aside_grabbed="true", pointer="divider-h")
+
+        wider = aim(own, before, width + 90.0, middle)
+        own.drive(
+            f"press left\nsleep 150\n"
+            f"move {wider[0]:.2f} {wider[1]:.2f}\nsleep 250\n"
+            f"release left\nsleep 250\nkey f12\nsleep 200\n"
+        )
+        dragged = holds(
+            own,
+            lambda it: abs(float(it["sidebar_w"]) - width) > 40.0,
+            "a sidebar the drag widened",
+        )
+        # The list moved with it, or the rows are drawn under the sidebar.
+        if float(dragged["name_x"]) <= float(before["name_x"]):
+            raise Failure("the name column did not move with the divider")
+        # Long enough for the session floor to have let a write through, then
+        # killed outright rather than closed: a clean exit writes the file on its
+        # way out, and rule 6's stated failure is a hard kill.
+        own.drive("sleep 2500\nkey f12\nsleep 200\n")
+        own.kill()
+    finally:
+        own.close()
+
+    back = Run(run.display, run.log.parent, None, [], run.instance, place)
+    try:
+        listed(back)
+        back.drive("key f12\nsleep 200\n")
+        # **Within a logical pixel, not equal to it.** The file holds whole
+        # pixels, the way the `columns` line does, and a pointer lands on a
+        # fraction of one — so 310.1 comes back as 310, which is the width
+        # somebody dragged to and not a width that was lost.
+        came_back = float(back.state()["sidebar_w"])
+        if abs(came_back - float(dragged["sidebar_w"])) > 1.0:
+            raise Failure(f"came back {came_back} wide, was {dragged['sidebar_w']}")
+    finally:
+        back.close()
+
+
+@scenario("a-pinned-place-is-dragged-into-a-different-order", fresh=True)
+def reordering_the_pins(run: Run, fixture: Path) -> None:
+    """M2's drag-to-reorder, and the keyboard's half of it.
+
+    The order on screen is the order of the lines in the file, so this asserts the
+    file as well: a reorder that only moved rows would come back in the old order
+    on the next start, and one that rewrote the file wrongly would take somebody
+    else's bookmark with it.
+    """
+    run.close()
+    place = own_config(run, "reorder")
+    bookmarks = Path(place["XDG_CONFIG_HOME"]) / "gtk-3.0" / "bookmarks"
+    own = Run(run.display, run.log.parent, fixture / "alpha", [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("key ctrl+b\nsleep 500\n")
+        until(own, pinned="alpha")
+
+        # A second pin, from the other folder — typed into the path bar, because
+        # `beta` is not under `alpha`.
+        own.drive("key ctrl+l\nsleep 200\nkey ctrl+u\n")
+        own.drive(f"text {fixture / 'beta'}\nsleep 150\nkey enter\nsleep 700\n")
+        until(own, path=str(fixture / "beta"))
+        own.drive("key ctrl+b\nsleep 500\nkey f12\nsleep 200\n")
+        two = until(own, pinned="alpha,beta")
+
+        first = int(two["pinned_at"])
+        from_at = place_point(own, two, first)
+        # **Past the middle of the row below**, which is where the gap is. Each
+        # row's own midline is the boundary, so a drop on the *centre* of the next
+        # row names the gap above it — which is the position the dragged row is
+        # already in, and is deliberately not a move.
+        across, above = place_logical(two, first)
+        _, centre = place_logical(two, first + 1)
+        below = aim(own, two, across, centre + (centre - above) * 0.6)
+        own.drive(
+            f"move {from_at[0]:.2f} {from_at[1]:.2f}\nsleep 150\n"
+            f"press left\nsleep 150\n"
+            f"move {below[0]:.2f} {below[1]:.2f}\nsleep 250\n"
+            f"release left\nsleep 600\nkey f12\nsleep 200\n"
+        )
+        until(own, pinned="beta,alpha")
+        wanted = f"file://{fixture / 'beta'}\nfile://{fixture / 'alpha'}\n"
+        if bookmarks.read_text() != wanted:
+            raise Failure(f"the file holds {bookmarks.read_text()!r}")
+
+        # **The press that started the drag also opened the row**, which is what
+        # dragging a tab does, so the pane is standing in `alpha` — and that is
+        # what the keyboard's half then acts on.
+        expect(own.state(), path=str(fixture / "alpha"))
+
+        # And back again with the keyboard, which ends in the same command the
+        # drag does. `alpha` is last now, so it is the raise that moves it.
+        own.drive("key ctrl+shift+up\nsleep 600\nkey f12\nsleep 200\n")
+        until(own, pinned="alpha,beta")
+    finally:
+        own.close()
 
 
 @scenario("navigation-buttons")

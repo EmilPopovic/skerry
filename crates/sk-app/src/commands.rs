@@ -28,6 +28,7 @@ pub fn registry() -> Registry<App> {
     select(&mut registry);
     directions(&mut registry);
     view(&mut registry);
+    places(&mut registry);
     grouping(&mut registry);
     zoom(&mut registry);
     file(&mut registry);
@@ -36,6 +37,64 @@ pub fn registry() -> Registry<App> {
     help(&mut registry);
     field(&mut registry);
     registry
+}
+
+/// The list of places: what is on it, and in what order.
+///
+/// Four commands and one target. [ADR
+/// 0021](../../../docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md) is
+/// that a pin is a line in GTK's bookmarks file and is [rule
+/// 6](../../../docs/03-principles.md#6-state-survives-everything) state rather
+/// than [rule 3](../../../docs/03-principles.md#3-everything-is-reversible)
+/// state: it is written durably the moment it is made and it is not on the undo
+/// stack, because rule 6 names bookmarks and its failure condition is `kill -9`
+/// losing one, while rule 3's list is the file mutations. The way back is Unpin,
+/// one row away in the same menu.
+fn places(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "place.pin",
+            name: "action.pin",
+            group: Group::Navigate,
+            // **`B` for the file this writes**, which is GTK's `bookmarks`, and
+            // not the `Ctrl+D` Nautilus and every browser use — that one is
+            // Duplicate here, which is a file operation and the more frequent of
+            // the two. The inverse is the same letter with `Shift`, which is the
+            // shape `Ctrl+Z` and `Ctrl+Shift+Z` already set.
+            keys: &["ctrl+b"],
+            enabled: App::can_pin,
+            run: App::pin_place,
+        },
+        CommandSpec {
+            id: "place.unpin",
+            name: "action.unpin",
+            group: Group::Navigate,
+            keys: &["ctrl+shift+b"],
+            enabled: App::can_unpin,
+            run: App::unpin_place,
+        },
+        CommandSpec {
+            id: "place.raise",
+            name: "action.place_up",
+            group: Group::Navigate,
+            // The pointer's way is dragging the row, which is what a list of
+            // eleven things asks for; these two are the keyboard's half of it,
+            // which is rule 5.
+            keys: &["ctrl+shift+up"],
+            enabled: App::can_raise_place,
+            run: |app: &mut App| app.move_place(false),
+        },
+        CommandSpec {
+            id: "place.lower",
+            name: "action.place_down",
+            group: Group::Navigate,
+            keys: &["ctrl+shift+down"],
+            enabled: App::can_lower_place,
+            run: |app: &mut App| app.move_place(true),
+        },
+    ] {
+        registry.add(spec);
+    }
 }
 
 /// Moving around: open, up, back, forward, home, reload.
@@ -974,7 +1033,12 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));
     reach.push(("tab.close", "the cross on a tab, or a double click on it"));
-    for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND, crate::menu::IN_A_LOOK] {
+    for groups in [
+        crate::menu::ON_ROW,
+        crate::menu::ON_BACKGROUND,
+        crate::menu::IN_A_LOOK,
+        crate::menu::ON_A_PLACE,
+    ] {
         for id in groups.iter().flat_map(|group| group.iter()) {
             reach.push((id, "the context menu"));
         }

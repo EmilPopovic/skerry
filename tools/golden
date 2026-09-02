@@ -114,6 +114,12 @@ FRAMES = [
     # frame at all. Twelve rows in a body that holds eight is what puts it here.
     ("wide-columns", ["--size", "1600x360", "--scale", "100"]),
     ("light", ["--size", "900x520", "--scale", "125", "--light"]),
+    # **The sidebar's third section, and the line a reorder drops onto.** The
+    # Pinned rows are the only ones the list can be asked to change, so this is
+    # the one frame that shows the heading, the rows under it, and the insertion
+    # line between them — which is drawn between two rows rather than over one,
+    # because the answer to a drop here is an order and not a destination.
+    ("sidebar-pinned", ["--size", "900x520", "--scale", "125", "--pinned"]),
     ("keyboard-overlay", ["--size", "900x520", "--scale", "125", "--keys"]),
     # **Not the statistics overlay.** Its content is job counts and cache
     # hit rates, which differ between two runs of the same binary by design —

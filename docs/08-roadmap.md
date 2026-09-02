@@ -188,7 +188,7 @@ dogfooding:
 | A breadcrumb path bar, `Ctrl+L` to type into it, and a text field that edits like one — selection, word operations, its own undo, and a scope that stops a chord meaning two things at once | M2, M6 | One bar per pane, under that pane's tab strip: a pane has a path, a history and a folder to reload, and a window has as many of each as it has panes — a single bar describing whichever pane last took the keyboard leaves the other half of a split a listing with no address. An inert bar is a strip of pixels that looks clickable and is not. Typing a path is how a person goes somewhere they cannot see, and it needs no completion to be worth having — the read fails with a message naming what it looked for, which is the same answer a directory deleted a moment ago gives |
 | **Properties**, and **a terminal here** | M5, and the one thing [11-non-goals.md](11-non-goals.md) says instead of an embedded terminal | A panel of what a file *is* is what a person opens when a listing has not answered their question, and it is `statx` and a `readlink` on a job rather than a milestone. The terminal is one command, honouring `$TERMINAL`, and it is the substitute the non-goals list already promised |
 | A mark coloured by the kind of file | M7 | An icon theme is a spec, a parser and a dependency on the user having one installed. Nine hues over the mark that was already there is legible at thirteen pixels, costs 0.012 ms a frame, and is what M7 replaces rather than what it starts from |
-| The sidebar, and back / forward / parent / reload | M2 | A file manager without them is a demo. What goes in the sidebar comes from three files every other file manager on the machine already reads, so it cost a parser each and no dependency — and the tree, the drag-to-reorder and the resizable divider that M2 owes are still owed |
+| The sidebar, and back / forward / parent / reload | M2 | A file manager without them is a demo. What goes in the sidebar comes from three files every other file manager on the machine already reads, so it cost a parser each and no dependency — and one of them is now **written**: a folder can be pinned, unpinned and dragged into a different order, which is a line in GTK's `bookmarks` ([ADR 0021](adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)) and therefore a pin in Nautilus too. Its **divider drags** and the width is in the session file. The **tree** M2 owes is still owed |
 | Filter-as-you-type | M4 | A substring over a listing already in memory is thirty lines and the narrowing is what a directory of ten thousand needs before search exists. **Not** search: no fuzzy matching, no index, no recursion — those are M4's and cost what M4 costs |
 | New folder, rename, **copy, cut, paste, duplicate**, Move to Trash over a whole selection, one undo stack over all of it, a counted progress line, a stop, and Copy the text inside | M3 | Rule 3 is one of the eight expensive-to-undo invariants, and every mutation added before the stack exists is a mutation that has to be retrofitted onto it. The engine is Spike E's, ported rather than rewritten. **Not** the whole queue: one operation at a time, no ETA, no pause, and no conflict *dialog* — but a copy under a taken name now lands beside it as `report (copy).pdf` rather than being refused, because pasting into the folder you copied from is how a person duplicates something and refusing it is a refusal to do the ordinary thing. A **move** under a taken name is still refused and said out loud: two files under names nobody chose is worse than a refusal. The XDG Trash is written by hand, so it brought no dependency and it interoperates with every other file manager on the machine |
 | The context menu **and the fuzzy palette**, both built out of the command registry | M6 | Every action reachable by keyboard alone *and* by pointer alone, which is a promise that gets more expensive with every command that arrives without it. `every_command_can_be_reached_without_a_keyboard` is the other half of the test rule 2 already had, and the exemption table it allows names ten commands and the reason a pointer has a better way of doing each |
@@ -313,8 +313,35 @@ call sites with no reader any the wiser. The guarantee the extraction existed fo
 is one read and one place a reply lands, and `pane::spawn_read` and
 `Panes::take_reply` are those.
 
-**Still owed here:** middle-click to split, the **List** columns — and the inline
-**Tree**,
+**The sidebar is a list somebody arranges**, which is the rest of what M2 owed
+it. A folder that is not one of the well-known directories can be **pinned**, and
+the well-known ones cannot be unpinned — the two verbs are one line in GTK's
+`bookmarks` file, so a pin here is a pin in Nautilus, Thunar, Nemo and `PCManFM`,
+and every line that file holds which this program cannot interpret comes back out
+of it unchanged. [ADR 0021](adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)
+settles that, and settles which rule a pin belongs to: [rule
+6](03-principles.md#6-state-survives-everything) names bookmarks and its stated
+failure is `kill -9` losing one, so a pin is written durably the moment it is made
+and is **not** on the undo stack, whose list is the file mutations. The way back
+is Unpin, one row away in the same menu.
+
+The pinned rows **drag into a different order**, with the line drawn between two
+rows rather than over one — a drop here is an order, not a destination — and
+`Ctrl+Shift+↑` / `Ctrl+Shift+↓` are the keyboard's half of the same command,
+because a reorder only a pointer can do is [rule
+5](03-principles.md#5-pointer-and-keyboard-are-peers) half kept. And the
+**divider drags**: a width between 150 and 480 logical pixels, in the session file
+beside the column widths, because a width is a decision about how much of a name
+somebody wants to read.
+
+What that needed was a target. A command runs against `&mut App` and takes no
+argument, so a place's own menu had nowhere to say *which* place — the comment in
+`open_menu` said as much. The answer is a field, exactly as the selection is the
+field that tells `file.trash` what to trash, and it lives as long as the menu
+plus the one command the menu was opened for.
+
+**Still owed here:** middle-click to split, the **List** columns, the sidebar's
+**tree** — and the inline **Tree**,
 which ADR 0013 explicitly does not reach: it is not a listing laid out
 differently but a listing whose rows come from several directories at varying
 depth, with an expansion state nothing models yet.

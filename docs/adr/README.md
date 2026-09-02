@@ -28,6 +28,8 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0018](0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md) | Thumbnails are slots in one atlas; a preview is not | **Superseded by [0020](0020-a-preview-is-a-few-textures-bounded-by-bytes.md)** |
 | [0019](0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md) | A preview request names a page, and the child stays stateless | Accepted |
 | [0020](0020-a-preview-is-a-few-textures-bounded-by-bytes.md) | A preview is a few textures, bounded by bytes, and the pages ahead are rendered early | Accepted |
+| [0021](0021-a-pin-is-a-line-in-gtks-bookmarks-file.md) | A pin is a line in GTK's bookmarks file, and rule 6 state rather than rule 3 state | Accepted |
+| [0022](0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md) | A search names a scope, and everywhere is the local mounts, index-first per root | Accepted |
 
 ## Triggers that have been answered
 

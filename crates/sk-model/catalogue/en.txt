@@ -128,7 +128,18 @@ error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.ino
 # The sidebar's section headings, and the name for the root filesystem — which
 # is `/` and is not what a person calls it.
 sidebar.places = Places
-sidebar.bookmarks = Bookmarks
+sidebar.pinned = Pinned
+
+# Pinning a folder to the list of places. The list is GTK's `bookmarks` file, so
+# a pin here is a pin in every other file manager on the machine — ADR 0021.
+action.pin = Pin this folder
+action.unpin = Unpin
+action.place_up = Move this place up
+action.place_down = Move this place down
+notice.pinned = Pinned {0}
+notice.unpinned = Unpinned {0}
+notice.places_ordered = The list of places was reordered
+notice.places_refused = The list of places could not be saved — check that the config directory can be written
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
 # The home directory, which is named after the user and is not what anyone calls

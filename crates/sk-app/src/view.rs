@@ -82,6 +82,15 @@ pub struct Chrome<'a> {
     pub places: &'a [Section],
     /// The sidebar row under the pointer.
     pub hovered_place: Option<usize>,
+    /// Whether the sidebar's divider is under the pointer or being dragged.
+    ///
+    /// **Drawn, because eight logical pixels of invisible grab band is a feature
+    /// only somebody who was told about it can use** — which is [rule
+    /// 4](../../../docs/03-principles.md), and the same argument the column
+    /// boundaries already won.
+    pub aside_grabbed: bool,
+    /// Where a pinned place being dragged would land, as a gap between rows.
+    pub place_drop: Option<usize>,
     /// The row a drag of files would drop into, while one is in flight.
     pub drop_row: Option<(PaneId, usize)>,
     /// The tab it would drop into instead, marked on the tab itself: a drop on
@@ -2373,8 +2382,17 @@ fn sidebar(
     fill(painter, area, theme.palette.sidebar);
     // The divider is on the sidebar's edge rather than the list's, so the list
     // owns its own left gutter and a row's hover shape does not touch it.
-    let edge = painter.rect(area.right() - 1.0, area.y, 1.0, area.height);
-    painter.list.rect(edge, theme.palette.divider, 0.0);
+    //
+    // Two pixels and the accent colour while a hand is on it, which is what the
+    // column boundaries do: the line is the control, so it has to look like one
+    // when it is about to be used.
+    let (ink, thickness) = if chrome.aside_grabbed {
+        (theme.palette.accent, 2.0)
+    } else {
+        (theme.palette.divider, 1.0)
+    };
+    let edge = painter.rect(area.right() - thickness, area.y, thickness, area.height);
+    painter.list.rect(edge, ink, 0.0);
 
     let clip = painter.rect(area.x, area.y, area.width - 1.0, area.height);
     painter.list.push_clip(clip);
@@ -2394,7 +2412,15 @@ fn sidebar(
         );
         y += metrics.sidebar_heading + 12.0;
 
-        for entry in &section.entries {
+        // The gap a reorder would drop into is drawn inside the section that
+        // holds the rows it is a gap between, because that is the only place the
+        // running index and the running `y` are both in hand.
+        let pinned = section.entries.iter().any(|entry| entry.pinned);
+        let drop = chrome.place_drop.filter(|_| pinned);
+        for (at, entry) in section.entries.iter().enumerate() {
+            if drop == Some(at) {
+                insertion(painter, area, y);
+            }
             let row = Area { x: area.x, y, width: area.width - 1.0, height: metrics.sidebar_row };
             hits.places.push(row);
             place_row(
@@ -2407,9 +2433,23 @@ fn sidebar(
             y += metrics.sidebar_row;
             index += 1;
         }
+        if drop == Some(section.entries.len()) {
+            insertion(painter, area, y);
+        }
         y += 8.0;
     }
     painter.list.pop_clip();
+}
+
+/// The line a dragged place would land on.
+///
+/// Between the rows rather than over one: a highlight on a row would say "into
+/// this", which is what a drop on a folder means everywhere else in this window,
+/// and the answer here is an order rather than a destination.
+fn insertion(painter: &mut Painter<'_>, area: Area, y: f32) {
+    let theme = *painter.theme;
+    let line = painter.rect(area.x + 8.0, y - 1.0, area.width - 17.0, 2.0);
+    painter.list.rect(line, theme.palette.accent, painter.px(1.0));
 }
 
 /// One row of the sidebar.
@@ -4437,7 +4477,7 @@ mod tests {
     ) -> Vec<(sk_text::GlyphKey, u32, u32)> {
         let logical = Size::new(1000.0, 620.0);
         let layout =
-            Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, false, 0.0);
+            Layout::compute_with(logical, &theme.metrics, crate::layout::Frame::None, 0.0, 0.0);
         let (mut leaves, mut dividers) = (Vec::new(), Vec::new());
         let widths = crate::layout::Columns::default();
         panes.layout(layout.content, &theme.metrics, widths, &mut leaves, &mut dividers);
@@ -4461,6 +4501,8 @@ mod tests {
             let chrome = Chrome {
                 quick_look: None,
                 hovered_look: None,
+                aside_grabbed: false,
+                place_drop: None,
                 edits: None,
                 history: (false, 0.0),
                 hovered_edit: None,

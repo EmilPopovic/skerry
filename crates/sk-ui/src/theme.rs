@@ -108,11 +108,6 @@ pub struct Metrics {
     pub radius: f32,
     /// Width of the icon column, including its trailing space.
     pub icon_column: f32,
-    /// Width of the sidebar, in logical pixels.
-    ///
-    /// 220 is what Windows 11 and Nautilus both settle near, and it is wide
-    /// enough for `VirtualBox VMs` at the body text size without truncation.
-    pub sidebar_width: f32,
     /// One row of the sidebar. Taller than a list row, because a sidebar is
     /// clicked rather than scanned and forty of them never have to fit.
     pub sidebar_row: f32,
@@ -151,7 +146,6 @@ impl Default for Metrics {
             path_size: 13.5,
             radius: 6.0,
             icon_column: 26.0,
-            sidebar_width: 220.0,
             sidebar_row: 30.0,
             sidebar_heading: 11.0,
             tool_width: 30.0,

@@ -295,24 +295,11 @@ pub fn load() -> Views {
 
 /// Writes `text` where [`path`] says, whole and atomically.
 ///
-/// The same three steps [`crate::session::write`] takes, and for the same reason:
-/// a reader sees the whole old file or the whole new one, never a torn one.
+/// The same [`sk_fs::atomically`] the session file and the pinned places use. It
+/// was a second copy of those steps before, with the `fsync` missing — which is
+/// what a duplicated four-step write costs.
 pub fn write(text: &str) -> bool {
-    let Some(file) = path() else { return false };
-    let Some(directory) = file.parent() else { return false };
-    if std::fs::create_dir_all(directory).is_err() {
-        return false;
-    }
-    let staging = file.with_extension("new");
-    if std::fs::write(&staging, text).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
-    }
-    if std::fs::rename(&staging, &file).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
-    }
-    true
+    path().is_some_and(|file| sk_fs::atomically(&file, text))
 }
 
 #[cfg(test)]

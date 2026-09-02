@@ -12,7 +12,7 @@
 //! ```text
 //! skerry 1
 //! theme dark            dark | light
-//! sidebar on            on | off
+//! sidebar on 220        on | off, then how wide it has been dragged
 //! history on            on | off — whether the visible history is expanded
 //! hidden off            on | off
 //! zoom 2                an index into App::ZOOM
@@ -56,6 +56,12 @@ pub struct Session {
     pub dark: bool,
     /// Whether the list of places was open.
     pub sidebar: bool,
+    /// How wide the list of places was dragged to, in logical pixels.
+    ///
+    /// **A second token on the `sidebar` line, not a line of its own**, and an
+    /// older file that has only `on` restores the default — the same per-field
+    /// tolerance the `columns` line has, for the same reason.
+    pub aside: f32,
     /// Whether the history strip is expanded.
     ///
     /// **[Rule 6](../../../docs/03-principles.md), which is about the layout and
@@ -168,32 +174,11 @@ pub fn load() -> Option<Session> {
 
 /// Writes `text` where [`path`] says, whole and atomically.
 ///
-/// **Runs on a job.** Three steps, and each one is why rule 6 can claim to
-/// survive a power cut: written to a neighbouring name, `fsync`ed so the bytes
-/// are on the device rather than in the page cache, then `rename`d — which is
-/// atomic within a directory, so a reader sees the whole old file or the whole
-/// new one and never a torn one.
+/// **Runs on a job**, through [`sk_fs::atomically`] — the four steps that are why
+/// rule 6 can claim to survive a power cut, in the one place the view records and
+/// the pinned places take them too.
 pub fn write(text: &str) -> bool {
-    let Some(file) = path() else { return false };
-    let Some(directory) = file.parent() else { return false };
-    if std::fs::create_dir_all(directory).is_err() {
-        return false;
-    }
-    let staging = file.with_extension("new");
-    let Ok(handle) = std::fs::File::create(&staging) else { return false };
-    {
-        use std::io::Write as _;
-        let mut handle = handle;
-        if handle.write_all(text.as_bytes()).is_err() || handle.sync_all().is_err() {
-            let _ = std::fs::remove_file(&staging);
-            return false;
-        }
-    }
-    if std::fs::rename(&staging, &file).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
-    }
-    true
+    path().is_some_and(|file| sk_fs::atomically(&file, text))
 }
 
 /// The file's text for a session.
@@ -201,7 +186,12 @@ pub fn write(text: &str) -> bool {
 pub fn render(session: &Session) -> String {
     let mut out = format!("skerry {VERSION}\n");
     out.push_str(if session.dark { "theme dark\n" } else { "theme light\n" });
-    out.push_str(if session.sidebar { "sidebar on\n" } else { "sidebar off\n" });
+    let _ = writeln!(
+        out,
+        "sidebar {} {}",
+        if session.sidebar { "on" } else { "off" },
+        session.aside.round()
+    );
     out.push_str(if session.history { "history on\n" } else { "history off\n" });
     out.push_str(if session.hidden { "hidden on\n" } else { "hidden off\n" });
     let _ = writeln!(out, "zoom {}", session.zoom);
@@ -300,6 +290,7 @@ pub fn parse(text: &str) -> Option<Session> {
     let mut session = Session {
         dark: true,
         sidebar: true,
+        aside: crate::sidebar::DEFAULT_WIDTH,
         history: false,
         hidden: false,
         zoom: crate::app::ZOOM_DEFAULT,
@@ -314,7 +305,13 @@ pub fn parse(text: &str) -> Option<Session> {
         let (word, value) = line.split_once(' ').unwrap_or((line, ""));
         match word {
             "theme" => session.dark = value != "light",
-            "sidebar" => session.sidebar = value == "on",
+            "sidebar" => {
+                let mut words = value.split_whitespace();
+                session.sidebar = words.next() == Some("on");
+                if let Some(width) = words.next().and_then(|it| it.parse::<f32>().ok()) {
+                    session.aside = width.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
+                }
+            }
             "history" => session.history = value == "on",
             "hidden" => session.hidden = value == "on",
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
@@ -477,6 +474,7 @@ mod tests {
 
     fn nested() -> Session {
         Session {
+            aside: crate::sidebar::DEFAULT_WIDTH,
             dark: false,
             sidebar: false,
             history: false,
@@ -552,6 +550,32 @@ mod tests {
         let session = parse(older).expect("an older file is not a broken one");
         assert_eq!(session.columns, crate::layout::Columns::default());
         assert_eq!(session.window, (1100, 720), "and the rest of it still read");
+        // The same rule for the sidebar's width, which is a *second token* on a
+        // line an older file already has — so `sidebar on` has to keep meaning
+        // "open, at whatever width this build ships".
+        assert!(session.sidebar, "the line stopped being read when it grew a field");
+        assert!((session.aside - crate::sidebar::DEFAULT_WIDTH).abs() < f32::EPSILON);
+    }
+
+    /// The width out and the same width back, and one the file should not be
+    /// able to hold held inside the range rather than refusing the file with it.
+    #[test]
+    fn the_sidebars_width_survives_a_round_trip_and_a_corrupt_one_is_clamped() {
+        let mut session = nested();
+        session.aside = 331.0;
+        session.sidebar = true;
+        let text = render(&session);
+        assert!(text.contains("sidebar on 331"), "{text}");
+        assert!((parse(&text).expect("round trip").aside - 331.0).abs() < f32::EPSILON);
+
+        let broken = text.replace("sidebar on 331", "sidebar on 4000");
+        let read = parse(&broken).expect("a bad width is not a bad file");
+        assert!((read.aside - crate::sidebar::WIDEST).abs() < f32::EPSILON);
+        assert!(read.sidebar, "and the token before it still read");
+        let nonsense = text.replace("sidebar on 331", "sidebar off nonsense");
+        let read = parse(&nonsense).expect("a bad width is not a bad file");
+        assert!(!read.sidebar);
+        assert!((read.aside - crate::sidebar::DEFAULT_WIDTH).abs() < f32::EPSILON);
     }
 
     /// Three widths out and the same three back.
