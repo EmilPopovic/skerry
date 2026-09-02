@@ -2408,3 +2408,71 @@ The rule: **a wait belongs on the value the scenario is about to use, not on the
 flag that says it is coming.** And where two accessors return the same thing in
 different shapes, they need the same guarantee — a wait in one of them is a wait
 that covers whichever scenario happened to call the right one.
+
+## The failure that was not the failure it said it was
+
+`a-drag-in-from-another-application-lands` fails about one run in eight with
+`nothing landed`, and the comment beside it said why: *"the synthetic drag itself
+is not delivered, which is XTEST and pacing rather than a wait in the wrong
+place"*. That was a guess, it was written as if it were a finding, and it is
+wrong.
+
+**The first thing the message said was that it was wrong.** The failure prints
+what the directory holds, and the dropped file *was in the listing* — the
+scenario had spent eight seconds asking `exists()` about a path that the very
+next line then listed. What the failure means is "not yet", not "never".
+
+Instrumenting the whole path — the selection request, the `SelectionNotify`, the
+property, the pipe, the read, the channel, the wake — showed every link
+completing, with timestamps:
+
+```
+TRACE take_drop asked
+TRACE request_from target=274
+TRACE arrived property=272 target=274 pending=1
+TRACE handing over 59 bytes
+TRACE dropped text "file:///…/outside/from-the-peer.txt\r\n" into "…/fixture-…"
+TRACE paths ["/…/outside/from-the-peer.txt"]
+TRACE job sent=true at 1788378978.769282434
+TRACE job woke  at 1788378978.769291341
+TRACE drain_paste took one at 1788378978.769338900
+```
+
+Fifty-six microseconds from the job's wake-up to the frame loop taking the
+message, with the paths right and the destination right — so `finish_drop` and
+`Edits::paste_all` both ran. Thirty-three seconds later the window reported no
+operation pending, an empty queue and no undo entry, and **one key press made the
+file appear within two hundred milliseconds.**
+
+Three hypotheses died on the way, and each is written down so nobody spends the
+afternoon again:
+
+- **A lost wake-up.** Ruled out by the timestamps above: the wake and the drain
+  are 56 µs apart.
+- **An event asleep in x11rb's buffer while `poll` waits on the socket** — the
+  classic X11 hang. Ruled out by reading: `pump` drains every buffered event
+  before it sleeps, and `drain_server` loops until `poll_for_event` says none.
+- **A refused conversion leaving a pipe's write end alive**, which is a bug this
+  module has had once and records in `Incoming::target`'s own comment. Ruled out:
+  the property was 272 and not `None`, and 59 bytes were handed over.
+
+What is left is the last link — `paste_all` is reached and the copy does not start
+— and it is **timing-sensitive enough that instrumenting it hides it**: an
+`eprintln!` between `finish_drop` and `paste_all` bought 27 consecutive passes
+where the rate had been one in eight. A stderr write is a syscall on the frame
+loop, which is the one thing this loop is built not to do, so that is not a
+coincidence to shrug at — it is the shape of the remaining defect.
+
+**What the hunt did find is a silent refusal.** `Edits::queue_all` returns early
+when an operation is already pending, and it used to return with the paths
+dropped on the floor and nothing said. One operation at a time is M3's decision
+and it stands; a refusal nobody is told about does not, and for a drag from
+another application those are somebody else's files. It now returns whether it
+took the batch and every caller says so. Whether that is *this* defect is
+unproven — the window reported nothing pending — which is exactly why it is
+recorded as a defect found by reading rather than as the fix.
+
+The rule: **a failure message that describes a cause is a hypothesis, and it
+should be written as one.** "Nothing landed" was a fact and cost nothing; the
+sentence after it cost a wrong diagnosis that survived three commits, because
+every reader after it trusted the explanation instead of the observation.

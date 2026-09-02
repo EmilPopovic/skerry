@@ -1085,7 +1085,17 @@ fn quick_look(
         // aspect into a box has one answer whatever size the shape is. Soft for
         // the sixty milliseconds it is up, and in the right place, which is the
         // trade a stand-in exists to make.
-        painter.standby(key, fitted(painter, inner, aspect, true), theme.palette.text);
+        //
+        // **Unless the thumbnail says the picture is small.** A raster thumbnail
+        // is never enlarged into its 128-pixel slot — `box_fit` — so one that
+        // came back strictly inside the slot *is* the source, at its own size,
+        // and the finished preview will be drawn at that size rather than at the
+        // panel's. Enlarging the stand-in there is the one case where it lands
+        // somewhere the picture will not: a 64-pixel icon shown eleven times too
+        // big for sixty milliseconds. An SVG fills its slot by construction — a
+        // vector has no natural size — so this never fires for one, which is
+        // right, because an SVG preview *does* fill the panel.
+        painter.standby(key, fitted(painter, inner, aspect, grows(aspect)), theme.palette.text);
         return;
     }
     if let Some(text) = &look.text {
@@ -1189,6 +1199,16 @@ fn look_button(
 /// stand-in is drawn at the panel's size and its replacement at its own, so it
 /// shrinks. Getting that right needs the source's dimensions, which are not on
 /// the wire, and it lasts the sixty milliseconds an image takes.
+/// Whether a thumbnail of this size may be enlarged to stand in for the picture.
+///
+/// A raster thumbnail is never enlarged into its slot, so one that came back
+/// strictly inside the slot is the source at its own size — and the picture will
+/// be drawn at that size. One that touches the slot's edge came from something at
+/// least that big, and so did the picture.
+fn grows(aspect: (u32, u32)) -> bool {
+    aspect.0 >= sk_gpu::THUMBNAIL_SLOT || aspect.1 >= sk_gpu::THUMBNAIL_SLOT
+}
+
 fn fitted(painter: &Painter<'_>, inner: Area, size: (u32, u32), standing_in: bool) -> sk_gpu::Rect {
     let fit = (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32);
     let scale = if standing_in { fit } else { fit.min(1.0) };
@@ -4571,6 +4591,20 @@ mod tests {
                 small.width <= painter.px(64.0) + 1.0,
                 "a small picture was blown up to the panel at scale {scale}"
             );
+
+            // **And the stand-in for a small picture does not break it either.**
+            // A thumbnail strictly inside its slot is the source at its own
+            // size, so enlarging it would draw the stand-in eleven times where
+            // the picture will not be — for the sixty milliseconds before the
+            // real one lands. The rule says so, and the geometry agrees to a
+            // logical pixel.
+            assert!(!super::grows((64, 64)), "a 64-pixel thumbnail is the whole picture");
+            assert!(super::grows((128, 96)), "a thumbnail on its slot's edge says nothing");
+            assert!(super::grows((96, 128)), "the other edge too");
+            let held = super::fitted(&painter, inner, (64, 64), super::grows((64, 64)));
+            assert!((small.width - held.width).abs() <= painter.px(1.0));
+            assert!((small.x - held.x).abs() <= painter.px(1.0));
+            assert!((small.y - held.y).abs() <= painter.px(1.0));
         }
     }
 

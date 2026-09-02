@@ -525,6 +525,14 @@ is a frozen window on a 4 GiB file, and [rule 1](03-principles.md#1-never-block-
 means the engine had to be on the pool from its first commit rather than moved
 there afterwards.
 
+**And one operation at a time now says so.** A batch arriving while one runs is
+refused — that is M3's choice and it stands — but it used to be refused *silently*,
+with the paths dropped on the floor. For a drag from another application those are
+somebody else's files, and a drop that loses them looks exactly like a drop that
+never happened. `Edits::queue_all` returns whether it took the batch and every
+caller says so, which is [rule 7](03-principles.md#7-honest-progress) applied to a
+refusal rather than to progress.
+
 **A cancelled copy is still a change**, which is the part that took the thinking.
 It stopped part way and left what it wrote, and the only thing that can take that
 back is the undo stack — so it is recorded as a copy rather than reported as a

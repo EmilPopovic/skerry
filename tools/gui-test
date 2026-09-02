@@ -4652,18 +4652,55 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
         # after the drop has been *acted* on, so waiting for it before waiting for
         # the file was waiting for the second half of a job with a six-second
         # budget. Measured: **two failures in eight runs** before this, on this
-        # commit and on the one before it — so the sweeps had been passing on luck
-        # — and **one in sixteen** after, which is not the same defect. What is
-        # left fails with "nothing landed": the synthetic drag itself is not
-        # delivered, which is XTEST and pacing rather than a wait in the wrong
-        # place, and is owed.
+        # commit and on the one before it — so the sweeps had been passing on luck.
+        #
+        # **What is left fails about one run in eight, and the cause is not
+        # known.** Everything up to `Edits::paste_all` completes in microseconds —
+        # traced — and then the copy does not start until the window is touched;
+        # the evidence and the three hypotheses it killed are in
+        # [12-measurement.md](../docs/12-measurement.md). So the message below
+        # states what was observed and nothing about why: the sentence that used
+        # to be here blamed XTEST pacing, and that was a guess three later readers
+        # believed.
         peer.wait_for("asked for text/uri-list")
-        for _ in range(40):
-            if (fixture / carried.name).is_file():
+        landed = False
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if (fixture / carried.name).exists():
+                landed = True
                 break
-            run.drive("sleep 200\n")
-        else:
-            raise Failure(f"nothing landed: {sorted(p.name for p in fixture.iterdir())}")
+            time.sleep(0.05)
+        if not landed:
+            # **What the window thought, not just what the directory holds.** The
+            # peer has been asked for the data by this point, so a file that never
+            # arrives is one of three things — the transfer, the operation queue,
+            # or a drop that was refused — and which of them it was is the whole
+            # of what a rare failure has to say for itself. The listing is taken
+            # *before* the window is touched, because touching it is what unsticks
+            # the drop and the first version of this message read as though the
+            # file had been there all along.
+            held = sorted(p.name for p in fixture.iterdir())
+            # **What every thread is waiting on, read out of `/proc`.** No
+            # perturbation at all, which matters here: an `eprintln!` in the frame
+            # loop hides this defect, so anything that touches the process is a
+            # measurement of something else.
+            for task in sorted(Path(f"/proc/{run.process.pid}/task").iterdir()):
+                try:
+                    name = (task / "comm").read_text().strip()
+                    wchan = (task / "wchan").read_text().strip()
+                    call = (task / "syscall").read_text().strip().split()
+                except OSError:
+                    continue
+                print(f"        thread {task.name} {name} wchan={wchan} syscall={call[:4]}",
+                      flush=True)
+            run.drive("key f12\nsleep 200\n")
+            said = run.state()
+            raise Failure(
+                f"nothing landed in 8s: {held}; "
+                f"drag_in={said['drag_in']} busy={said['busy']} queue={said['queue']} "
+                f"undo={said['undo']} jobs={said['jobs']} notice={said['notice']!r}; "
+                f"it is there now: {(fixture / carried.name).exists()}"
+            )
         peer.wait_for("drag ended")
         # The peer's original stays: a drag in is a copy.
         if not carried.is_file():

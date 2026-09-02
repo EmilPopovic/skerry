@@ -1525,7 +1525,8 @@ impl App {
                 // more.
                 self.cutting = false;
                 let into = self.panes.focused().path.clone();
-                self.edits.paste_all(paths, into, moving, &self.jobs);
+                let took = self.edits.paste_all(paths, into, moving, &self.jobs);
+                self.said_it_is_busy(took);
             }
             Pasted::Dropped(paths, into) => {
                 // The bytes are in hand, so the drag is over: `wl_data_offer`
@@ -1533,7 +1534,8 @@ impl App {
                 // stops serving before it has served.
                 self.window.finish_drop();
                 if !paths.is_empty() {
-                    self.edits.paste_all(paths, into, false, &self.jobs);
+                    let took = self.edits.paste_all(paths, into, false, &self.jobs);
+                    self.said_it_is_busy(took);
                 }
             }
             Pasted::Text(text) => {
@@ -1549,6 +1551,21 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    /// Says that an operation was refused because one is already running.
+    ///
+    /// **The one thing a refusal may not be is silent.** One operation at a time
+    /// is M3's choice and it stands; a batch that arrives while one runs used to
+    /// be dropped with nothing said, which looks exactly like a drop that never
+    /// happened — and for a drag from another application, the files are somebody
+    /// else's and the window is the only thing that knows they were offered.
+    fn said_it_is_busy(&mut self, took: bool) {
+        if took {
+            return;
+        }
+        self.notice =
+            Some((sk_model::i18n::lookup("error.one_at_a_time").to_owned(), Instant::now()));
     }
 
     /// Takes delivery of the freedesktop databases, once.
@@ -2707,7 +2724,8 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        self.edits.duplicate_all(paths, &self.jobs);
+        let took = self.edits.duplicate_all(paths, &self.jobs);
+        self.said_it_is_busy(took);
     }
 
     /// Deletes what is selected for good, on the second press.
@@ -2735,7 +2753,8 @@ impl App {
     pub(crate) fn erase_for_good(&mut self) {
         let Some(asking) = self.erasing.take() else { return };
         self.step_off_the_selection(&asking.paths);
-        self.edits.erase_all(asking.paths, &self.jobs);
+        let took = self.edits.erase_all(asking.paths, &self.jobs);
+        self.said_it_is_busy(took);
         self.dirty = true;
     }
 
@@ -3001,7 +3020,8 @@ impl App {
         // a cursor that lands nowhere makes the second press do nothing at all —
         // `enabled` reads `focused`.
         self.step_off_the_selection(&paths);
-        self.edits.trash_all(paths, &self.jobs);
+        let took = self.edits.trash_all(paths, &self.jobs);
+        self.said_it_is_busy(took);
     }
 
     /// Moves the cursor to the first row that is not going.
@@ -7479,7 +7499,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.dirty = true;
             return;
         };
-        self.edits.paste_all(drag.paths, into, !copying, &self.jobs);
+        let took = self.edits.paste_all(drag.paths, into, !copying, &self.jobs);
+        self.said_it_is_busy(took);
         self.dirty = true;
     }
 

@@ -480,6 +480,7 @@ notice.cut_one = Cut {0}
 notice.copied_one = Copied {0}
 notice.copied_path = Copied {0}
 notice.copied_content = Copied {0} of text from {1}
+error.one_at_a_time = One operation at a time — this one was not started, so try it again when the other has finished
 error.clipboard_not_a_folder = The clipboard does not hold a folder.
 error.no_clipboard = This compositor offers no clipboard.
 stats.capabilities = platform

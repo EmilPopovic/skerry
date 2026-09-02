@@ -415,8 +415,8 @@ impl Edits {
     /// A failure stops the rest. Continuing would trash some of a selection and
     /// not others with only the last message visible, and "seven of nine went"
     /// is not a state a person can act on.
-    pub fn trash_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
-        self.queue_all(Queued::Trash, paths, jobs);
+    pub fn trash_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Trash, paths, jobs)
     }
 
     /// Deletes several paths for good, one at a time.
@@ -424,8 +424,8 @@ impl Edits {
     /// Nothing here asks whether the caller is sure: the confirmation is the
     /// command's, because it is the command that knows what a person just
     /// pressed twice.
-    pub fn erase_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
-        self.queue_all(Queued::Erase, paths, jobs);
+    pub fn erase_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Erase, paths, jobs)
     }
 
     /// Copies or moves several paths into `into`, one at a time.
@@ -433,7 +433,14 @@ impl Edits {
     /// `moving` is what tells a paste after Cut from a paste after Copy. The same
     /// one-at-a-time policy as [`Edits::trash_all`], for the same reasons, and the
     /// same one undo entry each.
-    pub fn paste_all(&mut self, paths: Vec<PathBuf>, into: PathBuf, moving: bool, jobs: &Jobs) {
+    #[must_use]
+    pub fn paste_all(
+        &mut self,
+        paths: Vec<PathBuf>,
+        into: PathBuf,
+        moving: bool,
+        jobs: &Jobs,
+    ) -> bool {
         let doing = if moving {
             Queued::Move { into }
         } else {
@@ -444,21 +451,33 @@ impl Edits {
             // to tell which is which.
             Queued::Copy { into, conflict: sk_fs::ops::Conflict::Rename }
         };
-        self.queue_all(doing, paths, jobs);
+        self.queue_all(doing, paths, jobs)
     }
 
     /// Copies each path into the folder it is already in, under a free name.
-    pub fn duplicate_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) {
+    pub fn duplicate_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
         let Some(into) = paths.first().and_then(|path| path.parent()).map(Path::to_path_buf) else {
-            return;
+            return false;
         };
         let doing = Queued::Copy { into, conflict: sk_fs::ops::Conflict::Rename };
-        self.queue_all(doing, paths, jobs);
+        self.queue_all(doing, paths, jobs)
     }
 
-    fn queue_all(&mut self, doing: Queued, paths: Vec<PathBuf>, jobs: &Jobs) {
-        if self.pending.is_some() || paths.is_empty() {
-            return;
+    /// Queues a batch. Whether it was taken.
+    ///
+    /// **One operation at a time**, which is what M3 chose and what
+    /// [08-roadmap.md](../../../docs/08-roadmap.md) still records: a second batch
+    /// arriving while one runs is refused. What is new is that the refusal is
+    /// *reported*. It used to return here with the paths dropped on the floor and
+    /// nothing said, which is the one thing this program does not do — a drop that
+    /// silently loses somebody's files looks exactly like a drop that did not
+    /// happen, and the caller is the only one who can say which of the two it was.
+    fn queue_all(&mut self, doing: Queued, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        if self.pending.is_some() {
+            return false;
         }
         self.doing = doing;
         self.queued = paths.len();
@@ -470,6 +489,7 @@ impl Edits {
         self.reported = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         self.start_counting(jobs);
         self.next_in_queue(jobs);
+        true
     }
 
     /// Walks everything the queue holds, so the line can say how much is left.
