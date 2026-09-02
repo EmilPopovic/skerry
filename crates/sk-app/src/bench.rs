@@ -120,6 +120,7 @@ fn chrome_of<'a>(
         // measuring a frame with a panel nobody opened would be measuring the
         // wrong frame.
         quick_look: None,
+        hovered_look: None,
         edits: None,
         history: (false, 0.0),
         hovered_edit: None,

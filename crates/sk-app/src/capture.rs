@@ -136,7 +136,7 @@ fn sample_quick_look(
         }
         return Some(look);
     }
-    look.asked = within;
+    look.asked = Some(look.shot(within));
     let mut previews = sk_preview::Previews::new();
     previews.want(sk_preview::Want {
         kind: match shows {
@@ -147,10 +147,17 @@ fn sample_quick_look(
         path,
         mtime,
         within,
+        page: look.page,
     });
     while look.image.is_none() && std::time::Instant::now() < deadline {
         previews.pump(&session.jobs.pool, &session.waker.handle());
         for answer in previews.drain() {
+            // **The count as well as the pixels.** A frame that took only the
+            // image drew the page control saying `1` on a document 66 pages long,
+            // which is the panel's "unknown" shape standing in for a known answer.
+            if answer.pages > 0 {
+                look.pages = answer.pages;
+            }
             if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
                 // A fixed key, because a capture draws exactly one preview and
                 // has no `Thumbs` counter to mint from — and the top of the range
@@ -921,6 +928,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         keys: sample.keys,
         stats: request.stats,
         quick_look: sample.look,
+        hovered_look: None,
         edits: Some(sample.edits),
         history: (request.history, 0.0),
         // The second row, so the frame shows the hover as well as the present.

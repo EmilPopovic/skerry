@@ -1,4 +1,4 @@
-//! The document helper: the first page of a PDF, through a renderer on `PATH`.
+//! The document helper: one page of a PDF, through a renderer on `PATH`.
 //!
 //! **[ADR 0006](../../../docs/adr/0006-out-of-process-decoders.md)** provides for
 //! exactly this — "plus external tools such as `ffmpeg` discovered on `PATH` at
@@ -29,9 +29,17 @@ use sk_preview::wire::{Refusal, Reply, Request};
 
 fn main() {
     if std::env::args().any(|it| it == "--probe") {
-        let report = sk_preview::sandbox::confine(&[Path::new("/")], &[], &[]);
-        println!("skerry-preview-doc: sandbox: {}", report.line());
+        // **The same confinement the served process gets**, or the probe answers
+        // a question nobody asked: its first version granted no execute right, so
+        // it reported `pages: None` on a machine where `pdfinfo` works perfectly
+        // — a diagnostic that lied about the thing it exists to diagnose.
+        confine();
         println!("skerry-preview-doc: renderer: {:?}", renderer());
+        if let (Some(tool), Some(path)) =
+            (renderer(), std::env::args().skip(1).find(|it| it != "--probe"))
+        {
+            println!("skerry-preview-doc: pages: {:?}", count(tool, Path::new(&path)));
+        }
         return;
     }
     confine();
@@ -88,9 +96,21 @@ fn answer(request: &Request) -> Reply {
     let Some(tool) = renderer() else {
         return Reply::refused(Refusal::NoRenderer);
     };
-    match render(tool, &path, request.within) {
-        Ok((pixels, size)) => Reply { refusal: Refusal::None, size, pixels },
-        Err(refusal) => Reply::refused(refusal),
+    // **The count first, and its failure is not the request's.** A machine with
+    // the renderer but not the tool that counts pages still previews the document
+    // — ADR 0019 — so zero travels back as "unknown" and the panel shows a page
+    // number without a total rather than inventing one.
+    let pages = count(tool, &path).unwrap_or(0);
+    let page = request.page.max(1);
+    // A page past the end is not a broken document: it is a `↓` at the last page,
+    // which the host answers by staying where it is. Refusing here rather than
+    // spawning a renderer that will fail costs nothing and says something precise.
+    if pages > 0 && page > pages {
+        return Reply { refusal: Refusal::NoSuchPage, size: (0, 0), pages, pixels: Vec::new() };
+    }
+    match render(tool, &path, request.within, page) {
+        Ok((pixels, size)) => Reply { refusal: Refusal::None, size, pages, pixels },
+        Err(refusal) => Reply { refusal, size: (0, 0), pages, pixels: Vec::new() },
     }
 }
 
@@ -136,14 +156,52 @@ fn on_path(program: &str) -> bool {
     })
 }
 
-/// Renders page one and decodes what came back.
+/// How many pages the document has, if the machine can say.
+///
+/// **A second program, and a cheap one**: `pdfinfo` costs 0.01 s against the
+/// 0.09–0.30 s the render itself takes, measured in
+/// [ADR 0019](../../../docs/adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md).
+/// It ships in the same package as `pdftoppm`, so in practice it is there
+/// whenever the renderer is — and "in practice" is why the answer is an `Option`
+/// rather than a number.
+fn count(tool: Tool, path: &Path) -> Option<u32> {
+    let mut command = Command::new(match tool {
+        Tool::PdfToPpm => "pdfinfo",
+        Tool::MuTool => "mutool",
+    });
+    if tool == Tool::MuTool {
+        command.arg("info");
+    }
+    let done = command.arg(path).output().ok()?;
+    if !done.status.success() {
+        return None;
+    }
+    // Both print a `Pages: N` line, poppler once and mupdf once per document.
+    String::from_utf8_lossy(&done.stdout)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Pages:"))
+        .and_then(|rest| rest.trim().parse().ok())
+        .filter(|pages: &u32| *pages > 0)
+}
+
+/// Renders one page and decodes what came back.
 ///
 /// **Both tools are asked for PNG on `stdout`**, so what is between them and this
 /// process is a pipe rather than a temporary file — which matters more than it
 /// looks: a temporary file would be a write, and this helper is confined with
 /// nothing writable.
-fn render(tool: Tool, path: &Path, within: (u32, u32)) -> Result<(Vec<u8>, (u32, u32)), Refusal> {
+///
+/// **A spawn per page, which ADR 0019 measured before choosing it**: reaching page
+/// 400 of a 1200-page manual costs what reaching page 1 costs, because PDF has a
+/// cross-reference table and poppler uses it.
+fn render(
+    tool: Tool,
+    path: &Path,
+    within: (u32, u32),
+    page: u32,
+) -> Result<(Vec<u8>, (u32, u32)), Refusal> {
     let long = within.0.max(within.1).clamp(64, 2048).to_string();
+    let page = page.to_string();
     let mut command = Command::new(match tool {
         Tool::PdfToPpm => "pdftoppm",
         Tool::MuTool => "mutool",
@@ -152,10 +210,10 @@ fn render(tool: Tool, path: &Path, within: (u32, u32)) -> Result<(Vec<u8>, (u32,
         // `-r` is a resolution and `-scale-to` is a long edge, which is what a box
         // wants: a page is rendered to fit rather than at a guessed DPI.
         Tool::PdfToPpm => {
-            command.args(["-png", "-f", "1", "-l", "1", "-scale-to", &long]).arg(path);
+            command.args(["-png", "-f", &page, "-l", &page, "-scale-to", &long]).arg(path);
         }
         Tool::MuTool => {
-            command.args(["draw", "-F", "png", "-o", "-", "-w", &long]).arg(path).arg("1");
+            command.args(["draw", "-F", "png", "-o", "-", "-w", &long]).arg(path).arg(&page);
         }
     }
     let done = command.output().map_err(|_| Refusal::NoRenderer)?;

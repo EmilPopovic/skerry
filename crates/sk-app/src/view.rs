@@ -72,6 +72,8 @@ pub struct Chrome<'a> {
     pub hovered_tool: Option<(PaneId, Tool)>,
     /// The switcher button under the pointer, and the pane whose bar it is in.
     pub hovered_mode: Option<(PaneId, Mode)>,
+    /// The quick look's control under the pointer.
+    pub hovered_look: Option<LookControl>,
     /// The sidebar's contents, once the job that reads them has finished.
     ///
     /// A slice rather than the model, because the view needs the arrangement and
@@ -151,6 +153,26 @@ pub struct Chrome<'a> {
     pub tab_drop: Option<crate::panes::Drop>,
 }
 
+/// One of a quick look's four controls.
+///
+/// **Four buttons rather than none**, because [rule
+/// 5](../../../docs/03-principles.md) is that every command is reachable by
+/// pointer alone and the panel covers the list a pointer would otherwise use. Two
+/// pairs rather than one, because they step different things: the file being
+/// looked at, and the page inside it — and the page numbers between the second
+/// pair are what stop the two pairs reading as the same control twice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LookControl {
+    /// The previous file with a preview.
+    PreviousFile,
+    /// The next one.
+    NextFile,
+    /// The page before this one.
+    PreviousPage,
+    /// The page after it.
+    NextPage,
+}
+
 /// Hit regions this frame produced, for the next event to test against.
 ///
 /// A breadcrumb's rectangle is a function of the shaped width of a directory
@@ -180,6 +202,13 @@ pub struct Hits {
     /// One rectangle per sidebar row, in the flattened order the model uses, so
     /// the index a click reports is an index into it.
     pub places: Vec<Area>,
+    /// The quick look's controls, while one is open and while it has them.
+    ///
+    /// **A list rather than four fields**, and empty rather than absent where the
+    /// thing on screen has no pages: a control that is not drawn must not be
+    /// clickable, and the one place that knows whether it was drawn is the code
+    /// that drew it.
+    pub look: Vec<(LookControl, Area)>,
     /// The history strip's header, which collapses the list when pressed.
     ///
     /// `None` where there is no history and therefore no strip at all.
@@ -349,8 +378,12 @@ pub fn draw(
     if chrome.stats {
         stats_overlay(hits, painter, pane, here, diagnostics);
     }
+    // **Cleared whether one is drawn or not.** A control's rectangle outliving the
+    // panel it was in would be a button the pointer could still find with nothing
+    // on screen under it.
+    hits.look.clear();
     if let Some(look) = chrome.quick_look {
-        quick_look(painter, layout, look, hits);
+        quick_look(painter, layout, look, hits, chrome.hovered_look);
     }
     if let Some(rows) = chrome.keys {
         keys_overlay(painter, layout, rows, hits);
@@ -975,12 +1008,19 @@ pub(crate) fn quick_look_area(layout: &Layout) -> Area {
     }
 }
 
+/// The strip at the top of a quick look, where its title and controls are.
+pub(crate) fn quick_look_strip(layout: &Layout) -> Area {
+    let inner = quick_look_area(layout);
+    Area { x: inner.x, y: inner.y - QUICK_LOOK_TITLE, width: inner.width, height: QUICK_LOOK_TITLE }
+}
+
 /// The quick look panel: a title, and the file under it.
 fn quick_look(
     painter: &mut Painter<'_>,
     layout: &Layout,
     look: &crate::quicklook::QuickLook,
     hits: &mut Hits,
+    hovered: Option<LookControl>,
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -993,10 +1033,16 @@ fn quick_look(
     };
     panel_shape(painter, outer, hits);
 
+    // **The strip's own top, not six pixels into it.** `baseline` centres the text
+    // in the box it is given, so a top pushed down by six with the full height
+    // still passed centres it six pixels low — and the strip is 34 tall, where six
+    // is visible.
+    let baseline = painter.baseline(outer.y, QUICK_LOOK_TITLE, metrics.path_size);
+    let strip = Area { height: QUICK_LOOK_TITLE, ..outer };
+    let name_from = quick_look_controls(painter, strip, look, hits, (baseline, hovered));
     let title = look.title();
-    let baseline = painter.baseline(outer.y + 6.0, QUICK_LOOK_TITLE, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
-    line(painter, &title, style, outer.x + 14.0, outer.width - 28.0, baseline);
+    line(painter, &title, style, name_from, (strip.right() - 8.0 - name_from).max(1.0), baseline);
     painter.hairline(outer.x, inner.y - 1.0, outer.width, theme.palette.divider);
 
     if let Some((key, size)) = look.image {
@@ -1026,6 +1072,74 @@ fn quick_look(
     let baseline = painter.baseline(inner.y + inner.height / 2.0, 0.0, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.dim);
     line(painter, i18n::lookup(message), style, inner.x + 14.0, inner.width - 28.0, baseline);
+}
+
+/// The strip's controls: the file pair on the left, the page pair on the right.
+///
+/// Returns where the name may start, which is past the file pair — the name is
+/// laid out around the controls rather than the other way round, because the
+/// controls are a fixed size and a name is whatever it is.
+fn quick_look_controls(
+    painter: &mut Painter<'_>,
+    strip: Area,
+    look: &crate::quicklook::QuickLook,
+    hits: &mut Hits,
+    text: (f32, Option<LookControl>),
+) -> f32 {
+    let (baseline, hovered) = text;
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let side = QUICK_LOOK_TITLE;
+    let mut at = strip.x + 4.0;
+    for (control, direction) in
+        [(LookControl::PreviousFile, Direction::Left), (LookControl::NextFile, Direction::Right)]
+    {
+        let area = Area { x: at, y: strip.y, width: side, height: side };
+        look_button(painter, area, (control, hovered), direction, hits);
+        at += side;
+    }
+
+    // **The page pair only where there are pages**, drawn from the right edge
+    // inwards so the whole group stays put as the numbers widen from `1` to
+    // `1000`.
+    if look.shows == crate::previews::Shows::Page {
+        let label = look.page_label();
+        let style = TextStyle::new(metrics.path_size, theme.palette.dim);
+        // **An estimate, and deliberately a generous one.** There is no measure
+        // that does not also draw — `Painter::label` returns an advance *after*
+        // putting glyphs in the list — so the room is taken from the character
+        // count. Over-estimating leaves a pixel or two of air between the numbers
+        // and the arrow on their right; under-estimating would elide a page
+        // number, so the error is spent in the harmless direction.
+        let room = label.chars().count() as f32 * metrics.path_size * 0.62;
+        let width = side * 2.0 + room + 12.0;
+        let from = (strip.right() - 8.0 - width).max(at);
+        let back = Area { x: from, y: strip.y, width: side, height: side };
+        look_button(painter, back, (LookControl::PreviousPage, hovered), Direction::Left, hits);
+        line(painter, &label, style, from + side + 6.0, room + 2.0, baseline);
+        let forward = Area { x: from + side + room + 12.0, y: strip.y, width: side, height: side };
+        look_button(painter, forward, (LookControl::NextPage, hovered), Direction::Right, hits);
+    }
+    at + 6.0
+}
+
+/// One of them: a hover pill, an arrow, and a rectangle the pointer can find.
+fn look_button(
+    painter: &mut Painter<'_>,
+    area: Area,
+    which: (LookControl, Option<LookControl>),
+    direction: Direction,
+    hits: &mut Hits,
+) {
+    let (control, hovered) = which;
+    let theme = *painter.theme;
+    if hovered == Some(control) {
+        let shape = painter.rect(area.x + 3.0, area.y + 5.0, area.width - 6.0, area.height - 10.0);
+        painter.list.rect(shape, theme.palette.button_hover, painter.px(theme.metrics.radius));
+    }
+    let centre = (area.x + area.width / 2.0, area.y + area.height / 2.0);
+    arrow(painter, centre, theme.palette.dim, direction);
+    hits.look.push((control, area));
 }
 
 /// The text of a file, line by line, each line by its tones.
@@ -3205,13 +3319,13 @@ fn cell_at(
     let mark = mark_of(pane.mode, layout, box_, &metrics);
     mark_at(painter, pane, id, mark, MarkState { directory, broken }, types);
 
-    let text_top = box_.y + box_.height * 0.58;
-    let baseline = painter.baseline(text_top, metrics.row_height, metrics.text_size);
+    let label = grid_label(box_, &metrics);
+    let baseline = painter.baseline(label.y, label.height, metrics.text_size);
     if let Some(naming) = naming.filter(|naming| naming.row == row) {
-        name_field_at(painter, layout, naming, text_top, baseline);
+        name_field_at(painter, layout, naming, label.y, baseline);
         return;
     }
-    let name_box = painter.rect(box_.x + 4.0, 0.0, (box_.width - 8.0).max(1.0), 0.0);
+    let name_box = painter.rect(label.x, 0.0, label.width, 0.0);
     painter.cell(
         RunKey::cell(
             pane.listing.version(),
@@ -3226,6 +3340,30 @@ fn cell_at(
         theme.name_color(selected, directory, broken),
         Align::Center,
     );
+}
+
+/// Where a grid cell's name goes: a row-high band inside the *pill*, not the cell.
+///
+/// **Both insets from one figure**, because they used to be two. The pill is inset
+/// from the cell by half the gutter, which scales with the zoom; the name box was
+/// inset by a hard four logical pixels, which does not — so the name was *wider
+/// than the shape behind it*, by one pixel at the default row height and by five
+/// at the largest, and a long elided name crossed the selection's border on both
+/// sides.
+///
+/// **And it is anchored to the pill's bottom** rather than to a fraction of the
+/// cell's height, so no combination of the seven zoom steps and four scales can
+/// put a descender through the bottom edge — which a fraction can only be checked
+/// against one combination at a time.
+fn grid_label(cell: Area, metrics: &sk_ui::Metrics) -> Area {
+    let inset = metrics.gutter * 0.5;
+    let height = metrics.row_height;
+    Area {
+        x: cell.x + inset * 2.0,
+        y: (cell.y + cell.height - inset * 2.0 - height).max(cell.y),
+        width: (cell.width - inset * 4.0).max(1.0),
+        height,
+    }
 }
 
 /// What a mark needs to know that the listing alone does not say twice.
@@ -4081,6 +4219,7 @@ mod tests {
             let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
             let chrome = Chrome {
                 quick_look: None,
+                hovered_look: None,
                 edits: None,
                 history: (false, 0.0),
                 hovered_edit: None,
@@ -4175,6 +4314,66 @@ mod tests {
             assert!(x >= body.x, "in {mode} it starts under the sidebar");
             assert!(x + width <= body.right(), "in {mode} it runs past the pane");
             assert!(width > 100.0, "in {mode} a {width} box holds no sentence");
+        }
+    }
+
+    /// **A grid cell's name stays inside the shape behind it, at every zoom.**
+    ///
+    /// This is a sweep rather than one case because the defect it pins was
+    /// invisible at the default row height and obvious at the largest: the pill's
+    /// inset scaled with the zoom and the name box's did not, so the name was one
+    /// logical pixel wider than the pill at 100% and five wider at 175%, and a
+    /// long elided name crossed the selection's border on both sides.
+    ///
+    /// It checks the vertical too, which is why the label is anchored to the
+    /// pill's bottom: a fraction of the cell's height can only be checked against
+    /// one combination of zoom and scale at a time, and there are twenty-eight.
+    #[test]
+    fn a_grid_name_never_crosses_the_cell_it_is_in() {
+        for factor in [0.7_f32, 0.85, 1.0, 1.15, 1.3, 1.5, 1.75] {
+            let metrics = sk_ui::Metrics::default().zoomed(factor);
+            let height = (crate::cells::GRID_HEIGHT * metrics.row_height).round();
+            // From the narrowest cell the layout will make to a very wide one, which
+            // is what an ultrawide window with few entries produces.
+            for width in [4.5 * metrics.row_height, 150.0, 240.0, 600.0] {
+                let cell = super::Area { x: 17.0, y: 11.0, width, height };
+                let inset = metrics.gutter * 0.5;
+                let pill = super::Area {
+                    x: cell.x + inset,
+                    y: cell.y + inset,
+                    width: cell.width - inset * 2.0,
+                    height: cell.height - inset * 2.0,
+                };
+                let label = super::grid_label(cell, &metrics);
+                let what = format!("zoom {factor}, cell {width}×{height}");
+                assert!(label.x > pill.x, "the name starts left of the pill: {what}");
+                assert!(
+                    label.x + label.width < pill.x + pill.width,
+                    "the name runs past the pill's right edge: {what}"
+                );
+                assert!(
+                    label.y + label.height < pill.y + pill.height,
+                    "the name's band crosses the pill's bottom: {what}"
+                );
+                assert!(label.y > pill.y, "the name is above the pill's top: {what}");
+
+                // And the mark above it does not reach into the band — which is the
+                // other half of "one cell geometry", and the failure the mark's own
+                // comment records having had once already.
+                // `mark_of` reads the layout only in Details and Columns, where the
+                // mark sits in a column the layout owns; a grid mark is a function
+                // of its cell alone.
+                let mark = super::mark_of(
+                    super::Mode::Grid,
+                    &super::PaneLayout::default(),
+                    cell,
+                    &metrics,
+                );
+                assert!(
+                    mark.y + mark.height <= label.y,
+                    "the mark reaches into the name's band: {what}"
+                );
+            }
         }
     }
 

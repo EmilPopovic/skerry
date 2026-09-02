@@ -365,32 +365,51 @@ def build_fixture() -> Path:
     return directory
 
 
-def one_page_pdf() -> bytes:
-    """A single-page PDF with a line of text on it, valid enough for a renderer.
+def three_page_pdf() -> bytes:
+    """A three-page PDF, valid enough for a renderer, with its pages numbered.
 
     **Hand-assembled with a real cross-reference table**, because the first version
     of this fixture had none and poppler answered `Syntax Warning: No valid XRef`
     — which it recovers from, and which makes a frame depend on a recovery path
     rather than on the file being right.
+
+    **Three pages rather than one**, so the frame shows the page control saying
+    `1 / 3` — a one-page document draws the same control saying `1 / 1`, which is
+    indistinguishable from the shape it takes when the count is unknown.
     """
     # **Inside the MediaBox**, which the first draft was not: 680 on a page 595
     # tall put the line above the paper and the frame rendered a blank page, which
     # is exactly the "frame of the fallback" this file keeps warning about.
-    body = (
+    first = (
         # 18pt, not 22: at 22 the line is about 396 points of Helvetica and the
         # MediaBox is 420 wide, so it ran off the right edge of its own paper.
         b"BT /F1 18 Tf 40 500 Td (A page, rendered by poppler or mupdf.) Tj ET\n"
         b"0.15 0.35 0.75 rg 40 380 340 90 re f\n"
         b"BT /F1 16 Tf 40 330 Td (Whatever is on PATH renders it, sandboxed.) Tj ET"
     )
+    bodies = [
+        first,
+        b"BT /F1 24 Tf 40 500 Td (The second page.) Tj ET",
+        b"BT /F1 24 Tf 40 500 Td (And the third.) Tj ET",
+    ]
+    # Objects 1 and 2 are the catalogue and the page tree; 3, 4 and 5 are the
+    # pages; 6, 7 and 8 their contents; 9 the font.
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] "
-        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
-        b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
     ]
+    objects.extend(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] "
+        b"/Resources << /Font << /F1 9 0 R >> >> /Contents "
+        + str(6 + index).encode()
+        + b" 0 R >>"
+        for index in range(3)
+    )
+    objects.extend(
+        b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream"
+        for body in bodies
+    )
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, obj in enumerate(objects, start=1):
@@ -466,7 +485,7 @@ def build_pictures() -> None:
     # A one-page PDF, written by hand so it needs no tool to generate — and it is
     # the only fixture whose *rendering* is somebody else's, which is the point:
     # `skerry-preview-doc` drives whatever is on `PATH`.
-    (directory / "paper.pdf").write_bytes(one_page_pdf())
+    (directory / "paper.pdf").write_bytes(three_page_pdf())
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
 

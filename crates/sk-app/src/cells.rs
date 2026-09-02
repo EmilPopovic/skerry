@@ -100,7 +100,7 @@ const GRID_MIN_WIDTH: f32 = 4.5;
 /// screen — the mark ballooned, the scrolling went strange, and the same folder
 /// looked like a different program at two window sizes. A cell holds a mark and
 /// one line of name whatever it is wide, so its height is that and does not move.
-const GRID_HEIGHT: f32 = 3.4;
+pub(crate) const GRID_HEIGHT: f32 = 3.4;
 
 /// The strip down the right of the body the scrollbar thumb sits in.
 ///

@@ -1,17 +1,17 @@
 //! The bytes that cross between the host and a preview child.
 //!
-//! **[ADR 0017](../../../docs/adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md).**
+//! **[ADR 0019](../../../docs/adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md).**
 //! A child is a long-lived filter: length-prefixed requests in on `stdin`,
 //! length-prefixed replies out on `stdout`, in order, one in flight at a time.
 //! Ordering is the only correlation mechanism, which is why there are no request
 //! ids here and why a child that answers out of order has violated the protocol
 //! rather than confused the host.
 //!
-//! **Fixed twenty-byte headers and a payload.** Not a text format: the payload is
-//! a quarter of a megabyte of pixels and every byte of framing around it is
-//! framing somebody has to parse. Not a serialization crate either — six integers
-//! and a byte string is not a dependency's worth of problem, and this crate's
-//! whole point is that the host's graph does not grow.
+//! **Fixed twenty-four-byte headers and a payload.** Not a text format: the
+//! payload is a quarter of a megabyte of pixels and every byte of framing around
+//! it is framing somebody has to parse. Not a serialization crate either — seven
+//! integers and a byte string is not a dependency's worth of problem, and this
+//! crate's whole point is that the host's graph does not grow.
 //!
 //! Every field is little-endian. The two ends are the same build on the same
 //! machine — a helper is spawned from the binary's own directory — so this is a
@@ -28,10 +28,15 @@ const MAGIC: u32 = 0x534b_5052;
 /// spawns the helper out of its own directory, so two versions in one
 /// conversation means somebody has a stale binary and the useful thing to do is
 /// say which.
-const VERSION: u16 = 1;
+///
+/// **Two, since the header grew a page.** Both ends are the same build spawned
+/// from the same directory, so this is a recompile and not a migration — the
+/// number moves so that a stale helper says which side is old instead of
+/// misparsing a header.
+const VERSION: u16 = 2;
 
-/// Header bytes before the payload: magic, version, a word, and three lengths.
-const HEADER: usize = 20;
+/// Header bytes before the payload: magic, version, a word, and four `u32`s.
+const HEADER: usize = 24;
 
 /// The most pixels a reply may carry, in bytes.
 ///
@@ -88,6 +93,12 @@ pub enum Refusal {
     NoRenderer = 4,
     /// It would need more memory than the child is allowed.
     TooLarge = 5,
+    /// The document has no such page.
+    ///
+    /// **Not a message**, because the only way to ask for one is to press `↓` on
+    /// the last page, and a panel that answered that with a sentence would be
+    /// scolding somebody for reaching the end. The host keeps the page it has.
+    NoSuchPage = 6,
 }
 
 impl Refusal {
@@ -101,6 +112,7 @@ impl Refusal {
             2 => Self::Unreadable,
             4 => Self::NoRenderer,
             5 => Self::TooLarge,
+            6 => Self::NoSuchPage,
             _ => Self::Undecodable,
         }
     }
@@ -112,7 +124,7 @@ impl Refusal {
         match self {
             // Not a message: a file that is not an image simply has no preview,
             // and a panel saying so about every text file would be furniture.
-            Self::None | Self::NotItsKind => None,
+            Self::None | Self::NotItsKind | Self::NoSuchPage => None,
             Self::Unreadable => Some("preview.unreadable"),
             Self::Undecodable => Some("preview.undecodable"),
             Self::NoRenderer => Some("preview.no_renderer"),
@@ -129,6 +141,12 @@ pub struct Request {
     /// The largest the answer may be, in device pixels. The child fits the image
     /// inside this box and keeps its aspect ratio.
     pub within: (u32, u32),
+    /// Which page, one-based, or zero for "whatever the first one is".
+    ///
+    /// **Zero rather than one as the don't-care value** — ADR 0019 — so every
+    /// caller that has no pages to think about, which is every image and every
+    /// thumbnail, sends a default and never learns the field exists.
+    pub page: u32,
     /// The file, as raw bytes, because a path is not text.
     pub path: Vec<u8>,
 }
@@ -147,6 +165,7 @@ impl Request {
         header.extend_from_slice(&(self.ask as u16).to_le_bytes());
         header.extend_from_slice(&self.within.0.to_le_bytes());
         header.extend_from_slice(&self.within.1.to_le_bytes());
+        header.extend_from_slice(&self.page.to_le_bytes());
         header.extend_from_slice(&u32::try_from(self.path.len()).unwrap_or(0).to_le_bytes());
         header.extend_from_slice(&self.path);
         out.write_all(&header)?;
@@ -168,13 +187,14 @@ impl Request {
         let ask = Ask::from_word(word16(&head, 6))
             .ok_or_else(|| broken(&format!("ask {}", word16(&head, 6))))?;
         let within = (word32(&head, 8), word32(&head, 12));
-        let len = word32(&head, 16) as usize;
+        let page = word32(&head, 16);
+        let len = word32(&head, 20) as usize;
         if len > 4096 {
             return Err(broken(&format!("a path of {len} bytes")));
         }
         let mut path = vec![0u8; len];
         input.read_exact(&mut path)?;
-        Ok(Self { ask, within, path })
+        Ok(Self { ask, within, page, path })
     }
 }
 
@@ -185,6 +205,13 @@ pub struct Reply {
     pub refusal: Refusal,
     /// The pixels' dimensions, which are what the child chose inside `within`.
     pub size: (u32, u32),
+    /// How many pages the document has, or zero for "unknown".
+    ///
+    /// **Unknown, not none** — ADR 0019. A machine with a renderer but not the
+    /// tool that counts pages still previews the document; it cannot say how long
+    /// it is, and the panel shows the page number without a total rather than
+    /// inventing one. Anything that is not a document answers zero.
+    pub pages: u32,
     /// Straight, non-premultiplied `RGBA8`, row-major, no padding.
     pub pixels: Vec<u8>,
 }
@@ -193,7 +220,7 @@ impl Reply {
     /// A refusal with no pixels behind it.
     #[must_use]
     pub const fn refused(refusal: Refusal) -> Self {
-        Self { refusal, size: (0, 0), pixels: Vec::new() }
+        Self { refusal, size: (0, 0), pages: 0, pixels: Vec::new() }
     }
 
     /// Writes this reply to the host, in a child.
@@ -208,6 +235,7 @@ impl Reply {
         header.extend_from_slice(&(self.refusal as u16).to_le_bytes());
         header.extend_from_slice(&self.size.0.to_le_bytes());
         header.extend_from_slice(&self.size.1.to_le_bytes());
+        header.extend_from_slice(&self.pages.to_le_bytes());
         header.extend_from_slice(&u32::try_from(self.pixels.len()).unwrap_or(0).to_le_bytes());
         out.write_all(&header)?;
         out.write_all(&self.pixels)?;
@@ -231,7 +259,8 @@ impl Reply {
         }
         let refusal = Refusal::from_word(word16(&head, 6));
         let size = (word32(&head, 8), word32(&head, 12));
-        let len = word32(&head, 16) as usize;
+        let pages = word32(&head, 16);
+        let len = word32(&head, 20) as usize;
         if len > MOST_PIXELS {
             return Err(broken(&format!("{len} bytes of pixels")));
         }
@@ -242,7 +271,7 @@ impl Reply {
         }
         let mut pixels = vec![0u8; len];
         input.read_exact(&mut pixels)?;
-        Ok(Self { refusal, size, pixels })
+        Ok(Self { refusal, size, pages, pixels })
     }
 }
 
@@ -276,6 +305,7 @@ mod tests {
         let asked = Request {
             ask: Ask::Preview,
             within: (800, 600),
+            page: 7,
             // Not UTF-8: a path is bytes, and a file called `\xff` is a file.
             path: vec![b'/', 0xff, b'x'],
         };
@@ -287,8 +317,12 @@ mod tests {
 
     #[test]
     fn a_reply_round_trips_with_its_pixels() {
-        let answered =
-            Reply { refusal: Refusal::None, size: (2, 1), pixels: vec![1, 2, 3, 4, 5, 6, 7, 8] };
+        let answered = Reply {
+            refusal: Refusal::None,
+            size: (2, 1),
+            pages: 14,
+            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
         let mut pipe = Vec::new();
         answered.write_to(&mut pipe).unwrap();
         assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), answered);
@@ -298,6 +332,15 @@ mod tests {
         let mut pipe = Vec::new();
         refused.write_to(&mut pipe).unwrap();
         assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), refused);
+
+        // **And a page count travels with a refusal too**, which is the whole of
+        // how `↓` at the last page learns how long the document is: `NoSuchPage`
+        // carries the count and no pixels — ADR 0019.
+        let ended =
+            Reply { refusal: Refusal::NoSuchPage, size: (0, 0), pages: 14, pixels: Vec::new() };
+        let mut pipe = Vec::new();
+        ended.write_to(&mut pipe).unwrap();
+        assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), ended);
     }
 
     /// **A length is not a promise.** Each of these is a header a buggy or
@@ -305,13 +348,17 @@ mod tests {
     /// allocated from it.
     #[test]
     fn a_reply_whose_length_disagrees_with_its_size_is_refused() {
+        // **Assembled by hand rather than through `write_to`**, because what is
+        // being tested is a header this build would never write: the point is what
+        // happens when the bytes on the pipe are wrong.
         let head = |size: (u32, u32), len: u32| {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&0x534b_5052u32.to_le_bytes());
-            bytes.extend_from_slice(&1u16.to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
             bytes.extend_from_slice(&0u16.to_le_bytes());
             bytes.extend_from_slice(&size.0.to_le_bytes());
             bytes.extend_from_slice(&size.1.to_le_bytes());
+            bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes.extend_from_slice(&len.to_le_bytes());
             bytes
         };
@@ -330,10 +377,25 @@ mod tests {
 
     #[test]
     fn a_stranger_on_the_pipe_is_refused_rather_than_parsed() {
-        assert!(Request::read_from(&mut b"hello there, twenty bytes".as_slice()).is_err());
-        assert!(Reply::read_from(&mut b"hello there, twenty bytes".as_slice()).is_err());
+        assert!(Request::read_from(&mut b"hello there, twenty-four+".as_slice()).is_err());
+        assert!(Reply::read_from(&mut b"hello there, twenty-four+".as_slice()).is_err());
         // A truncated header is an error and not a hang.
         assert!(Request::read_from(&mut b"SKPR".as_slice()).is_err());
+    }
+
+    /// **A stale helper says which side is old.** The header grew a page in
+    /// ADR 0019 and `VERSION` moved with it; a build that reads the old layout as
+    /// the new one would take a path length out of a page number.
+    #[test]
+    fn a_header_from_the_previous_version_is_refused() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x534b_5052u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&(Ask::Preview as u16).to_le_bytes());
+        bytes.extend_from_slice(&800u32.to_le_bytes());
+        bytes.extend_from_slice(&600u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        assert!(Request::read_from(&mut bytes.as_slice()).is_err());
     }
 
     #[test]

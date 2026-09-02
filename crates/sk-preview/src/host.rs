@@ -44,7 +44,7 @@ const DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 pub enum Kind {
     /// `skerry-thumbnailer`: raster images and SVG, decoded in pure Rust.
     Image,
-    /// `skerry-preview-doc`: the first page of a document, through a renderer
+    /// `skerry-preview-doc`: one page of a document, through a renderer
     /// found on `PATH`.
     Document,
 }
@@ -72,6 +72,9 @@ pub struct Want {
     pub mtime: i64,
     /// The box the answer must fit inside, in device pixels.
     pub within: (u32, u32),
+    /// Which page, one-based, or zero for the first — ADR 0019. Zero for
+    /// everything that has no pages, which is every image and every thumbnail.
+    pub page: u32,
 }
 
 impl Want {
@@ -83,7 +86,7 @@ impl Want {
     /// one, and it costs no `statx` because the listing already has it.
     #[must_use]
     pub fn key(&self) -> Key {
-        Key { path: self.path.clone(), mtime: self.mtime, within: self.within }
+        Key { path: self.path.clone(), mtime: self.mtime, within: self.within, page: self.page }
     }
 }
 
@@ -96,6 +99,13 @@ pub struct Key {
     pub mtime: i64,
     /// The box it was fitted inside.
     pub within: (u32, u32),
+    /// Which page it is of.
+    ///
+    /// **In the key, because a page is what an answer is *of*.** Two `↓` presses
+    /// in quick succession put two requests in one batch, and without this the
+    /// reply for page 3 would satisfy a panel that had moved on to page 4 — the
+    /// same staleness rule `within` already carries, applied to one more field.
+    pub page: u32,
 }
 
 /// One answer, on its way back to the frame loop.
@@ -107,6 +117,8 @@ pub struct Answer {
     pub refusal: Refusal,
     /// The image's own size, inside the box that was asked for.
     pub size: (u32, u32),
+    /// How many pages the document has, or zero for unknown — ADR 0019.
+    pub pages: u32,
     /// Straight `RGBA8`.
     pub pixels: Vec<u8>,
 }
@@ -304,6 +316,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
         let request = Request {
             ask: want.ask,
             within: want.within,
+            page: want.page,
             path: want.path.as_os_str().as_encoded_bytes().to_vec(),
         };
         let asked = std::time::Instant::now();
@@ -313,6 +326,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
                 key: want.key(),
                 refusal: reply.refusal,
                 size: reply.size,
+                pages: reply.pages,
                 pixels: reply.pixels,
             }),
             // A reply that arrived late is still a reply, and throwing it away
@@ -323,6 +337,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
                     key: want.key(),
                     refusal: reply.refusal,
                     size: reply.size,
+                    pages: reply.pages,
                     pixels: reply.pixels,
                 });
                 alive = false;
@@ -367,6 +382,7 @@ mod tests {
             path: PathBuf::from(path),
             mtime: 7,
             within: (128, 128),
+            page: 0,
         }
     }
 

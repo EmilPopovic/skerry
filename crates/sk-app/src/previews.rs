@@ -8,7 +8,7 @@
 //!
 //! # The three answers, and why text is not a fourth process
 //!
-//! A picture goes to `skerry-thumbnailer` and a document's first page to
+//! A picture goes to `skerry-thumbnailer` and a document's page to
 //! `skerry-preview-doc`, both under [ADR
 //! 0006](../../../docs/adr/0006-out-of-process-decoders.md)'s sandbox, because
 //! decoding is the attack surface. Reading a text file is not decoding —
@@ -32,7 +32,12 @@ pub(crate) enum Shows {
     /// tool costs a process per file, which is affordable for the one document
     /// somebody is looking at and not for a grid of forty.
     Picture,
-    /// A document's first page, through `skerry-preview-doc`. Preview only.
+    /// A document's page, through `skerry-preview-doc`. Preview only.
+    ///
+    /// Which page is the look's business — [ADR
+    /// 0019](../../../docs/adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md)
+    /// — and there is no thumbnail of one: a page costs a process, which is
+    /// affordable for the document somebody has open and not for a grid of forty.
     Page,
     /// Its own text, read here. Preview only.
     Text,
@@ -77,7 +82,7 @@ pub(crate) struct Thumbs {
 impl Thumbs {
     /// The atlas key for a file at a modification time, minting one if new.
     pub(crate) fn name(&mut self, path: &Path, mtime: i64) -> (sk_preview::Key, ImageKey) {
-        let key = sk_preview::Key { path: path.to_path_buf(), mtime, within: THUMBNAIL };
+        let key = sk_preview::Key { path: path.to_path_buf(), mtime, within: THUMBNAIL, page: 0 };
         if let Some(image) = self.named.get(&key) {
             return (key, *image);
         }
@@ -129,7 +134,7 @@ pub(crate) const THUMBNAIL: (u32, u32) = (sk_gpu::THUMBNAIL_SLOT, sk_gpu::THUMBN
 
 /// A want for one file's thumbnail.
 pub(crate) fn thumbnail(path: PathBuf, mtime: i64) -> Want {
-    Want { kind: Kind::Image, ask: Ask::Thumbnail, path, mtime, within: THUMBNAIL }
+    Want { kind: Kind::Image, ask: Ask::Thumbnail, path, mtime, within: THUMBNAIL, page: 0 }
 }
 
 #[cfg(test)]

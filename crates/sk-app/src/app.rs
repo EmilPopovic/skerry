@@ -747,6 +747,8 @@ pub struct App {
     crumb_pending: Option<usize>,
     /// The navigation button under the pointer.
     hovered_tool: Option<(crate::panes::PaneId, crate::layout::Tool)>,
+    /// The quick look's control under the pointer, while one is open.
+    hovered_look: Option<crate::view::LookControl>,
     /// The switcher button under the pointer.
     hovered_mode: Option<(crate::panes::PaneId, crate::cells::Mode)>,
     /// How many scroll events have arrived, how many of them said a finger sent
@@ -1133,6 +1135,7 @@ impl App {
             crumb_menu: None,
             crumb_pending: None,
             hovered_tool: None,
+            hovered_look: None,
             hovered_mode: None,
             scrolls: (0, 0, 0),
             scroll_time: 0,
@@ -1759,6 +1762,14 @@ impl App {
         if self.search.is_some() && self.search_key(event, commands) {
             return;
         }
+        // **A quick look takes the four arrows and nothing else.** It is a viewer
+        // rather than a question, so it does not swallow the keyboard: `Space`
+        // still closes it through the registry, `Escape` through `clear`, and
+        // `Ctrl+W` still closes the tab. What it does take is what would
+        // otherwise move a cursor nobody can see behind the panel.
+        if self.quick_look.is_some() && self.quick_look_key(event) {
+            return;
+        }
         // **A field-scoped command comes before the field's own editing keys.**
         // `Ctrl+A` over a listing is Select all and inside a field is Select the
         // whole name, and the registry is the only place that difference can live
@@ -2068,6 +2079,14 @@ impl App {
         measurer.update(panes.focused_mut(), visible, jobs);
         self.settle_thumbnails();
         self.settle_quick_look();
+        // **Last, because both of the above put things in the queue.** The pump
+        // used to be the last line of `settle_thumbnails`, which ran first — so a
+        // quick look's request was queued *after* the only pump of the frame, no
+        // child was spawned, and nothing was left to wake the loop: the panel
+        // stayed blank until an unrelated event drew another frame. A frame is
+        // only drawn when something is dirty, so "the next frame" can be minutes
+        // away, or never.
+        self.previews.pump(&self.jobs.pool, &self.waker.handle());
     }
 
     /// Puts the caret where a click in the path field landed.
@@ -2709,6 +2728,7 @@ impl App {
             .flatten()
             .any(on)
             || self.hits.answers.iter().any(on)
+            || self.hits.look.iter().any(|(_, area)| on(area))
     }
 
     /// A press on the status strip's own controls. Whether it was taken.
@@ -2742,6 +2762,42 @@ impl App {
         } else if self.hits.erase_delete.is_some_and(|a| a.contains(position.x, position.y)) {
             self.erase_for_good();
         }
+        true
+    }
+
+    /// A press while a quick look is open. Whether it was taken.
+    ///
+    /// **Every press inside the panel, and none outside it.** A control does what
+    /// its arrow says; anywhere else in the panel does nothing, because a picture
+    /// somebody is looking at is not a button. A press *outside* falls through, so
+    /// clicking the list behind the look closes it by choosing a different file —
+    /// which is what a person means by clicking a list they can see.
+    fn press_in_the_quick_look(&mut self, position: Point) -> bool {
+        if self.quick_look.is_none() {
+            return false;
+        }
+        match self.look_control_at(position) {
+            Some(crate::view::LookControl::PreviousFile) => self.look_at_sibling(-1),
+            Some(crate::view::LookControl::NextFile) => self.look_at_sibling(1),
+            Some(crate::view::LookControl::PreviousPage) => self.look_by(-1, false),
+            Some(crate::view::LookControl::NextPage) => self.look_by(1, false),
+            None => {
+                let inside = crate::view::quick_look_area(&self.layout);
+                let strip = crate::view::quick_look_strip(&self.layout);
+                if !inside.contains(position.x, position.y)
+                    && !strip.contains(position.x, position.y)
+                {
+                    // **Click-away closes it, and the press still lands.** A
+                    // person clicking a row they can see means to select that row,
+                    // and a look that stayed open over a different file than the
+                    // cursor would be two answers to "which file is this".
+                    self.quick_look = None;
+                    self.dirty = true;
+                    return false;
+                }
+            }
+        }
+        self.dirty = true;
         true
     }
 
@@ -4080,6 +4136,81 @@ impl App {
         true
     }
 
+    /// Every piece of the window's own furniture under the pointer.
+    ///
+    /// Five independent comparisons with one shape, split out of [`Self::moved`]
+    /// because that function was two ideas: what the pointer is *over*, and what a
+    /// drag in flight is doing about it.
+    fn hover_the_chrome(&mut self, position: Point) {
+        let button = self.layout.button_at(position.x, position.y);
+        if self.hovered_button != button {
+            self.hovered_button = button;
+            self.dirty = true;
+        }
+        self.hover_the_path_bar(position);
+        let crumb = self.crumb_at(position);
+        if self.hovered_crumb != crumb {
+            self.hovered_crumb = crumb;
+            self.dirty = true;
+        }
+        let mode = self.mode_at(position);
+        if self.hovered_mode != mode {
+            self.hovered_mode = mode;
+            self.dirty = true;
+        }
+        let tool = self.tool_at(position);
+        if self.hovered_tool != tool {
+            self.hovered_tool = tool;
+            self.dirty = true;
+        }
+        let control = self.look_control_at(position);
+        if self.hovered_look != control {
+            self.hovered_look = control;
+            self.dirty = true;
+        }
+    }
+
+    /// The quick look's control under `position`, if the pointer is on one.
+    ///
+    /// **Empty where nothing was drawn**, because `Hits::look` is filled by the
+    /// drawing: a page arrow over a picture is not merely disabled, it is not
+    /// there, and a rectangle left behind from a document would be a button the
+    /// pointer could find and the eye could not.
+    fn look_control_at(&self, position: sk_plat::Point) -> Option<crate::view::LookControl> {
+        self.hits
+            .look
+            .iter()
+            .find(|(_, area)| area.contains(position.x, position.y))
+            .map(|(control, _)| *control)
+    }
+
+    /// A key while a quick look is open. Whether it was taken.
+    ///
+    /// `←`/`→` walk to the previous and next file that has a preview; `↑`/`↓` and
+    /// `PageUp`/`PageDown` go further through the one on screen — a document's
+    /// pages, a text file's lines, and nowhere at all for a picture.
+    ///
+    /// **Bare chords only.** `Ctrl ←` is a word in a field and `Alt ←` is Back,
+    /// and a viewer that took either would be taking a key that means something
+    /// else everywhere in the program.
+    fn quick_look_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
+        use sk_plat::{Key, Named};
+        if !event.mods.none() {
+            return false;
+        }
+        match event.key {
+            Key::Named(Named::Left) => self.look_at_sibling(-1),
+            Key::Named(Named::Right) => self.look_at_sibling(1),
+            Key::Named(Named::Up) => self.look_by(-1, false),
+            Key::Named(Named::Down) => self.look_by(1, false),
+            Key::Named(Named::PageUp) => self.look_by(-1, true),
+            Key::Named(Named::PageDown) => self.look_by(1, true),
+            _ => return false,
+        }
+        self.dirty = true;
+        true
+    }
+
     /// A key while a name-taken question is open. Whether it was taken.
     ///
     /// Arrows walk the four answers, `Space` toggles whether the answer covers
@@ -4735,20 +4866,93 @@ search_active={active:?}",
             self.dirty = true;
             return;
         }
-        let Some(desktop) = self.desktop.clone() else { return };
+        let Some(row) = self.panes.focused().cursor_row() else { return };
+        self.look_at_row(row);
+    }
+
+    /// What a row can be shown as, if anything.
+    fn shows_at(&self, row: usize) -> Option<crate::previews::Shows> {
+        let desktop = self.desktop.as_ref()?;
         let pane = self.panes.focused();
-        let Some(id) = pane.selection.cursor() else { return };
+        let id = pane.listing.at(row)?;
         let kind = sk_desktop::kind_of(&pane.listing, id, Some(&desktop.mime));
-        let Some(shows) = crate::previews::shows(pane.listing.name(id), kind, Some(&desktop.mime))
-        else {
-            // Nothing this program can draw. Not a message: a quick look at a
-            // spreadsheet saying "no preview" is a panel whose only content is an
-            // apology, and the file is still there in the list behind it.
-            return;
-        };
+        crate::previews::shows(pane.listing.name(id), kind, Some(&desktop.mime))
+    }
+
+    /// Opens a look at one row. Whether there was anything to open.
+    ///
+    /// **Nothing for a file this program cannot draw**, and no message either: a
+    /// quick look at a spreadsheet saying "no preview" is a panel whose only
+    /// content is an apology, and the file is still there in the list behind it.
+    fn look_at_row(&mut self, row: usize) -> bool {
+        let Some(shows) = self.shows_at(row) else { return false };
+        let pane = self.panes.focused();
+        let Some(id) = pane.listing.at(row) else { return false };
         let (path, mtime) = (pane.path_of(id), pane.listing.mtime(id));
         self.quick_look = Some(crate::quicklook::QuickLook::open(path, mtime, shows, &self.jobs));
         self.dirty = true;
+        true
+    }
+
+    /// Moves the look to the next file in `delta`'s direction that has one.
+    ///
+    /// **It walks past what it cannot draw** rather than closing on it. `→` over
+    /// a folder of photographs with a `.zip` in the middle would otherwise put the
+    /// panel away halfway through, which is not what the key means.
+    ///
+    /// **And it takes the cursor with it**, so the list behind the panel is
+    /// standing where the panel is looking — and closing the look leaves the
+    /// selection on the file that was last on screen rather than where it started.
+    pub(crate) fn look_at_sibling(&mut self, delta: isize) {
+        if self.quick_look.is_none() {
+            return;
+        }
+        let rows = self.panes.focused().listing.rows();
+        let Some(from) = self.panes.focused().cursor_row() else { return };
+        let mut row = from;
+        loop {
+            let Ok(next) = isize::try_from(row).map(|it| it + delta) else { return };
+            let Ok(next) = usize::try_from(next) else { return };
+            if next >= rows {
+                return;
+            }
+            row = next;
+            if self.shows_at(row).is_some() {
+                break;
+            }
+        }
+        self.panes.focused_mut().cursor_to(row, false);
+        self.reveal_cursor();
+        self.look_at_row(row);
+    }
+
+    /// `↑`/`↓` and `PageUp`/`PageDown` inside the look.
+    ///
+    /// **What they mean depends on what is being looked at**, and that is the
+    /// point rather than an inconsistency: a document's pages and a text file's
+    /// lines are both "further through this file", and a picture has no further to
+    /// go — where the key is swallowed rather than passed on, because an arrow
+    /// that moved a cursor nobody can see would be worse than one that does
+    /// nothing.
+    pub(crate) fn look_by(&mut self, delta: i32, whole: bool) {
+        let room = crate::view::quick_look_area(&self.layout).height;
+        let step = self.theme.metrics.row_height;
+        let Some(look) = self.quick_look.as_mut() else { return };
+        match look.shows {
+            crate::previews::Shows::Page => {
+                look.turn(delta);
+            }
+            crate::previews::Shows::Text => {
+                let lines = look.text.as_ref().map_or(0, |it| it.lines.len());
+                look.scroll.set_extent(lines as f32 * step, room);
+                // `to` rather than `by`: a keystroke goes where it was sent and
+                // does not carry on afterwards, which is what `Scroll::to` is for
+                // and what `by` — whose job is a finger's velocity — is not.
+                let by = if whole { room } else { step } * delta as f32;
+                look.scroll.to(look.scroll.offset() + by);
+            }
+            crate::previews::Shows::Picture => {}
+        }
     }
 
     /// The box a quick look's picture is rendered into, in device pixels.
@@ -4773,7 +4977,8 @@ search_active={active:?}",
         if !look.wants(within) {
             return;
         }
-        look.asked = within;
+        let shot = look.shot(within);
+        look.asked = Some(shot);
         let (kind, path, mtime) = (look.shows, look.path.clone(), look.mtime);
         let helper = match kind {
             crate::previews::Shows::Picture => sk_preview::Kind::Image,
@@ -4786,6 +4991,7 @@ search_active={active:?}",
             path,
             mtime,
             within,
+            page: shot.page,
         });
     }
 
@@ -4842,7 +5048,6 @@ search_active={active:?}",
                 self.previews.want(crate::previews::thumbnail(path, mtime));
             }
         }
-        self.previews.pump(&self.jobs.pool, &self.waker.handle());
     }
 
     /// Puts finished thumbnails into the atlas.
@@ -4856,10 +5061,17 @@ search_active={active:?}",
             // It is not in the slot atlas — ADR 0018 — so it gets a key of its own
             // and a texture the size of the panel.
             if let Some(look) = &mut self.quick_look
-                && look.is_of(&answer.key.path, answer.key.mtime)
-                && answer.key.within == look.asked
+                && look.answers_to(&answer.key)
             {
-                if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
+                // The count travels with every document reply, so a page turn
+                // learns the length even when the first reply could not say it.
+                if answer.pages > 0 {
+                    look.pages = answer.pages;
+                }
+                if answer.refusal == sk_preview::Refusal::NoSuchPage {
+                    // A `↓` at the last page. The page on screen stays.
+                    look.no_such_page(answer.pages);
+                } else if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
                     let key = self.thumbs.name_preview();
                     self.renderer.hold_preview(key, answer.size, &answer.pixels);
                     look.image = Some((key, answer.size));
@@ -5257,7 +5469,10 @@ search_active={active:?}",
             || "none".to_owned(),
             |look| {
                 let what = if look.image.is_some() {
-                    "picture"
+                    // A document's page is an image too, and saying `picture`
+                    // about a PDF made a dump that had to be read beside
+                    // `look_page` to be understood at all.
+                    if look.shows == crate::previews::Shows::Page { "page" } else { "picture" }
                 } else if look.text.is_some() {
                     "text"
                 } else if look.refusal.is_some() {
@@ -5268,11 +5483,44 @@ search_active={active:?}",
                 format!("{}:{what}", look.title())
             },
         );
+        // The page and the count, separately, so the assertions above keep working
+        // and a page turn is visible on its own: `3/14`, `3/?` where the count is
+        // unknown, or `none` for anything that is not paged.
+        // Where each of the look's controls is, so a scenario clicks one by name
+        // rather than by arithmetic over the strip's own constants — the same
+        // trade `menu_aim` and `erase_aim` make.
+        let look_aim = self
+            .hits
+            .look
+            .iter()
+            .map(|(control, area)| {
+                let name = match control {
+                    crate::view::LookControl::PreviousFile => "previous_file",
+                    crate::view::LookControl::NextFile => "next_file",
+                    crate::view::LookControl::PreviousPage => "previous_page",
+                    crate::view::LookControl::NextPage => "next_page",
+                };
+                format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let look_page = self.quick_look.as_ref().map_or_else(
+            || "none".to_owned(),
+            |look| {
+                if look.shows == crate::previews::Shows::Page {
+                    let total =
+                        if look.pages > 0 { look.pages.to_string() } else { "?".to_owned() };
+                    format!("{}/{total}", look.page)
+                } else {
+                    "none".to_owned()
+                }
+            },
+        );
         format!(
             "mode={} grouping={} bands={} remembered={} columns={} cell={:.1}x{:.1} \
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
-looking={looking} \
+looking={looking} look_page={look_page} look_aim={look_aim:?} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -6499,6 +6747,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.press_in_the_crumb_menu(position) {
             return true;
         }
+        if self.press_in_the_quick_look(position) {
+            return true;
+        }
         if self.menu.is_some() {
             self.menu_press(position, commands);
             return true;
@@ -7513,27 +7764,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.hover_an_overlay(position) {
             return;
         }
-        let over = self.layout.button_at(position.x, position.y);
-        if self.hovered_button != over {
-            self.hovered_button = over;
-            self.dirty = true;
-        }
-        let crumb = self.crumb_at(position);
-        self.hover_the_path_bar(position);
-        if self.hovered_crumb != crumb {
-            self.hovered_crumb = crumb;
-            self.dirty = true;
-        }
-        let tool = self.tool_at(position);
-        let mode = self.mode_at(position);
-        if self.hovered_mode != mode {
-            self.hovered_mode = mode;
-            self.dirty = true;
-        }
-        if self.hovered_tool != tool {
-            self.hovered_tool = tool;
-            self.dirty = true;
-        }
+        self.hover_the_chrome(position);
         self.hover_the_history(position);
         if self.hover_the_sidebar(position) {
             self.dirty = true;
@@ -7737,6 +7968,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_separator,
             crumb_menu,
             hovered_tool,
+            hovered_look,
             hovered_mode,
             sidebar,
             edits,
@@ -7824,6 +8056,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_separator: *hovered_separator,
             crumb_menu: crumb_menu.as_ref(),
             hovered_tool: *hovered_tool,
+            hovered_look: *hovered_look,
             hovered_mode: *hovered_mode,
             places: &sidebar.sections,
             hovered_place: sidebar.hover,

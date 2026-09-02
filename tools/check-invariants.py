@@ -220,7 +220,15 @@ def spliced_comment_check(report: Report) -> None:
     against the whole tree when this was written: two hits, both real, no false
     positives.
 
-    **What it does not catch** is a comment spliced onto the *end* of a paragraph
+    **A second shape, and this one is exact.** An attribute followed immediately by
+    a doc comment — `#[derive(Default)]` and then `/// Something else entirely` —
+    is an item's `derive` left stranded above the comment of the item that was
+    inserted under it. Rust accepts the ordering, which is why nothing else
+    complains; this project never writes it, and a sweep of `crates` and `bin` when
+    this was added found zero. The two hits in `spikes/` are a `#[cfg]` above a
+    doc comment, and spikes are not scanned.
+
+    **What neither catches** is a comment spliced onto the *end* of a paragraph
     rather than after a summary — the block then reads as one comment with an odd
     last paragraph, and the item below is left with none. The detectable half of
     that is the orphan, and the lint for it,
@@ -229,6 +237,17 @@ def spliced_comment_check(report: Report) -> None:
     """
     for source in rust_sources("crates", "bin"):
         lines = source.read_text().splitlines()
+        for number, (here, following) in enumerate(zip(lines, lines[1:]), start=1):
+            if (
+                here.strip().startswith("#[")
+                and following.strip().startswith("///")
+                and not suppressed(here, "attribute-then-doc")
+            ):
+                report.fail(
+                    f"{rel(source)}:{number}",
+                    "an attribute above a doc comment — the item it belongs to is "
+                    "below the comment, which documents something else",
+                )
         index = 0
         while index < len(lines):
             if not lines[index].strip().startswith("///"):

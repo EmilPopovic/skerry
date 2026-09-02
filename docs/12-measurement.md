@@ -2099,3 +2099,80 @@ the cheap move is to write the distance down; widening the gate is worth it only
 when the widened version has been run against the whole tree and the false
 positives counted. Both numbers above — six caught, 300 undocumented — came from
 running it.
+
+## A queue pumped before the thing that fills it
+
+`Space` opened a quick look and the panel stayed blank. Any unrelated event — a
+click, a window focus change, the pointer crossing a row — and the picture
+appeared at once. Every test passed, because a test's next instruction *is* an
+unrelated event.
+
+The frame does this, in this order:
+
+```
+settle_thumbnails()   // queues what the visible rows want, then pumps
+settle_quick_look()   // queues what the panel wants
+```
+
+The pump was the last line of `settle_thumbnails`, so the panel's request was
+queued *after* the only pump of the frame. No child was spawned; nothing was left
+to wake the loop, because the loop sleeps on descriptors and no descriptor had
+anything coming. The next frame would have pumped it — and a frame is only drawn
+when something is dirty, so "the next frame" is however long until the person does
+something else.
+
+**A once-a-frame pump belongs after everything that can fill its queue, and the
+way to make that true is to have one caller rather than to order two.** It is now
+a line in `settle_rows` after both settles, which is the only place that can see
+both.
+
+What makes this worth a section is how it hid. The symptom — "it works as soon as
+I touch anything" — reads like a repaint problem, and the two hours it deserves go
+to the renderer. The tell was that the *thumbnails* in the same folder appeared
+immediately: same host, same child, same channel, different call order. **When two
+users of one mechanism behave differently, the mechanism is not the bug.**
+
+## Two insets, one of which scaled
+
+A grid cell's name was drawn one logical pixel wider than the selection behind it
+at the default row height, and five wider at the largest. The pill is inset from
+the cell by half the gutter, which `Metrics::zoomed` scales; the name box was inset
+by a hard `4.0`, which it does not. At 100% the overlap is a pixel and reads as a
+rendering artefact. At 175% the name crosses the selection's border on both sides,
+which is what got reported.
+
+The fix is not a better constant. **Two numbers that have to agree should be one
+number**, so the label's box is now derived from the pill's own inset, and its
+vertical band is anchored to the pill's *bottom* rather than to `0.58` of the
+cell's height — a fraction can only be checked against one combination of zoom and
+scale at a time, and there are twenty-eight of them.
+
+The test is the shape this document keeps arriving at: **a sweep over every
+combination, asserting a relation rather than a value.** Seven zoom steps by four
+cell widths, and the assertion is "the name is inside the pill and below the
+mark". Run against the old geometry it fails at zoom 0.85 — not at 1.0, which is
+why looking at one screenshot at one scale had not found it.
+
+## A diagnostic that ran under a stricter sandbox than the thing it diagnoses
+
+`skerry-preview-doc --probe` printed `renderer: Some(PdfToPpm)` and `pages: None`
+on a machine where `pdfinfo` answers correctly in ten milliseconds.
+
+The probe applied its own confinement — read the root, execute nothing — while
+the served process grants execute at the root and can therefore spawn the counter.
+So the probe was answering a question about a process that does not exist. It is
+the same defect as [a green assertion between two derived
+numbers](#an-assertion-between-two-derived-numbers-can-be-green-while-both-are-wrong):
+the measurement was of the harness.
+
+**A probe has to run under exactly the confinement of the thing it reports on**,
+and the way to guarantee that is to call the same function rather than to write a
+second one that looks like it. `--probe` now calls `confine()`, the same one
+`main` does.
+
+This is the second time the sandbox has produced a wrong answer that looked like a
+missing feature — the first is
+[above](#a-sandbox-that-works-announces-itself-by-refusing-something-you-wanted) —
+and both times the shape was a capability quietly absent rather than an error. A
+confinement has no way to tell you it is the reason; that has to come from a probe,
+and a probe that is not the real thing is worse than none.

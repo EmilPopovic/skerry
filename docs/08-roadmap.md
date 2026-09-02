@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates and two sandboxed helpers, 674 tests, 113 GUI scenarios on two display servers and fifty-three golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates and two sandboxed helpers, 681 tests, 114 GUI scenarios on two display servers and fifty-three golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -346,15 +346,23 @@ cache.
 
 **Started, and the spine of it is in.** Two helpers under
 [ADR 0006](adr/0006-out-of-process-decoders.md)'s sandbox — `skerry-thumbnailer`
-for PNG, JPEG and SVG in pure Rust, `skerry-preview-doc` for a PDF's first page
+for PNG, JPEG and SVG in pure Rust, `skerry-preview-doc` for one page of a PDF
 through whatever renderer is on `PATH` — talking to a host that decodes nothing,
 over the protocol
-[ADR 0017](adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md)
+[ADR 0019](adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md)
 settles. Thumbnails go to the XDG shared cache, so one Nautilus wrote is one this
 reads and the other way round, and they are drawn from a slot atlas
 ([ADR 0018](adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md)) in
 Details and in the grid. `Space` opens a quick look at a picture, a page or a text
 file; `Space` or `Escape` closes it.
+
+**`←`/`→` walk the files and `↑`/`↓` walk a document's pages**, past anything with
+no preview rather than closing on it, with the cursor following so the list is
+standing where the panel is looking. A page turn is a fresh request naming a page,
+because ADR 0019 measured the thing its predecessor feared: reaching page 400 of a
+1200-page manual costs **0.13–0.16 s**, the same as page 1, so the child holds no
+document open and needs no correlation table. The four moves have buttons in the
+panel's own strip, because the panel covers the list a pointer would otherwise use.
 
 **The product's dependency count did not move**, which is ADR 0006's whole
 argument: a helper is a separate binary and `tools/dep-budget.py` measures the

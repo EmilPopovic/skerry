@@ -315,6 +315,11 @@ preview.undecodable = This file could not be read as a picture.
 preview.no_renderer = No document renderer is installed. Install poppler-utils or mupdf-tools to preview a PDF.
 preview.too_large = This file is too large to preview.
 preview.more = …
+# The page control in the quick look's title strip. Two forms because a count of
+# zero means unknown — ADR 0019 — and a total invented from nothing is the one
+# thing rule 7 forbids.
+preview.page_of = {0} / {1}
+preview.page = {0}
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday

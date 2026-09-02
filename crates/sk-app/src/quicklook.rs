@@ -116,6 +116,19 @@ impl Text {
     }
 }
 
+/// What was last asked of a child: the box, and the page.
+///
+/// **One value rather than two fields**, because they are one question. A resize
+/// and a page turn are both "the panel wants a different image now", and a
+/// `wants` that compared them separately would be two chances to forget one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Shot {
+    /// The box, in device pixels.
+    pub(crate) within: (u32, u32),
+    /// The page, one-based.
+    pub(crate) page: u32,
+}
+
 /// What is on screen, and what is still coming.
 pub(crate) struct QuickLook {
     /// The file being looked at.
@@ -130,8 +143,12 @@ pub(crate) struct QuickLook {
     pub(crate) text: Option<Text>,
     /// Why there is nothing to show, if there is nothing.
     pub(crate) refusal: Option<Refusal>,
-    /// The box the image was last asked for at, so a resize asks again.
-    pub(crate) asked: (u32, u32),
+    /// Which page is wanted, one-based. Always 1 for anything that is not paged.
+    pub(crate) page: u32,
+    /// How many pages the document has, or zero for unknown — ADR 0019.
+    pub(crate) pages: u32,
+    /// What was last asked for, so a resize or a page turn asks again.
+    pub(crate) asked: Option<Shot>,
     /// How far the text is scrolled.
     pub(crate) scroll: sk_ui::Scroll,
     reading: Option<mpsc::Receiver<Option<String>>>,
@@ -147,7 +164,9 @@ impl QuickLook {
             image: None,
             text: None,
             refusal: None,
-            asked: (0, 0),
+            page: 1,
+            pages: 0,
+            asked: None,
             scroll: sk_ui::Scroll::default(),
             reading: None,
         };
@@ -187,12 +206,84 @@ impl QuickLook {
     /// drawing it, so a window twice as wide is a different question — and for a
     /// vector or a PDF page, a materially better answer.
     pub(crate) fn wants(&self, within: (u32, u32)) -> bool {
-        self.shows != Shows::Text && self.refusal.is_none() && self.asked != within
+        self.shows != Shows::Text && self.refusal.is_none() && self.asked != Some(self.shot(within))
+    }
+
+    /// What to ask for at this size.
+    pub(crate) const fn shot(&self, within: (u32, u32)) -> Shot {
+        Shot { within, page: self.page }
+    }
+
+    /// Whether this look answers to `key` — the file, when it changed, the box
+    /// it was asked at and the page.
+    ///
+    /// **All four, because a reply can be stale in four ways.** Two `↓` presses
+    /// put two requests in one batch, and a page-3 reply arriving after the panel
+    /// has moved to page 4 must not be drawn as page 4.
+    pub(crate) fn answers_to(&self, key: &sk_preview::Key) -> bool {
+        self.is_of(&key.path, key.mtime)
+            && self.asked == Some(Shot { within: key.within, page: key.page })
+    }
+
+    /// Turns `delta` pages, and says whether the page moved.
+    ///
+    /// **Clamped where the count is known and open where it is not.** A machine
+    /// without `pdfinfo` previews the document and cannot say how long it is —
+    /// ADR 0019 — so `↓` there is allowed to ask for a page that may not exist,
+    /// and `NoSuchPage` is how it finds out.
+    pub(crate) fn turn(&mut self, delta: i32) -> bool {
+        if self.shows != Shows::Page {
+            return false;
+        }
+        let wanted = self.page.saturating_add_signed(delta).max(1);
+        let wanted = if self.pages > 0 { wanted.min(self.pages) } else { wanted };
+        let moved = wanted != self.page;
+        self.page = wanted;
+        moved
+    }
+
+    /// Puts the page back after a child said there is no such page.
+    ///
+    /// **Not a refusal with a sentence.** The only way to ask for a page past the
+    /// end is to press `↓` on the last one, and a panel that answered that with a
+    /// message would be scolding somebody for reaching the end: the page it has
+    /// stays on screen and the count is now known.
+    pub(crate) fn no_such_page(&mut self, pages: u32) {
+        if pages > 0 {
+            self.pages = pages;
+            self.page = self.page.min(pages).max(1);
+        } else if self.page > 1 {
+            self.page -= 1;
+        }
+        // **And nothing is re-rendered.** The page we came back to is the one
+        // already on screen, so the shot that failed becomes the shot for it —
+        // clearing `asked` instead would send a fresh request for a page we have,
+        // which is a spawn and a render for no change at all.
+        if let Some(shot) = &mut self.asked {
+            shot.page = self.page;
+        }
     }
 
     /// The sentence to draw when there is no picture and no text.
     pub(crate) fn message(&self) -> Option<&'static str> {
         self.refusal.and_then(Refusal::message)
+    }
+
+    /// What the page control says between its arrows.
+    ///
+    /// **`3 / 14`, or `3` alone where the count is unknown** — ADR 0019's zero.
+    /// A total invented from nothing would be the one thing [rule
+    /// 7](../../../docs/03-principles.md) forbids: a number on screen that
+    /// nothing behind it knows.
+    ///
+    /// Through the catalogue, both of them, because a locale that says "3 of 14"
+    /// — or puts the total first — is a locale this cannot spell with a `/`.
+    pub(crate) fn page_label(&self) -> String {
+        if self.pages > 0 {
+            sk_model::i18n::format("preview.page_of", &[&self.page, &self.pages])
+        } else {
+            sk_model::i18n::format("preview.page", &[&self.page])
+        }
     }
 
     /// The file's name, for the panel's title.
@@ -212,7 +303,8 @@ impl QuickLook {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{LINES, Text, Tone};
+    use super::{LINES, QuickLook, Text, Tone};
+    use crate::previews::Shows;
     use sk_preview::Refusal;
 
     /// **Every line has runs covering exactly it.** The drawing slices a line by
@@ -259,6 +351,85 @@ mod tests {
         assert!(!Text::of("").truncated);
     }
 
+    /// A look with no child behind it, for the page arithmetic.
+    fn paged(pages: u32) -> QuickLook {
+        QuickLook {
+            path: std::path::PathBuf::from("/a/doc.pdf"),
+            mtime: 7,
+            shows: Shows::Page,
+            image: None,
+            text: None,
+            refusal: None,
+            page: 1,
+            pages,
+            asked: Some(super::Shot { within: (800, 600), page: 1 }),
+            scroll: sk_ui::Scroll::default(),
+            reading: None,
+        }
+    }
+
+    /// **`↓` stops at the end and `↑` at the beginning**, where the count is
+    /// known — ADR 0019's clamp.
+    #[test]
+    fn a_page_turn_stops_at_both_ends_of_a_known_count() {
+        let mut look = paged(3);
+        assert!(look.turn(1) && look.page == 2);
+        assert!(look.turn(1) && look.page == 3);
+        assert!(!look.turn(1), "a turn past the last page reported a move");
+        assert_eq!(look.page, 3);
+        assert!(look.turn(-1) && look.page == 2);
+        assert!(look.turn(-1) && look.page == 1);
+        assert!(!look.turn(-1), "a turn before the first page reported a move");
+        assert_eq!(look.page, 1);
+    }
+
+    /// **An unknown count does not clamp**, because the only way to find the end
+    /// is to ask past it — a machine with a renderer but no `pdfinfo`.
+    #[test]
+    fn an_unknown_count_lets_a_turn_ask_past_the_end() {
+        let mut look = paged(0);
+        assert!(look.turn(1) && look.page == 2);
+        assert!(look.turn(1) && look.page == 3);
+
+        // And the child's answer settles it: the count arrives, the page comes
+        // back to the last real one, and the shot follows so the page already on
+        // screen is not rendered a second time.
+        look.no_such_page(2);
+        assert_eq!((look.page, look.pages), (2, 2));
+        assert!(!look.wants((800, 600)), "the page on screen was asked for again");
+        assert!(look.refusal.is_none(), "reaching the end left a message on screen");
+    }
+
+    /// Where the child cannot say how long the document is either, the step back
+    /// is one page and the count stays unknown.
+    #[test]
+    fn no_such_page_without_a_count_steps_back_one() {
+        let mut look = paged(0);
+        look.turn(1);
+        look.no_such_page(0);
+        assert_eq!((look.page, look.pages), (1, 0));
+    }
+
+    /// A resize asks again, and so does a page turn — one field, one comparison.
+    #[test]
+    fn a_resize_and_a_page_turn_are_both_a_new_question() {
+        let mut look = paged(9);
+        assert!(!look.wants((800, 600)), "nothing changed and it asked anyway");
+        assert!(look.wants((900, 600)), "a resize did not ask again");
+        look.turn(1);
+        assert!(look.wants((800, 600)), "a page turn did not ask again");
+    }
+
+    /// What the control says between its arrows, in both shapes.
+    #[test]
+    fn the_page_label_says_the_total_only_when_there_is_one() {
+        let mut look = paged(14);
+        look.turn(2);
+        assert_eq!(look.page_label(), "3 / 14");
+        let unknown = paged(0);
+        assert_eq!(unknown.page_label(), "1");
+    }
+
     /// **Every refusal that has a sentence has one in the catalogue.**
     ///
     /// The keys are returned from `Refusal::message` as bare literals rather than
@@ -278,9 +449,10 @@ mod tests {
             Refusal::Undecodable,
             Refusal::NoRenderer,
             Refusal::TooLarge,
+            Refusal::NoSuchPage,
         ] {
             let wanted = match refusal {
-                Refusal::None | Refusal::NotItsKind => false,
+                Refusal::None | Refusal::NotItsKind | Refusal::NoSuchPage => false,
                 Refusal::Unreadable
                 | Refusal::Undecodable
                 | Refusal::NoRenderer

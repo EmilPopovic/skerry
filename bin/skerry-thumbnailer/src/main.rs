@@ -89,7 +89,9 @@ fn answer(request: &Request) -> Reply {
     if request.ask == Ask::Thumbnail
         && let Some((pixels, width, height)) = cache::read(&path, mtime)
     {
-        return Reply { refusal: Refusal::None, size: (width, height), pixels };
+        // **Zero pages, because an image is not paged.** ADR 0019's field is a
+        // document's business and this helper never has one.
+        return Reply { refusal: Refusal::None, size: (width, height), pages: 0, pixels };
     }
     let Ok(bytes) = std::fs::read(&path) else {
         return Reply::refused(Refusal::Unreadable);
@@ -105,7 +107,7 @@ fn answer(request: &Request) -> Reply {
             if request.ask == Ask::Thumbnail {
                 cache::write(&path, mtime, &raster.pixels, raster.size);
             }
-            Reply { refusal: Refusal::None, size: raster.size, pixels: raster.pixels }
+            Reply { refusal: Refusal::None, size: raster.size, pages: 0, pixels: raster.pixels }
         }
         Err(refusal) => Reply::refused(refusal),
     }
