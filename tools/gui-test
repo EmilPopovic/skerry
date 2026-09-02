@@ -1257,7 +1257,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 121
+FEWEST_SCENARIOS = 122
 
 
 def scenario(name, fresh: bool = False):
@@ -3158,7 +3158,7 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
             "sleep 150\nclick right\nsleep 350\nkey f12\nsleep 150\n"
         )
         over_place = run.state()
-        expect(over_place, menu="3", cursor=wanted)
+        expect(over_place, menu="4", cursor=wanted)
         if "file.new_folder" in over_place["menu_aim"]:
             raise Failure("the sidebar answered with the list's own menu")
         if not over_place["place_menu"]:
@@ -5282,7 +5282,12 @@ def a_default_place_is_not_unpinnable(run: Run, fixture: Path) -> None:
             f"click right\nsleep 400\nkey f12\nsleep 200\n"
         )
         over_home = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        expect(over_home, menu="3")
+        expect(over_home, menu="4")
+        # Open is the fourth row and is *not* dimmed: every row of the sidebar is
+        # a directory and every one of them opens. What Home has no business
+        # offering is the three that change the list.
+        if "place.expand" in over_home["menu_dim"]:
+            raise Failure(f"Open is dimmed over Home: {over_home['menu_dim']!r}")
         for wanted in ("place.unpin", "place.raise", "place.lower"):
             if wanted not in over_home["menu_dim"]:
                 raise Failure(f"{wanted} is not dimmed over Home: {over_home['menu_dim']!r}")
@@ -5484,6 +5489,106 @@ def the_search_scope(run: Run, fixture: Path) -> None:
     # it has always done.
     run.drive("key ctrl+shift+f\nsleep 300\nkey f12\nsleep 200\n")
     expect(run.state(), searching="false")
+
+
+@scenario("a-place-opens-in-the-sidebar-and-stays-open", fresh=True)
+def the_sidebar_tree(run: Run, fixture: Path) -> None:
+    """M2's last sidebar item: a place shows what is under it.
+
+    Three claims. The twisty opens the row rather than navigating to it — which is
+    what every tree control on the desktop does, and the difference between
+    looking inside a folder and going there. A row under a place is a row: it is
+    indented, it can be opened in turn, and pressing it goes. And the shape
+    survives `kill -9`, because rule 6 is about the layout and an open tree is
+    part of it.
+
+    The fixture is pinned first, so the place being opened is one this scenario
+    put there rather than whatever `user-dirs.dirs` says about the machine.
+    """
+    run.close()
+    place = own_config(run, "tree")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("key ctrl+b\nsleep 500\nkey f12\nsleep 200\n")
+        # A fresh fixture's own name, which is the scenario's: `fresh=True` gives
+        # it a directory of its own so that pinning one does not put another
+        # scenario's fixture on the list.
+        state = until(own, pinned=fixture.name)
+        pinned_row = int(state["pinned_at"])
+        where = own.state()["path"]
+
+        # The twisty, not the row.
+        twisties = [it for it in state["twisty_aim"].split(",") if it]
+        across, down = (float(value) for value in twisties[pinned_row].split(":"))
+        at = aim(own, state, across, down)
+        own.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nclick left\nsleep 600\nkey f12\nsleep 250\n")
+        opened = holds(
+            own,
+            lambda it: "1" in it.get("place_depths", "").split(","),
+            "a row indented under a place",
+        )
+        expect(opened, path=where)
+        depths = opened["place_depths"].split(",")
+        if depths[pinned_row] != "0+":
+            raise Failure(f"the place is not marked open: {opened['place_depths']!r}")
+        if depths.count("1") < 2:
+            raise Failure(f"the fixture's two folders are not under it: {depths}")
+
+        # A row under it goes where it points, which is the whole of what a tree
+        # row is for. The rows are in the listing's own order, so the first of
+        # them is `alpha` — asserted through the row the pointer is over rather
+        # than assumed, because a tree in readdir order would pass either way.
+        child = place_point(own, opened, pinned_row + 1)
+        own.drive(f"move {child[0]:.2f} {child[1]:.2f}\nsleep 150\nkey f12\nsleep 150\n")
+        expect(own.state(), place_name="alpha")
+        own.drive("click left\nsleep 800\nkey f12\nsleep 200\n")
+        went = until(own, path=str(fixture / "alpha"))
+        if went["place_depths"].split(",")[pinned_row] != "0+":
+            raise Failure("navigating closed the tree")
+
+        own.drive("sleep 2500\nkey f12\nsleep 200\n")
+        own.kill()
+    finally:
+        own.close()
+
+    back = Run(run.display, run.log.parent, None, [], run.instance, place)
+    try:
+        listed(back)
+        back.drive("key f12\nsleep 300\n")
+        # The read of what is under it is a job, so the rows arrive a moment
+        # after the shape does.
+        holds(
+            back,
+            lambda it: "1" in it.get("place_depths", "").split(","),
+            "a tree that came back open",
+        )
+    finally:
+        back.close()
+
+    # And the keyboard's half of the same command: standing in a place that is
+    # open, `Ctrl+Shift+E` closes it. No path on the command line, because a path
+    # named there is an explicit request and the saved layout stays saved — which
+    # includes the tree.
+    again = Run(run.display, run.log.parent, None, [], run.instance, place)
+    try:
+        listed(again)
+        again.drive("key f12\nsleep 200\n")
+        holds(again, lambda it: "1" in it.get("place_depths", "").split(","), "an open tree")
+        # The session came back standing in the folder the tree row opened, so
+        # the parent is the place the chord is about.
+        again.drive("key backspace\nsleep 700\n")
+        until(again, path=str(fixture))
+        again.drive("key ctrl+shift+e\nsleep 500\nkey f12\nsleep 200\n")
+        shut = holds(
+            again,
+            lambda it: "1" not in it.get("place_depths", "").split(","),
+            "a tree the chord closed",
+        )
+        if "0+" in shut["place_depths"].split(","):
+            raise Failure(f"a row is still marked open: {shut['place_depths']!r}")
+    finally:
+        again.close()
 
 
 @scenario("navigation-buttons")

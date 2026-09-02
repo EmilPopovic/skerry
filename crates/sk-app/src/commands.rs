@@ -67,6 +67,17 @@ fn places(registry: &mut Registry<App>) {
             run: App::pin_place,
         },
         CommandSpec {
+            id: "place.expand",
+            name: "action.place_expand",
+            group: Group::Navigate,
+            // `E` for expand, in the `Ctrl+Shift` family the other three place
+            // commands are in. The pointer's way is the twisty, which is the
+            // control every tree on the desktop has.
+            keys: &["ctrl+shift+e"],
+            enabled: App::can_expand_place,
+            run: App::expand_place,
+        },
+        CommandSpec {
             id: "place.unpin",
             name: "action.unpin",
             group: Group::Navigate,

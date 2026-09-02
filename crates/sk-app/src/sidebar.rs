@@ -8,6 +8,16 @@
 //! **Built on a job.** It reads `user-dirs.dirs`, GTK's `bookmarks` and
 //! `/proc/self/mountinfo`, and stats every candidate directory to drop the ones
 //! that are not there. None of that is a frame's work.
+//!
+//! **And a place opens.** A row with a twisty shows the directories under it,
+//! indented, each of which opens in turn — which is the tree M2 owes the sidebar,
+//! and is not the inline Tree [ADR
+//! 0013](../../../docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md)
+//! declines: a sidebar row is a place to go rather than a file to act on, so
+//! there is no selection, no sort and no columns to keep in step. Every
+//! expansion is one read on a job, and what is drawn is [`Row`] — the sections'
+//! entries with whatever is open under them, flattened, because a heading and a
+//! row are the same kind of thing to a hit test.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -74,6 +84,32 @@ pub struct Section {
     pub entries: Vec<Entry>,
 }
 
+/// One drawn row: a place, or a directory under one.
+///
+/// **Flattened, with the heading carried by the row that starts a section.** The
+/// alternative is a nested loop in the view and a hit test that has to walk the
+/// same nesting to turn a `y` back into a row — which is two descriptions of one
+/// arrangement, and the second one is the one that goes wrong.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Row {
+    /// Where pressing it goes.
+    pub path: PathBuf,
+    /// What it is called.
+    pub label: String,
+    /// Which mark to draw.
+    pub mark: Mark,
+    /// Whether reaching it may block for a network timeout.
+    pub remote: bool,
+    /// Whether it is a line in the bookmarks file.
+    pub pinned: bool,
+    /// How deep: 0 for a place, 1 for a directory inside one.
+    pub depth: usize,
+    /// Whether what is under it is being shown.
+    pub open: bool,
+    /// The section heading this row is the first under, if it is.
+    pub heading: Option<&'static str>,
+}
+
 /// How wide the sidebar is until somebody drags it.
 ///
 /// 220 is what Windows 11 and Nautilus both settle near, and it is wide enough
@@ -109,6 +145,22 @@ pub struct Sidebar {
     /// column widths for the same reason: a width is a decision about how much of
     /// a name somebody wants to read.
     pub width: f32,
+    /// The rows as drawn: the sections' entries, with whatever is open under
+    /// each of them.
+    ///
+    /// Rebuilt when the sections, the expansions or a directory's contents
+    /// change — never per frame, and never per press: a hit test and a frame that
+    /// disagreed about which row is where would be a click that opened the row
+    /// above the one under the pointer.
+    visible: Vec<Row>,
+    /// The places somebody has opened, in no particular order.
+    opened: Vec<PathBuf>,
+    /// What each opened directory holds, once the job that read it has answered.
+    ///
+    /// Subdirectories only, and dotted names left out: a sidebar is a list of
+    /// places you go, and `.cache` beside `Documents` is noise in the one list
+    /// that has to stay scannable.
+    children: Vec<(PathBuf, Vec<String>)>,
     /// The row under the pointer, as an index into [`Sidebar::rows`].
     pub hover: Option<usize>,
     /// How many times the contents have arrived.
@@ -130,6 +182,9 @@ impl Sidebar {
         let (sender, loaded) = std::sync::mpsc::channel();
         let sidebar = Self {
             sections: Vec::new(),
+            visible: Vec::new(),
+            opened: Vec::new(),
+            children: Vec::new(),
             open,
             width: width.clamp(NARROWEST, WIDEST),
             hover: None,
@@ -170,25 +225,148 @@ impl Sidebar {
         }
         if any {
             self.hover = None;
+            self.settle();
         }
         any
     }
 
-    /// Every row, in display order, with its section's heading before it.
-    pub fn rows(&self) -> impl Iterator<Item = &Entry> + '_ {
-        self.sections.iter().flat_map(|section| section.entries.iter())
+    /// Every drawn row, in display order.
+    #[must_use]
+    pub fn rows(&self) -> &[Row] {
+        &self.visible
     }
 
     /// How many rows there are.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.sections.iter().map(|section| section.entries.len()).sum()
+        self.visible.len()
     }
 
     /// The row at an index into the flattened list.
     #[must_use]
-    pub fn at(&self, index: usize) -> Option<&Entry> {
-        self.rows().nth(index)
+    pub fn at(&self, index: usize) -> Option<&Row> {
+        self.visible.get(index)
+    }
+
+    /// Rebuilds the drawn rows from the sections and what is open.
+    fn settle(&mut self) {
+        let mut rows = Vec::with_capacity(self.visible.len().max(8));
+        for section in &self.sections {
+            let mut heading = Some(section.title);
+            for entry in &section.entries {
+                let open = self.is_open(&entry.path);
+                rows.push(Row {
+                    path: entry.path.clone(),
+                    label: entry.label.clone(),
+                    mark: entry.mark,
+                    remote: entry.remote,
+                    pinned: entry.pinned,
+                    depth: 0,
+                    open,
+                    heading: heading.take(),
+                });
+                if open {
+                    self.push_children(&entry.path, 1, &mut rows);
+                }
+            }
+        }
+        self.visible = rows;
+    }
+
+    /// The open directories under `parent`, deepest last.
+    ///
+    /// **Bounded by what is open**, which is what makes recursion safe here: a
+    /// cycle needs a symlink and `children` holds only directories a read
+    /// reported, so the depth is the number of twisties somebody has pressed.
+    fn push_children(&self, parent: &Path, depth: usize, rows: &mut Vec<Row>) {
+        let Some((_, names)) = self.children.iter().find(|(path, _)| path == parent) else {
+            return;
+        };
+        for name in names {
+            let path = parent.join(name);
+            let open = self.is_open(&path);
+            rows.push(Row {
+                path: path.clone(),
+                label: name.clone(),
+                mark: Mark::Place(Kind::Other),
+                remote: false,
+                pinned: false,
+                depth,
+                open,
+                heading: None,
+            });
+            if open {
+                self.push_children(&path, depth + 1, rows);
+            }
+        }
+    }
+
+    /// Whether what is under `path` is being shown.
+    #[must_use]
+    pub fn is_open(&self, path: &Path) -> bool {
+        self.opened.iter().any(|it| it == path)
+    }
+
+    /// Opens or closes `path`. Whether its contents now have to be read.
+    ///
+    /// **Read every time it is opened, not once.** A directory changes while a
+    /// window is open, and a sidebar that showed what was there ten minutes ago
+    /// is the stale listing rule 1 exists to prevent, one panel over.
+    pub fn toggle(&mut self, path: &Path) -> bool {
+        if self.is_open(path) {
+            // Everything under it closes with it: leaving the descendants in the
+            // open list would make reopening one row restore a tree somebody
+            // collapsed on purpose.
+            self.opened.retain(|it| !it.starts_with(path));
+            self.settle();
+            return false;
+        }
+        self.opened.push(path.to_path_buf());
+        self.settle();
+        true
+    }
+
+    /// Takes delivery of one directory's subdirectories.
+    ///
+    /// **Sorted here, by the order the listing uses.** A directory read arrives
+    /// in whatever order the filesystem hands it out, and two lists of the same
+    /// folder ordered differently is [rule
+    /// 8](../../../docs/03-principles.md) broken in the one place a person can
+    /// see both at once.
+    pub fn took(&mut self, path: PathBuf, mut names: Vec<String>) {
+        names.sort_by(|left, right| sk_model::natural_cmp(left, right));
+        self.children.retain(|(it, _)| *it != path);
+        self.children.push((path, names));
+        self.settle();
+    }
+
+    /// The places that are open, for the session file.
+    #[must_use]
+    pub fn open_places(&self) -> &[PathBuf] {
+        &self.opened
+    }
+
+    /// Opens the places a session file named, without reading them yet.
+    ///
+    /// The reads are the caller's to start — they are jobs, and this crate's half
+    /// of the sidebar owns no pool.
+    pub fn open_these(&mut self, places: &[PathBuf]) {
+        self.opened = places.to_vec();
+        self.settle();
+    }
+
+    /// The mount points, which is what a search of everything covers.
+    ///
+    /// Over the sections rather than the drawn rows: a directory opened under a
+    /// volume is inside that filesystem, not another one.
+    #[must_use]
+    pub fn volumes(&self) -> Vec<PathBuf> {
+        self.sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .filter(|entry| entry.mark == Mark::Volume && !entry.remote)
+            .map(|entry| entry.path.clone())
+            .collect()
     }
 
     /// The pinned places, in the order they are drawn.
@@ -199,13 +377,22 @@ impl Sidebar {
     /// onto the file rather than guessing.
     #[must_use]
     pub fn pinned(&self) -> Vec<PathBuf> {
-        self.rows().filter(|entry| entry.pinned).map(|entry| entry.path.clone()).collect()
+        self.places().filter(|entry| entry.pinned).map(|entry| entry.path.clone()).collect()
     }
 
     /// Whether `path` is one of the pinned places.
     #[must_use]
     pub fn is_pinned(&self, path: &Path) -> bool {
-        self.rows().any(|entry| entry.pinned && entry.path == path)
+        self.places().any(|entry| entry.pinned && entry.path == path)
+    }
+
+    /// The sections' own entries, which are the places themselves.
+    ///
+    /// **Not the drawn rows.** A directory shown because somebody opened a
+    /// twisty over it is not on the list of places, so pinning it is exactly the
+    /// thing to offer — and `holds` asking the drawn rows would have refused it.
+    fn places(&self) -> impl Iterator<Item = &Entry> + '_ {
+        self.sections.iter().flat_map(|section| section.entries.iter())
     }
 
     /// Whether `path` is already a row of any section.
@@ -217,7 +404,7 @@ impl Sidebar {
     /// row saying it cannot be done.
     #[must_use]
     pub fn holds(&self, path: &Path) -> bool {
-        self.rows().any(|entry| entry.path == path)
+        self.places().any(|entry| entry.path == path)
     }
 
     /// The width the divider would set from a pointer at `x`, clamped.
@@ -253,13 +440,13 @@ pub fn moved(order: &[PathBuf], from: usize, at: usize) -> Option<Vec<PathBuf>> 
 /// The longest match rather than the first: with `/` and `/home/emil` both on
 /// the list, standing in `/home/emil/Downloads` should light Home and not the
 /// filesystem. An exact match wins over both.
-pub(crate) fn current(sections: &[Section], path: &Path) -> Option<usize> {
+pub(crate) fn current(rows: &[Row], path: &Path) -> Option<usize> {
     let mut best: Option<(usize, usize)> = None;
-    for (index, entry) in sections.iter().flat_map(|section| section.entries.iter()).enumerate() {
-        if !path.starts_with(&entry.path) {
+    for (index, row) in rows.iter().enumerate() {
+        if !path.starts_with(&row.path) {
             continue;
         }
-        let depth = entry.path.components().count();
+        let depth = row.path.components().count();
         if best.is_none_or(|(_, found)| depth > found) {
             best = Some((index, depth));
         }
@@ -279,46 +466,61 @@ pub(crate) fn current(sections: &[Section], path: &Path) -> Option<usize> {
 /// The paths are `root`'s own subdirectories, so the current-location highlight
 /// has something to land on.
 #[must_use]
-pub(crate) fn sample(root: &Path, pinned: bool) -> Vec<Section> {
-    let place = |label: &str, path: PathBuf, kind: Kind| Entry {
+pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
+    let row = |label: &str, path: PathBuf, kind: Kind| Row {
         path,
         label: label.to_owned(),
         mark: Mark::Place(kind),
         remote: false,
         pinned: false,
+        depth: 0,
+        open: false,
+        heading: None,
     };
-    let mut sections = vec![Section {
-        title: "sidebar.places",
-        entries: vec![
-            place(sk_model::i18n::lookup("sidebar.home"), root.to_path_buf(), Kind::Home),
-            place("documents", root.join("documents"), Kind::Documents),
-            place("build", root.join("build"), Kind::Other),
-        ],
-    }];
+    let mut rows = vec![
+        Row {
+            heading: Some("sidebar.places"),
+            ..row(sk_model::i18n::lookup("sidebar.home"), root.to_path_buf(), Kind::Home)
+        },
+        row("documents", root.join("documents"), Kind::Documents),
+        row("build", root.join("build"), Kind::Other),
+    ];
+    // **One place open, with what is under it.** The tree is drawn from the same
+    // rows the machine's own sidebar produces, so a frame of it needs a fixture
+    // with a depth in it — and `documents` is the one row every other frame here
+    // already has.
+    if opened {
+        rows[1].open = true;
+        for (at, name) in ["invoices", "letters"].into_iter().enumerate() {
+            rows.insert(
+                2 + at,
+                Row { depth: 1, ..row(name, root.join("documents").join(name), Kind::Other) },
+            );
+        }
+    }
     // **Off by default, so that adding it did not re-bless fifty-five
     // references.** The sidebar is in every frame, so a row added to this list is
     // a diff in every one of them — and a sweep of fifty-five blessings is a
     // sweep nobody reviews. One frame asks for it.
     if pinned {
-        sections.push(Section {
-            title: "sidebar.pinned",
-            entries: vec![
-                Entry { pinned: true, ..place("photos", root.join("photos"), Kind::Other) },
-                Entry { pinned: true, ..place("work", root.join("work"), Kind::Other) },
-            ],
+        rows.push(Row {
+            pinned: true,
+            heading: Some("sidebar.pinned"),
+            ..row("photos", root.join("photos"), Kind::Other)
         });
+        rows.push(Row { pinned: true, ..row("work", root.join("work"), Kind::Other) });
     }
-    sections.push(Section {
-        title: "sidebar.volumes",
-        entries: vec![Entry {
-            path: PathBuf::from("/"),
-            label: sk_model::i18n::lookup("sidebar.root").to_owned(),
-            mark: Mark::Volume,
-            remote: false,
-            pinned: false,
-        }],
+    rows.push(Row {
+        heading: Some("sidebar.volumes"),
+        path: PathBuf::from("/"),
+        label: sk_model::i18n::lookup("sidebar.root").to_owned(),
+        mark: Mark::Volume,
+        remote: false,
+        pinned: false,
+        depth: 0,
+        open: false,
     });
-    sections
+    rows
 }
 
 /// Reads the three sources and arranges them.
@@ -396,8 +598,11 @@ mod tests {
     fn laid_out(sections: Vec<Section>) -> Sidebar {
         let waker = sk_util::Waker::new().expect("eventfd");
         let (sender, loaded) = std::sync::mpsc::channel();
-        Sidebar {
+        let mut sidebar = Sidebar {
             sections,
+            visible: Vec::new(),
+            opened: Vec::new(),
+            children: Vec::new(),
             open: true,
             width: super::DEFAULT_WIDTH,
             hover: None,
@@ -405,7 +610,9 @@ mod tests {
             loaded,
             sender,
             wake: waker.handle(),
-        }
+        };
+        sidebar.settle();
+        sidebar
     }
 
     fn fake(paths: &[&str]) -> Vec<Section> {
@@ -425,7 +632,7 @@ mod tests {
     }
 
     fn at(sections: &[Section], path: &str) -> Option<usize> {
-        super::current(sections, Path::new(path))
+        super::current(laid_out(sections.to_vec()).rows(), Path::new(path))
     }
 
     /// The longest match, not the first: `/` and `/home/emil` are both on the
@@ -544,5 +751,61 @@ mod tests {
         assert!((super::Sidebar::dragged_to(0.0) - super::NARROWEST).abs() < f32::EPSILON);
         assert!((super::Sidebar::dragged_to(4000.0) - super::WIDEST).abs() < f32::EPSILON);
         assert!((super::Sidebar::dragged_to(300.0) - 300.0).abs() < f32::EPSILON);
+    }
+
+    /// A place opens, what is under it is indented, and closing it takes the
+    /// whole subtree with it.
+    #[test]
+    fn a_place_opens_and_what_is_under_it_is_indented() {
+        let mut sidebar = laid_out(fake(&["/home/emil", "/srv"]));
+        assert_eq!(sidebar.len(), 2);
+        assert!(sidebar.toggle(Path::new("/home/emil")), "opening asked for no read");
+        // Open, and nothing under it until the read lands: a twisty that waits
+        // is the honest state, not a row that guesses.
+        assert_eq!(sidebar.len(), 2);
+        assert!(sidebar.is_open(Path::new("/home/emil")));
+
+        // Handed over in readdir order and drawn in the listing's order, which
+        // is the one a person can see beside it.
+        sidebar.took(PathBuf::from("/home/emil"), vec!["repos".to_owned(), "notes".to_owned()]);
+        let shape: Vec<(usize, &str)> =
+            sidebar.rows().iter().map(|row| (row.depth, row.label.as_str())).collect();
+        assert_eq!(shape, [(0, "/home/emil"), (1, "notes"), (1, "repos"), (0, "/srv")]);
+
+        // A child opens too, and its own children go under it.
+        assert!(sidebar.toggle(Path::new("/home/emil/repos")));
+        sidebar.took(PathBuf::from("/home/emil/repos"), vec!["skerry".to_owned()]);
+        let shape: Vec<(usize, &str)> =
+            sidebar.rows().iter().map(|row| (row.depth, row.label.as_str())).collect();
+        assert_eq!(
+            shape,
+            [(0, "/home/emil"), (1, "notes"), (1, "repos"), (2, "skerry"), (0, "/srv")]
+        );
+
+        // **Closing the place closes what was open inside it.** Leaving the
+        // descendants on the list would make reopening one row restore a tree
+        // somebody collapsed on purpose.
+        assert!(!sidebar.toggle(Path::new("/home/emil")), "closing asked for a read");
+        assert_eq!(sidebar.len(), 2);
+        assert!(!sidebar.is_open(Path::new("/home/emil/repos")));
+        assert!(sidebar.open_places().is_empty());
+    }
+
+    /// A row shown because a twisty was opened is not a place, so it can be
+    /// pinned — and the section headings still belong to the rows that start
+    /// them.
+    #[test]
+    fn a_row_under_a_place_is_not_itself_a_place() {
+        let mut sidebar = laid_out(fake(&["/home/emil"]));
+        sidebar.toggle(Path::new("/home/emil"));
+        sidebar.took(PathBuf::from("/home/emil"), vec!["repos".to_owned()]);
+        assert!(sidebar.holds(Path::new("/home/emil")));
+        assert!(!sidebar.holds(Path::new("/home/emil/repos")), "a tree row refused a pin");
+        assert_eq!(sidebar.rows()[0].heading, Some("sidebar.places"));
+        assert_eq!(sidebar.rows()[1].heading, None, "a child started a section");
+
+        // And the highlight follows the deepest row, which is what the tree is
+        // for: standing in `repos` lights `repos` rather than the place above it.
+        assert_eq!(super::current(sidebar.rows(), Path::new("/home/emil/repos/skerry")), Some(1));
     }
 }

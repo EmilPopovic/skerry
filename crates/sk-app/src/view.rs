@@ -21,7 +21,7 @@ use crate::menu::Menu;
 use crate::palette::Palette;
 use crate::pane::Pane;
 use crate::panes::{Divider, PaneId, PaneLayout, Panes, SplitId};
-use crate::sidebar::{Entry, Mark, Section};
+use crate::sidebar::Mark;
 
 /// Which column a row cache key is for.
 const COLUMN_NAME: u8 = 0;
@@ -74,12 +74,15 @@ pub struct Chrome<'a> {
     pub hovered_mode: Option<(PaneId, Mode)>,
     /// The quick look's control under the pointer.
     pub hovered_look: Option<LookControl>,
-    /// The sidebar's contents, once the job that reads them has finished.
+    /// The sidebar's rows as they are drawn, once the job that reads them has
+    /// finished.
     ///
     /// A slice rather than the model, because the view needs the arrangement and
     /// not the channel the arrangement arrived on — which is what lets a capture
-    /// build one synchronously and have a golden frame of it.
-    pub places: &'a [Section],
+    /// build one synchronously and have a golden frame of it. Flattened, with the
+    /// heading carried by the row that starts a section: a heading and a row are
+    /// the same kind of thing to a hit test.
+    pub places: &'a [crate::sidebar::Row],
     /// The sidebar row under the pointer.
     pub hovered_place: Option<usize>,
     /// Whether the sidebar's divider is under the pointer or being dragged.
@@ -211,6 +214,8 @@ pub struct Hits {
     /// One rectangle per sidebar row, in the flattened order the model uses, so
     /// the index a click reports is an index into it.
     pub places: Vec<Area>,
+    /// One per sidebar row, in the same order: the box that opens and closes it.
+    pub twisties: Vec<Area>,
     /// The quick look's controls, while one is open and while it has them.
     ///
     /// **A list rather than four fields**, and empty rather than absent where the
@@ -2437,6 +2442,7 @@ fn sidebar(
     hits: &mut Hits,
 ) {
     hits.places.clear();
+    hits.twisties.clear();
     let area = layout.sidebar;
     if area.width <= 0.0 {
         return;
@@ -2461,49 +2467,57 @@ fn sidebar(
     let clip = painter.rect(area.x, area.y, area.width - 1.0, area.height);
     painter.list.push_clip(clip);
     let current = crate::sidebar::current(chrome.places, &pane.path);
+    let heading = metrics.sidebar_heading + 12.0;
     let mut y = area.y + 6.0;
-    let mut index = 0;
-    for section in chrome.places {
-        let baseline = painter.baseline(y, metrics.sidebar_heading + 12.0, metrics.sidebar_heading);
-        let style = TextStyle::new(metrics.sidebar_heading, theme.palette.heading).bold();
-        line(
-            painter,
-            i18n::lookup(section.title),
-            style,
-            area.x + 14.0,
-            area.width - 20.0,
-            baseline,
-        );
-        y += metrics.sidebar_heading + 12.0;
-
-        // The gap a reorder would drop into is drawn inside the section that
-        // holds the rows it is a gap between, because that is the only place the
-        // running index and the running `y` are both in hand.
-        let pinned = section.entries.iter().any(|entry| entry.pinned);
-        let drop = chrome.place_drop.filter(|_| pinned);
-        for (at, entry) in section.entries.iter().enumerate() {
-            if drop == Some(at) {
+    // How many pinned rows have been drawn, and where the last of them ended:
+    // the gap a reorder would drop into is counted in pinned rows, and "after
+    // the last one" is a position no row can draw for itself.
+    let mut pins = 0;
+    let mut after_pins = area.y;
+    for (index, row) in chrome.places.iter().enumerate() {
+        if let Some(title) = row.heading {
+            // A gap above every heading but the first, which is what makes three
+            // lists rather than one list with words in it.
+            if index > 0 {
+                y += 8.0;
+            }
+            let baseline = painter.baseline(y, heading, metrics.sidebar_heading);
+            let style = TextStyle::new(metrics.sidebar_heading, theme.palette.heading).bold();
+            line(painter, i18n::lookup(title), style, area.x + 14.0, area.width - 20.0, baseline);
+            y += heading;
+        }
+        if row.pinned {
+            if chrome.place_drop == Some(pins) {
                 insertion(painter, area, y);
             }
-            let row = Area { x: area.x, y, width: area.width - 1.0, height: metrics.sidebar_row };
-            hits.places.push(row);
-            place_row(
-                painter,
-                entry,
-                row,
-                current == Some(index),
-                chrome.hovered_place == Some(index),
-            );
-            y += metrics.sidebar_row;
-            index += 1;
+            pins += 1;
         }
-        if drop == Some(section.entries.len()) {
-            insertion(painter, area, y);
+        let box_ = Area { x: area.x, y, width: area.width - 1.0, height: metrics.sidebar_row };
+        hits.places.push(box_);
+        hits.twisties.push(twisty_box(box_, row.depth));
+        place_row(painter, row, box_, current == Some(index), chrome.hovered_place == Some(index));
+        y += metrics.sidebar_row;
+        if row.pinned {
+            after_pins = y;
         }
-        y += 8.0;
+    }
+    if pins > 0 && chrome.place_drop == Some(pins) {
+        insertion(painter, area, after_pins);
     }
     painter.list.pop_clip();
 }
+
+/// Where the twisty of a row at `depth` is.
+///
+/// One indent step per level, and the same box whether or not there turns out to
+/// be anything under the row: a directory that has to be read before its own
+/// control can be drawn is a control that appears a frame after the row does.
+fn twisty_box(row: Area, depth: usize) -> Area {
+    Area { x: row.x + 4.0 + depth as f32 * INDENT, y: row.y, width: 16.0, height: row.height }
+}
+
+/// How far one level of the sidebar's tree is indented.
+const INDENT: f32 = 13.0;
 
 /// The line a dragged place would land on.
 ///
@@ -2517,10 +2531,16 @@ fn insertion(painter: &mut Painter<'_>, area: Area, y: f32) {
 }
 
 /// One row of the sidebar.
-fn place_row(painter: &mut Painter<'_>, entry: &Entry, row: Area, current: bool, hovered: bool) {
+fn place_row(
+    painter: &mut Painter<'_>,
+    row: &crate::sidebar::Row,
+    box_: Area,
+    current: bool,
+    hovered: bool,
+) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let pill = painter.rect(row.x + 6.0, row.y + 1.0, row.width - 12.0, row.height - 2.0);
+    let pill = painter.rect(box_.x + 6.0, box_.y + 1.0, box_.width - 12.0, box_.height - 2.0);
     if current {
         painter.list.rect(
             pill,
@@ -2531,17 +2551,44 @@ fn place_row(painter: &mut Painter<'_>, entry: &Entry, row: Area, current: bool,
         painter.list.rect(pill, theme.palette.hover, painter.px(metrics.radius));
     }
 
-    let icon = painter.rect(row.x + 14.0, row.y + (row.height - 15.0) / 2.0, 15.0, 15.0);
+    // **The twisty is drawn, not implied.** A row that opens and gives no sign
+    // that it does is a feature only somebody who was told about it can use,
+    // which is rule 4 — the same argument the column boundaries won.
+    let twisty = twisty_box(box_, row.depth);
+    let ink = if current { theme.palette.selected_text } else { theme.palette.dim };
+    // A triangle rather than a glyph, for the reason the reload button is one:
+    // `▸` and `▾` are a font's decision and this machine's chain is missing
+    // arrows already.
+    let (width, height, at) =
+        if row.open { (9.0, 5.0, Direction::Down) } else { (5.0, 9.0, Direction::Right) };
+    painter.triangle(
+        twisty.x + (twisty.width - width) / 2.0,
+        twisty.y + (twisty.height - height) / 2.0,
+        width,
+        height,
+        ink,
+        at,
+    );
+
+    // **Logical pixels all the way to the draw call.** `Painter::rect` is where
+    // the conversion happens, so a device rectangle's `right()` used as the next
+    // shape's `x` is a position scaled twice — correct at 100% and, at 200%, a
+    // label a hundred pixels from its own icon. Which is what the second golden
+    // frame at 200% exists to catch.
+    let mark_at = twisty.right() + 2.0;
+    let mark = 15.0;
+    let icon = painter.rect(mark_at, box_.y + (box_.height - mark) / 2.0, mark, mark);
     let kinds = theme.palette.kinds;
-    match entry.mark {
-        Mark::Volume => painter.disk(icon, if entry.remote { kinds.audio } else { kinds.unknown }),
+    match row.mark {
+        Mark::Volume => painter.disk(icon, if row.remote { kinds.audio } else { kinds.unknown }),
         Mark::Place(_) => painter.folder(icon, kinds.folder),
     }
 
     let ink = if current { theme.palette.selected_text } else { theme.palette.text };
-    let baseline = painter.baseline(row.y, row.height, metrics.text_size);
-    let box_rect = painter.rect(row.x + 37.0, 0.0, row.width - 47.0, 0.0);
-    painter.label(&entry.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
+    let baseline = painter.baseline(box_.y, box_.height, metrics.text_size);
+    let text_at = mark_at + mark + 7.0;
+    let box_rect = painter.rect(text_at, 0.0, (box_.right() - 10.0 - text_at).max(0.0), 0.0);
+    painter.label(&row.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
 }
 
 /// Back, forward, parent and reload, drawn from triangles and rectangles.

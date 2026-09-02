@@ -7,11 +7,11 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 713 tests, 121 GUI scenarios **on both Wayland and X11**,
-fifty-six golden frames, every gate green: a Details view
+sandboxed helpers, 715 tests, 122 GUI scenarios **on both Wayland and X11**,
+fifty-eight golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
-under inotify, with folder totals, a sidebar **whose divider drags and whose
-pinned places are a line each in GTK's `bookmarks` file**
+under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
+drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
 ([ADR 0021](docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)) — so a
 folder pinned here is pinned in Nautilus, the well-known directories cannot be
 unpinned, and the rows drag into an order — **tabs and a

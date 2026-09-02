@@ -366,6 +366,8 @@ pub struct Capture {
     /// Off by default so that adding the section did not re-bless every frame
     /// the sidebar is in, which is all of them.
     pub pinned: bool,
+    /// Whether one of its places is open, with what is under it.
+    pub tree: bool,
     /// Whether to draw the window frame the program draws for itself.
     ///
     /// A capture has no compositor to ask, so it is told. Without this the
@@ -949,7 +951,7 @@ fn pose(pane: &mut Pane, checked: bool) {
 /// read.
 struct Sample<'a> {
     overlays: &'a Overlays,
-    places: &'a [crate::sidebar::Section],
+    places: &'a [crate::sidebar::Row],
     types: &'a sk_desktop::MimeDatabase,
     keys: Option<&'a [(String, String)]>,
     hint: &'a str,
@@ -1080,7 +1082,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // and a reference image that embeds somebody's `user-dirs.dirs` and mount
     // table is one nobody else can reproduce.
     let places = if request.sidebar {
-        crate::sidebar::sample(&request.path, request.pinned)
+        crate::sidebar::sample(&request.path, request.pinned, request.tree)
     } else {
         Vec::new()
     };

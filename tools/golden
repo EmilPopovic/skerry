@@ -120,6 +120,12 @@ FRAMES = [
     # line between them — which is drawn between two rows rather than over one,
     # because the answer to a drop here is an order and not a destination.
     ("sidebar-pinned", ["--size", "900x520", "--scale", "125", "--pinned"]),
+    # **A place opened, with what is under it.** The tree M2 owed the sidebar:
+    # one indent step per level, a twisty that points down where a row is open and
+    # right where it is not, and the marks and labels shifted with it — which is
+    # the arithmetic a second scale would catch and a description could not.
+    ("sidebar-tree", ["--size", "900x520", "--scale", "125", "--tree"]),
+    ("sidebar-tree-200", ["--size", "760x440", "--scale", "200", "--tree"]),
     ("keyboard-overlay", ["--size", "900x520", "--scale", "125", "--keys"]),
     # **Not the statistics overlay.** Its content is job counts and cache
     # hit rates, which differ between two runs of the same binary by design —

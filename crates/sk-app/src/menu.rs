@@ -59,7 +59,8 @@ pub const IN_A_LOOK: &[&[&str]] = &[&["look.select_all", "look.copy"]];
 ///
 /// Pin is deliberately absent: every row of the sidebar is already a place, so
 /// the row would be dimmed every time the menu opened.
-pub const ON_A_PLACE: &[&[&str]] = &[&["place.unpin", "place.raise", "place.lower"]];
+pub const ON_A_PLACE: &[&[&str]] =
+    &[&["place.expand"], &["place.unpin", "place.raise", "place.lower"]];
 
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[

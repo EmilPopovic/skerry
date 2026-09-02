@@ -106,7 +106,7 @@ fn take_delivery(
 /// with it, so every state that only exists during an interaction is off — and
 /// stating that in one place keeps it from drifting into the loop.
 fn chrome_of<'a>(
-    places: &'a [crate::sidebar::Section],
+    places: &'a [crate::sidebar::Row],
     types: &'a sk_desktop::MimeDatabase,
     hint: &'a str,
     leaves: &'a [crate::panes::PaneLayout],
@@ -196,7 +196,7 @@ struct Trace {
 /// What a trace draws that does not change between frames.
 struct Fixed {
     types: std::sync::Arc<sk_desktop::MimeDatabase>,
-    places: Vec<crate::sidebar::Section>,
+    places: Vec<crate::sidebar::Row>,
     theme: Theme,
     layout: Layout,
     hint: String,
@@ -207,7 +207,7 @@ fn fixed(request: &Bench) -> Fixed {
     let logical = Size::new(request.logical.0 as f32, request.logical.1 as f32);
     Fixed {
         types: std::sync::Arc::new(sk_desktop::MimeDatabase::load()),
-        places: crate::sidebar::sample(&request.path, false),
+        places: crate::sidebar::sample(&request.path, false, false),
         layout: Layout::compute_with(
             logical,
             &theme.metrics,

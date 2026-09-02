@@ -18,6 +18,7 @@
 //! zoom 2                an index into App::ZOOM
 //! window 1100x720       logical pixels
 //! columns 520 96 128    name, size and modified widths, in logical pixels
+//! expanded /home/emil   a place opened in the sidebar's tree, one line each
 //! split beside 0.5      beside | below, then a ratio
 //!   leaf 1              the index of the showing tab
 //!     tab name+ 0 /home     a sort, a scroll offset, and the path last
@@ -85,6 +86,13 @@ pub struct Session {
     /// exists to preserve. A file without the line restores the defaults, which
     /// is exactly what a person who has never dragged a column expects.
     pub columns: crate::layout::Columns,
+    /// The places opened in the sidebar's tree.
+    ///
+    /// **One line each, and the path is last**, which is the grammar's own rule:
+    /// a newline is the one byte a path cannot hold. A place whose directory has
+    /// gone comes back as a line that opens nothing, which costs one read and no
+    /// row.
+    pub expanded: Vec<PathBuf>,
     /// The pane tree.
     pub tree: Node,
 }
@@ -206,6 +214,9 @@ pub fn render(session: &Session) -> String {
         session.columns.size.round(),
         session.columns.modified.round()
     );
+    for path in &session.expanded {
+        let _ = writeln!(out, "expanded {}", path.display());
+    }
     write_node(&session.tree, 0, &mut out);
     out
 }
@@ -296,6 +307,7 @@ pub fn parse(text: &str) -> Option<Session> {
         zoom: crate::app::ZOOM_DEFAULT,
         window: (1100, 720),
         columns: crate::layout::Columns::default(),
+        expanded: Vec::new(),
         tree: Node::Leaf { active: 0, tabs: Vec::new() },
     };
     let rest: Vec<&str> = lines.collect();
@@ -316,6 +328,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "hidden" => session.hidden = value == "on",
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
             "columns" => session.columns = read_columns(value),
+            "expanded" if !value.is_empty() => session.expanded.push(PathBuf::from(value)),
             "window" => {
                 if let Some(size) = read_size(value) {
                     session.window = size;
@@ -475,6 +488,7 @@ mod tests {
     fn nested() -> Session {
         Session {
             aside: crate::sidebar::DEFAULT_WIDTH,
+            expanded: Vec::new(),
             dark: false,
             sidebar: false,
             history: false,

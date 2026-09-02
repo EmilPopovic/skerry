@@ -63,6 +63,7 @@ struct Overlays {
     history: bool,
     look_selected: bool,
     pinned: bool,
+    tree: bool,
 }
 
 impl Overlays {
@@ -93,6 +94,7 @@ impl Overlays {
             "--grid" => &mut self.grid,
             "--look-selected" => &mut self.look_selected,
             "--pinned" => &mut self.pinned,
+            "--tree" => &mut self.tree,
             "--columns" => &mut self.columns,
             "--grouped" => &mut self.grouped,
             "--grouped-size" => &mut self.grouped_size,
@@ -183,6 +185,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         own_frame: shape.own_frame,
         sidebar: shape.sidebar,
         pinned: overlays.pinned,
+        tree: overlays.tree,
     })
 }
 
@@ -360,6 +363,7 @@ skerry [OPTIONS] [PATH]
   --rename         show a name being typed, for a golden frame of it
   --look-selected  select all of a text preview's text, for a frame of it
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
+  --tree           open one of the sidebar's places, for a frame of the tree
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,

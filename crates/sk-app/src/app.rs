@@ -616,6 +616,9 @@ struct Replies {
     /// What a write to the list of places did, and whether it worked.
     places_tx: std::sync::mpsc::Sender<(crate::sidebar::Edit, PathBuf, bool)>,
     places_rx: Receiver<(crate::sidebar::Edit, PathBuf, bool)>,
+    /// What a place opened in the sidebar's tree turned out to hold.
+    opened_tx: std::sync::mpsc::Sender<(PathBuf, Vec<String>)>,
+    opened_rx: Receiver<(PathBuf, Vec<String>)>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -642,6 +645,7 @@ impl Replies {
         let (index_tx, index_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
         let (places_tx, places_rx) = mpsc::channel();
+        let (opened_tx, opened_rx) = mpsc::channel();
         Self {
             paste_tx,
             paste_rx,
@@ -661,6 +665,8 @@ impl Replies {
             index_rx,
             places_tx,
             places_rx,
+            opened_tx,
+            opened_rx,
         }
     }
 }
@@ -953,17 +959,18 @@ pub struct App {
     aside_drag: bool,
     /// A pinned place being dragged into a different order.
     place_drag: Option<PlaceDrag>,
-    /// The place a menu was opened over, while that menu is what is being acted
-    /// on.
+    /// The place a pointer acted on, for the one command that acts on it.
     ///
     /// **The target `open_menu` said the registry had no shape for.** A command
-    /// runs against `&mut App` and takes no argument, so a place's menu rows need
-    /// somewhere to say *which* place — and that is a field, exactly as the
-    /// selection is the field that tells `file.trash` what to trash
+    /// runs against `&mut App` and takes no argument, so a place's menu rows and
+    /// a press on a twisty need somewhere to say *which* place — and that is a
+    /// field, exactly as the selection is the field that tells `file.trash` what
+    /// to trash
     /// ([ADR 0021](../../docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)).
-    /// Cleared with the menu, by [`App::close_menu`], and outliving it by exactly
-    /// one command — the one the menu was opened for.
-    menu_place: Option<PathBuf>,
+    /// It outlives the gesture by exactly one command, which is the command the
+    /// gesture was for; a menu clears it through [`App::close_menu`], so a target
+    /// cannot outlive the menu it was read from.
+    place_target: Option<PathBuf>,
     /// Where a rubber band started, and where it is now.
     band: Option<(Point, Point)>,
     /// A press on an already-selected row that may become a drag of files.
@@ -1036,6 +1043,15 @@ impl App {
         }
         self.sidebar.open = options.sidebar.unwrap_or(session.sidebar);
         self.sidebar.width = session.aside.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
+        // **Opened before the sections have arrived**, which is why this is two
+        // steps: the tree's shape is a list of paths and the rows it hangs under
+        // are still being read on a job. Each read is started here rather than
+        // when the sections land, because the answer is keyed by path and the
+        // order the two arrive in does not matter.
+        self.sidebar.open_these(&session.expanded);
+        for path in session.expanded.clone() {
+            self.read_a_place(path);
+        }
         self.history_open = session.history;
         self.zoom = session.zoom.min(ZOOM.len() - 1);
         self.columns = session.columns.clamped();
@@ -1060,6 +1076,7 @@ impl App {
             zoom: self.zoom,
             window: (self.logical.width as u32, self.logical.height as u32),
             columns: self.columns,
+            expanded: self.sidebar.open_places().to_vec(),
             tree: self.panes.describe(),
         }
     }
@@ -1237,7 +1254,7 @@ impl App {
             column_drag: None,
             aside_drag: false,
             place_drag: None,
-            menu_place: None,
+            place_target: None,
             band: None,
             files_drag: None,
             dropped: false,
@@ -1301,6 +1318,7 @@ impl App {
             self.drain_found();
             self.drain_index();
             self.drain_places();
+            self.drain_opened();
             if self.edits.drain_progress() {
                 self.dirty = true;
             }
@@ -3211,6 +3229,20 @@ impl App {
             self.aside_drag = true;
             return true;
         }
+        // **Before the row**, because the twisty is inside it: a press that
+        // opened a place must not also navigate to it, which is what every tree
+        // control on the desktop does and the difference between looking inside
+        // a folder and going there.
+        if let Some(path) = self.twisty_at(position) {
+            self.place_target = Some(path);
+            if let Some(command) = commands.find("place.expand") {
+                commands.run(command, self);
+            }
+            // The same rule the menu's target follows: it outlives the gesture by
+            // exactly the one command the gesture was for.
+            self.place_target = None;
+            return true;
+        }
         if let Some(index) = self.place_at(position) {
             // A pinned row is also the start of a possible reorder. The
             // navigation still happens on the press — dragging a place opens it,
@@ -3295,19 +3327,68 @@ impl App {
         self.dirty = true;
     }
 
+    /// The path of the row whose twisty covers `position`.
+    fn twisty_at(&self, position: Point) -> Option<PathBuf> {
+        let index =
+            self.hits.twisties.iter().position(|area| area.contains(position.x, position.y))?;
+        self.sidebar.at(index).map(|row| row.path.clone())
+    }
+
+    /// Whether the place in question is a row the sidebar can open.
+    #[must_use]
+    pub(crate) fn can_expand_place(&self) -> bool {
+        let path = self.place_in_question();
+        self.sidebar.rows().iter().any(|row| row.path == path)
+    }
+
+    /// Opens or closes the place in question.
+    pub(crate) fn expand_place(&mut self) {
+        let path = self.place_in_question();
+        if self.sidebar.toggle(&path) {
+            self.read_a_place(path);
+        }
+        self.dirty = true;
+    }
+
+    /// Reads what is under one place, on a job.
+    ///
+    /// **Directories only, and never on the frame loop** — one `getdents64` over
+    /// a directory that may be on a mount that has stopped answering, which is
+    /// rule 1's canonical case. The rows appear when the answer lands; until then
+    /// the twisty is open and the row has nothing under it.
+    fn read_a_place(&mut self, path: PathBuf) {
+        let sender = self.replies.opened_tx.clone();
+        let wake = self.waker.handle();
+        let show_hidden = self.panes.focused().show_hidden;
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |cancel| {
+            let names = crate::crumbs::children(&path, show_hidden, cancel).unwrap_or_default();
+            if sender.send((path, names)).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of one place's contents.
+    fn drain_opened(&mut self) {
+        let mut any = false;
+        while let Ok((path, names)) = self.replies.opened_rx.try_recv() {
+            self.sidebar.took(path, names);
+            any = true;
+        }
+        if any {
+            self.dirty = true;
+        }
+    }
+
     /// Where the pinned rows are in the flattened list.
     ///
     /// One contiguous run, because they are one section. Nothing where nothing is
     /// pinned, which is also when there is no section and no heading.
     fn pinned_run(&self) -> Option<std::ops::Range<usize>> {
-        let mut at = 0;
-        for section in &self.sidebar.sections {
-            if section.entries.iter().any(|entry| entry.pinned) {
-                return Some(at..at + section.entries.len());
-            }
-            at += section.entries.len();
-        }
-        None
+        let rows = self.sidebar.rows();
+        let first = rows.iter().position(|row| row.pinned)?;
+        let last = rows.iter().rposition(|row| row.pinned)?;
+        Some(first..last + 1)
     }
 
     /// A flattened row index as an index among the pinned places.
@@ -3371,7 +3452,7 @@ impl App {
     /// and "where I am" from the palette, a chord or the background menu, and
     /// neither reading needs a second command.
     fn place_in_question(&self) -> PathBuf {
-        self.menu_place.clone().unwrap_or_else(|| self.panes.focused().path.clone())
+        self.place_target.clone().unwrap_or_else(|| self.panes.focused().path.clone())
     }
 
     /// Whether the place in question could be added to the list.
@@ -4922,12 +5003,7 @@ scope_aim={scope_aim:?}",
         match &search.scope {
             crate::search::Scope::Here(path) => vec![path.clone()],
             crate::search::Scope::Everywhere => {
-                let roots: Vec<std::path::PathBuf> = self
-                    .sidebar
-                    .rows()
-                    .filter(|entry| entry.mark == crate::sidebar::Mark::Volume && !entry.remote)
-                    .map(|entry| entry.path.clone())
-                    .collect();
+                let roots = self.sidebar.volumes();
                 if roots.is_empty() { vec![std::path::PathBuf::from("/")] } else { roots }
             }
         }
@@ -6655,7 +6731,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
             .join(",");
         let at = self.pinned_run().map_or(-1, |run| i64::try_from(run.start).unwrap_or(-1));
         let menu = self
-            .menu_place
+            .place_target
             .as_deref()
             .map(|path| crate::panes::title_of(path).to_owned())
             .unwrap_or_default();
@@ -6667,17 +6743,43 @@ pane_body={bodies:?} pane_bar={bars:?}",
         // at a place without the harness owning a copy of the row height and the
         // heading's — and the index the pinned run starts at, so "the second pin"
         // is arithmetic rather than a guess about which sections exist.
+        //
+        // **Six tenths of the way across, not thirty pixels in.** A row at depth
+        // one has its twisty where a place's label is, so an aim by a fixed
+        // offset would have opened the tree row it meant to click.
         let aim = self
             .hits
             .places
             .iter()
-            .map(|area| format!("{:.0}:{:.0}", area.x + 30.0, area.y + area.height / 2.0))
+            .map(|area| {
+                format!("{:.0}:{:.0}", area.x + area.width * 0.6, area.y + area.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        // And one per twisty, which is a different target on the same row.
+        let twisties = self
+            .hits
+            .twisties
+            .iter()
+            .map(|area| {
+                format!("{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        // Which rows are open, and how deep each is drawn, so a scenario can
+        // assert a shape rather than a count.
+        let depths = self
+            .sidebar
+            .rows()
+            .iter()
+            .map(|row| format!("{}{}", row.depth, if row.open { "+" } else { "" }))
             .collect::<Vec<_>>()
             .join(",");
         format!(
             "sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={hover} place_name={name:?} pinned={pinned:?} pinned_at={at} place_menu={menu:?} \
-place_drop={drop} place_aim={aim:?} aside_grabbed={}",
+place_drop={drop} place_aim={aim:?} twisty_aim={twisties:?} place_depths={depths:?} \
+aside_grabbed={}",
             self.layout.sidebar.width,
             self.layout.sidebar.y,
             self.sidebar.len(),
@@ -7935,11 +8037,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // different directory — a menu offering New folder over `Downloads` would
         // make it somewhere else. What a place offers instead is the two things
         // that are about *it*, and the target a command needs is
-        // [`App::menu_place`].
+        // [`App::place_target`].
         if self.layout.sidebar.contains(position.x, position.y) {
             let over = self.place_at(position).and_then(|index| self.sidebar.at(index));
             let Some(entry) = over else { return };
-            self.menu_place = Some(entry.path.clone());
+            self.place_target = Some(entry.path.clone());
             self.menu_wanted = Some((position, crate::menu::ON_A_PLACE));
             return;
         }
@@ -7970,11 +8072,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// was open.
     ///
     /// **One function rather than eight assignments**, because the target and the
-    /// menu have to disappear together: a `menu_place` that outlived its menu
+    /// menu have to disappear together: a `place_target` that outlived its menu
     /// would make the next `place.unpin` — from the palette, from a chord — act on
     /// a row somebody clicked minutes ago.
     fn close_menu(&mut self) -> bool {
-        self.menu_place = None;
+        self.place_target = None;
         self.menu.take().is_some()
     }
 
@@ -8236,7 +8338,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         // **The target outlives the menu by exactly one command**, which is the
         // command the menu was opened for.
-        self.menu_place = None;
+        self.place_target = None;
     }
 
     /// One key to an open menu. Returns whether it was consumed.
@@ -8269,7 +8371,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 if let Some(id) = chosen.and_then(|id| commands.find(id)) {
                     commands.run(id, self);
                 }
-                self.menu_place = None;
+                self.place_target = None;
             }
             _ => {
                 // **The diagnostic report passes through every mode, this one
@@ -8797,7 +8899,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_tool: *hovered_tool,
             hovered_look: *hovered_look,
             hovered_mode: *hovered_mode,
-            places: &sidebar.sections,
+            places: sidebar.rows(),
             hovered_place: sidebar.hover,
             aside_grabbed,
             place_drop,

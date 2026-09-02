@@ -340,8 +340,22 @@ argument, so a place's own menu had nowhere to say *which* place — the comment
 field that tells `file.trash` what to trash, and it lives as long as the menu
 plus the one command the menu was opened for.
 
-**Still owed here:** middle-click to split, the **List** columns, the sidebar's
-**tree** — and the inline **Tree**,
+**And a place opens.** A twisty on every sidebar row shows the directories under
+it, indented, each of which opens in turn — the tree M2 owed the sidebar, and not
+the inline Tree ADR 0013 declines: a sidebar row is a place to go rather than a
+file to act on, so there is no selection, no sort and no columns to keep in step.
+Each expansion is one read on a job and the names are drawn in the listing's own
+order, because two lists of the same folder ordered differently is [rule
+8](03-principles.md) broken where somebody can see both at once. The shape is in
+the session file, one `expanded` line per open place, so `kill -9` keeps it.
+
+What that cost was one shape rather than two: what the view draws is a flat list
+of rows, each carrying its depth and the section heading it starts, because a
+nested loop in the view and a hit test that walks the same nesting are two
+descriptions of one arrangement — and the second one is the one that goes wrong.
+
+**Still owed here:** middle-click to split, the **List** columns — and the inline
+**Tree**,
 which ADR 0013 explicitly does not reach: it is not a listing laid out
 differently but a listing whose rows come from several directories at varying
 depth, with an expansion state nothing models yet.
