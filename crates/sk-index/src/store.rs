@@ -596,21 +596,44 @@ pub fn forget(root: &Path) -> bool {
 #[must_use]
 pub fn search(index: &Arc<Index>, needle: &str, pool: &sk_util::Pool, cancel: &Cancel) -> Found {
     let mut found = Found::default();
+    search_into(index, needle, pool, cancel, &mut found);
+    // A cancelled scan is a question nobody is asking any more, and the one
+    // thing it must not do is claim to have answered it.
+    found.complete = !cancel.is_cancelled();
+    found
+}
+
+/// As [`search`], adding to a list that already holds something.
+///
+/// **`complete` is the caller's to set**, which is the whole reason this is
+/// separate: a scope of several roots answers some of them from an index and
+/// walks the rest
+/// ([ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)),
+/// and a scan that declared the answer complete would make the panel say "done"
+/// while a walk of the other half was still running.
+pub fn search_into(
+    index: &Arc<Index>,
+    needle: &str,
+    pool: &sk_util::Pool,
+    cancel: &Cancel,
+    found: &mut Found,
+) {
     if needle.is_empty() {
         // Not "everything". An empty query is a question that has not been asked
         // yet, and answering it with the whole tree is how a search box becomes a
         // way to accidentally list a million files.
-        found.complete = true;
-        return found;
+        return;
     }
     let matched = scan(index, needle, pool, cancel);
     if cancel.is_cancelled() {
-        return found;
+        return;
     }
-    found.scanned = index.entries as u64;
-    found.capped = matched.len() > MOST;
-    found.complete = true;
-    for entry in matched.into_iter().take(MOST) {
+    found.scanned += index.entries as u64;
+    // The cap is over the whole scope, so what is left of it is what this scan
+    // may add — and reaching it is reported rather than hidden.
+    let room = MOST.saturating_sub(found.hits.len());
+    found.capped |= matched.len() > room;
+    for entry in matched.into_iter().take(room) {
         // **Verified here, which is the freshness policy.** ADR 0012 puts one
         // `statx` between a hit and the screen, so a file deleted since the build
         // never appears; the cap is what keeps that at two thousand calls
@@ -630,7 +653,6 @@ pub fn search(index: &Arc<Index>, needle: &str, pool: &sk_util::Pool, cancel: &C
             directory: u32::from(stat.stx_mode) & 0o170_000 == 0o040_000,
         });
     }
-    found
 }
 
 /// How many entries one shard covers.
@@ -1060,7 +1082,7 @@ mod tests {
 mod measure {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::print_stdout)]
 
-    use super::{build, count, load_from, save_to, search};
+    use super::{build, count, load_from, save_to, search, search_into};
     use sk_util::{Cancel, Pool};
     use std::sync::Arc;
     use std::time::Instant;
@@ -1140,5 +1162,81 @@ mod measure {
             bytes as f64 / entries.max(1) as f64
         );
         let _ = std::fs::remove_file(&file);
+    }
+
+    /// What a search over several roots costs, unindexed: the first result, and
+    /// the whole answer.
+    ///
+    /// The scope [ADR
+    /// 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+    /// calls *everywhere*, measured over the code that runs it rather than over
+    /// one root at a time. Run it deliberately:
+    ///
+    /// ```text
+    /// SKERRY_SEARCH_ROOTS=/:/boot cargo test -p sk-index --release measure_a_search_over_several_roots -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "walks real filesystems; run it deliberately"]
+    fn measure_a_search_over_several_roots() {
+        let Some(value) = std::env::var_os("SKERRY_SEARCH_ROOTS") else {
+            println!("skerry-search set SKERRY_SEARCH_ROOTS to roots to measure, `:` between");
+            return;
+        };
+        let roots: Vec<std::path::PathBuf> = std::env::split_paths(&value).collect();
+        let needle = std::env::var("SKERRY_SEARCH_FOR").unwrap_or_else(|_| "config".to_owned());
+        // The roots to answer from an index, built here and not timed: what is
+        // being measured is the search, and the build is its own row.
+        let wanted: Vec<std::path::PathBuf> = std::env::var_os("SKERRY_SEARCH_INDEX")
+            .map(|it| std::env::split_paths(&it).collect())
+            .unwrap_or_default();
+        let pool = Pool::new();
+        let held: Vec<Arc<crate::Index>> = wanted
+            .iter()
+            .filter_map(|root| build(root, &Cancel::new(), &mut |_| {}).map(Arc::new))
+            .collect();
+        let walks: Vec<std::path::PathBuf> = roots
+            .iter()
+            .filter(|root| !held.iter().any(|index| index.root() == root.as_path()))
+            .cloned()
+            .collect();
+
+        // The order the window runs them in: the indexed roots first, because
+        // tens of milliseconds of answer belongs on screen before seconds of
+        // walking start.
+        let at = Instant::now();
+        let mut first: Option<std::time::Duration> = None;
+        let mut found = crate::find::Found::default();
+        for index in &held {
+            search_into(index, &needle, &pool, &Cancel::new(), &mut found);
+            if first.is_none() && !found.hits.is_empty() {
+                first = Some(at.elapsed());
+            }
+        }
+        let scanned = at.elapsed();
+        crate::find::across(&walks, &needle, &Cancel::new(), &mut found, &mut |seen| {
+            if first.is_none() && !seen.hits.is_empty() {
+                first = Some(at.elapsed());
+            }
+        });
+        let whole = at.elapsed();
+
+        println!("skerry-search roots {}", roots.len());
+        println!("skerry-search indexed {} walked {}", held.len(), walks.len());
+        if !held.is_empty() {
+            println!("skerry-search scans {:.2} ms", scanned.as_secs_f64() * 1000.0);
+        }
+        println!("skerry-search needle {needle}");
+        println!(
+            "skerry-search first-result {:.2} ms",
+            first.unwrap_or_default().as_secs_f64() * 1000.0
+        );
+        println!("skerry-search complete {:.1} ms", whole.as_secs_f64() * 1000.0);
+        println!(
+            "skerry-search entries {} hits {} capped {} partial {}",
+            found.scanned,
+            found.hits.len(),
+            found.capped,
+            found.partial
+        );
     }
 }

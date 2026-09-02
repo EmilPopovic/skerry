@@ -1,10 +1,17 @@
-//! Searching everything under the folder you are in.
+//! Searching everything under the folder you are in, or everything there is.
 //!
 //! **Not the find popup.** `Ctrl+F` narrows the listing that is already on
 //! screen — one directory, instantly, because the names are already in memory.
 //! This walks the tree underneath it, which is a job and a wait and a list of
 //! results in other folders. Two things that both start with typing and are not
 //! the same thing, so they are two surfaces.
+//!
+//! **Two scopes, one panel.** `Ctrl+Shift+F` searches under the folder and
+//! `Ctrl+Alt+F` searches every local filesystem;
+//! [ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+//! settles what "everywhere" is and what it costs. Either chord switches an open
+//! panel without losing what has been typed, and the switcher in the panel is the
+//! pointer's way to the same thing.
 //!
 //! **`Enter` navigates and `Ctrl+Enter` flattens.** The first takes the pane to
 //! the file's folder and puts the cursor on it, which is what a person wants when
@@ -19,7 +26,7 @@
 //! [rule 8](../../../docs/03-principles.md) says the filter grammar is the same
 //! in every view.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sk_index::find::Found;
 
@@ -35,10 +42,52 @@ fn now() -> i64 {
 /// How many results are drawn before the list scrolls.
 pub(crate) const VISIBLE: usize = 12;
 
+/// What a search covers.
+///
+/// **Not a list of roots**, because the roots of `Everywhere` are a fact about
+/// the machine that changes while a window is open — a disk is plugged in — and
+/// reading the mount table is a syscall the frame loop may not make. The roots
+/// are asked for where they are already in memory, which is the sidebar's own
+/// Volumes section: [ADR
+/// 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Scope {
+    /// Everything under one folder.
+    Here(PathBuf),
+    /// Every local filesystem that is mounted.
+    Everywhere,
+}
+
+impl Scope {
+    /// The folder a result's own directory is shown relative to.
+    ///
+    /// Nothing for `Everywhere`: a result three disks away has no useful prefix
+    /// to strip, and stripping the wrong one is how `a/b/c` becomes `../../..`.
+    pub(crate) fn under(&self) -> Option<&Path> {
+        match self {
+            Self::Here(path) => Some(path),
+            Self::Everywhere => None,
+        }
+    }
+
+    /// Whether this is the whole machine.
+    pub(crate) const fn is_everywhere(&self) -> bool {
+        matches!(self, Self::Everywhere)
+    }
+
+    /// What the empty field says it will do.
+    pub(crate) const fn prompt(&self) -> &'static str {
+        match self {
+            Self::Here(_) => "search.title",
+            Self::Everywhere => "search.title_everywhere",
+        }
+    }
+}
+
 /// A search over one subtree, as it stands.
 pub(crate) struct Search {
-    /// The directory the walk started from.
-    pub(crate) root: PathBuf,
+    /// What it covers.
+    pub(crate) scope: Scope,
     /// What has been typed, and where the caret is.
     pub(crate) query: Field,
     /// The query the walk in flight is for, so a stale reply is discarded.
@@ -54,7 +103,8 @@ pub(crate) struct Search {
     pub(crate) scroll: usize,
     /// The token for the walk in flight, so a new query stops the old one.
     pub(crate) cancel: sk_util::Cancel,
-    /// When the index this search is scanning was built, if it is scanning one.
+    /// When the oldest index this search scanned was built, if **every** root of
+    /// the scope was answered from one.
     ///
     /// **The freshness policy's whole user interface.** [ADR
     /// 0012](../../../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)
@@ -62,6 +112,13 @@ pub(crate) struct Search {
     /// cannot appear — but one *created* since it cannot be found, and no check
     /// fixes that. Saying how old the index is, is what makes that honest rather
     /// than mysterious.
+    ///
+    /// **Every root or none**, which is [ADR
+    /// 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md):
+    /// an index's age is a promise about what could have been found, and two ages
+    /// averaged is a promise about neither — so a scope where one disk was
+    /// indexed and another was walked takes the plain line, which promises
+    /// nothing false.
     pub(crate) indexed: Option<i64>,
 }
 
@@ -88,9 +145,9 @@ impl Search {
         listing
     }
 
-    pub(crate) fn new(root: PathBuf) -> Self {
+    pub(crate) fn new(scope: Scope) -> Self {
         Self {
-            root,
+            scope,
             query: Field::new(String::new()),
             asked: String::new(),
             found: Found::default(),
@@ -161,7 +218,9 @@ impl Search {
     /// it is still going.
     pub(crate) fn summary(&self) -> String {
         if self.asked.is_empty() {
-            return sk_model::i18n::lookup("search.type").to_owned();
+            let key =
+                if self.scope.is_everywhere() { "search.type_everywhere" } else { "search.type" };
+            return sk_model::i18n::lookup(key).to_owned();
         }
         let scanned = sk_ui::format::grouped(self.found.scanned as usize);
         if let Some(built) = self.indexed.filter(|_| self.found.complete) {
@@ -198,7 +257,7 @@ mod tests {
     }
 
     fn searching(count: usize) -> Search {
-        let mut search = Search::new(PathBuf::from("/tmp"));
+        let mut search = Search::new(super::Scope::Here(PathBuf::from("/tmp")));
         search.asked = "x".to_owned();
         let hits = (0..count).map(|index| hit(&format!("x-{index}"))).collect();
         search.arrived("x", Found { hits, scanned: 100, ..Found::default() });

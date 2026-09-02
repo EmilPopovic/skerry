@@ -563,7 +563,7 @@ fn sample_clash(path: &std::path::Path) -> crate::edit::Clash {
 /// says the walk is still going. The paths are the fixture's own, so the frame
 /// is the same on every machine.
 fn sample_search(path: &std::path::Path) -> crate::search::Search {
-    let mut search = crate::search::Search::new(path.to_path_buf());
+    let mut search = crate::search::Search::new(crate::search::Scope::Here(path.to_path_buf()));
     search.query = crate::field::Field::new("re".to_owned());
     "re".clone_into(&mut search.asked);
     let hit = |where_: &str, name: &str, size: u64, directory: bool| sk_index::Hit {

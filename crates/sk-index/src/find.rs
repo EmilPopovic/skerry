@@ -7,10 +7,19 @@
 //! persistent filename index mandatory, and [Spike
 //! F](../../../spikes/f-index-and-search/README.md) measured one: 195 ms to load
 //! it cold on a Pi against 2.3–3.7 s to walk the same tree. That index is what
-//! makes a search over *the whole filesystem* answerable, and it is not built.
-//! This is the other half — one subtree, walked now — which is the scope a person
-//! asks for far more often and the only one that is honest without an index
-//! behind it.
+//! makes a *complete* answer over the whole filesystem fast — 27.45 ms against
+//! 8,559 ms over 6.9 million entries, which is
+//! [ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)'s
+//! measurement. This is the other half, and it is the half that answers *first*
+//! in either scope: the walk streams, so a result is on screen in about a
+//! millisecond whether an index exists or not.
+//!
+//! **One walk, several roots.** ADR 0022 turns "one filesystem" into "the
+//! filesystems you asked for": [`across`] takes a set of roots, admits the
+//! device of each, and seeds itself with the roots no other root contains — so
+//! `/boot` under `/` is reached by descending rather than walked twice, and
+//! `/proc` is excluded by not being a root rather than by a list of names to
+//! keep up with. [`find`] is `across` over one.
 //!
 //! # Why it reports as it goes
 //!
@@ -92,6 +101,28 @@ pub fn find(root: &Path, needle: &str, cancel: &Cancel, report: &mut impl FnMut(
     find_every(root, needle, cancel, REPORT_EVERY, report);
 }
 
+/// Walks every root and reports everything under them whose name contains
+/// `needle`, adding to what `found` already holds.
+///
+/// **The scope's roots, and the devices they name.** A directory inside the tree
+/// is descended into when its device belongs to one of the roots — so a scope of
+/// `/` and `/boot` crosses that mount and a scope of `/` alone does not, which is
+/// the same `du -x` rule [`crate::size`] follows, generalised from one device to
+/// the set somebody asked about.
+///
+/// `found` arrives holding whatever the index scans already answered, which is
+/// what makes the two halves of one search one list: the cap, the count of
+/// entries looked at and the hits are all continued rather than restarted.
+pub fn across(
+    roots: &[PathBuf],
+    needle: &str,
+    cancel: &Cancel,
+    found: &mut Found,
+    report: &mut impl FnMut(&Found),
+) {
+    across_every(roots, needle, cancel, REPORT_EVERY, found, report);
+}
+
 /// As [`find`], with the reporting interval given.
 ///
 /// Exists so the partial-report path can be tested: at 64 ms a fixture small
@@ -105,48 +136,90 @@ pub fn find_every(
     report: &mut impl FnMut(&Found),
 ) {
     let mut found = Found::default();
+    across_every(&[root.to_path_buf()], needle, cancel, interval, &mut found, report);
+}
+
+/// As [`across`], with the reporting interval given.
+///
+/// Exists so the partial-report path can be tested: at 64 ms a fixture small
+/// enough to be a test finishes in one report, and every assertion about the
+/// list *filling* would be vacuously true.
+pub fn across_every(
+    roots: &[PathBuf],
+    needle: &str,
+    cancel: &Cancel,
+    interval: Duration,
+    found: &mut Found,
+    report: &mut impl FnMut(&Found),
+) {
     if needle.is_empty() {
         // Not "everything". An empty query is a question that has not been asked
         // yet, and answering it with the whole tree is how a search box becomes a
         // way to accidentally list a million files.
         found.complete = true;
-        report(&found);
+        report(found);
         return;
     }
-    let Some(device) = device_of(root) else {
+    let mut devices: Vec<u64> = Vec::with_capacity(roots.len());
+    for root in roots {
+        match device_of(root) {
+            Some(device) if !devices.contains(&device) => devices.push(device),
+            Some(_) => {}
+            // A root that cannot be stated is a disk that went away between the
+            // mount table being read and the question being asked. The rest of
+            // the scope is still answerable, and the flag says something was
+            // skipped.
+            None => found.partial = true,
+        }
+    }
+    if devices.is_empty() {
         found.complete = true;
         found.partial = true;
-        report(&found);
+        report(found);
         return;
-    };
+    }
 
-    let mut pending = vec![root.to_path_buf()];
+    let mut pending: Vec<PathBuf> = seeds(roots);
     let mut next_report = Instant::now() + interval;
     // **The first match goes out at once, whatever the interval says.** M4's bar
     // is first results within 50 ms of the first keystroke, and a walk that only
     // reported every 64 ms could not meet it however fast it was — the number
     // would be the throttle rather than the work. After that the interval takes
     // over, because the second result is not the one anybody is waiting for.
-    let mut said_anything = false;
+    let mut said_anything = !found.hits.is_empty();
     // Depth-first with an explicit stack rather than recursion: a directory tree
     // is attacker-controlled depth, and a deep one must not be a stack overflow.
     while let Some(directory) = pending.pop() {
         if cancel.is_cancelled() {
             return;
         }
-        if !look_in(&directory, needle, device, &mut found, &mut pending) {
+        if !look_in(&directory, needle, &devices, found, &mut pending) {
             found.partial = true;
         }
         let first = !said_anything && !found.hits.is_empty();
         if first || Instant::now() >= next_report {
             said_anything = true;
             next_report = Instant::now() + interval;
-            report(&found);
+            report(found);
         }
     }
 
     found.complete = true;
-    report(&found);
+    report(found);
+}
+
+/// The roots to start walking from: the ones no other root contains.
+///
+/// A mount point is a path inside its parent filesystem, so a scope of `/` and
+/// `/boot` would otherwise walk `/boot` twice — once by descending into it, once
+/// as a root of its own. Dropping the contained ones costs nothing, because the
+/// device set is what admits them either way.
+fn seeds(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .filter(|root| !roots.iter().any(|other| other != *root && root.starts_with(other)))
+        .cloned()
+        .collect()
 }
 
 /// Reads one directory, keeping what matches and queueing its subdirectories.
@@ -155,7 +228,7 @@ pub fn find_every(
 fn look_in(
     directory: &Path,
     needle: &str,
-    device: u64,
+    devices: &[u64],
     found: &mut Found,
     pending: &mut Vec<PathBuf>,
 ) -> bool {
@@ -187,9 +260,11 @@ fn look_in(
         let directory_here = u32::from(stat.stx_mode) & 0o170_000 == 0o040_000;
         keep(directory, &name, needle, Some(&stat), found);
         if directory_here {
-            // `du -x`: a mount point inside the tree is a different filesystem
-            // and a different question.
-            if u64::from(stat.stx_dev_major) << 32 | u64::from(stat.stx_dev_minor) == device {
+            // `du -x`, over the set: a mount point inside the tree is a
+            // different filesystem, and whether it is a different *question*
+            // depends on whether the scope named it.
+            let device = u64::from(stat.stx_dev_major) << 32 | u64::from(stat.stx_dev_minor);
+            if devices.contains(&device) {
                 pending.push(directory.join(&name));
             } else {
                 found.partial = true;
@@ -334,6 +409,75 @@ mod tests {
             assert!(pair[1].hits.len() >= pair[0].hits.len(), "the list went backwards");
             assert!(pair[1].scanned >= pair[0].scanned);
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two roots on one filesystem are one list, and nothing is walked twice.
+    ///
+    /// The contained root is the case that matters: `alpha` is inside the
+    /// fixture, so a scope naming both would reach it as a root *and* by
+    /// descending — and every entry under it would appear twice. What stops that
+    /// is the seed set rather than a visited list, which is
+    /// [ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)'s
+    /// own argument.
+    #[test]
+    fn a_scope_of_several_roots_is_one_list_and_walks_nothing_twice() {
+        let root = fixture("scope");
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        std::fs::write(root.join("elsewhere/report-here.txt"), b"z").unwrap();
+
+        let mut both = Found::default();
+        let roots = vec![root.clone(), root.join("a")];
+        super::across(&roots, "report", &Cancel::new(), &mut both, &mut |_| {});
+        let mut whole = Found::default();
+        super::across(
+            std::slice::from_ref(&root),
+            "report",
+            &Cancel::new(),
+            &mut whole,
+            &mut |_| {},
+        );
+        assert_eq!(names(&both), names(&whole), "a contained root changed the answer");
+        assert_eq!(both.scanned, whole.scanned, "something was walked twice");
+        assert!(both.complete);
+
+        // And a list that arrives holding something is continued rather than
+        // restarted, which is how an index scan and a walk are one search.
+        let mut carried = Found { scanned: 40, ..Found::default() };
+        carried.hits.push(super::Hit {
+            path: root.join("from-an-index.txt"),
+            size: 0,
+            modified: 0,
+            directory: false,
+        });
+        super::across(
+            std::slice::from_ref(&root),
+            "report",
+            &Cancel::new(),
+            &mut carried,
+            &mut |_| {},
+        );
+        assert_eq!(carried.scanned, whole.scanned + 40);
+        assert_eq!(carried.hits.len(), whole.hits.len() + 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A root that is not there is a disk that went away, not a failed search.
+    #[test]
+    fn a_root_that_cannot_be_stated_leaves_the_rest_of_the_scope_answerable() {
+        let root = fixture("missing-root");
+        let mut found = Found::default();
+        let roots = vec![root.clone(), root.join("no-such-mount")];
+        super::across(&roots, "report", &Cancel::new(), &mut found, &mut |_| {});
+        assert_eq!(names(&found), ["Report.pdf", "report-2024.pdf", "reports"]);
+        assert!(found.partial, "something was skipped and the flag did not say so");
+        assert!(found.complete);
+
+        // Every root gone is an answer of nothing, said completely.
+        let mut none = Found::default();
+        super::across(&[root.join("gone")], "report", &Cancel::new(), &mut none, &mut |_| {});
+        assert!(none.hits.is_empty());
+        assert!(none.complete && none.partial);
         let _ = std::fs::remove_dir_all(&root);
     }
 

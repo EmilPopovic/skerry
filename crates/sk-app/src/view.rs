@@ -244,7 +244,14 @@ pub struct Hits {
     /// click reports is an offset from the list's scroll.
     pub search: Vec<Area>,
     /// The search's query field, so a click into it can place the caret.
+    ///
+    /// Narrower than the field's row: the scope switcher sits at the right end of
+    /// it, and a press on a switcher that also placed a caret would be two
+    /// things at once.
     pub search_field: Option<Area>,
+    /// The scope switcher's two buttons: everywhere, and whether each is the
+    /// scope in force.
+    pub search_scope: Vec<(bool, Area)>,
     /// The label that puts every result into the pane, while there are results.
     pub search_all: Option<Area>,
     /// One rectangle per answer to an open name-taken question, in panel order.
@@ -408,6 +415,7 @@ pub fn draw(
     } else {
         hits.search.clear();
         hits.search_field = None;
+        hits.search_scope.clear();
     }
     if let Some(panel) = chrome.properties {
         properties(hits, painter, layout, panel, now);
@@ -1916,13 +1924,22 @@ fn search_panel(
     };
     panel_shape(painter, area, hits);
 
-    let field_area = Area { x: area.x, y: area.y, width: area.width, height: FIELD };
+    // **The switcher first, because the field is what is left of the row.** Two
+    // buttons with the one in force filled, which is the shape the pane bar's view
+    // switcher already set — a mode reached only by a chord is a mode most people
+    // never find, and that is [rule 4](../../../docs/03-principles.md).
+    let taken = scope_switch(painter, area, search, hits);
+    let field_area =
+        Area { x: area.x, y: area.y, width: (area.width - taken).max(0.0), height: FIELD };
     hits.search_field = Some(field_area);
     let baseline = painter.baseline(area.y, FIELD, metrics.path_size);
     let style = TextStyle::new(metrics.path_size, theme.palette.text);
     if search.query.text.is_empty() {
         let prompt = TextStyle::new(metrics.path_size, theme.palette.dim);
-        let label = i18n::format("search.title", &[&crate::panes::title_of(&search.root)]);
+        let label = match search.scope.under() {
+            Some(path) => i18n::format(search.scope.prompt(), &[&crate::panes::title_of(path)]),
+            None => i18n::lookup(search.scope.prompt()).to_owned(),
+        };
         line(painter, &label, prompt, area.x + INSET, area.width - INSET * 2.0, baseline);
     }
     field_text(painter, field_area, (&search.query).into(), style, INSET, baseline);
@@ -1978,11 +1995,18 @@ fn search_panel(
         };
         let baseline = painter.baseline(top, STEP, metrics.text_size);
         let name = crate::panes::title_of(&hit.path).to_owned();
+        // Relative to where the search started, and absolute where it started
+        // everywhere: a result three disks away has no useful prefix to strip.
         let where_ = hit
             .path
             .parent()
-            .and_then(|parent| parent.strip_prefix(&search.root).ok())
-            .map(|relative| relative.display().to_string())
+            .map(|parent| match search.scope.under() {
+                Some(under) => parent.strip_prefix(under).map_or_else(
+                    |_| parent.display().to_string(),
+                    |relative| relative.display().to_string(),
+                ),
+                None => parent.display().to_string(),
+            })
             .filter(|relative| !relative.is_empty())
             .unwrap_or_else(|| ".".to_owned());
         let where_width = text_width(painter, &where_, metrics.header_size, false);
@@ -1992,6 +2016,46 @@ fn search_panel(
         let where_style = TextStyle::new(metrics.header_size, where_colour).right();
         line(painter, &where_, where_style, x, inner, baseline);
     }
+}
+
+/// The scope switcher at the right of the search's field. Returns its width.
+fn scope_switch(
+    painter: &mut Painter<'_>,
+    area: Area,
+    search: &crate::search::Search,
+    hits: &mut Hits,
+) -> f32 {
+    use crate::palette::{FIELD, INSET};
+
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    hits.search_scope.clear();
+    let height = 20.0;
+    let top = area.y + (FIELD - height) / 2.0;
+    let mut right = area.right() - INSET;
+    // Right to left, so the pair reads left to right: here, then everywhere.
+    for (everywhere, key) in [(true, "search.everywhere"), (false, "search.here")] {
+        let label = i18n::lookup(key);
+        let width = text_width(painter, label, metrics.header_size, false) + 16.0;
+        let button = Area { x: right - width, y: top, width, height };
+        let chosen = search.scope.is_everywhere() == everywhere;
+        let ink = if chosen {
+            painter.list.rect(
+                painter.rect(button.x, button.y, button.width, button.height),
+                theme.palette.accent,
+                painter.px(metrics.radius),
+            );
+            theme.palette.selected_text
+        } else {
+            theme.palette.dim
+        };
+        let style = TextStyle::new(metrics.header_size, ink).centred();
+        let baseline = painter.baseline(button.y, height, metrics.header_size);
+        line(painter, label, style, button.x, button.width, baseline);
+        hits.search_scope.push((everywhere, button));
+        right = button.x - 4.0;
+    }
+    (area.right() - right).max(0.0)
 }
 
 /// The summary line between the field and the results.

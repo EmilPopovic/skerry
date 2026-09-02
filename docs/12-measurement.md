@@ -2343,3 +2343,68 @@ and "not yet" — and "not yet" turned out to be reachable permanently by two ro
 and for four and a half seconds at a time by a third. None of them was a wrong
 pixel; all three were an absence, and an absence is the one defect a screenshot
 cannot diagnose and a state table can.
+
+## A 234× win that is also a 200× loss, in the same measurement
+
+The whole-machine search was measured twice over the same 6,905,073 entries: once
+walking, once from an index of `/`.
+
+| | walked | indexed |
+| --- | --- | --- |
+| Complete answer | 8,472 ms | **36.2 ms** |
+| First result | **0.17 ms** | 35.7 ms |
+
+The first row is the one the feature exists for and it is 234×. The second row is
+the same change measured at the other end of the latency, and it is 200× the wrong
+way — because a walk *streams*, so it has a match on screen in a fifth of a
+millisecond and finishes eight and a half seconds later, while the index scan is
+one parallel pass that reports when it is finished: nothing, then everything.
+
+Neither number is wrong and neither is the whole story. A single figure would have
+been, and "the index made search 234× faster" is the figure anybody would have
+quoted — including in a commit message, where it would have been true and would
+have described a keystroke that now waits 36 ms where it used to wait for nothing.
+
+Both are inside the 50 ms first-result bar, which is the only reason this is an
+observation here rather than a defect in the tracker. The rule it earns is about
+what to measure rather than about what to fix: **a latency has two ends, and a
+change that improves the aggregate can make the first pixel worse.** Measure the
+first report and the last one, in the same run, and write both down — the
+project's own bar is on the *first* one, and an optimization that moves the last
+one is not automatically allowed to move the first.
+
+It also predicts where the next defect will be. A one-character query in the
+indexed scope pauses for 36 ms and then draws two thousand rows; the same query
+walked draws four rows and keeps going. The two feel different, and only one of
+them was ever designed.
+
+## A wait in one accessor and not in its sibling
+
+Two scenarios failed in a full Wayland sweep and passed alone, with errors that
+named neither timing nor the window:
+
+```
+ValueError: not enough values to unpack (expected 4, got 3)
+ValueError: could not convert string to float: ''
+```
+
+Both are the same defect in two places. `Run.state` waits for the window to
+answer every `F12` the scripts asked for — the wait is documented there, and the
+reason is that a stale line is indistinguishable from a fresh one. `Run.states`,
+which nine scenarios call and four unpack by position, did not: it read the log
+and returned whatever was in it. On an idle machine the answers are always there
+by the time it is called; under a full sweep they are not, and the scenario fails
+three lines later as an unpacking error against a list that is one short.
+
+The second is the same shape one layer up. `until(run, erasing="1")` waits for the
+flag that says the delete question is open — and the *rectangles* of its two
+buttons are recorded by the frame that draws them, which is a frame later. So the
+state that satisfied the wait had `erase_aim=""`, and the scenario divided an
+empty string. `menu_aim` had already needed exactly this fix, and the wait it
+needed — `holds`, on the aims being non-empty rather than on the flag — is the one
+this needed too.
+
+The rule: **a wait belongs on the value the scenario is about to use, not on the
+flag that says it is coming.** And where two accessors return the same thing in
+different shapes, they need the same guarantee — a wait in one of them is a wait
+that covers whichever scenario happened to call the right one.

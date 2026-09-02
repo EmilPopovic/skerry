@@ -386,6 +386,51 @@ entries, which is the cost a person pays deliberately and once — [ADR
 has no incremental path, so a tree that changes constantly is a tree this does
 not help.
 
+### What a search over the whole machine measured
+
+**Method.** `SKERRY_SEARCH_ROOTS=/:/boot cargo test -p sk-index --release
+measure_a_search_over_several_roots -- --ignored --nocapture`, with
+`SKERRY_SEARCH_INDEX=/` for the indexed half — the code the window runs, in the
+order it runs it, rather than one root at a time. The scope
+[ADR 0022](adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+calls *everywhere* is this machine's two local filesystems, **6,905,073 entries**;
+the query is `config`, which caps at two thousand hits. Three runs each, warm page
+cache, on the same 24-thread laptop, at a one-minute load average of **2.2–2.5** —
+not idle, and [12-measurement.md](12-measurement.md#the-machine-must-be-idle-and-the-load-must-be-recorded)
+prices that at up to 6×, which matters for the millisecond figures below and not
+for the eight-second one.
+
+| | median of 3 | spread |
+| --- | --- | --- |
+| **Complete answer, walked** | **8,472 ms** | 8,469–8,545 |
+| **Complete answer, from an index of `/`** | **36.2 ms** | 32.9–37.7 |
+| First result, walked | **0.17 ms** | 0.13–0.23 |
+| First result, from the index | 35.7 ms | 32.5–37.3 |
+| Loading that index, warm | 413.6 ms | one run, 6.9M entries — 60 ms a million against a 250 ms target at one |
+| Its size on disk | 342,234,511 bytes | **49.6 bytes an entry** |
+
+**234× on the answer, and 200× the wrong way on the first pixel.** Both rows are
+real and they are the same design: the walk streams, so it has something on
+screen in a fifth of a millisecond and takes eight and a half seconds to finish;
+the index scan is one parallel pass that reports when it is done, so nothing is on
+screen for 36 ms and then everything is. Both are inside the 50 ms first-result
+bar, which is the only reason this is an observation rather than a defect — and it
+is the shape of thing a single "faster" would have hidden.
+
+**326 MB of resident memory while that panel is open**, freed when it closes,
+which is what ADR 0022 spends to make the row above a peak rather than a floor.
+Of it, **110 MB is provably unread**: the index writes `size` and `modified` — 16
+of the 49.6 bytes an entry — and nothing reads them, because
+[ADR 0012](adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)'s freshness
+policy `statx`es every hit before it is drawn. `flags` is another 2. Removing them
+is a format change and a decision of its own; the number is recorded here because
+it was measured here.
+
+**And the walk reports `partial` every time.** An ordinary user cannot read
+`/root` or another account's home, so something is always skipped. The flag has
+always meant that; what is new is that it is the normal case in this scope rather
+than the exception.
+
 ### The two numbers that were wrong before they were right
 
 Both are recorded because each was a *measurement* that read as a success.

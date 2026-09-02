@@ -65,7 +65,14 @@ pub const ON_A_PLACE: &[&[&str]] = &[&["place.unpin", "place.raise", "place.lowe
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],
     &["edit.undo", "edit.redo", "edit.pause", "edit.cancel"],
-    &["select.all", "view.filter", "go.search", "index.build", "index.forget"],
+    &[
+        "select.all",
+        "view.filter",
+        "go.search",
+        "go.search_everywhere",
+        "index.build",
+        "index.forget",
+    ],
     &[
         "view.details",
         "view.grid",

@@ -3,16 +3,18 @@
 //! Does not own: rendering results, or the query UI.
 //!
 //! What is here and what is owed: **recursive size aggregation** and **a search
-//! over one subtree**, both pulled forward from M4 — a folder with no size is a
-//! folder you have to open to understand, and a file manager that cannot find a
-//! file is a reason to open a terminal.
+//! over one subtree or over every local filesystem**, both pulled forward from
+//! M4 — a folder with no size is a folder you have to open to understand, and a
+//! file manager that cannot find a file is a reason to open a terminal.
 //!
 //! The **persistent index** that [ADR
 //! 0008](../../../docs/adr/0008-persistent-index-is-required.md) made mandatory
 //! is here too, in [`store`], with its format settled by [ADR
 //! 0012](../../../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md) —
-//! which is what makes a search over a *whole home directory* answerable rather
-//! than only a subtree.
+//! and it is what makes the wider scope answerable: **8,472 ms walked against
+//! 36.2 ms scanned** over 6.9 million entries, which is
+//! [ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)'s
+//! measurement and the reason that record exists.
 //!
 //! Still M4's and still absent: extension facets, and ignore rules.
 

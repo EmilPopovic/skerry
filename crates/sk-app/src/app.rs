@@ -4823,35 +4823,114 @@ carrying={carrying:?}",
     fn search_report(&self) -> String {
         let Some(search) = self.search.as_ref() else {
             return "searching=false search_query=\"\" search_hits=0 search_done=false \
-search_active=\"\""
+search_active=\"\" search_scope=none search_roots=0 search_scanned=0 scope_aim=\"\""
                 .to_owned();
         };
         let active = search
             .chosen()
             .map(|hit| crate::panes::title_of(&hit.path).to_owned())
             .unwrap_or_default();
+        let scope = if search.scope.is_everywhere() { "everywhere" } else { "here" };
+        // One point per switcher button, named rather than positional — the same
+        // `id@x:y` the menu reports, and for the same reason: a harness that
+        // indexed into a list would be encoding which button is drawn first.
+        let scope_aim = self
+            .hits
+            .search_scope
+            .iter()
+            .map(|(everywhere, area)| {
+                format!(
+                    "{}@{:.0}:{:.0}",
+                    if *everywhere { "everywhere" } else { "here" },
+                    area.x + area.width / 2.0,
+                    area.y + area.height / 2.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
             "searching=true search_query={:?} search_hits={} search_done={} \
-search_active={active:?}",
+search_active={active:?} search_scope={scope} search_roots={} search_scanned={} \
+scope_aim={scope_aim:?}",
             search.query.text,
             search.found.hits.len(),
             search.found.complete,
+            self.search_roots().len(),
+            search.found.scanned,
         )
     }
 
     /// Opens the search over everything under the folder being shown.
     pub(crate) fn open_search(&mut self) {
-        if self.search.is_some() {
-            self.close_search();
-            return;
+        let here = crate::search::Scope::Here(self.panes.focused().path.clone());
+        self.search_in(here);
+    }
+
+    /// Opens it over every local filesystem.
+    pub(crate) fn search_everywhere(&mut self) {
+        self.search_in(crate::search::Scope::Everywhere);
+    }
+
+    /// Opens the search in `scope`, switches an open one to it, or closes one
+    /// that is already in it.
+    ///
+    /// **The chord for the scope you are in closes; the chord for the other one
+    /// switches**, and switching keeps what has been typed — which is
+    /// [ADR 0022](../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md):
+    /// widening a search that has found nothing is the commonest thing a person
+    /// does next, and retyping the query to do it is the cost of not having this.
+    fn search_in(&mut self, scope: crate::search::Scope) {
+        match self.search.as_mut() {
+            Some(search) if search.scope == scope => {
+                self.close_search();
+                return;
+            }
+            Some(search) => {
+                search.scope = scope;
+                // The query stands and the answer does not: a stale list under a
+                // new scope is the old answer with a new label.
+                search.asked = String::new();
+            }
+            None => {
+                self.claim_keyboard(Claim::Search);
+                self.search = Some(crate::search::Search::new(scope));
+            }
         }
-        self.claim_keyboard(Claim::Search);
-        let root = self.panes.focused().path.clone();
         // Asked for here rather than on the first keystroke, so the read is over
-        // by the time anybody has typed enough to search for.
-        self.want_index(&root);
-        self.search = Some(crate::search::Search::new(root));
+        // by the time anybody has typed enough to search for — 413.6 ms for a
+        // whole filesystem's index against the second or so it takes to type
+        // three characters.
+        for root in self.search_roots() {
+            self.want_index(&root);
+        }
+        self.search_again();
         self.dirty = true;
+    }
+
+    /// The roots the open search covers.
+    ///
+    /// **From the sidebar rather than from `/proc/self/mountinfo`**, because the
+    /// mount table is a file and rule 1 has no exemption for a small one — and
+    /// the sidebar has already read it, on a job, with the same allow-list of
+    /// filesystem types. A remote mount is excluded: reaching one costs its
+    /// timeout, which [Spike B](../../spikes/b-enumeration/README.md) measured at
+    /// 28,000 ms for one unresponsive mount. `/` alone where the sidebar has
+    /// nothing yet, because a search with no roots finds nothing and says nothing
+    /// about why.
+    fn search_roots(&self) -> Vec<std::path::PathBuf> {
+        let Some(search) = self.search.as_ref() else { return Vec::new() };
+        match &search.scope {
+            crate::search::Scope::Here(path) => vec![path.clone()],
+            crate::search::Scope::Everywhere => {
+                let roots: Vec<std::path::PathBuf> = self
+                    .sidebar
+                    .rows()
+                    .filter(|entry| entry.mark == crate::sidebar::Mark::Volume && !entry.remote)
+                    .map(|entry| entry.path.clone())
+                    .collect();
+                if roots.is_empty() { vec![std::path::PathBuf::from("/")] } else { roots }
+            }
+        }
     }
 
     /// Closes it and stops the walk.
@@ -4859,6 +4938,13 @@ search_active={active:?}",
         if let Some(search) = self.search.take() {
             search.cancel.cancel();
         }
+        // **The index's bytes go with the panel.** A whole filesystem's index is
+        // 326 MB on this machine, 49.6 bytes an entry, and holding it after the
+        // search that wanted it has closed would make that a floor rather than a
+        // peak — ADR 0022, which is ADR 0020's rule applied to the other store.
+        // What is kept is the knowledge that the file exists, which is what
+        // *Forget the index* is enabled by and costs nothing.
+        self.indexes.drop_the_bytes();
         self.dirty = true;
     }
 
@@ -4885,34 +4971,47 @@ search_active={active:?}",
         }
         let cancel = sk_util::Cancel::new();
         search.cancel = cancel.clone();
-        let root = search.root.clone();
         let sender = self.replies.found_tx.clone();
         let wake = self.waker.handle();
         let lane = self.panes.focused().lane();
-        // **The index if there is one, the walk if there is not.** ADR 0008's
-        // third constraint is that a missing index is a performance event and
-        // never a correctness one, so these two arms answer the same question
-        // and the caller cannot tell which ran.
-        let held = self.indexes.covering(&root).map(std::sync::Arc::clone);
+        // **The index where there is one, the walk where there is not, and one
+        // list either way.** ADR 0008's third constraint is that a missing index
+        // is a performance event and never a correctness one, so the two arms
+        // answer the same question and the caller cannot tell which ran — and ADR
+        // 0022 makes that per root, because a scope of several disks may have an
+        // index for one of them.
+        let roots = self.search_roots();
+        let scans: Vec<std::sync::Arc<sk_index::Index>> =
+            roots.iter().filter_map(|root| self.indexes.covering(root).cloned()).collect();
+        let walks: Vec<std::path::PathBuf> =
+            roots.iter().filter(|root| self.indexes.covering(root).is_none()).cloned().collect();
         let pool = std::sync::Arc::clone(&self.jobs.pool);
         // Recorded now rather than on the reply, because the summary has to say
         // which of the two answered and a `Found` cannot: the whole point of ADR
-        // 0008's third constraint is that the two are indistinguishable.
+        // 0008's third constraint is that the two are indistinguishable. The
+        // oldest build, and only where nothing had to be walked.
+        let built = scans.iter().map(|index| index.built()).min();
         if let Some(search) = self.search.as_mut() {
-            search.indexed = held.as_ref().map(|it| it.built());
+            search.indexed = built.filter(|_| walks.is_empty());
         }
         self.jobs.pool.spawn(lane, cancel, move |cancel| {
+            let mut found = sk_index::Found::default();
             let mut say = |found: &sk_index::Found| {
                 if sender.send((query.clone(), found.clone())).is_ok() {
                     wake.wake();
                 }
             };
-            match held {
-                Some(index) => {
-                    let found = sk_index::store::search(&index, &query, &pool, cancel);
-                    say(&found);
-                }
-                None => sk_index::find(&root, &query, cancel, &mut say),
+            // The indexed roots first, because tens of milliseconds of answer
+            // belongs on screen before seconds of walking start.
+            for index in &scans {
+                sk_index::store::search_into(index, &query, &pool, cancel, &mut found);
+                say(&found);
+            }
+            if walks.is_empty() {
+                found.complete = !cancel.is_cancelled();
+                say(&found);
+            } else {
+                sk_index::find::across(&walks, &query, cancel, &mut found, &mut say);
             }
         });
         self.dirty = true;
@@ -5010,10 +5109,14 @@ search_active={active:?}",
         self.indexes.building().is_some()
     }
 
-    /// Whether the folder being shown has an index loaded.
+    /// Whether there is an index for the folder being shown.
+    ///
+    /// **Known of, not loaded.** The bytes go when the search panel closes — ADR
+    /// 0022 — and *Forget the index* has to stay reachable after that, or the only
+    /// way to delete a 326 MB file would be to open a search first.
     #[must_use]
     pub(crate) fn indexed(&self) -> bool {
-        self.indexes.covering(&self.panes.focused().path).is_some()
+        self.indexes.knows_of(&self.panes.focused().path)
     }
 
     /// Takes delivery of index reports.
@@ -5138,6 +5241,27 @@ search_active={active:?}",
                 search.hover(offset);
             }
             self.follow_search();
+            return true;
+        }
+        // **Before the field**, because the switcher sits inside the field's row:
+        // without this every press on it also placed a caret.
+        let switched = self
+            .hits
+            .search_scope
+            .iter()
+            .find(|(_, area)| area.contains(position.x, position.y))
+            .map(|(everywhere, _)| *everywhere);
+        if let Some(everywhere) = switched {
+            let scope = if everywhere {
+                crate::search::Scope::Everywhere
+            } else {
+                crate::search::Scope::Here(self.panes.focused().path.clone())
+            };
+            // Through `search_in`, which is what the two chords run: a second way
+            // of switching must not be a second piece of code to keep in step.
+            if self.search.as_ref().is_some_and(|search| search.scope != scope) {
+                self.search_in(scope);
+            }
             return true;
         }
         if self.hits.search_field.is_some_and(|a| a.contains(position.x, position.y)) {

@@ -600,16 +600,40 @@ job in [check.yml](../.github/workflows/check.yml) rather than a milestone:
 ### After those, and in this order
 
 **Search over the index** (M4) [Spike F](../spikes/f-index-and-search/README.md) said
-go on. **One subtree is searchable now** — `Ctrl+Shift+F`, a walk on the pool,
-results arriving live with the folder each is in, first result at **0.7 ms over
-817,288 entries** against a 50 ms bar
-([09](09-performance-budgets.md#what-first-search-result-measures-and-what-it-does-not)).
-What that scope does *not* need is the index, which is exactly why it exists
-first; the whole filesystem does, and the index is still not built. **The
-flattened view is done**: `Ctrl+Enter` — or the label at the end of the search's
-summary line — puts every result into the pane as rows, and then they are rows.
-Selecting, copying, dragging, trashing and undoing all work on them with no
+go on, and **both scopes are searchable now**. `Ctrl+Shift+F` walks the tree under
+the folder — results arriving live with the folder each is in, first result at
+**0.7 ms over 817,288 entries** against a 50 ms bar
+([09](09-performance-budgets.md#what-first-search-result-measures-and-what-it-does-not))
+— and `Ctrl+Alt+F` covers **every local filesystem**, which is what the index has
+been waiting for a caller to need.
+[ADR 0022](adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+settles what "everywhere" is: the roots are the sidebar's own Volumes, so what the
+sidebar calls a place is what the search calls a root; a remote mount is excluded
+because reaching one costs its timeout; and the walk's "one filesystem" rule
+becomes "the filesystems you asked for" — a device set, seeded from the roots no
+other root contains, so `/boot` under `/` is reached by descending rather than
+walked twice. Either chord switches an open panel without losing what has been
+typed, and the switcher in the panel is the pointer's way to the same thing.
+
+**The numbers are why the index exists.** Over this machine's 6,905,073 entries,
+a complete answer costs **8,472 ms** walked and **36.2 ms** from an index of `/` —
+234× — while the *first* result goes the other way, 0.17 ms walked against 35.7 ms
+scanned, because a walk streams and a scan reports when it is done. Both are
+inside the 50 ms bar, which is the only reason that is an observation rather than
+a defect
+([09](09-performance-budgets.md#what-a-search-over-the-whole-machine-measured)).
+The index is loaded per root of the scope and dropped when the panel closes,
+because 326 MB is a peak worth paying for and a floor that is not.
+
+**The flattened view is done**: `Ctrl+Enter` — or the label at the end of the
+search's summary line — puts every result into the pane as rows, and then they are
+rows. Selecting, copying, dragging, trashing and undoing all work on them with no
 second implementation, which is what [rule 8](03-principles.md) asks for.
+
+What is still owed in M4: **one action that indexes every root** — `index.build`
+acts on the folder you are standing in, so indexing the whole filesystem is two
+steps, Filesystem in the sidebar and then Build the index — and extension facets
+and ignore rules, which are untouched.
 
 What made it a bigger change than it looks was the sentence above: every
 `path.join(name)` assumed one directory behind it, at ten call sites. A `Listing`
@@ -619,8 +643,6 @@ is the one place that joins a name to a directory. A scenario trashes one of two
 results that share a name, finds it gone from the folder it actually lived in,
 and undoes it back there; watched failing against a `path_of` that used the
 pane's own path, which removed neither file.
-
-Extension facets and ignore rules are untouched.
 
 Then the **rest of** quick look and the inspector (M5 — the two helpers, the
 atlas, the cache and the three previews are in; syntax highlighting, EXIF, zoom

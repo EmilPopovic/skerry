@@ -1,10 +1,18 @@
 //! The persistent index, as this window holds it.
 //!
-//! **The window owns one at a time.** [ADR
+//! **The window owns one per root of the search in flight.** [ADR
 //! 0012](../../../docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)
-//! stores one file per root, and a search is always over one root, so holding a
-//! map of them would be fifty megabytes each of speculation. The one that is
-//! loaded is the one the last search wanted.
+//! stores one file per root; a search over one folder wants one of them and a
+//! search over the whole machine wants one per disk
+//! ([ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)).
+//! Nothing else is held: fifty megabytes of index for a folder nobody is
+//! searching is fifty megabytes of speculation, and the bytes go when the panel
+//! does.
+//!
+//! **What survives the bytes is the knowledge that the file exists.** A path and
+//! a build time each, which is what *Forget the index* is enabled by and what the
+//! status line reports — 24 bytes against the 326 MB an index of this machine's
+//! root filesystem occupies.
 //!
 //! Nothing here reads a file. Loading and building are jobs, because
 //! [rule 1](../../../docs/03-principles.md) is that the UI thread issues no
@@ -29,11 +37,17 @@ pub(crate) enum Note {
     Loaded(Option<Arc<sk_index::Index>>),
 }
 
-/// The index this window has, and any build in flight.
+/// The indexes this window has, and any build in flight.
 #[derive(Default)]
 pub(crate) struct Indexes {
-    /// The one that is loaded.
-    held: Option<Arc<sk_index::Index>>,
+    /// The ones that are loaded, one per root at most.
+    held: Vec<Arc<sk_index::Index>>,
+    /// Every root this window has seen an index for, and when it was built.
+    ///
+    /// Kept when [`Indexes::drop_the_bytes`] throws the indexes away, because
+    /// "there is an index for this folder" is a different question from "it is
+    /// loaded" — and the row that deletes one has to be enabled by the first.
+    known: Vec<(PathBuf, i64)>,
     /// The root a build is running for, and how many entries it has reached.
     building: Option<(PathBuf, usize)>,
     /// How many entries the counting pass has found, and whether it finished.
@@ -45,12 +59,13 @@ pub(crate) struct Indexes {
     total: (usize, bool),
     /// The token that stops a build in flight.
     cancel: Option<sk_util::Cancel>,
-    /// The root a load or a build was asked about.
+    /// The roots a load or a build has been asked about.
     ///
-    /// A reply names no root, so this is what tells a reply for the folder being
-    /// looked at from one for the folder that was being looked at two navigations
-    /// ago — which would otherwise replace a good index with an absent one.
-    asked: Option<PathBuf>,
+    /// A reply names no root, so this is what stops a second load being asked
+    /// for on every keystroke — the loaded index is what every search of that
+    /// folder then scans, and re-reading it per character would be the walk this
+    /// feature exists to replace, with extra steps.
+    asked: Vec<PathBuf>,
 }
 
 impl Indexes {
@@ -62,17 +77,34 @@ impl Indexes {
     /// the containment check ADR 0012 declined at the storage layer is declined
     /// here too.
     pub(crate) fn covering(&self, root: &Path) -> Option<&Arc<sk_index::Index>> {
-        self.held.as_ref().filter(|it| it.root() == root)
+        self.held.iter().find(|it| it.root() == root)
+    }
+
+    /// Whether this window knows of an index for `root`, loaded or not.
+    pub(crate) fn knows_of(&self, root: &Path) -> bool {
+        self.known.iter().any(|(path, _)| path == root)
     }
 
     /// Whether a load or a build for `root` has already been asked for.
     pub(crate) fn asked_about(&self, root: &Path) -> bool {
-        self.asked.as_deref() == Some(root)
+        self.asked.iter().any(|path| path == root)
     }
 
     /// Records that one has been.
     pub(crate) fn asking(&mut self, root: &Path) {
-        self.asked = Some(root.to_path_buf());
+        if !self.asked_about(root) {
+            self.asked.push(root.to_path_buf());
+        }
+    }
+
+    /// Throws away the loaded indexes, keeping what is known about them.
+    ///
+    /// What the panel closing does. The `asked` list goes with the bytes: the
+    /// next search has to read the file again, which is 413.6 ms for a whole
+    /// filesystem on a job and is the price of the peak not being a floor.
+    pub(crate) fn drop_the_bytes(&mut self) {
+        self.held.clear();
+        self.asked.clear();
     }
 
     /// The root a build is running for, and how far it has got.
@@ -117,14 +149,21 @@ impl Indexes {
         self.building = None;
     }
 
-    /// Forgets the loaded index for `root`.
+    /// Forgets the index for `root` — the bytes, and that there was one.
     pub(crate) fn drop_for(&mut self, root: &Path) {
-        if self.held.as_ref().is_some_and(|it| it.root() == root) {
-            self.held = None;
-        }
-        if self.asked.as_deref() == Some(root) {
-            self.asked = None;
-        }
+        self.held.retain(|it| it.root() != root);
+        self.known.retain(|(path, _)| path != root);
+        self.asked.retain(|path| path != root);
+    }
+
+    /// Takes delivery of one index, replacing any held for the same root.
+    fn take(&mut self, index: Arc<sk_index::Index>) {
+        let root = index.root().to_path_buf();
+        let built = index.built();
+        self.held.retain(|it| it.root() != root);
+        self.known.retain(|(path, _)| *path != root);
+        self.known.push((root, built));
+        self.held.push(index);
     }
 
     /// Takes a reply. Whether anything changed on screen.
@@ -143,8 +182,8 @@ impl Indexes {
                 self.building = None;
                 self.cancel = None;
                 self.total = (0, false);
-                if index.is_some() {
-                    self.held = index;
+                if let Some(index) = index {
+                    self.take(index);
                 }
                 true
             }
@@ -153,8 +192,8 @@ impl Indexes {
             // an index built a moment ago and not yet saved is still the best
             // answer this window has.
             Note::Loaded(index) => {
-                if index.is_some() {
-                    self.held = index;
+                if let Some(index) = index {
+                    self.take(index);
                     return true;
                 }
                 false

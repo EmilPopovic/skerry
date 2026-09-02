@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 711 tests, 120 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 713 tests, 121 GUI scenarios **on both Wayland and X11**,
 fifty-six golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose divider drags and whose
@@ -38,7 +38,11 @@ is held and a folder — or a tab — held over for nine hundred milliseconds op
 to be dropped into; a taken name **stops the queue and asks**, and Replace trashes what it
 replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and can
 be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
-result at **0.7 ms over 817,288 entries**, and `Ctrl+Enter` puts every result
+result at **0.7 ms over 817,288 entries**, `Ctrl+Alt+F` searches **every local
+filesystem** — the sidebar's own Volumes, as
+[ADR 0022](docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+settles, where a complete answer over 6.9 million entries is **8,472 ms walked
+against 36.2 ms from an index** — and `Ctrl+Enter` puts every result
 into the pane as rows that can be selected, dragged and trashed where they are;
 scrolling belongs to the pane under the
 pointer and a touchpad **flick throws the list** and coasts to a stop, which is

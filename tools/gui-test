@@ -853,6 +853,22 @@ class Run:
         return self.state() if self.reported() > before else None
 
     def states(self) -> list[dict[str, str]]:
+        """Every state the window has reported, once it has answered everything
+        asked for.
+
+        **The wait is here and not only in `state`.** Nine scenarios read this
+        list directly — four of them unpack it by position — and it used to be a
+        wait-free read of the log, so a window still drawing produced three
+        answers where the script had asked for four and the failure read as
+        `ValueError: not enough values to unpack`. Measured: `hidden-and-sort`
+        did exactly that in a full Wayland sweep and passed on its own. A wait in
+        one accessor and not in its sibling is a wait that covers whichever
+        scenario happened to use the right one.
+        """
+        if not self.reports_reached(self.owed, patience=PATIENCE):
+            raise Failure(
+                f"the window answered {self.reported()} of {self.owed} F12s in {PATIENCE}s"
+            )
         found = []
         for line in self.log.read_text().splitlines():
             if not line.startswith("skerry-state "):
@@ -879,11 +895,6 @@ class Run:
         and is wrong in exactly the way that matters — it describes the window
         before the keys under test.
         """
-        if not self.reports_reached(self.owed, patience=PATIENCE):
-            raise Failure(
-                f"the window answered {self.reported()} of {self.owed} F12s "
-                f"in {PATIENCE}s"
-            )
         found = self.states()
         if not found:
             raise Failure("the window reported no state at all")
@@ -1246,7 +1257,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 120
+FEWEST_SCENARIOS = 121
 
 
 def scenario(name, fresh: bool = False):
@@ -5419,6 +5430,62 @@ def reordering_the_pins(run: Run, fixture: Path) -> None:
         own.close()
 
 
+@scenario("a-search-covers-one-folder-or-every-disk", fresh=True)
+def the_search_scope(run: Run, fixture: Path) -> None:
+    """`Ctrl+Alt+F` widens the same panel to every local filesystem.
+
+    ADR 0022: the roots are the sidebar's own Volumes — the allow-list of
+    filesystem types that already decides what a person would call a place — so
+    what this asserts is that there is at least one, that the walk leaves the
+    folder the other scope is confined to, and that switching keeps what has been
+    typed. Widening a search that has found nothing is the commonest thing a
+    person does next, and retyping the query to do it is the cost of not having
+    it.
+
+    **Not that a particular file is found.** A complete answer over this machine's
+    root filesystem is 8,559 ms over 6,901,145 entries without an index — the
+    number in ADR 0022 — so a scenario that waited for one would be waiting for
+    the machine it runs on. The entries looked at are the observable: the fixture
+    holds nine, and a scope that has scanned thousands is a scope that is not the
+    fixture.
+    """
+    listed(run)
+    run.drive("key ctrl+shift+f\nsleep 300\ntext zzz-nothing-is-called-this\nsleep 600\n")
+    here = until(run, searching="true", search_scope="here")
+    expect(here, search_roots="1", search_hits="0")
+
+    # Widened, with the query still in the field.
+    run.drive("key ctrl+alt+f\nsleep 400\nkey f12\nsleep 200\n")
+    wide = until(run, search_scope="everywhere")
+    expect(wide, search_query="zzz-nothing-is-called-this")
+    if int(wide["search_roots"]) < 1:
+        raise Failure("the whole machine is no roots at all")
+    walked = holds(
+        run,
+        lambda it: int(it.get("search_scanned", "0")) > 5000,
+        "a walk that left the folder it started in",
+    )
+    if walked["search_scope"] != "everywhere":
+        raise Failure("the scope changed under the walk")
+
+    # And back, by pointer this time: the switcher runs the same command the
+    # chord does. `scope_aim` names each button, so this cannot depend on which
+    # one is drawn first.
+    aims = dict(it.split("@") for it in walked["scope_aim"].split(",") if it)
+    if set(aims) != {"here", "everywhere"}:
+        raise Failure(f"the switcher drew {sorted(aims)}")
+    across, down = (float(value) for value in aims["here"].split(":"))
+    at = aim(run, walked, across, down)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nclick left\nsleep 400\nkey f12\nsleep 200\n")
+    back = until(run, search_scope="here")
+    expect(back, search_query="zzz-nothing-is-called-this", search_roots="1")
+
+    # The chord for the scope you are already in closes the panel, which is what
+    # it has always done.
+    run.drive("key ctrl+shift+f\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), searching="false")
+
+
 @scenario("navigation-buttons")
 def navigation_buttons(run: Run, fixture: Path) -> None:
     """Back, forward, parent and reload, clicked rather than pressed.
@@ -5648,7 +5715,12 @@ def cursor_says_what_is_clickable(run: Run, fixture: Path) -> None:
     run.drive("key escape\nsleep 200\nkey end\n")
     until(run, selected="1")
     run.drive("key shift+delete\n")
-    asking = until(run, erasing="1")
+    # **The aims, not the flag.** `erasing` is set the moment the question is
+    # asked and the buttons' rectangles are recorded by the frame that draws
+    # them, so a state can report the panel as open with nowhere to click yet —
+    # which failed here as `could not convert string to float: ''` in a full
+    # sweep and passed alone. The same wait `menu_aim` already needed.
+    asking = holds(run, lambda it: bool(it.get("erase_aim")), "a question with drawn buttons")
     for index, name in ((0, "Cancel"), (1, "Delete")):
         x, _, y = asking["erase_aim"].split(",")[index].partition(":")
         at = aim(run, asking, float(x), float(y))

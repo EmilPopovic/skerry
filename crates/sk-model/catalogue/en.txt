@@ -271,7 +271,11 @@ clash.for_the_rest = Do this for the other {0}
 
 # Searching everything under a folder.
 search.title = Find under {0}
+search.title_everywhere = Find on this machine
 search.type = Type to search everything under this folder
+search.type_everywhere = Type to search every disk on this machine
+search.here = This folder
+search.everywhere = Everywhere
 search.running = {0} so far, {1} looked at…
 search.done[one] = {0} found in {1} entry
 search.done[other] = {0} found in {1} entries
@@ -286,6 +290,7 @@ index.building[one] = Indexing… {0} entry so far
 index.building[other] = Indexing… {0} entries so far
 index.building_of[one] = Indexing… {0} of {1} entry
 index.building_of[other] = Indexing… {0} of {1} entries
+action.search_everywhere = Search everywhere
 action.search = Find a file
 action.search_results = Show all results in this pane
 action.view_details = Details

@@ -24,6 +24,7 @@ use crate::layout::Tool;
 pub fn registry() -> Registry<App> {
     let mut registry = Registry::new();
     navigate(&mut registry);
+    finding(&mut registry);
     panes(&mut registry);
     select(&mut registry);
     directions(&mut registry);
@@ -91,6 +92,66 @@ fn places(registry: &mut Registry<App>) {
             keys: &["ctrl+shift+down"],
             enabled: App::can_lower_place,
             run: |app: &mut App| app.move_place(true),
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// Finding things: the index, and the two scopes of the search.
+///
+/// Its own group of registrations rather than more of `navigate`, which was at
+/// the hundred-line limit — and they are one subject: a search's scope decides
+/// which indexes it can use, and [ADR
+/// 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+/// is the record that ties them together.
+fn finding(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "index.build",
+            name: "action.index_build",
+            group: Group::Navigate,
+            // The pair sits on one letter on purpose: `Shift` builds the index
+            // and `Alt` removes it, so finding either teaches the other. `Ctrl+I`
+            // is already Properties, which is why neither is the bare chord.
+            keys: &["ctrl+shift+i"],
+            enabled: |app: &App| !app.indexing(),
+            run: App::build_index,
+        },
+        CommandSpec {
+            id: "index.forget",
+            name: "action.index_forget",
+            group: Group::Navigate,
+            keys: &["ctrl+alt+i"],
+            // Dimmed rather than hidden where there is nothing to delete, so the
+            // menu is the same shape every time it opens — and so that a person
+            // looking for "where is my index" finds the row that removes it.
+            enabled: |app: &App| app.indexed() || app.indexing(),
+            run: App::forget_index,
+        },
+        CommandSpec {
+            id: "go.search_everywhere",
+            name: "action.search_everywhere",
+            group: Group::Navigate,
+            // The same letter, one modifier out: `Ctrl+Shift+F` is the scope a
+            // person asks for most and this is the one they widen to. `Alt`
+            // rather than a different letter, because the two are one setting
+            // with two values and the panel's own switcher says so.
+            keys: &["ctrl+alt+f"],
+            enabled: |_| true,
+            run: App::search_everywhere,
+        },
+        CommandSpec {
+            id: "go.search",
+            name: "action.search",
+            group: Group::Navigate,
+            // `Ctrl+Shift+F` is search-in-project everywhere a person has met
+            // one, and `Ctrl+F` is already the find popup over the listing on
+            // screen — which is the same relationship those two keys have in
+            // every editor: narrow what is here, or go looking.
+            keys: &["ctrl+shift+f"],
+            enabled: |_| true,
+            run: App::open_search,
         },
     ] {
         registry.add(spec);
@@ -173,40 +234,6 @@ fn navigate(registry: &mut Registry<App>) {
             keys: &["alt+home"],
             enabled: |_| std::env::var_os("HOME").is_some(),
             run: App::go_home,
-        },
-        CommandSpec {
-            id: "index.build",
-            name: "action.index_build",
-            group: Group::Navigate,
-            // The pair sits on one letter on purpose: `Shift` builds the index
-            // and `Alt` removes it, so finding either teaches the other. `Ctrl+I`
-            // is already Properties, which is why neither is the bare chord.
-            keys: &["ctrl+shift+i"],
-            enabled: |app: &App| !app.indexing(),
-            run: App::build_index,
-        },
-        CommandSpec {
-            id: "index.forget",
-            name: "action.index_forget",
-            group: Group::Navigate,
-            keys: &["ctrl+alt+i"],
-            // Dimmed rather than hidden where there is nothing to delete, so the
-            // menu is the same shape every time it opens — and so that a person
-            // looking for "where is my index" finds the row that removes it.
-            enabled: |app: &App| app.indexed() || app.indexing(),
-            run: App::forget_index,
-        },
-        CommandSpec {
-            id: "go.search",
-            name: "action.search",
-            group: Group::Navigate,
-            // `Ctrl+Shift+F` is search-in-project everywhere a person has met
-            // one, and `Ctrl+F` is already the find popup over the listing on
-            // screen — which is the same relationship those two keys have in
-            // every editor: narrow what is here, or go looking.
-            keys: &["ctrl+shift+f"],
-            enabled: |_| true,
-            run: App::open_search,
         },
         CommandSpec {
             id: "go.reload",
