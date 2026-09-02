@@ -79,6 +79,14 @@ pub enum Scope {
     Global,
     /// While a text field has the keyboard.
     Field,
+    /// While a quick look is showing text that can be selected.
+    ///
+    /// **A third scope, which the fallback below was written to expect.** `Ctrl+A`
+    /// over a listing selects files and inside a text preview selects the text,
+    /// and `Ctrl+C` copies files or copies what is selected — the same difference
+    /// `Field` exists to express, and the registry is the only place it can live
+    /// if a keymap is ever to be rebindable.
+    Look,
 }
 
 /// A command's position in the registry.
@@ -213,6 +221,10 @@ impl<C> Registry<C> {
             // Named rather than a wildcard, so a third scope has to decide here
             // whether it falls back rather than inheriting an answer by default.
             Scope::Field => matching(Scope::Field).or_else(|| matching(Scope::Global)),
+            // Falls back, so `Ctrl+W` still closes a tab and `F12` still dumps
+            // while a preview has the keyboard: a look is a surface over the
+            // window and not a modal question.
+            Scope::Look => matching(Scope::Look).or_else(|| matching(Scope::Global)),
         }
     }
 

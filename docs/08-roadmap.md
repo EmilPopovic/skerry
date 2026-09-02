@@ -134,7 +134,7 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > every later milestone sits on it and because Spike D has already de-risked it.
 
 **In progress. The workspace exists and there is a window on screen.** Twelve
-crates and two sandboxed helpers, 681 tests, 114 GUI scenarios on two display servers and fifty-three golden frames, every gate green. What "the least to show" turned out to mean in practice:
+crates and two sandboxed helpers, 689 tests, 115 GUI scenarios on two display servers and fifty-four golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -363,6 +363,21 @@ because ADR 0019 measured the thing its predecessor feared: reaching page 400 of
 1200-page manual costs **0.13–0.16 s**, the same as page 1, so the child holds no
 document open and needs no correlation table. The four moves have buttons in the
 panel's own strip, because the panel covers the list a pointer would otherwise use.
+
+**A text preview is mono, numbered, and selectable.** Drag to select, `Ctrl+A` for
+all of it, `Ctrl+C` to copy — the last two in
+[`sk_cmd::Scope::Look`](04-architecture.md#layers), which is the third scope the
+resolver was written to expect: `Ctrl+A` over a listing selects files and inside a
+preview selects text, and the registry is the only place that difference can live
+if a keymap is to be rebindable. The pointer reaches both through the preview's own
+context menu.
+
+**And the time to a first pixel is a third to a half of what it was**, from three
+changes that came out of one measurement — the thumbnail already on the GPU stands
+in for a picture (**0 ms**, was 67–155), a page is drafted at a third size first
+(**61–76 ms**, was 135–200), and a preview no longer queues behind a grid's
+thumbnails (**480 ms** worst case, was 1.9 s). The numbers and the method are in
+[12-measurement.md](12-measurement.md#where-a-previews-latency-actually-was-and-where-it-looked-like-it-was).
 
 **The product's dependency count did not move**, which is ADR 0006's whole
 argument: a helper is a separate binary and `tools/dep-budget.py` measures the

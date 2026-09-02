@@ -320,6 +320,16 @@ preview.more = …
 # thing rule 7 forbids.
 preview.page_of = {0} / {1}
 preview.page = {0}
+# The text preview's own two actions, which are neither the listing's nor a
+# field's — `action.select_all_text` above is the field's, and using it here
+# would have put "Select the whole name, in a field" in a preview's menu.
+action.look_select_all = Select all text
+# Not bare "Copy": the palette listed it beside `file.copy` with the same chord
+# and the same word, and a palette with two identical rows is the opposite of
+# what rule 4 is for. The wording follows `action.copy_content` next door.
+action.look_copy = Copy the selected text
+notice.copied_lines[one] = Copied {0} line
+notice.copied_lines[other] = Copied {0} lines
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday

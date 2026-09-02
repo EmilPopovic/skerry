@@ -1049,16 +1049,24 @@ fn quick_look(
         // **Fitted here, and this is the only place that fits it.** The child was
         // asked for a box and answered with what fitted inside it, so the size that
         // came back is already right — all that is left is to centre it.
-        let scale =
-            (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32).min(1.0);
-        let (width, height) = (size.0 as f32 * scale, size.1 as f32 * scale);
-        let at = painter.rect(
-            inner.x + (inner.width - width) / 2.0,
-            inner.y + (inner.height - height) / 2.0,
-            width,
-            height,
+        painter.preview(key, fitted(painter, inner, size), theme.palette.text);
+        return;
+    }
+    if let Some(key) = look.standby {
+        // **The thumbnail, at its own size, centred.** Already on the GPU — the
+        // row it belongs to was on screen — so this is the only free thing in the
+        // whole path, and it answers the question a person actually has while
+        // waiting: *which* picture is this.
+        //
+        // Not enlarged to fill the panel. `image_quad` refuses to, for a good
+        // reason of its own, and 128 pixels blown up to a thousand is mush; a
+        // sharp stamp that grows into place reads better than a blurred fill that
+        // sharpens. From the *atlas*, so it is `image` and not `preview`.
+        painter.image(
+            key,
+            painter.rect(inner.x, inner.y, inner.width, inner.height),
+            theme.palette.text,
         );
-        painter.preview(key, at, theme.palette.text);
         return;
     }
     if let Some(text) = &look.text {
@@ -1142,12 +1150,111 @@ fn look_button(
     hits.look.push((control, area));
 }
 
+/// A picture's rectangle, centred in `inner` with its aspect kept.
+///
+/// **Never larger than it came back at**, because the child was asked for a box
+/// and answered with what fitted inside it: enlarging here would be a picture
+/// scaled twice, once by a box filter and once by a sampler.
+fn fitted(painter: &Painter<'_>, inner: Area, size: (u32, u32)) -> sk_gpu::Rect {
+    let scale =
+        (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32).min(1.0);
+    let (width, height) = (size.0 as f32 * scale, size.1 as f32 * scale);
+    painter.rect(
+        inner.x + (inner.width - width) / 2.0,
+        inner.y + (inner.height - height) / 2.0,
+        width,
+        height,
+    )
+}
+
+/// The inset between the text and the panel's edges.
+const TEXT_PAD: f32 = 14.0;
+
+/// The gap between the line numbers and the text they belong to.
+const TEXT_GUTTER_GAP: f32 = 10.0;
+
+/// Where a text preview's parts sit, so the drawing and the pointer agree.
+///
+/// **One function, because a selection is the two of them having the same
+/// answer.** A click is turned into a byte by measuring from `text_x`, and the
+/// highlight is drawn from `text_x`; a second copy of that arithmetic is a
+/// selection that lands one gutter to the left of where it was made.
+#[derive(Clone, Copy)]
+pub(crate) struct TextLayout {
+    /// Where the line numbers' column ends.
+    pub(crate) gutter: f32,
+    /// Where a line's own text starts.
+    pub(crate) text_x: f32,
+    /// One line's pitch.
+    pub(crate) step: f32,
+}
+
+/// The logical width of the widest line number a text of `lines` lines can show.
+///
+/// **From the count and not from the line on screen**, so the gutter does not
+/// widen as a scroll passes line 100 and shift every line of the file sideways.
+pub(crate) fn gutter_width(
+    lines: usize,
+    size: f32,
+    cache: &mut sk_text::LayoutCache,
+    fonts: &mut sk_text::Fonts,
+    scale: f32,
+) -> f32 {
+    let widest = "0".repeat(lines.max(1).to_string().len());
+    // **Plus two, because a box exactly one advance wide elides.** The shaped
+    // advance is device pixels rounded to the glyph grid and the box is snapped
+    // to it separately, so a number that fits by arithmetic came out as `1…`.
+    sk_ui::advance_of(cache, fonts, &widest, sk_text::Weight::Mono, size * scale) / scale.max(0.01)
+        + 2.0
+}
+
+/// Where the parts of a text preview go, given the gutter's measured width.
+pub(crate) fn text_layout(inner: Area, metrics: &sk_ui::Metrics, digits: f32) -> TextLayout {
+    let gutter = inner.x + TEXT_PAD + digits;
+    TextLayout { gutter, text_x: gutter + TEXT_GUTTER_GAP, step: metrics.row_height }
+}
+
+/// Which line and byte a point lands on, for a press or a drag.
+///
+/// **Clamped rather than optional.** A drag that leaves the panel has to keep
+/// extending the selection — that is what dragging past the edge means everywhere
+/// — so a point above the first line is the start of the file and one below the
+/// last is the end of it.
+pub(crate) fn text_spot(
+    look: &crate::quicklook::QuickLook,
+    text: &crate::quicklook::Text,
+    where_: (Area, &sk_ui::Metrics),
+    at: (f32, f32),
+    tools: (&mut sk_text::LayoutCache, &mut sk_text::Fonts, f32),
+) -> crate::quicklook::Spot {
+    let (inner, metrics) = where_;
+    let (cache, fonts, scale) = tools;
+    let size = metrics.text_size;
+    let digits = gutter_width(text.lines.len(), size, cache, fonts, scale);
+    let placed = text_layout(inner, metrics, digits);
+    let row = ((at.1 - inner.y + look.scroll.offset()) / placed.step).floor();
+    let line = (row.max(0.0) as usize).min(text.lines.len().saturating_sub(1));
+    let body = text.lines.get(line).map_or("", String::as_str);
+    // The colour is not part of a measurement; the weight is, and it has to be
+    // the face the text was drawn in or the answer is a different font's.
+    let style = mono(TextStyle::new(size, sk_gpu::Color::rgba(0, 0, 0, 0)));
+    let want = (at.0 - placed.text_x).max(0.0) * scale;
+    crate::quicklook::Spot {
+        line,
+        byte: sk_ui::caret_offset(fonts, body, style, size * scale, want),
+    }
+}
+
 /// The text of a file, line by line, each line by its tones.
 ///
 /// **Drawn as runs, which is the whole of the syntax-highlighting seam.** Every
 /// line is already cut into `Span`s carrying a `Tone`, and this colours each run by
 /// its tone; today there is one run per line and one tone. A highlighter replaces
 /// `quicklook::highlight` and nothing here.
+///
+/// **In the mono face, with its lines numbered.** A file's own text is the one
+/// place in this program where the columns *are* the content: an indented block, a
+/// table of numbers and a diff all stop meaning anything in a proportional face.
 fn quick_look_text(
     painter: &mut Painter<'_>,
     look: &crate::quicklook::QuickLook,
@@ -1156,24 +1263,44 @@ fn quick_look_text(
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    let step = metrics.row_height;
+    let digits = {
+        let Painter { cache, fonts, scale, .. } = painter;
+        gutter_width(text.lines.len(), metrics.text_size, cache, fonts, *scale)
+    };
+    let placed = text_layout(inner, &metrics, digits);
+    let step = placed.step;
     let first = (look.scroll.offset() / step).floor().max(0.0) as usize;
     let room = (inner.height / step).ceil() as usize + 1;
     let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
     painter.list.push_clip(clip);
+    // The gutter's own rule, so the numbers read as a column rather than as the
+    // first word of every line. A vertical rule, which `hairline` does not draw:
+    // that one is a horizontal line of a given width.
+    let rule = painter.rect(
+        placed.gutter + TEXT_GUTTER_GAP / 2.0,
+        inner.y,
+        painter.logical(1.0),
+        inner.height,
+    );
+    painter.list.rect(rule, theme.palette.divider, 0.0);
     for (offset, (body, spans)) in
         text.lines.iter().zip(&text.spans).enumerate().skip(first).take(room)
     {
         let top = inner.y + offset as f32 * step - look.scroll.offset();
         let baseline = painter.baseline(top, step, metrics.text_size);
-        let mut x = inner.x + 14.0;
+        text_selection(painter, look, (offset, body), (placed, top, inner));
+        let number = (offset + 1).to_string();
+        let numbers = TextStyle::new(metrics.text_size, theme.palette.dim).right();
+        let column = painter.rect(inner.x + TEXT_PAD, 0.0, digits, 0.0);
+        painter.label(&number, mono(numbers), column, baseline);
+        let mut x = placed.text_x;
         for span in spans {
             let Some(run) = body.get(span.from..span.to) else { continue };
             let colour = match span.tone {
                 crate::quicklook::Tone::Plain => theme.palette.text,
             };
-            let style = TextStyle::new(metrics.text_size, colour);
-            let room = (inner.right() - 14.0 - x).max(1.0);
+            let style = mono(TextStyle::new(metrics.text_size, colour));
+            let room = (inner.right() - TEXT_PAD - x).max(1.0);
             let drawn = line(painter, run, style, x, room, baseline);
             x += painter.logical(drawn);
         }
@@ -1182,8 +1309,53 @@ fn quick_look_text(
     if text.truncated {
         let baseline = painter.baseline(inner.bottom() - step, step, metrics.text_size);
         let style = TextStyle::new(metrics.text_size, theme.palette.dim);
-        line(painter, i18n::lookup("preview.more"), style, inner.x + 14.0, inner.width, baseline);
+        line(painter, i18n::lookup("preview.more"), style, placed.text_x, inner.width, baseline);
     }
+}
+
+/// The same style in the mono face.
+fn mono(style: TextStyle) -> TextStyle {
+    TextStyle { weight: sk_text::Weight::Mono, ..style }
+}
+
+/// The highlight behind one line's selected part, where it has one.
+///
+/// **A line inside the selection but not at either end is highlighted whole**,
+/// including a strip past its last character, because a selection that stopped at
+/// each line's ragged right edge would not read as one region.
+fn text_selection(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    line: (usize, &str),
+    where_: (TextLayout, f32, Area),
+) {
+    let (offset, body) = line;
+    let (placed, top, inner) = where_;
+    let Some(chosen) = look.chosen.filter(|it| !it.is_empty()) else { return };
+    let (from, to) = chosen.ordered();
+    if offset < from.line || offset > to.line {
+        return;
+    }
+    let theme = *painter.theme;
+    let size = theme.metrics.text_size;
+    let start = if offset == from.line { from.byte } else { 0 };
+    let end = if offset == to.line { to.byte } else { body.len() };
+    let (left, right) = {
+        let Painter { fonts, scale, .. } = painter;
+        let px = size * *scale;
+        let weight = sk_text::Weight::Mono;
+        (
+            sk_ui::advance_to(fonts, body, weight, px, start) / scale.max(0.01),
+            sk_ui::advance_to(fonts, body, weight, px, end) / scale.max(0.01),
+        )
+    };
+    // Past the end of a line that continues into the next one, so the region has
+    // no notch in it where a short line was.
+    let tail = if offset < to.line { size * 0.5 } else { 0.0 };
+    let x = placed.text_x + left;
+    let width = (right - left + tail).max(1.0).min(inner.right() - x);
+    let shape = painter.rect(x, top, width, placed.step);
+    painter.list.rect(shape, theme.palette.accent.with_alpha(80), 0.0);
 }
 
 /// The Properties panel: a title, and a label-and-value row per fact.

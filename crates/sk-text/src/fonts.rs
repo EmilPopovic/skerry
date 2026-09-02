@@ -32,6 +32,14 @@ pub enum Weight {
     Regular,
     /// Column headers, the path bar, anything that has to win attention.
     Bold,
+    /// A file's own text, where the columns are the content.
+    ///
+    /// **Not a weight, and it is here anyway.** This enum is what picks a face
+    /// out of the chain, and a third face is what a mono preview needs; a second
+    /// axis for one caller would be two enums to thread through every
+    /// `TextStyle`, `RunKey` and glyph key in the program. If a fourth face ever
+    /// arrives — an italic — that is the moment to split them.
+    Mono,
 }
 
 /// Where a glyph raster is identified from.
@@ -212,6 +220,25 @@ const UI_BOLD: &[&str] = &[
 /// A file list has to render the names on the disk, not the names in the
 /// language of the interface: a `~/Downloads` with one Japanese filename and one
 /// emoji is the common case, not the exotic one.
+/// The face a file's own text is drawn in.
+///
+/// **Noto first, because CI has it and the golden frames pin it by hash.** After
+/// that, whatever the machine happens to have: the list is in the order a person
+/// would rank them for reading code, and the last entry is on every distribution
+/// that ships any font at all. A machine with none of them falls back to the UI
+/// sans, which is legible and not aligned — recorded in `missing` and reported,
+/// because it changes what the program looks like.
+const UI_MONO: &[&str] = &[
+    "notosansmonoregular",
+    "notosansmono",
+    "dejavusansmono",
+    "liberationmonoregular",
+    "jetbrainsmonoregular",
+    "cascadiamonoregular",
+    "ubuntumonor",
+    "freemono",
+];
+
 const FALLBACK: &[&str] = &[
     "notosanscjkregular",
     "notosanscjkjpregular",
@@ -232,6 +259,7 @@ pub struct Fonts {
     pub(crate) faces: Vec<Face>,
     regular: u16,
     bold: u16,
+    mono: u16,
     pub(crate) shape_context: ShapeContext,
     scale_context: ScaleContext,
     pub(crate) scratch: crate::shape::Scratch,
@@ -256,6 +284,11 @@ impl Fonts {
                 // column header. Faux bold is worse than one weight, so the regular
                 // face stands in and the header is distinguished by colour instead.
                 .or(regular);
+        // The same bargain: a text preview in a proportional face is a preview
+        // whose columns do not line up, which is worse than one and not as bad as
+        // none.
+        let mono = take(&mut faces, &mut opened, &candidates, UI_MONO, &mut missing, "a mono face")
+            .or(regular);
 
         // Deduplicated by path, because two needles can name one file:
         // `notosanscjkregular` and `notosanscjk` both resolve to
@@ -283,6 +316,7 @@ impl Fonts {
             faces,
             regular,
             bold: bold.unwrap_or(regular),
+            mono: mono.unwrap_or(regular),
             shape_context: ShapeContext::new(),
             scale_context: ScaleContext::new(),
             scratch: crate::shape::Scratch::default(),
@@ -330,6 +364,7 @@ impl Fonts {
         match weight {
             Weight::Regular => self.regular,
             Weight::Bold => self.bold,
+            Weight::Mono => self.mono,
         }
     }
 
@@ -418,6 +453,26 @@ mod tests {
         let Some(fonts) = fonts() else { return };
         assert!(!fonts.is_empty());
         assert!(!fonts.names().is_empty());
+    }
+
+    /// **The mono face is a different face, or it says it is not.**
+    ///
+    /// A text preview in a proportional face is one whose columns do not line up,
+    /// and the fallback to the UI sans is deliberate rather than silent — so this
+    /// asserts the pair: either `Mono` resolves somewhere else in the chain, or
+    /// `missing` names it. The reference machine and CI both have
+    /// `NotoSansMono-Regular.ttf`, so on both this takes the first branch.
+    #[test]
+    fn a_mono_face_is_its_own_face_or_is_reported_absent() {
+        let fonts = Fonts::discover().expect("no usable font on this machine");
+        let mono = fonts.primary(Weight::Mono);
+        if mono == fonts.primary(Weight::Regular) {
+            assert!(
+                fonts.missing().iter().any(|what| what.contains("mono")),
+                "the mono face fell back to the sans and nothing said so"
+            );
+        }
+        assert!((mono as usize) < fonts.len(), "the mono index is not in the chain");
     }
 
     /// A face in the chain twice is a second mapping of the same file and a

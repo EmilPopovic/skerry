@@ -1762,6 +1762,22 @@ impl App {
         if self.search.is_some() && self.search_key(event, commands) {
             return;
         }
+        // **The look's own two chords, before the listing's.** `Ctrl+A` and
+        // `Ctrl+C` mean the text in the panel rather than the files behind it —
+        // the same shape the field scope has, and settled in the registry rather
+        // than by a branch, so a rebindable keymap has somewhere to put it.
+        // **Unless a field has the keyboard.** `F2` starts a rename with the look
+        // still open, and `Ctrl+A` then means the name being typed — the field is
+        // where the caret is, and the caret decides.
+        if self.field_scope() == Scope::Global
+            && self.looking_at_text()
+            && let Some(command) = commands.resolve(event, Scope::Look)
+            && commands.scope_of(command) == Scope::Look
+        {
+            commands.run(command, self);
+            self.dirty = true;
+            return;
+        }
         // **A quick look takes the four arrows and nothing else.** It is a viewer
         // rather than a question, so it does not swallow the keyboard: `Space`
         // still closes it through the registry, `Escape` through `clear`, and
@@ -2784,6 +2800,10 @@ impl App {
             None => {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
+                if inside.contains(position.x, position.y) && self.start_choosing_text(position) {
+                    self.dirty = true;
+                    return true;
+                }
                 if !inside.contains(position.x, position.y)
                     && !strip.contains(position.x, position.y)
                 {
@@ -2799,6 +2819,93 @@ impl App {
         }
         self.dirty = true;
         true
+    }
+
+    /// A press inside a text preview: the start of a selection. Whether it took.
+    ///
+    /// **Only for text.** A press on a picture or a page is not the start of
+    /// anything — there is nothing there to select — and a click that quietly
+    /// armed a drag would make the panel feel like it had a mode.
+    fn start_choosing_text(&mut self, position: Point) -> bool {
+        let Some(spot) = self.text_spot_at(position) else { return false };
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        look.chosen = Some(crate::quicklook::Chosen { anchor: spot, caret: spot });
+        look.dragging = true;
+        true
+    }
+
+    /// Extends a selection that is being dragged.
+    fn extend_the_text_choice(&mut self, position: Point) -> bool {
+        if !self.quick_look.as_ref().is_some_and(|look| look.dragging) {
+            return false;
+        }
+        let Some(spot) = self.text_spot_at(position) else { return false };
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        let Some(chosen) = look.chosen.as_mut() else { return false };
+        if chosen.caret == spot {
+            return false;
+        }
+        chosen.caret = spot;
+        true
+    }
+
+    /// Which line and byte of the text preview a point is over.
+    fn text_spot_at(&mut self, position: Point) -> Option<crate::quicklook::Spot> {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let metrics = self.theme.metrics;
+        let scale = self.window.scale();
+        let Self { quick_look, cache, fonts, .. } = self;
+        let look = quick_look.as_ref()?;
+        let text = look.text.as_ref()?;
+        Some(crate::view::text_spot(
+            look,
+            text,
+            (inner, &metrics),
+            (position.x, position.y),
+            (cache, fonts, scale),
+        ))
+    }
+
+    /// Whether a quick look is showing text, so its two chords are live.
+    pub(crate) fn looking_at_text(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| look.text.is_some())
+    }
+
+    /// Whether that text has something selected in it.
+    pub(crate) fn look_has_a_selection(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::has_selection)
+    }
+
+    /// Selects everything the preview read — `Ctrl+A` inside a text preview.
+    pub(crate) fn select_all_of_the_look(&mut self) {
+        if let Some(look) = self.quick_look.as_mut() {
+            look.select_all();
+            self.dirty = true;
+        }
+    }
+
+    /// Puts the selected text on the clipboard.
+    ///
+    /// **Both selections, the same as [`Self::copy_path`].** X11's primary
+    /// selection is what a middle click pastes, and a person who has just dragged
+    /// across text expects a middle click elsewhere to produce it.
+    pub(crate) fn copy_the_look_selection(&mut self) {
+        let Some(text) =
+            self.quick_look.as_ref().and_then(crate::quicklook::QuickLook::chosen_text)
+        else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.window.set_selection(Selection::Clipboard, Content::text(&text));
+        self.window.set_selection(Selection::Primary, Content::text(&text));
+        let lines = text.lines().count().max(1);
+        self.notice = Some((
+            sk_model::i18n::plural("notice.copied_lines", lines as u64, &[&lines]),
+            Instant::now(),
+        ));
+        self.dirty = true;
     }
 
     /// Moves what is selected to the trash.
@@ -4147,18 +4254,21 @@ impl App {
             self.hovered_button = button;
             self.dirty = true;
         }
-        self.hover_the_path_bar(position);
+        // **`crumb_at` before `hover_the_path_bar`**, which is the order this had
+        // before it moved out of `moved` — the second one is a `&mut self` call
+        // and reordering it around a read is a behaviour change, not a tidy-up.
         let crumb = self.crumb_at(position);
+        self.hover_the_path_bar(position);
         if self.hovered_crumb != crumb {
             self.hovered_crumb = crumb;
             self.dirty = true;
         }
+        let tool = self.tool_at(position);
         let mode = self.mode_at(position);
         if self.hovered_mode != mode {
             self.hovered_mode = mode;
             self.dirty = true;
         }
-        let tool = self.tool_at(position);
         if self.hovered_tool != tool {
             self.hovered_tool = tool;
             self.dirty = true;
@@ -4889,7 +4999,18 @@ search_active={active:?}",
         let pane = self.panes.focused();
         let Some(id) = pane.listing.at(row) else { return false };
         let (path, mtime) = (pane.path_of(id), pane.listing.mtime(id));
-        self.quick_look = Some(crate::quicklook::QuickLook::open(path, mtime, shows, &self.jobs));
+        let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &self.jobs);
+        // **Whatever the atlas already has, drawn while the real one is fetched.**
+        // The row was on screen, so its thumbnail is on the GPU; the only thing
+        // this costs is the lookup, and it is the difference between a panel that
+        // opens and one that appears sixty milliseconds later.
+        if shows == crate::previews::Shows::Picture {
+            let (_, image) = self.thumbs.name(&path, mtime);
+            if self.renderer.holds_image(image) {
+                look.standby = Some(image);
+            }
+        }
+        self.quick_look = Some(look);
         self.dirty = true;
         true
     }
@@ -4985,12 +5106,17 @@ search_active={active:?}",
             crate::previews::Shows::Page => sk_preview::Kind::Document,
             crate::previews::Shows::Text => return,
         };
+        // **`shot.within`, not `within`.** The shot is what a reply is matched
+        // against, so asking for a different box than the one recorded is an
+        // answer that can never match: the draft went out at full size, came back
+        // keyed to full size, and was dropped against a coarse `asked` — a panel
+        // that waited for ever, which is what the arrows scenario caught.
         self.previews.want(sk_preview::Want {
             kind: helper,
             ask: sk_preview::Ask::Preview,
             path,
             mtime,
-            within,
+            within: shot.within,
             page: shot.page,
         });
     }
@@ -5074,7 +5200,7 @@ search_active={active:?}",
                 } else if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
                     let key = self.thumbs.name_preview();
                     self.renderer.hold_preview(key, answer.size, &answer.pixels);
-                    look.image = Some((key, answer.size));
+                    look.took(key, answer.size);
                 } else {
                     look.refusal = Some(answer.refusal);
                 }
@@ -5504,6 +5630,20 @@ search_active={active:?}",
             })
             .collect::<Vec<_>>()
             .join(",");
+        // What is selected in a text preview, as `line:byte-line:byte` in reading
+        // order — so a scenario can assert a drag landed where it aimed without
+        // reading the clipboard, which is a separate claim.
+        let look_chosen = self
+            .quick_look
+            .as_ref()
+            .and_then(|look| look.chosen.filter(|it| !it.is_empty()))
+            .map_or_else(
+                || "none".to_owned(),
+                |chosen| {
+                    let (from, to) = chosen.ordered();
+                    format!("{}:{}-{}:{}", from.line, from.byte, to.line, to.byte)
+                },
+            );
         let look_page = self.quick_look.as_ref().map_or_else(
             || "none".to_owned(),
             |look| {
@@ -5521,6 +5661,7 @@ search_active={active:?}",
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
 looking={looking} look_page={look_page} look_aim={look_aim:?} \
+look_chosen={look_chosen} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -6747,11 +6888,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.press_in_the_crumb_menu(position) {
             return true;
         }
-        if self.press_in_the_quick_look(position) {
-            return true;
-        }
         if self.menu.is_some() {
             self.menu_press(position, commands);
+            return true;
+        }
+        // **After the menu, because a menu opens over the panel.** The preview's
+        // own context menu is drawn on top of the text it acts on, so a handler
+        // that took every press inside the panel first swallowed the click on the
+        // menu row — and started an empty selection where the row was, which is
+        // how `Copy` came to copy nothing.
+        if self.press_in_the_quick_look(position) {
             return true;
         }
         false
@@ -6829,6 +6975,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let ended = self.band.take().is_some();
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
+        let chose = self.quick_look.as_mut().is_some_and(|look| std::mem::take(&mut look.dragging));
         let divided = self.placement.dragging.take().is_some();
         // A width is part of the layout, so letting go of one is a thing to save.
         // The session is compared rather than tracked, so this only has to make
@@ -6838,7 +6985,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // and a title bar holds nothing to click: the path moved into the panes,
         // so there is nothing here for a press to be about.
         self.title_press = None;
-        if ended || released || dragged || divided || sized {
+        if ended || released || dragged || divided || sized || chose {
             self.dirty = true;
         }
     }
@@ -7253,6 +7400,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         }
         if self.edits.naming.is_some() {
             self.commit_name();
+        }
+        // **The preview's own menu first, while one is over the list.** A
+        // secondary click inside a text preview is about the text, and a menu of
+        // file operations over a panel covering the file would act on something
+        // the person cannot see.
+        if self.looking_at_text()
+            && crate::view::quick_look_area(&self.layout).contains(position.x, position.y)
+        {
+            self.menu_wanted = Some((position, crate::menu::IN_A_LOOK));
+            return;
         }
         let row = self.row_under(position);
         if let Some(id) = row.and_then(|row| self.panes.focused().listing.at(row))
@@ -7765,6 +7922,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return;
         }
         self.hover_the_chrome(position);
+        // **Before the hover work below it takes an early return.** A drag that
+        // leaves the panel still extends the selection, which is what dragging
+        // past an edge means in every text view.
+        if self.extend_the_text_choice(position) {
+            self.dirty = true;
+        }
         self.hover_the_history(position);
         if self.hover_the_sidebar(position) {
             self.dirty = true;

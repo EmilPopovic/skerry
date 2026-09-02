@@ -82,7 +82,10 @@ jobs:
 
   frames:
     # The golden frames, which need a software Vulkan, Pillow, a PDF renderer and
-    # the exact fonts the references were rendered with. `poppler-utils` is there
+    # the exact fonts the references were rendered with — `fonts-noto-mono` among
+    # them, because a text preview is drawn in the mono face and a machine without
+    # one falls back to the sans, which is a different picture and a legitimate
+    # state of the program. `poppler-utils` is there
     # for one frame — `quick-look-page`, whose whole point is that the page is
     # rendered by whatever is on `PATH` — and without it that frame draws the
     # sentence saying no renderer is installed, which is a real state of the
@@ -99,7 +102,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev mesa-vulkan-drivers python3-pil \
-            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fonts-noto-mono \
             poppler-utils
       - name: Toolchain
         run: |

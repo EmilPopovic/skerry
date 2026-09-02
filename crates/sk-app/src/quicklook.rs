@@ -76,6 +76,49 @@ pub(crate) struct Span {
     pub(crate) tone: Tone,
 }
 
+/// A place in the text: which line, and which byte of it.
+///
+/// **A byte rather than a character**, because that is what a slice takes and
+/// what the clipboard wants; `sk_ui::caret_offset` is what turns a pixel into
+/// one, and it lands on character boundaries by construction.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) struct Spot {
+    /// Which line, indexed from zero.
+    pub(crate) line: usize,
+    /// Which byte of that line.
+    pub(crate) byte: usize,
+}
+
+/// A selection, as the two ends a drag produced.
+///
+/// **Anchor and caret rather than start and end**, because dragging upward is an
+/// ordinary thing to do and a selection that reordered itself as the pointer
+/// crossed its own start would grow from the wrong end. The ordering happens
+/// where it is needed, which is drawing and copying.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Chosen {
+    /// Where the drag began.
+    pub(crate) anchor: Spot,
+    /// Where it is now.
+    pub(crate) caret: Spot,
+}
+
+impl Chosen {
+    /// The two ends in reading order.
+    pub(crate) fn ordered(self) -> (Spot, Spot) {
+        if self.anchor <= self.caret {
+            (self.anchor, self.caret)
+        } else {
+            (self.caret, self.anchor)
+        }
+    }
+
+    /// Whether it covers nothing, which a click without a drag produces.
+    pub(crate) fn is_empty(self) -> bool {
+        self.anchor == self.caret
+    }
+}
+
 /// A file's text, cut into lines and each line into tones.
 pub(crate) struct Text {
     /// The lines, without their terminators.
@@ -139,6 +182,25 @@ pub(crate) struct QuickLook {
     pub(crate) shows: Shows,
     /// The picture, once the atlas holds it, and the size it came back at.
     pub(crate) image: Option<(ImageKey, (u32, u32))>,
+    /// The file's own thumbnail, standing in until the full picture lands.
+    ///
+    /// **Free, because it is already on the GPU.** The row `Space` was pressed on
+    /// was visible, so `settle_thumbnails` has already put its 128-pixel
+    /// thumbnail in the atlas — drawing that, blurred up to the panel, costs one
+    /// quad and turns a 60–155 ms wait into no wait at all. Pictures only: a
+    /// document has no thumbnail, by ADR 0018, because a page costs a process.
+    ///
+    /// A key and no size, because the atlas knows the size and the drawing fits
+    /// the slot inside whatever rectangle it is given.
+    pub(crate) standby: Option<ImageKey>,
+    /// Whether the next ask is the quick coarse one rather than the full size.
+    ///
+    /// **Documents only.** A page's cost is proportional to what is drawn —
+    /// 60–70 ms at 320 pixels against 135–200 ms at 1200, from ADR 0019's table —
+    /// so a coarse pass is a third of the wait for something on screen. An image
+    /// gets no coarse pass because there the cost is the decode: 60 ms at 128
+    /// pixels and 67 ms at 1200, so a first pass would be a second full price.
+    pub(crate) coarse: bool,
     /// The text, once it has been read.
     pub(crate) text: Option<Text>,
     /// Why there is nothing to show, if there is nothing.
@@ -151,6 +213,10 @@ pub(crate) struct QuickLook {
     pub(crate) asked: Option<Shot>,
     /// How far the text is scrolled.
     pub(crate) scroll: sk_ui::Scroll,
+    /// What is selected in a text preview, if anything.
+    pub(crate) chosen: Option<Chosen>,
+    /// Whether the pointer is still down and extending it.
+    pub(crate) dragging: bool,
     reading: Option<mpsc::Receiver<Option<String>>>,
 }
 
@@ -162,12 +228,16 @@ impl QuickLook {
             mtime,
             shows,
             image: None,
+            standby: None,
+            coarse: shows == Shows::Page,
             text: None,
             refusal: None,
             page: 1,
             pages: 0,
             asked: None,
             scroll: sk_ui::Scroll::default(),
+            chosen: None,
+            dragging: false,
             reading: None,
         };
         if shows == Shows::Text {
@@ -210,7 +280,16 @@ impl QuickLook {
     }
 
     /// What to ask for at this size.
-    pub(crate) const fn shot(&self, within: (u32, u32)) -> Shot {
+    ///
+    /// The coarse pass asks for a third of the long edge, which is where the
+    /// three-fold difference in [`Self::coarse`] comes from.
+    pub(crate) fn shot(&self, within: (u32, u32)) -> Shot {
+        if self.coarse {
+            let long = within.0.max(within.1).max(1);
+            let side = (long / 3).clamp(64, 512);
+            let shrink = |it: u32| (it * side / long).max(1);
+            return Shot { within: (shrink(within.0), shrink(within.1)), page: self.page };
+        }
         Shot { within, page: self.page }
     }
 
@@ -239,7 +318,26 @@ impl QuickLook {
         let wanted = if self.pages > 0 { wanted.min(self.pages) } else { wanted };
         let moved = wanted != self.page;
         self.page = wanted;
+        // **A turn is a draft first, for the same reason opening one is.** `↓`
+        // twice in a row is a person looking for something, and two 65 ms drafts
+        // answer that better than one 150 ms page.
+        self.coarse |= moved;
         moved
+    }
+
+    /// Takes a picture, and stops the coarse pass standing in for it.
+    ///
+    /// **The coarse pass is not the answer, it is the first draft of it.** A page
+    /// drawn at a third of the panel is legible enough to read the shape of and
+    /// too soft to read the words of, so the full size is asked for as soon as the
+    /// draft is on screen — and the draft stays up until it arrives, because a
+    /// panel that blanked between the two would be worse than one that waited.
+    pub(crate) fn took(&mut self, key: ImageKey, size: (u32, u32)) {
+        self.image = Some((key, size));
+        // The stand-in has done its job and must stop being drawn under a picture
+        // with transparency in it.
+        self.standby = None;
+        self.coarse = false;
     }
 
     /// Puts the page back after a child said there is no such page.
@@ -256,9 +354,11 @@ impl QuickLook {
             self.page -= 1;
         }
         // **And nothing is re-rendered.** The page we came back to is the one
-        // already on screen, so the shot that failed becomes the shot for it —
-        // clearing `asked` instead would send a fresh request for a page we have,
+        // already on screen and it is there at full size — `took` cleared the
+        // draft when it arrived — so the shot that failed becomes the shot for it.
+        // Clearing `asked` instead would send a fresh request for a page we have,
         // which is a spawn and a render for no change at all.
+        self.coarse = false;
         if let Some(shot) = &mut self.asked {
             shot.page = self.page;
         }
@@ -267,6 +367,49 @@ impl QuickLook {
     /// The sentence to draw when there is no picture and no text.
     pub(crate) fn message(&self) -> Option<&'static str> {
         self.refusal.and_then(Refusal::message)
+    }
+
+    /// Selects the whole file — `Ctrl+A`.
+    ///
+    /// The whole of what was *read*, which is a screenful and not a file: the
+    /// panel says so with an ellipsis and the clipboard gets what is on screen.
+    /// Copying bytes nobody has seen would be a paste nobody could predict.
+    pub(crate) fn select_all(&mut self) {
+        let Some(text) = &self.text else { return };
+        let Some(last) = text.lines.len().checked_sub(1) else { return };
+        self.chosen = Some(Chosen {
+            anchor: Spot { line: 0, byte: 0 },
+            caret: Spot { line: last, byte: text.lines[last].len() },
+        });
+    }
+
+    /// Whether there is a selection with anything in it.
+    pub(crate) fn has_selection(&self) -> bool {
+        self.chosen.is_some_and(|chosen| !chosen.is_empty())
+    }
+
+    /// The selected text, lines joined by newlines.
+    ///
+    /// **`\n` and not the platform's separator**, because there is one platform
+    /// and it is the one whose separator is `\n`.
+    pub(crate) fn chosen_text(&self) -> Option<String> {
+        let text = self.text.as_ref()?;
+        let chosen = self.chosen.filter(|it| !it.is_empty())?;
+        let (from, to) = chosen.ordered();
+        let mut out = String::new();
+        for line in from.line..=to.line.min(text.lines.len().saturating_sub(1)) {
+            let body = text.lines.get(line)?;
+            let start = if line == from.line { from.byte.min(body.len()) } else { 0 };
+            let end = if line == to.line { to.byte.min(body.len()) } else { body.len() };
+            if start > end || !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+                continue;
+            }
+            if line > from.line {
+                out.push('\n');
+            }
+            out.push_str(&body[start..end]);
+        }
+        Some(out)
     }
 
     /// What the page control says between its arrows.
@@ -303,7 +446,7 @@ impl QuickLook {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{LINES, QuickLook, Text, Tone};
+    use super::{Chosen, LINES, QuickLook, Spot, Text, Tone};
     use crate::previews::Shows;
     use sk_preview::Refusal;
 
@@ -351,6 +494,46 @@ mod tests {
         assert!(!Text::of("").truncated);
     }
 
+    /// **The stand-in stops being drawn the moment the real one lands.**
+    ///
+    /// Two pictures at once would be the thumbnail showing through wherever the
+    /// full one has transparency — the same picture-shaped hole the thumbnail
+    /// frames caught in the rows, one panel over.
+    #[test]
+    fn taking_a_picture_puts_the_stand_in_away_and_ends_the_coarse_pass() {
+        let mut look = paged(3);
+        look.standby = Some(sk_gpu::ImageKey(9));
+        look.coarse = true;
+        look.took(sk_gpu::ImageKey(10), (800, 600));
+        assert_eq!(look.standby, None, "the thumbnail is still under the picture");
+        assert!(!look.coarse, "the draft is still owed after the full size arrived");
+        assert_eq!(look.image, Some((sk_gpu::ImageKey(10), (800, 600))));
+    }
+
+    /// **A draft is a third of the long edge, and only for a document.**
+    ///
+    /// The asymmetry is the measurement, not a preference: a page costs what it
+    /// draws — 61–76 ms at 400 pixels against 135–200 ms at 1200 — and an image
+    /// costs its decode, 60 ms at 128 pixels and 67 ms at 1200, so a draft there
+    /// would be a second full price for nothing.
+    #[test]
+    fn a_document_asks_for_a_draft_first_and_an_image_does_not() {
+        let mut page = paged(3);
+        page.coarse = true;
+        assert_eq!(page.shot((1200, 900)).within, (400, 300));
+
+        page.coarse = false;
+        assert_eq!(page.shot((1200, 900)).within, (1200, 900));
+
+        // A turn owes a draft again, which is what makes `↓` feel like `↓`.
+        assert!(page.turn(1));
+        assert_eq!(page.shot((1200, 900)).within, (400, 300));
+
+        // And a tiny panel is not divided into nothing.
+        page.coarse = true;
+        assert_eq!(page.shot((90, 60)).within, (64, 42));
+    }
+
     /// A look with no child behind it, for the page arithmetic.
     fn paged(pages: u32) -> QuickLook {
         QuickLook {
@@ -362,10 +545,88 @@ mod tests {
             refusal: None,
             page: 1,
             pages,
+            standby: None,
+            coarse: false,
             asked: Some(super::Shot { within: (800, 600), page: 1 }),
             scroll: sk_ui::Scroll::default(),
+            chosen: None,
+            dragging: false,
             reading: None,
         }
+    }
+
+    /// A look holding `body` as its text, for the selection arithmetic.
+    fn texted(body: &str) -> QuickLook {
+        let mut look = paged(0);
+        look.shows = Shows::Text;
+        look.text = Some(Text::of(body));
+        look
+    }
+
+    /// **What is copied is what the highlight covers**, on one line and across
+    /// several, and the lines are joined by newlines and not by the platform's
+    /// separator — there is one platform and its separator is a newline.
+    #[test]
+    fn copying_a_selection_gives_back_exactly_what_it_spans() {
+        let mut look = texted("first line\nsecond line\nthird line\n");
+
+        // Part of one line.
+        look.chosen =
+            Some(Chosen { anchor: Spot { line: 1, byte: 0 }, caret: Spot { line: 1, byte: 6 } });
+        assert_eq!(look.chosen_text().as_deref(), Some("second"));
+
+        // Across three, from the middle of the first to the middle of the last.
+        look.chosen =
+            Some(Chosen { anchor: Spot { line: 0, byte: 6 }, caret: Spot { line: 2, byte: 5 } });
+        assert_eq!(look.chosen_text().as_deref(), Some("line\nsecond line\nthird"));
+
+        // **Dragged upward is the same selection.** The ends are an anchor and a
+        // caret, not a start and an end, so this is the case that a `start..end`
+        // model gets wrong by producing nothing at all.
+        look.chosen =
+            Some(Chosen { anchor: Spot { line: 2, byte: 5 }, caret: Spot { line: 0, byte: 6 } });
+        assert_eq!(look.chosen_text().as_deref(), Some("line\nsecond line\nthird"));
+    }
+
+    /// An empty selection is nothing to copy, and a click without a drag makes
+    /// one — so `Ctrl+C` there must not quietly copy the whole file.
+    #[test]
+    fn a_click_without_a_drag_selects_nothing_and_copies_nothing() {
+        let mut look = texted("one\ntwo\n");
+        look.chosen =
+            Some(Chosen { anchor: Spot { line: 0, byte: 2 }, caret: Spot { line: 0, byte: 2 } });
+        assert!(!look.has_selection());
+        assert_eq!(look.chosen_text(), None);
+    }
+
+    /// `Ctrl+A` takes the whole of what was *read* — a screenful, not a file.
+    #[test]
+    fn select_all_covers_every_line_that_was_read() {
+        let mut look = texted("alpha\nbeta\ngamma");
+        look.select_all();
+        assert!(look.has_selection());
+        assert_eq!(look.chosen_text().as_deref(), Some("alpha\nbeta\ngamma"));
+
+        // And a preview of nothing has nothing to select, rather than a selection
+        // of one empty line.
+        let mut empty = texted("");
+        empty.select_all();
+        assert!(!empty.has_selection());
+    }
+
+    /// A selection that outlives the text it was made in copies nothing rather
+    /// than panicking on a slice.
+    ///
+    /// **The case is a page turn.** `←` replaces the whole look, but a `Text` that
+    /// arrives late on a look whose selection was set by `Ctrl+A` on the previous
+    /// one would index past the end — and a byte range into a `String` is a panic,
+    /// not a wrong answer.
+    #[test]
+    fn a_selection_past_the_end_of_the_text_copies_what_is_there() {
+        let mut look = texted("short\n");
+        look.chosen =
+            Some(Chosen { anchor: Spot { line: 0, byte: 0 }, caret: Spot { line: 40, byte: 900 } });
+        assert_eq!(look.chosen_text().as_deref(), Some("short"));
     }
 
     /// **`↓` stops at the end and `↑` at the beginning**, where the count is

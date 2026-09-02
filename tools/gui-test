@@ -1246,7 +1246,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 114
+FEWEST_SCENARIOS = 115
 
 
 def scenario(name, fresh: bool = False):
@@ -1766,6 +1766,89 @@ def arrows_walk_the_look_and_a_pdfs_pages(run: Run, fixture: Path) -> None:
     aimed = look_aim(run, "next_file")
     run.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 900\n")
     until_looking(run, "look-d.pdf", "page")
+
+
+@scenario("a-text-preview-selects-and-copies", fresh=True)
+def a_text_preview_selects_and_copies(run: Run, fixture: Path) -> None:
+    """**Dragging across a text preview selects it, and `Ctrl+C` copies it.**
+
+    Four claims:
+
+    * a drag inside the panel selects from where it started to where it ended,
+      which is asserted as a byte range rather than as pixels;
+    * `Ctrl+C` puts exactly that on the clipboard, read by a *separate client* —
+      the window's own report would pass with the selection never taken;
+    * `Ctrl+A` inside the preview selects the text and not the files behind it,
+      which is the whole reason [`sk_cmd::Scope::Look`] exists;
+    * and the preview's own context menu offers both, because the panel covers
+      the list a pointer would otherwise use — [rule 5](../docs/03-principles.md).
+    """
+    lines = ["alpha beta gamma", "second line here", "third and last"]
+    (fixture / "notes.txt").write_text("\n".join(lines) + "\n")
+
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text notes\nsleep 400\n")
+    until(run, cursor="notes.txt")
+    run.drive("key space\nsleep 600\n")
+    until_looking(run, "notes.txt", "text")
+
+    # **`Ctrl+A` first, because it needs no arithmetic.** If the look scope were
+    # not consulted this would select the files behind the panel instead, which
+    # the second assertion below catches.
+    picked = int(run.state()["selected"])
+    run.drive("key ctrl+a\nsleep 300\n")
+    whole = holds(run, lambda it: it["look_chosen"] != "none", "a selection")
+    last = len(lines) - 1
+    if whole["look_chosen"] != f"0:0-{last}:{len(lines[last])}":
+        raise Failure(f"Ctrl+A selected {whole['look_chosen']!r}")
+    if int(whole["selected"]) != picked:
+        raise Failure("Ctrl+A in a preview changed the file selection behind it")
+
+    run.drive("key ctrl+c\nsleep 400\n")
+    held = clipboard(run)
+    if held != "\n".join(lines):
+        raise Failure(f"the clipboard holds {held!r}")
+
+    # Then a drag, across the middle of the second line. The panel's own geometry
+    # is not exposed, so this aims by the text's own metrics: the mono advance is
+    # read off the window's `row_h` only for the vertical, and the horizontal is
+    # deliberately generous — what is asserted is the *range*, which the window
+    # reports, and not the pixel it came from.
+    inner = [float(v) for v in whole["panel_area"].split(":")]
+    top = inner[1] + 34.0
+    row = float(whole["row_h"])
+    from_at = aim(run, whole, inner[0] + 90.0, top + row * 1.5)
+    to_at = aim(run, whole, inner[0] + 200.0, top + row * 1.5)
+    run.drive(
+        f"move {from_at[0]:.2f} {from_at[1]:.2f}\nsleep 150\n"
+        f"press left\nsleep 150\n"
+        f"move {to_at[0]:.2f} {to_at[1]:.2f}\nsleep 200\n"
+        f"release left\nsleep 300\n"
+    )
+    dragged = holds(
+        run,
+        lambda it: it["look_chosen"] != "none" and it["look_chosen"] != whole["look_chosen"],
+        "a selection the drag made",
+    )
+    start, _, end = dragged["look_chosen"].partition("-")
+    if not start.startswith("1:") or not end.startswith("1:"):
+        raise Failure(f"a drag across one line selected {dragged['look_chosen']!r}")
+    if int(start.split(":")[1]) >= int(end.split(":")[1]):
+        raise Failure(f"the drag selected nothing forward: {dragged['look_chosen']!r}")
+
+    # And the pointer's way to both, which is the preview's own menu.
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    opened = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+    for wanted in ("look.select_all", "look.copy"):
+        if wanted not in opened["menu_aim"]:
+            raise Failure(f"{wanted} is not on the preview's menu: {opened['menu_aim']!r}")
+    aimed = menu_aim(run, opened, "look.copy")
+    run.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 400\n")
+    if clipboard(run) == "\n".join(lines):
+        raise Failure("the menu's Copy copied the whole file rather than the drag")
 
 
 def look_aim(run: Run, control: str) -> tuple[float, float]:
@@ -4501,15 +4584,23 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
         into = aim(run, before, name_x(before), empty)
         drag_between(run, middle_of(run, peer.box()), into, steps=14, pace=220)
 
-        peer.wait_for("drag ended")
-        if "asked for text/uri-list" not in peer.output():
-            raise Failure(f"the peer was never asked for the files: {peer.output()!r}")
+        # **The file first, then the protocol's courtesy.** `XdndFinished` is sent
+        # after the drop has been *acted* on, so waiting for it before waiting for
+        # the file was waiting for the second half of a job with a six-second
+        # budget. Measured: **two failures in eight runs** before this, on this
+        # commit and on the one before it — so the sweeps had been passing on luck
+        # — and **one in sixteen** after, which is not the same defect. What is
+        # left fails with "nothing landed": the synthetic drag itself is not
+        # delivered, which is XTEST and pacing rather than a wait in the wrong
+        # place, and is owed.
+        peer.wait_for("asked for text/uri-list")
         for _ in range(40):
             if (fixture / carried.name).is_file():
                 break
             run.drive("sleep 200\n")
         else:
             raise Failure(f"nothing landed: {sorted(p.name for p in fixture.iterdir())}")
+        peer.wait_for("drag ended")
         # The peer's original stays: a drag in is a copy.
         if not carried.is_file():
             raise Failure("the drag deleted the peer's original")

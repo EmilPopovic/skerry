@@ -141,6 +141,31 @@ pub fn caret_offset(
     if (want - before).abs() <= (after - want).abs() { low } else { high }
 }
 
+/// How wide the first `bytes` of `text` are, in device pixels.
+///
+/// **Deliberately not through the layout cache**, for the reason
+/// [`caret_offset`] gives: a prefix is a distinct string, the cache holds 256 and
+/// clears wholesale at the cap, so drawing a selection would evict every chrome
+/// string in the window once per frame.
+///
+/// The companion of `caret_offset` and its inverse: that one takes a pixel and
+/// gives a byte, this takes a byte and gives a pixel. A selection needs both —
+/// the pointer speaks pixels and the clipboard speaks bytes.
+#[must_use]
+pub fn advance_to(
+    fonts: &mut Fonts,
+    text: &str,
+    weight: Weight,
+    px_size: f32,
+    bytes: usize,
+) -> f32 {
+    let bytes = bytes.min(text.len());
+    if bytes == 0 || !text.is_char_boundary(bytes) {
+        return 0.0;
+    }
+    fonts.shape(&text[..bytes], px_size, weight).advance
+}
+
 /// Everything one frame's drawing needs, borrowed for the length of the frame.
 pub struct Painter<'a> {
     /// The frame being built.

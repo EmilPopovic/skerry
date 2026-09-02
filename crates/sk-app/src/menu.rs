@@ -37,6 +37,16 @@ pub const ON_ROW: &[&[&str]] = &[
     &["file.properties"],
 ];
 
+/// What a secondary click inside a text preview offers.
+///
+/// **Two rows, and they are the pointer's way to the look's own scope.** `Ctrl+A`
+/// and `Ctrl+C` mean the text in the panel rather than the files behind it —
+/// [`sk_cmd::Scope::Look`] — and [rule
+/// 5](../../../docs/03-principles.md) wants both of them reachable without a
+/// keyboard. A menu is what every text view offers for exactly this, and it costs
+/// no new furniture: the rows come out of the same registry the chords do.
+pub const IN_A_LOOK: &[&[&str]] = &[&["look.select_all", "look.copy"]];
+
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],

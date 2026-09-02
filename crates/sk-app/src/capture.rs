@@ -134,22 +134,41 @@ fn sample_quick_look(
         while !look.drain() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
+        if request.look_selected {
+            look.select_all();
+        }
         return Some(look);
     }
-    look.asked = Some(look.shot(within));
     let mut previews = sk_preview::Previews::new();
-    previews.want(sk_preview::Want {
-        kind: match shows {
-            crate::previews::Shows::Page => sk_preview::Kind::Document,
-            _ => sk_preview::Kind::Image,
-        },
-        ask: sk_preview::Ask::Preview,
-        path,
-        mtime,
-        within,
-        page: look.page,
-    });
-    while look.image.is_none() && std::time::Instant::now() < deadline {
+    let helper = match shows {
+        crate::previews::Shows::Page => sk_preview::Kind::Document,
+        _ => sk_preview::Kind::Image,
+    };
+    // **Asks again for as long as the look still wants something**, which is what
+    // makes this the window's answer and not a coarser one. A document is fetched
+    // twice — a third-size draft that reaches the screen in a third of the time,
+    // then the full size — and a frame blessed on the draft would be a reference
+    // that only matches when the machine is slow.
+    // **Which shot has actually been answered**, because "there is an image" is
+    // not "there is nothing outstanding": the first version broke out of this loop
+    // in the round *after* asking for the full size, so every document frame was
+    // blessed on the third-size draft.
+    let mut served = None;
+    while std::time::Instant::now() < deadline {
+        if look.wants(within) {
+            let shot = look.shot(within);
+            look.asked = Some(shot);
+            previews.want(sk_preview::Want {
+                kind: helper,
+                ask: sk_preview::Ask::Preview,
+                path: path.clone(),
+                mtime,
+                within: shot.within,
+                page: shot.page,
+            });
+        } else if look.image.is_some() && served == look.asked {
+            break;
+        }
         previews.pump(&session.jobs.pool, &session.waker.handle());
         for answer in previews.drain() {
             // **The count as well as the pixels.** A frame that took only the
@@ -164,7 +183,11 @@ fn sample_quick_look(
                 // is the one number a thumbnail's counter cannot reach.
                 let key = sk_gpu::ImageKey(u64::MAX);
                 session.renderer.hold_preview(key, answer.size, &answer.pixels);
-                look.image = Some((key, answer.size));
+                look.took(key, answer.size);
+                served = Some(crate::quicklook::Shot {
+                    within: answer.key.within,
+                    page: answer.key.page,
+                });
             } else {
                 look.refusal = Some(answer.refusal);
                 break;
@@ -289,6 +312,12 @@ pub struct Capture {
     /// beside it, and two more open below — which is the only way to see that a
     /// collapse takes the rows and leaves the heading.
     pub collapsed: bool,
+    /// Whether that look's text is all selected, for a frame of the highlight.
+    ///
+    /// A flag rather than two coordinates: what a frame has to show is that a
+    /// selection is drawn behind the runs and across a blank line, and the whole
+    /// file shows that in one picture.
+    pub look_selected: bool,
     /// Which quick look to draw, by the name of the file it is of.
     ///
     /// A name rather than a flag, because the three kinds — a picture, a page and

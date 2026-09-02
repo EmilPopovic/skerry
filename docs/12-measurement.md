@@ -2176,3 +2176,90 @@ missing feature — the first is
 and both times the shape was a capability quietly absent rather than an error. A
 confinement has no way to tell you it is the reason; that has to come from a probe,
 and a probe that is not the real thing is worse than none.
+
+## Where a preview's latency actually was, and where it looked like it was
+
+"Make the previews load quicker" is the kind of request that invites optimising
+the decode. Measured first, over the helpers' own wire, seven requests each after
+a warm-up, on a 4000×2250 JPEG and a 66-page PDF:
+
+| output size | image | PDF page |
+| --- | --- | --- |
+| 128 px | 60–85 ms | — |
+| 320 px | 55–127 ms | 60–70 ms |
+| 400 px | — | 61–76 ms |
+| 640 px | — | 98–138 ms |
+| 1200 px | 67–155 ms | 135–200 ms |
+
+Spawning a helper is **1 ms**, so the process boundary ADR 0006 chose costs
+nothing here. Three things fall out of the table, and only one of them is what
+the request sounded like:
+
+**An image costs the same at every size.** 60 ms at 128 pixels and 67 ms at 1200:
+the JPEG decode dominates and `zune-jpeg` has no DCT-scaled decode, so a
+coarse-first pass would be paying full price twice. What is free instead is the
+128-pixel thumbnail already in the atlas — the row `Space` was pressed on was on
+screen — so the panel draws that at once and replaces it when the render lands.
+Time to first pixel: **0 ms**, and the only cost is a lookup.
+
+**A page costs what it draws.** 61–76 ms at 400 pixels against 135–200 ms at
+1200, because rendering is proportional to the output and not to the document
+(ADR 0019's table). So a document is fetched twice — a third-size draft, then the
+full size — and time to first pixel halves. The two changes are opposite
+decisions from the same table, which is the point of having measured rather than
+picked a strategy.
+
+**And the largest number was not in the table at all.** `BATCH` was 32, one batch
+holds the child for its whole run, and a batch cannot be recalled — so a `Space`
+pressed while a photo grid was thumbnailing waited behind up to 32 round trips.
+**1.9 seconds**, and it reads exactly like the window ignoring the key. Previews
+now form their own batch and go first, and `BATCH` is 8, which bounds the
+unavoidable case — a batch already in flight — at about 480 ms.
+
+**A fourth change was measured and declined.** `skerry-preview-doc` asks
+`pdftoppm -scale-to N` for the panel's *long edge*, so an A4 page in a landscape
+panel is rendered at 848×1200 and drawn at 565×800 — 2.2× the pixels, thrown away
+by the sampler. Fitting the render to the box needs the page's aspect, which the
+`pdfinfo` call already in the path could report for nothing. Measured at the
+fitted size: **128–161 ms against 135–200 ms**, about 13% with the two ranges
+overlapping. That is below the noise floor of this measurement, so the second code
+path is not worth having and the waste stays — written down here so the next
+person does not re-derive it.
+
+The rule this is the third instance of: **measure the thing the person described,
+not the thing the description made you think of.** The decode was the obvious
+suspect and is the one place nothing could be won. Two of the three wins were in
+scheduling and in something already on the GPU, and neither would have been found
+by profiling a decoder.
+
+## A sweep that had been passing on luck
+
+`a-drag-in-from-another-application-lands` failed in a full X11 sweep, and the
+first instinct — "that scenario is nothing to do with what I changed" — is the
+instinct this document exists to distrust. So it was measured on both sides,
+eight runs each, the previous commit built in a worktree beside the current one:
+
+| | passed | failed |
+| --- | --- | --- |
+| with the change | 6 | 2 |
+| at the previous commit | 6 | 2 |
+
+**Identical.** A pre-existing flake at 25%, which means every "0 failed" sweep
+this scenario has ever been part of was a coin landing the right way three times.
+That is worse than a red test: a gate that fails one run in four teaches everyone
+reading it to discount a failure, which is the whole value of the gate gone.
+
+The cause was a wait in the wrong order. `XdndFinished` — the peer's "drag ended"
+— is sent *after* the drop has been acted on, so waiting for it before waiting for
+the file to arrive was waiting on the far side of a job with a six-second budget.
+The scenario now waits for the file, which is the claim, and asserts the
+notification afterwards, by which time it has long since landed. Measured again:
+**one failure in sixteen**, and it fails differently — "nothing landed", the
+synthetic drag not being delivered at all. That is XTEST and pacing, it is owed,
+and it is written down here rather than left as folklore about a scenario that
+"sometimes goes red".
+
+Two things to take from it. **A flake rate is a number and can be measured in two
+minutes** — sixteen runs of one scenario — so "probably unrelated" is never the
+last word available. And **the same experiment settles both questions at once**:
+whether the failure is yours, and how bad it was before you arrived.

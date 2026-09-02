@@ -222,8 +222,18 @@ FRAMES = [
     ("quick-look-page", ["--size", "900x600", "--scale", "125", "--look", "paper.pdf"],
      "pictures"),
     # The text one is where the syntax-highlighting seam is: every line is drawn as
-    # runs carrying a tone, and there is one tone.
+    # runs carrying a tone, and there is one tone. In the mono face, with its lines
+    # numbered, because a file's own text is the one place in this program where the
+    # columns are the content.
     ("quick-look-text", ["--size", "900x600", "--scale", "125", "--look", "readme.txt"],
+     "pictures"),
+    # **And with all of it selected.** What this shows is the highlight behind the
+    # runs rather than over them, that a blank line inside the selection is
+    # highlighted rather than skipped, and that a line which continues into the
+    # next one is highlighted past its own last character — three things that make
+    # a selection read as one region instead of nine.
+    ("quick-look-chosen",
+     ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-selected"],
      "pictures"),
     # **The visible history**, expanded, with one step undone — which is the state
     # that shows the whole design in one frame: the present marked with an accent

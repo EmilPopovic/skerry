@@ -974,7 +974,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));
     reach.push(("tab.close", "the cross on a tab, or a double click on it"));
-    for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND] {
+    for groups in [crate::menu::ON_ROW, crate::menu::ON_BACKGROUND, crate::menu::IN_A_LOOK] {
         for id in groups.iter().flat_map(|group| group.iter()) {
             reach.push((id, "the context menu"));
         }
@@ -1139,6 +1139,40 @@ fn field(registry: &mut Registry<App>) {
         },
     ] {
         registry.add_in(sk_cmd::Scope::Field, spec);
+    }
+    look_scope(registry);
+}
+
+/// The two chords a text preview takes from the listing behind it.
+///
+/// **In the registry rather than handled privately**, because that is the only
+/// place the difference between "select all the files" and "select all the text"
+/// can live if a keymap is ever to be rebindable — the argument
+/// [`sk_cmd::Scope`] was written for. The pointer reaches both through the
+/// preview's own context menu, which is built from these same entries.
+fn look_scope(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "look.select_all",
+            name: "action.look_select_all",
+            group: Group::Edit,
+            keys: &["ctrl+a"],
+            enabled: App::looking_at_text,
+            run: App::select_all_of_the_look,
+        },
+        CommandSpec {
+            id: "look.copy",
+            name: "action.look_copy",
+            group: Group::Edit,
+            keys: &["ctrl+c"],
+            // Dimmed with nothing selected rather than copying the whole file,
+            // because `Ctrl+C` on an empty selection copying everything is a
+            // surprise somebody discovers by pasting.
+            enabled: App::look_has_a_selection,
+            run: App::copy_the_look_selection,
+        },
+    ] {
+        registry.add_in(sk_cmd::Scope::Look, spec);
     }
 }
 

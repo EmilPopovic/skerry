@@ -2,6 +2,7 @@
 # Written by tools/golden --bless. See the module docstring.
 89c3c497f618  NotoSans-Regular.ttf
 e83493c94584  NotoSans-Bold.ttf
+6b692c4b6d15  NotoSansMono-Regular.ttf
 b76b04332030  NotoSansCJK-Regular.ttc
 504d7407d868  NotoSansArabic-Regular.ttf
 436900d5ad77  NotoSansHebrew-Regular.ttf

@@ -24,13 +24,19 @@ use std::sync::mpsc;
 
 use crate::wire::{Ask, Refusal, Reply, Request};
 
-/// How many requests one batch carries.
+/// How many thumbnails one batch carries.
 ///
-/// **A screenful, not a listing.** The batch holds the child for its whole run, so
-/// a batch of ten thousand would be a preview panel that cannot open until a grid
-/// has finished. Thirty-two is more than one screen of grid cells and short enough
-/// that a second kind of work is never far behind.
-const BATCH: usize = 32;
+/// **Eight, and the number is a latency bound rather than a throughput one.** The
+/// batch holds the child for its whole run and a batch cannot be recalled, so its
+/// length *is* the worst case a preview waits behind — and a round trip is
+/// 60–155 ms on a directory of 4000×2250 JPEGs, measured over the wire. Thirty-two
+/// was 1.9 seconds of that, which reads exactly like the window ignoring `Space`.
+///
+/// The throughput given up is a frame of idle child time between batches: about
+/// 8 ms in every 500, or 1.7%. A batch exists to amortise a job dispatch — a
+/// channel send and a thread wake, microseconds — against a 60 ms round trip, so
+/// there was never much to amortise.
+const BATCH: usize = 8;
 
 /// How long the host waits for one reply before giving the child up for dead.
 ///
@@ -78,6 +84,16 @@ pub struct Want {
 }
 
 impl Want {
+    /// Whether somebody is looking at the panel this answers.
+    ///
+    /// A preview is; a thumbnail is one cell of a grid that will look the same in
+    /// a moment either way. What this decides is queue order — see
+    /// [`Previews::pump`].
+    #[must_use]
+    pub fn is_urgent(&self) -> bool {
+        self.ask == Ask::Preview
+    }
+
     /// What this want is keyed by: the file, when it changed, and how big.
     ///
     /// **The mtime is in the key** — [ADR
@@ -190,6 +206,16 @@ impl Previews {
         self.queue.clear();
     }
 
+    /// The wants that have not been asked yet, for a test of the order they go in.
+    ///
+    /// **Not a general accessor.** The queue's order is `pump`'s business and
+    /// nothing else reads it; this exists so the ordering rule can be asserted
+    /// without a job pool, and it is the whole of what that test needs.
+    #[cfg(test)]
+    pub(crate) fn queued(&self) -> &[Want] {
+        &self.queue
+    }
+
     /// How many wants are queued, for the diagnostic line.
     #[must_use]
     pub fn waiting(&self) -> usize {
@@ -208,9 +234,17 @@ impl Previews {
             if self.busy.contains(&kind) || !self.queue.iter().any(|want| want.kind == kind) {
                 continue;
             }
-            let mut batch = Vec::with_capacity(BATCH);
+            // **Previews first, and alone.** A preview is the one somebody is
+            // waiting for; a thumbnail is one of forty in a grid nobody has looked
+            // at yet. Mixing them would put a `Space` behind however many
+            // thumbnails happened to be queued first, and the queue is filled by a
+            // scroll — so the wait would depend on how fast the person scrolled.
+            let urgent = self.queue.iter().any(|want| want.kind == kind && want.is_urgent());
+            let room = if urgent { BATCH.max(1) } else { BATCH };
+            let mut batch = Vec::with_capacity(room);
             self.queue.retain(|want| {
-                if want.kind == kind && batch.len() < BATCH {
+                let mine = want.kind == kind && (!urgent || want.is_urgent());
+                if mine && batch.len() < room {
                     batch.push(want.clone());
                     return false;
                 }
@@ -384,6 +418,35 @@ mod tests {
             within: (128, 128),
             page: 0,
         }
+    }
+
+    /// **A preview leaves the queue before a thumbnail that was asked first.**
+    ///
+    /// The order matters because the queue is filled by a *scroll*: without this,
+    /// how long a `Space` waits depends on how many cells the person happened to
+    /// scroll past, which is the shape of a latency nobody can explain. A batch
+    /// cannot be recalled once out, so this is the half that is fixable — the
+    /// other half is `BATCH`, whose comment carries the number.
+    #[test]
+    fn a_preview_is_taken_before_thumbnails_that_were_queued_first() {
+        let mut host = Previews::new();
+        for index in 0..20 {
+            host.want(want(&format!("/a/{index}.png")));
+        }
+        let mut looked = want("/a/looked-at.png");
+        looked.ask = Ask::Preview;
+        host.want(looked.clone());
+        assert_eq!(host.waiting(), 21);
+
+        // `pump` needs a pool and a waker to send anything, so what is asserted is
+        // the batch this would form — the same predicate `pump` uses.
+        let urgent: Vec<&Want> = host.queued().iter().filter(|it| it.is_urgent()).collect();
+        assert_eq!(urgent.len(), 1, "the preview is not the only urgent want");
+        assert_eq!(urgent[0].path, looked.path);
+        assert!(
+            host.queued().iter().filter(|it| !it.is_urgent()).count() == 20,
+            "the thumbnails stopped being ordinary"
+        );
     }
 
     /// **A host that is not asked for anything starts nothing**, which is what
