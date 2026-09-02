@@ -81,8 +81,12 @@ jobs:
         run: ./tools/check
 
   frames:
-    # The golden frames, which need a software Vulkan, Pillow, and the exact fonts
-    # the references were rendered with. The first two are asserted below rather
+    # The golden frames, which need a software Vulkan, Pillow, a PDF renderer and
+    # the exact fonts the references were rendered with. `poppler-utils` is there
+    # for one frame — `quick-look-page`, whose whole point is that the page is
+    # rendered by whatever is on `PATH` — and without it that frame draws the
+    # sentence saying no renderer is installed, which is a real state of the
+    # program and not the one the reference was blessed in. The first two are asserted below rather
     # than trusted, because `tools/golden` *skips* where either is missing —
     # right for a person, decoration here. The fonts the harness checks itself,
     # against the hash of every file in `tests/golden/faces.txt`.
@@ -95,7 +99,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev mesa-vulkan-drivers python3-pil \
-            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
+            poppler-utils
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update

@@ -437,6 +437,14 @@ impl Painter<'_> {
         self.list.image(key, box_rect, tint);
     }
 
+    /// The one preview picture, filling `box_rect` exactly.
+    ///
+    /// The caller has already fitted it: a preview is rendered at the size it will
+    /// be drawn at, so the shape is known before the pixels are asked for.
+    pub fn preview(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
+        self.list.preview(key, box_rect, tint);
+    }
+
     /// A check box: a framed square with a block of `ink` in it when it is on.
     ///
     /// **No tick, because a tick is a diagonal.** The display list has rectangles,

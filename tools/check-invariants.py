@@ -171,10 +171,18 @@ def catalogue_check(report: Report) -> None:
     asserts a name did not resolve to its own id.
     """
     keys = set()
-    for line in CATALOGUE.read_text().splitlines():
+    for number, line in enumerate(CATALOGUE.read_text().splitlines(), start=1):
         line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            keys.add(line.split("=", 1)[0].strip())
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        # **A key twice is a key a translator maintains twice**, and the loser is
+        # silent: the loader keeps one and nothing says which. Both of the ones
+        # this caught were a scripted edit that appended a block it had already
+        # appended, which is invisible in a diff that is read as an addition.
+        if key in keys:
+            report.fail(f"{rel(CATALOGUE)}:{number}", f"`{key}` is in the catalogue twice")
+        keys.add(key)
     for source in rust_sources("crates", "bin"):
         text = source.read_text()
         lines = text.splitlines()
@@ -211,6 +219,13 @@ def spliced_comment_check(report: Report) -> None:
     of another sentence is two comments that have been run together. Measured
     against the whole tree when this was written: two hits, both real, no false
     positives.
+
+    **What it does not catch** is a comment spliced onto the *end* of a paragraph
+    rather than after a summary — the block then reads as one comment with an odd
+    last paragraph, and the item below is left with none. The detectable half of
+    that is the orphan, and the lint for it,
+    `clippy::missing_docs_in_private_items`, reports 300 items across the
+    workspace today. See [12-measurement.md](../docs/12-measurement.md).
     """
     for source in rust_sources("crates", "bin"):
         lines = source.read_text().splitlines()

@@ -20,6 +20,9 @@ struct Uniforms {
 // forty, so it is always minified and nearest sampling would be the aliasing the
 // child's box filter exists to avoid.
 @group(0) @binding(5) var image_sampler: sampler;
+// The one preview, which is not in the atlas because it is not the atlas's size —
+// ADR 0018. It shares the filtering sampler above.
+@group(0) @binding(6) var preview_texture: texture_2d<f32>;
 
 const KIND_RECT: u32 = 0u;
 const KIND_MASK: u32 = 1u;
@@ -28,6 +31,7 @@ const KIND_COLOR: u32 = 2u;
 const KIND_TRIANGLE: u32 = 3u;
 // After the four triangles. A thumbnail from the image atlas — ADR 0018.
 const KIND_IMAGE: u32 = 7u;
+const KIND_PREVIEW: u32 = 8u;
 
 struct Instance {
     @location(0) rect: vec4<f32>,   // device px: x, y, w, h
@@ -67,6 +71,11 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> Vertex {
     var atlas = select(u.mask_size, u.color_size, instance.kind == KIND_COLOR);
     if instance.kind == KIND_IMAGE {
         atlas = u.image_size;
+    }
+    // A preview's texture is exactly its own size, so its uv is its own extent —
+    // which the instance already carries, and dividing by it gives 0..1.
+    if instance.kind == KIND_PREVIEW {
+        atlas = instance.uv.zw;
     }
 
     var out: Vertex;
@@ -129,6 +138,11 @@ fn fs(in: Vertex) -> @location(0) vec4<f32> {
         }
         let alpha = in.color.a * coverage;
         return vec4<f32>(in.color.rgb * alpha, alpha);
+    }
+    if in.kind == KIND_PREVIEW {
+        let texel = textureSample(preview_texture, image_sampler, in.uv);
+        let alpha = texel.a * in.color.a;
+        return vec4<f32>(texel.rgb * alpha, alpha);
     }
     if in.kind == KIND_IMAGE {
         // Straight RGBA from the child, premultiplied here — the blend state is

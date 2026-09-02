@@ -6,9 +6,9 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Eleven crates, 633
-tests, 112 GUI scenarios **on both Wayland and X11**, forty-seven golden frames, every
-gate green: a Details view
+**M0, in progress, and something you can use for a day.** Twelve crates and two
+sandboxed helpers, 674 tests, 113 GUI scenarios **on both Wayland and X11**,
+fifty-three golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar, **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
@@ -62,6 +62,14 @@ that band — filtering by group, at no sort, with the heading left holding the 
 of what is behind it and the status line saying `9 of 12 items`; **a check box over
 an entry's mark** selects with the pointer alone, the same `Selection::toggle`
 `Ctrl`-click has always had and `Ctrl+Space` now has too;
+**a picture is its own mark** — PNG, JPEG and SVG decoded in
+`skerry-thumbnailer`, a process with no execute right anywhere and nothing writable
+but the XDG cache it shares with every other file manager on the machine, drawn
+from a grid of equal slots ([ADR 0018](docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md))
+that is one texel until the first thumbnail exists — and **`Space` is a quick
+look**: the picture, a PDF's first page through whatever renderer is on `PATH`, or
+the file's own text, drawn as runs carrying a tone so a highlighter replaces one
+function and nothing else;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and

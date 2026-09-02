@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1245,7 +1246,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 112
+FEWEST_SCENARIOS = 113
 
 
 def scenario(name, fresh: bool = False):
@@ -1517,6 +1518,125 @@ def the_history_lists_edits_and_travels_to_one(run: Run, fixture: Path) -> None:
         raise Failure(f"the header left it {shut and shut['history_open']}")
     if shut["history_aim"] == "none":
         raise Failure("collapsing took the header away, so it cannot be reopened")
+
+
+@scenario("space-looks-at-a-file-and-space-puts-it-away", fresh=True)
+def space_looks_at_a_file_and_space_puts_it_away(run: Run, fixture: Path) -> None:
+    """**Quick look, which no golden frame can open.** A frame is told what to
+    draw; this is the key that decides, and the round trip to a sandboxed child
+    that answers it.
+
+    Four claims:
+
+    * `Space` on a picture puts it on screen, which means a request went to
+      `skerry-thumbnailer`, came back, and reached the atlas — the whole preview
+      path end to end, in a real window;
+    * `Space` again puts it away, because it is one key both ways;
+    * `Escape` also puts it away, and closes the look rather than the selection
+      behind it;
+    * and `Space` on a file nothing can draw opens nothing at all, rather than a
+      panel whose only content is an apology.
+
+    The pictures are written here rather than taken from the shared fixture,
+    whose `img2.png` is four kilobytes of `x`.
+    """
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    raw = b"".join(
+        b"\x00" + bytes(v for x in range(48) for v in ((200, 40, 90) if x < 24 else (40, 160, 220)))
+        for _ in range(48)
+    )
+    (fixture / "picture.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 48, 48, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    (fixture / "notes.txt").write_text("first line\nsecond line\n")
+    # A file the databases name and this program cannot draw: `application/zip` is
+    # neither a picture, nor a PDF, nor text, which is the fourth claim's subject.
+    (fixture / "bundle.zip").write_bytes(b"PK\x03\x04" + bytes(64))
+
+    settled = listed(run)
+    if settled["looking"] != "none":
+        raise Failure(f"a window that has looked at nothing reports {settled['looking']}")
+
+    # **A reload, because these two files were written after the window opened.**
+    # `inotify` would bring them within a quarter of a second and a sleep long
+    # enough for that on an idle machine is too short on a busy one; asking is
+    # neither a guess nor a wait.
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 3, f"more than {before} rows")
+
+    # **Onto the picture by name**, because the row it lands on depends on what
+    # else the fixture holds and this scenario adds two files to it.
+    run.drive("text picture\nsleep 400\n")
+    until(run, cursor="picture.png")
+
+    run.drive("key space\nsleep 600\n")
+    until_looking(run, "picture.png", "picture")
+
+    # The same key puts it away.
+    run.drive("key space\nsleep 300\n")
+    away = run.answered(settle=300)
+    if away is None or away["looking"] != "none":
+        raise Failure(f"the second Space left {away and away['looking']}")
+
+    # And `Escape` does too — which must close the look rather than the selection
+    # behind it, so the cursor is still there afterwards.
+    run.drive("key space\nsleep 600\n")
+    until_looking(run, "picture.png", "picture")
+    run.drive("key escape\nsleep 300\n")
+    escaped = run.answered(settle=300)
+    if escaped is None or escaped["looking"] != "none":
+        raise Failure(f"Escape left {escaped and escaped['looking']}")
+    if escaped["cursor"] != "picture.png":
+        raise Failure(f"Escape took the selection too: cursor is {escaped['cursor']!r}")
+
+    # Text is the third kind and needs no child at all.
+    run.drive("key escape\nsleep 200\ntext notes\nsleep 400\n")
+    until(run, cursor="notes.txt")
+    run.drive("key space\nsleep 500\n")
+    until_looking(run, "notes.txt", "text")
+    run.drive("key escape\nsleep 200\n")
+
+    # And a file nothing can draw opens nothing: a panel saying "no preview" is a
+    # panel whose only content is an apology, with the file still in the list
+    # behind it.
+    #
+    # **Reached by a wait rather than a condition.** The first version of this
+    # asked `run.state()` whether the cursor had arrived and skipped the check if
+    # it had not — and the file it typed for was never in the fixture, so the
+    # fourth claim in the docstring above was never once tested.
+    run.drive("key escape\nsleep 200\ntext bundle\nsleep 400\n")
+    until(run, cursor="bundle.zip")
+    run.drive("key space\nsleep 400\n")
+    nothing = run.answered(settle=300)
+    if nothing is None or nothing["looking"] != "none":
+        raise Failure(f"a file with no preview opened {nothing and nothing['looking']}")
+
+
+def until_looking(run: Run, name: str, what: str) -> dict[str, str]:
+    """Waits for the quick look to be of `name`, showing `what`.
+
+    A poll rather than a sleep: a picture is a round trip to a child that spawns,
+    sandboxes itself and decodes, and how long that takes is the machine's
+    business. `waiting` is the state in between and is what this waits out.
+    """
+    deadline = time.time() + WAITING
+    state: dict[str, str] = {}
+    while time.time() < deadline:
+        fresh = run.answered()
+        if fresh is not None:
+            state = fresh
+            if state.get("looking") == f"{name}:{what}":
+                return state
+    raise Failure(f"the look never became {name}:{what} — it is {state.get('looking')}")
 
 
 @scenario("a-hung-mount-never-blocks-the-frame-loop", fresh=True)
@@ -2788,6 +2908,14 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
     Wayland, where it is not. Scrolling here is also the only thing that covers a
     scrolled menu being clickable at all.
     """
+    # **Wait for a drawn menu before reading one.** The aim points come from the
+    # hit rectangles a *frame* fills, so a dump taken between the click and the
+    # next frame reports every row as dimmed-or-not and none of them as anywhere.
+    # Under a full sweep that is what arrives, and the reads below then take an
+    # empty string apart — a crash rather than a failure, which is the same defect
+    # `keyboard-cursor` records at the top of this file.
+    if not state.get("menu_aim"):
+        state = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
     for attempt in range(8):
         for entry in state.get("menu_aim", "").split(","):
             name, _, point = entry.partition("@")
@@ -6611,7 +6739,16 @@ def main(argv: list[str]) -> int:
                 # from a bounded subprocess, or a typo in a scenario, used to end
                 # the run at whatever scenario it happened in and report nothing
                 # about the ninety after it.
-                verdict(f"  FAIL  {name}: {type(crash).__name__}: {crash}", began)
+                # **With the line it happened on**, which a bare message does
+                # not give: `could not convert string to float: ''` names neither
+                # the field that was empty nor the read that assumed it was not,
+                # and a scenario has a dozen of both.
+                where = traceback.extract_tb(crash.__traceback__)[-1]
+                verdict(
+                    f"  FAIL  {name}: {type(crash).__name__}: {crash} "
+                    f"(line {where.lineno}: {where.line})",
+                    began,
+                )
                 failed.append(name)
             finally:
                 if run is not None:

@@ -17,12 +17,20 @@ use crate::layout::Area;
 
 /// What a secondary click on a row offers.
 ///
-/// Grouped, and the groups are the separators: Open on its own because it is
-/// what a double click already does, the two clipboard entries together, and the
-/// two that change the file last — where a slip costs the most and the pointer
-/// is least likely to be.
+/// Grouped, and the groups are the separators: the ways of seeing the file
+/// first — Open because it is what a double click already does, and the quick
+/// look because it is the one that does not leave — then the two clipboard
+/// entries together, and the two that change the file last, where a slip costs
+/// the most and the pointer is least likely to be.
 pub const ON_ROW: &[&[&str]] = &[
-    &["go.open", "go.open_new_tab", "go.open_beside", "go.open_below", "file.open_with"],
+    &[
+        "go.open",
+        "go.open_new_tab",
+        "go.open_beside",
+        "go.open_below",
+        "file.open_with",
+        "view.quick_look",
+    ],
     &["file.copy", "file.cut", "file.paste"],
     &["file.copy_path", "file.copy_content"],
     &["file.duplicate", "file.rename", "file.trash", "file.delete"],

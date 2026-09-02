@@ -37,6 +37,8 @@ pub struct Chrome<'a> {
     pub keys: Option<&'a [(String, String)]>,
     /// The frame statistics.
     pub stats: bool,
+    /// The file being looked at, if `Space` has been pressed on one.
+    pub quick_look: Option<&'a crate::quicklook::QuickLook>,
     /// The undo stack, whose entries the history strip lists.
     ///
     /// `None` where there is no stack to draw — a bench, whose frame is measured
@@ -346,6 +348,9 @@ pub fn draw(
     }
     if chrome.stats {
         stats_overlay(hits, painter, pane, here, diagnostics);
+    }
+    if let Some(look) = chrome.quick_look {
+        quick_look(painter, layout, look, hits);
     }
     if let Some(rows) = chrome.keys {
         keys_overlay(painter, layout, rows, hits);
@@ -937,6 +942,135 @@ const CRUMB_MENU_INSET: f32 = 10.0;
 const CRUMB_MENU_MARK: f32 = 16.0;
 /// How wide the menu may be, whatever its widest name is.
 const CRUMB_MENU_WIDTH: (f32, f32) = (160.0, 420.0);
+
+/// How much of the window a quick look takes.
+///
+/// **Most of it, with a margin.** A quick look is the thing being looked at; a
+/// panel that took half the window would be a picture too small to have been
+/// worth opening. The margin is what keeps the list visible behind it, so it is
+/// still obvious what is being looked at and where it came from.
+const QUICK_LOOK_MARGIN: f32 = 48.0;
+
+/// The strip at the top of the panel that holds its title.
+const QUICK_LOOK_TITLE: f32 = 34.0;
+
+/// The rectangle a quick look's *content* goes in, in logical pixels.
+///
+/// **One function, because the app asks the same question the drawing does.** The
+/// picture is rendered at this size — the child is told the box — so a panel drawn
+/// to a different rectangle than the one that was asked for would be a picture
+/// scaled twice.
+pub(crate) fn quick_look_area(layout: &Layout) -> Area {
+    let outer = Area {
+        x: QUICK_LOOK_MARGIN,
+        y: QUICK_LOOK_MARGIN,
+        width: (layout.window.width - QUICK_LOOK_MARGIN * 2.0).max(64.0),
+        height: (layout.window.height - QUICK_LOOK_MARGIN * 2.0).max(64.0),
+    };
+    Area {
+        x: outer.x,
+        y: outer.y + QUICK_LOOK_TITLE,
+        width: outer.width,
+        height: (outer.height - QUICK_LOOK_TITLE).max(1.0),
+    }
+}
+
+/// The quick look panel: a title, and the file under it.
+fn quick_look(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    look: &crate::quicklook::QuickLook,
+    hits: &mut Hits,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let inner = quick_look_area(layout);
+    let outer = Area {
+        x: inner.x,
+        y: inner.y - QUICK_LOOK_TITLE,
+        width: inner.width,
+        height: inner.height + QUICK_LOOK_TITLE,
+    };
+    panel_shape(painter, outer, hits);
+
+    let title = look.title();
+    let baseline = painter.baseline(outer.y + 6.0, QUICK_LOOK_TITLE, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
+    line(painter, &title, style, outer.x + 14.0, outer.width - 28.0, baseline);
+    painter.hairline(outer.x, inner.y - 1.0, outer.width, theme.palette.divider);
+
+    if let Some((key, size)) = look.image {
+        // **Fitted here, and this is the only place that fits it.** The child was
+        // asked for a box and answered with what fitted inside it, so the size that
+        // came back is already right — all that is left is to centre it.
+        let scale =
+            (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32).min(1.0);
+        let (width, height) = (size.0 as f32 * scale, size.1 as f32 * scale);
+        let at = painter.rect(
+            inner.x + (inner.width - width) / 2.0,
+            inner.y + (inner.height - height) / 2.0,
+            width,
+            height,
+        );
+        painter.preview(key, at, theme.palette.text);
+        return;
+    }
+    if let Some(text) = &look.text {
+        quick_look_text(painter, look, text, inner);
+        return;
+    }
+    // Neither yet. A refusal says why; anything else is still being fetched, and a
+    // spinner for something that takes ten milliseconds is worse than nothing —
+    // [rule 7](../../../docs/03-principles.md).
+    let Some(message) = look.message() else { return };
+    let baseline = painter.baseline(inner.y + inner.height / 2.0, 0.0, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, theme.palette.dim);
+    line(painter, i18n::lookup(message), style, inner.x + 14.0, inner.width - 28.0, baseline);
+}
+
+/// The text of a file, line by line, each line by its tones.
+///
+/// **Drawn as runs, which is the whole of the syntax-highlighting seam.** Every
+/// line is already cut into `Span`s carrying a `Tone`, and this colours each run by
+/// its tone; today there is one run per line and one tone. A highlighter replaces
+/// `quicklook::highlight` and nothing here.
+fn quick_look_text(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    text: &crate::quicklook::Text,
+    inner: Area,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let step = metrics.row_height;
+    let first = (look.scroll.offset() / step).floor().max(0.0) as usize;
+    let room = (inner.height / step).ceil() as usize + 1;
+    let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
+    painter.list.push_clip(clip);
+    for (offset, (body, spans)) in
+        text.lines.iter().zip(&text.spans).enumerate().skip(first).take(room)
+    {
+        let top = inner.y + offset as f32 * step - look.scroll.offset();
+        let baseline = painter.baseline(top, step, metrics.text_size);
+        let mut x = inner.x + 14.0;
+        for span in spans {
+            let Some(run) = body.get(span.from..span.to) else { continue };
+            let colour = match span.tone {
+                crate::quicklook::Tone::Plain => theme.palette.text,
+            };
+            let style = TextStyle::new(metrics.text_size, colour);
+            let room = (inner.right() - 14.0 - x).max(1.0);
+            let drawn = line(painter, run, style, x, room, baseline);
+            x += painter.logical(drawn);
+        }
+    }
+    painter.list.pop_clip();
+    if text.truncated {
+        let baseline = painter.baseline(inner.bottom() - step, step, metrics.text_size);
+        let style = TextStyle::new(metrics.text_size, theme.palette.dim);
+        line(painter, i18n::lookup("preview.more"), style, inner.x + 14.0, inner.width, baseline);
+    }
+}
 
 /// The Properties panel: a title, and a label-and-value row per fact.
 ///
@@ -3946,6 +4080,7 @@ mod tests {
         {
             let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
             let chrome = Chrome {
+                quick_look: None,
                 edits: None,
                 history: (false, 0.0),
                 hovered_edit: None,

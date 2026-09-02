@@ -101,6 +101,76 @@ fn history_height(request: &Capture, metrics: &sk_ui::Metrics) -> f32 {
         + (SAMPLE_EDITS.min(crate::view::HISTORY_ROWS) as f32) * metrics.row_height
 }
 
+/// Opens a quick look and waits for it, so the one frame that gets taken has it.
+///
+/// The window does this over frames — `App::settle_quick_look` asks and a later
+/// frame draws — and a capture has one frame, so it waits here. The same bargain
+/// `settle_thumbnails` makes and the same deadline.
+fn sample_quick_look(
+    request: &Capture,
+    session: &mut Session,
+    pane: &Pane,
+    layout: &Layout,
+) -> Option<crate::quicklook::QuickLook> {
+    let wanted = request.looking.as_deref()?;
+    let types = sk_desktop::MimeDatabase::load();
+    let row = (0..pane.listing.rows())
+        .filter_map(|row| pane.listing.at(row))
+        .find(|id| pane.listing.name(*id) == wanted)?;
+    let kind = sk_desktop::kind_of(&pane.listing, row, Some(&types));
+    let shows = crate::previews::shows(wanted, kind, Some(&types))?;
+    let (path, mtime) = (pane.path_of(row), pane.listing.mtime(row));
+    let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &session.jobs);
+
+    // The same box the panel will be drawn into, in device pixels — the one
+    // number that crosses the logical/device line on purpose, because a page
+    // rendered at logical pixels on a 200% screen is a page at half the
+    // resolution of the screen showing it.
+    let inner = crate::view::quick_look_area(layout);
+    let scale = f32::from(u16::try_from(request.scale_120).unwrap_or(120)) / 120.0;
+    let within = ((inner.width * scale) as u32, (inner.height * scale) as u32);
+    let deadline = std::time::Instant::now() + READ_DEADLINE;
+    if shows == crate::previews::Shows::Text {
+        while !look.drain() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        return Some(look);
+    }
+    look.asked = within;
+    let mut previews = sk_preview::Previews::new();
+    previews.want(sk_preview::Want {
+        kind: match shows {
+            crate::previews::Shows::Page => sk_preview::Kind::Document,
+            _ => sk_preview::Kind::Image,
+        },
+        ask: sk_preview::Ask::Preview,
+        path,
+        mtime,
+        within,
+    });
+    while look.image.is_none() && std::time::Instant::now() < deadline {
+        previews.pump(&session.jobs.pool, &session.waker.handle());
+        for answer in previews.drain() {
+            if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
+                // A fixed key, because a capture draws exactly one preview and
+                // has no `Thumbs` counter to mint from — and the top of the range
+                // is the one number a thumbnail's counter cannot reach.
+                let key = sk_gpu::ImageKey(u64::MAX);
+                session.renderer.hold_preview(key, answer.size, &answer.pixels);
+                look.image = Some((key, answer.size));
+            } else {
+                look.refusal = Some(answer.refusal);
+                break;
+            }
+        }
+        if look.refusal.is_some() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    Some(look)
+}
+
 /// An undo stack for the frame, with a sample history on it where one was asked
 /// for.
 fn sample_edits(request: &Capture, session: &crate::headless::Session) -> crate::edit::Edits {
@@ -212,6 +282,11 @@ pub struct Capture {
     /// beside it, and two more open below — which is the only way to see that a
     /// collapse takes the rows and leaves the heading.
     pub collapsed: bool,
+    /// Which quick look to draw, by the name of the file it is of.
+    ///
+    /// A name rather than a flag, because the three kinds — a picture, a page and
+    /// text — are three frames and the fixture holds one of each.
+    pub looking: Option<String>,
     /// Whether to draw the visible history, expanded, with edits in it.
     pub history: bool,
     /// Whether to draw the subtree search, with results in it.
@@ -836,6 +911,8 @@ struct Sample<'a> {
     erasing: Option<(&'a [String], usize, bool)>,
     /// The undo stack the history strip lists, with a sample on it.
     edits: &'a crate::edit::Edits,
+    /// The quick look, if this frame is of one.
+    look: Option<&'a crate::quicklook::QuickLook>,
 }
 
 /// The chrome of the frame this capture was asked for.
@@ -843,6 +920,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
     Chrome {
         keys: sample.keys,
         stats: request.stats,
+        quick_look: sample.look,
         edits: Some(sample.edits),
         history: (request.history, 0.0),
         // The second row, so the frame shows the hover as well as the present.
@@ -1010,7 +1088,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // so a capture is never an image with holes in the text.
     let keyboard_hint = crate::commands::hint(&crate::commands::registry());
     let edits = sample_edits(request, &session);
+    let look = sample_quick_look(request, &mut session, panes.focused(), &layout);
     let sample = Sample {
+        look: look.as_ref(),
         edits: &edits,
         overlays: &overlays,
         places: &places,

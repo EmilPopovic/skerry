@@ -2009,3 +2009,93 @@ The rule that follows is narrow enough to act on: **write the accessor in the co
 that calls it.** If the data structure needs to keep something for a future feature,
 keep the *data* — `History` keeping its entries was always right — and let the
 feature bring its own way of reading them.
+
+## A sandbox that works announces itself by refusing something you wanted
+
+`skerry-preview-doc` renders a PDF by driving `pdftoppm`. It answered
+`Refusal::NoRenderer` for every PDF on a machine with poppler installed, and its
+own `--probe` said in the same breath that the renderer was there.
+
+Twice, for two different reasons, and both are worth keeping:
+
+**`execve` needs its own Landlock right**, and the first ruleset granted read and
+nothing else. That one is obvious in hindsight and was not in foresight: "the
+child may read any file" sounds like it covers running one.
+
+**And a dynamically linked program needs that right on its loader and every
+library it maps.** Granting execute on the directories in `PATH` — the precise,
+careful version — still refused, because `ld-linux` lives in `/lib64` and
+poppler's libraries in `/usr/lib`, neither of which is on `PATH`. Chasing those
+would mean tracking one distribution's layout, so the grant is the root; what is
+actually load-bearing is that the process cannot write a byte anywhere, and *that*
+was checked rather than assumed, with a five-line probe that tried.
+
+The general shape is the useful part. **A security control that has never refused
+anything has not been observed working.** Both of these presented as a feature
+that did not work, and the temptation each time was to widen the sandbox until the
+symptom went away — which is how a confinement becomes a comment. The discipline
+that avoided it was cheap: write the probe that asks *"can this process still do
+the thing I am trying to stop it doing?"*, and keep it in the file as the reason
+the grant is shaped the way it is.
+
+## A fixture nobody rendered is a picture of nothing
+
+Three golden frames of thumbnails, blessed, green. Two rows in each had **lost
+their marks entirely** — no thumbnail, no file glyph, nothing — and the diff was
+a narrow vertical strip I nearly waved through as "the mark column, expected".
+
+`holiday 🏖️.jpeg` and `img10.png` are in the shared fixture as junk bytes under
+picture names. The capture asked for their thumbnails, got `Undecodable`, and
+recorded the atlas key anyway — so the row drew `painter.image` for a picture that
+was never there, and skipped the mark that would have gone in its place. The window
+did not have this bug; only the capture did, because the two had the same rule
+written twice.
+
+Two things it teaches, and the second is the one I would not have got from the
+first:
+
+**A fallback and its replacement have to be exclusive by construction.** The rule
+is "record only what the atlas holds", and it now lives in a comment on both
+paths — but what actually made it safe is that `Pane::thumbs` is *only* filled
+where `holds_image` says yes, so the drawing needs no fallback logic at all and
+has no second branch to get wrong.
+
+**And a hand-made fixture is code that has to run.** The PDF for the quick-look
+frame was assembled by hand, and the first version put its text at y=680 on a page
+595 tall — off the paper. The frame rendered a blank white page, which looks
+exactly like a page that rendered. The capture already prints how many thumbnails
+landed, for precisely this reason; a document preview has no such count, and the
+only thing that caught it was looking at the picture.
+
+## A gate catches the shape it was written for, and this was a different shape
+
+Two defects in one afternoon's scripted edits, both invisible in a diff read as an
+addition, and the pair is more useful than either.
+
+**The doc comment that was spliced onto the end of a paragraph.**
+`spliced_comment_check` exists for exactly this class — it has caught six of them
+— and it looks for the shape it has always taken: a summary line followed
+immediately by the start of another sentence. This one landed after the *prose*,
+four lines down, so the block read as one comment with an odd last paragraph and
+`fn properties` below it was left with no comment at all. The half that is
+reliably detectable is the orphan, not the splice, and the lint for it —
+`clippy::missing_docs_in_private_items` — reports **300 items** across the
+workspace today. That is a cleanup, not a gate, and calling it one before doing
+the cleanup would put a warning nobody reads in front of a check nobody trusts.
+So the blind spot is written down here and in the check's own docstring, and the
+gate is honest about what it covers.
+
+**The catalogue key that was written twice** had no gate at all. A duplicate is
+silent by construction: the loader keeps one, nothing says which, and a
+translator maintains two lines that can drift into disagreeing. Four lines in
+`catalogue_check` fix it, and the first thing they reported was a duplicate
+`notice.terminal` that had been sitting there since the terminal command landed —
+which is the argument for the gate rather than for the fix.
+
+The general rule is narrower than "write more gates". **A gate's coverage is the
+shape it matches, not the class it is named after**, and the distance between the
+two is only visible when something in the class gets past it. When that happens
+the cheap move is to write the distance down; widening the gate is worth it only
+when the widened version has been run against the whole tree and the false
+positives counted. Both numbers above — six caught, 300 undocumented — came from
+running it.

@@ -43,6 +43,7 @@ mod pane;
 mod panes;
 mod previews;
 mod properties;
+mod quicklook;
 mod search;
 mod session;
 mod sidebar;

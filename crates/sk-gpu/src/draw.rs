@@ -214,6 +214,12 @@ pub(crate) enum Item {
         rect: Rect,
         alpha: Color,
     },
+    /// The one preview, drawn at a rectangle the caller has already fitted.
+    Preview {
+        key: crate::images::ImageKey,
+        rect: Rect,
+        alpha: Color,
+    },
 }
 
 /// A run of items sharing one scissor rectangle.
@@ -265,7 +271,7 @@ impl DrawList {
     pub fn glyphs(&self) -> impl Iterator<Item = (GlyphKey, f32, f32)> + '_ {
         self.items.iter().filter_map(|item| match item {
             Item::Glyph { key, x, y, .. } => Some((*key, *x, *y)),
-            Item::Quad(_) | Item::Image { .. } => None,
+            Item::Quad(_) | Item::Image { .. } | Item::Preview { .. } => None,
         })
     }
 
@@ -363,6 +369,19 @@ impl DrawList {
             return;
         }
         self.items.push(Item::Image { key, rect, alpha });
+    }
+
+    /// The one preview, filling `rect` exactly.
+    ///
+    /// **Not fitted here, unlike [`Self::image`].** A preview is rendered at the
+    /// size it will be drawn at, so the caller already knows the shape and has
+    /// already placed it; fitting it again would be the renderer second-guessing a
+    /// decision made with better information.
+    pub fn preview(&mut self, key: crate::images::ImageKey, rect: Rect, alpha: Color) {
+        if rect.is_empty() || alpha.is_invisible() {
+            return;
+        }
+        self.items.push(Item::Preview { key, rect, alpha });
     }
 
     /// Closes the last group. Called by the renderer before submitting, so a

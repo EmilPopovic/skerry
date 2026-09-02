@@ -87,6 +87,16 @@ impl Thumbs {
         (key, image)
     }
 
+    /// A fresh key for the one preview picture.
+    ///
+    /// **Not in the map.** A preview is not keyed by a file: it is whatever is in
+    /// the panel now, replaced whole each time, and giving it a name from the same
+    /// counter is what stops a stale reply from a resize drawing over a newer one.
+    pub(crate) fn name_preview(&mut self) -> ImageKey {
+        self.next += 1;
+        ImageKey(self.next)
+    }
+
     /// The atlas key an answer belongs to, if anything still wants it.
     pub(crate) fn look_up(&self, key: &sk_preview::Key) -> Option<ImageKey> {
         self.named.get(key).copied()

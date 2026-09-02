@@ -68,6 +68,10 @@ pub struct Renderer {
     color: wgpu::Texture,
     /// The thumbnail atlas's texture — ADR 0018's grid of equal slots.
     images: wgpu::Texture,
+    /// The one preview, which is not in that grid and is not the same size twice.
+    preview: wgpu::Texture,
+    /// What is held there and what is waiting for the queue.
+    looking: crate::images::Preview,
     atlas: Atlas,
     /// What is in that grid, and what is queued for it.
     pictures: Images,
@@ -192,7 +196,7 @@ impl Renderer {
         target: Target,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let Built { pipeline, layout, bind_group, uniforms, mask, color, images } =
+        let Built { pipeline, layout, bind_group, uniforms, mask, color, images, preview } =
             build(&device, format);
         let capacity = 1 << 14;
         let instances = instance_buffer(&device, capacity);
@@ -210,6 +214,8 @@ impl Renderer {
             color,
             layout,
             images,
+            preview,
+            looking: crate::images::Preview::default(),
             atlas: Atlas::new(),
             pictures: Images::default(),
             quads: Vec::with_capacity(capacity),
@@ -257,8 +263,15 @@ impl Renderer {
         }
         self.images =
             atlas_texture(&self.device, "thumbnails", IMAGE_SIDE, wgpu::TextureFormat::Rgba8Unorm);
-        // The layout is unchanged — same bindings, same types — so only the group
-        // is rebuilt and the pipeline is untouched.
+        self.rebuild_bindings();
+    }
+
+    /// Points the bind group at whatever the textures are now.
+    ///
+    /// **The layout never changes** — same bindings, same types — so this is a
+    /// group rebuilt and not a pipeline. Called by the two things that replace a
+    /// texture: the atlas outgrowing its placeholder, and each new preview.
+    fn rebuild_bindings(&mut self) {
         let view =
             |texture: &wgpu::Texture| texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = |filter| {
@@ -294,8 +307,66 @@ impl Renderer {
                     binding: 5,
                     resource: wgpu::BindingResource::Sampler(&sampler(wgpu::FilterMode::Linear)),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&view(&self.preview)),
+                },
             ],
         });
+    }
+
+    /// Puts the one preview picture in its own texture.
+    ///
+    /// Replaces whatever was there: there is one at a time, because there is one
+    /// panel. The texture is made the next time a frame is drawn, so a preview that
+    /// arrives and is dismissed before the frame costs no allocation at all.
+    pub fn hold_preview(&mut self, key: ImageKey, size: (u32, u32), pixels: &[u8]) {
+        self.looking.hold(key, size, pixels);
+    }
+
+    /// The size the preview held under `key` came back at, if that is what is held.
+    #[must_use]
+    pub fn preview_size(&self, key: ImageKey) -> Option<(u32, u32)> {
+        self.looking.size_of(key)
+    }
+
+    /// Makes the preview's texture and uploads it, if one is waiting.
+    ///
+    /// **Its own texture every time, rather than a resize.** A preview is asked for
+    /// at the panel's size, so a new one is usually a new size — and a texture
+    /// that has to be reallocated on most uploads is a texture with no reason to
+    /// be kept.
+    fn upload_the_preview(&mut self) {
+        if !self.looking.owes_upload() {
+            return;
+        }
+        let Some((pixels, size)) = self.looking.take() else { return };
+        self.preview = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("preview"),
+            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.preview,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.0 * 4),
+                rows_per_image: Some(size.1),
+            },
+            wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        );
+        self.rebuild_bindings();
     }
 
     /// Puts a thumbnail in the atlas, or says it did not fit.
@@ -405,6 +476,7 @@ impl Renderer {
         let boundaries = self.resolve(list, fonts, &mut stats);
         self.atlas.flush(&self.queue, &self.mask, &self.color);
         self.grow_the_image_atlas();
+        self.upload_the_preview();
         self.pictures.flush(&self.queue, &self.images);
 
         if self.quads.len() > self.capacity {
@@ -562,6 +634,18 @@ impl Renderer {
                         Some(_) => {}
                         None => stats.dropped += 1,
                     },
+                    Item::Preview { key, rect, alpha } => {
+                        if let Some(size) = self.looking.size_of(*key) {
+                            self.quads.push(Quad {
+                                rect: [rect.x, rect.y, rect.width, rect.height],
+                                uv: [0.0, 0.0, size.0 as f32, size.1 as f32],
+                                color: alpha.packed(),
+                                kind: KIND_PREVIEW,
+                                radius: 0.0,
+                                border: 0.0,
+                            });
+                        }
+                    }
                     Item::Image { key, rect, alpha } => {
                         if let Some(slot) = self.pictures.get(*key) {
                             self.quads.push(image_quad(slot, *rect, alpha.packed()));
@@ -716,6 +800,9 @@ fn image_quad(slot: crate::images::Slot, rect: crate::Rect, color: u32) -> Quad 
 /// The shader's `KIND_IMAGE`, after the four triangle directions.
 const KIND_IMAGE: u32 = 7;
 
+/// And the one preview, which samples a texture of its own.
+const KIND_PREVIEW: u32 = 8;
+
 fn glyph_quad(placed: Placed, pen_x: f32, baseline_y: f32, color: u32) -> Quad {
     // `left` and `top` come from the rasterizer and are already in device pixels
     // at this glyph's size, so the destination is an integer translation of the
@@ -816,6 +903,7 @@ struct Built {
     mask: wgpu::Texture,
     color: wgpu::Texture,
     images: wgpu::Texture,
+    preview: wgpu::Texture,
 }
 
 fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
@@ -834,7 +922,9 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
     // is a bind group rebuilt; the *layout* never changes, so the pipeline does
     // not either.
     let images = atlas_texture(device, "thumbnails", 1, wgpu::TextureFormat::Rgba8Unorm);
-    let (layout, bind_group) = bindings(device, &uniforms, &mask, &color, &images);
+    // One texel until a preview exists, for the reason the atlas is.
+    let preview = atlas_texture(device, "preview", 1, wgpu::TextureFormat::Rgba8Unorm);
+    let (layout, bind_group) = bindings(device, &uniforms, &mask, &color, &images, &preview);
     Built {
         pipeline: pipeline(device, &layout, format),
         layout,
@@ -843,6 +933,7 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
         mask,
         color,
         images,
+        preview,
     }
 }
 
@@ -852,6 +943,7 @@ fn bindings(
     mask: &wgpu::Texture,
     color: &wgpu::Texture,
     images: &wgpu::Texture,
+    preview: &wgpu::Texture,
 ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
     // Nearest, deliberately. Every glyph is drawn 1:1 from a raster made at its
     // device size, so a filtering sampler could only hide a bug — which is
@@ -896,6 +988,7 @@ fn bindings(
                 count: None,
             },
             texture_entry(4, true),
+            texture_entry(6, true),
             wgpu::BindGroupLayoutEntry {
                 binding: 5,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -926,6 +1019,10 @@ fn bindings(
                 resource: wgpu::BindingResource::TextureView(&view(images)),
             },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&smooth) },
+            wgpu::BindGroupEntry {
+                binding: 6,
+                resource: wgpu::BindingResource::TextureView(&view(preview)),
+            },
         ],
     });
     (layout, bind_group)

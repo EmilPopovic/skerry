@@ -227,6 +227,50 @@ impl Images {
     }
 }
 
+/// The one image that is not in the grid.
+///
+/// **[ADR 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md)'s
+/// second half.** A preview is one image at a time, sized to the panel drawing it,
+/// so it is not 128 pixels square and never will be. Putting it in a slot would
+/// mean either a second grid of a different size or the heterogeneous packing this
+/// module exists to avoid; a texture of its own is neither.
+#[derive(Default)]
+pub struct Preview {
+    /// The key the current picture answers to, so a stale reply draws nothing.
+    key: Option<ImageKey>,
+    size: (u32, u32),
+    pending: Option<Vec<u8>>,
+}
+
+impl Preview {
+    /// Replaces whatever was there. The next `flush` allocates and uploads.
+    pub fn hold(&mut self, key: ImageKey, size: (u32, u32), pixels: &[u8]) {
+        if size.0 == 0 || size.1 == 0 || pixels.len() != (size.0 as usize * size.1 as usize * 4) {
+            return;
+        }
+        self.key = Some(key);
+        self.size = size;
+        self.pending = Some(pixels.to_vec());
+    }
+
+    /// The size held under `key`, if that is what is held.
+    #[must_use]
+    pub fn size_of(&self, key: ImageKey) -> Option<(u32, u32)> {
+        (self.key == Some(key)).then_some(self.size)
+    }
+
+    /// Whether a new picture is waiting for the queue.
+    #[must_use]
+    pub fn owes_upload(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// The pixels waiting, and the size to make a texture for.
+    pub fn take(&mut self) -> Option<(Vec<u8>, (u32, u32))> {
+        Some((self.pending.take()?, self.size))
+    }
+}
+
 /// A slot's origin in texels.
 fn origin(slot: u32) -> (u32, u32) {
     ((slot % ACROSS) * SLOT, (slot / ACROSS) * SLOT)

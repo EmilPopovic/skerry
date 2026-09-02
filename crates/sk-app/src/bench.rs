@@ -119,6 +119,7 @@ fn chrome_of<'a>(
         // `Layout::compute_with` here, so this is the empty stack it agrees with:
         // measuring a frame with a panel nobody opened would be measuring the
         // wrong frame.
+        quick_look: None,
         edits: None,
         history: (false, 0.0),
         hovered_edit: None,

@@ -129,6 +129,8 @@ struct Shape {
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
+    /// The name of a file to open a quick look at.
+    looking: Option<String>,
 }
 
 /// Renders one frame to a file.
@@ -158,6 +160,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         checked: overlays.checked,
         collapsed: overlays.collapsed,
         history: overlays.history,
+        looking: shape.looking.clone(),
         search: overlays.search,
         carrying: overlays.carrying,
         path_entry: overlays.path_entry,
@@ -196,6 +199,7 @@ fn main() -> std::process::ExitCode {
     // one, and the only way to run at a fractional scale under a bare X server.
     let mut forced_scale = None;
     let mut at: Option<String> = None;
+    let mut looking: Option<String> = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -220,9 +224,12 @@ fn main() -> std::process::ExitCode {
                 Some(scale) => forced_scale = Some(scale),
                 None => return usage_error("--scale needs a percentage, such as 125"),
             },
-            "--at" => match arguments.next() {
-                Some(relative) => at = Some(relative),
-                None => return usage_error("--at needs a path relative to the directory"),
+            "--look" | "--at" => match arguments.next() {
+                // Two flags, one shape: a name that follows. `--at` says which
+                // directory to capture and `--look` which file in it to open.
+                Some(name) if argument == "--look" => looking = Some(name),
+                Some(name) => at = Some(name),
+                None => return usage_error("--at and --look each need a name"),
             },
             "--help" | "-h" => {
                 // The answer to `--help`, which is the program's output rather
@@ -258,6 +265,7 @@ fn main() -> std::process::ExitCode {
                 own_frame,
                 sidebar: !no_sidebar,
                 at,
+                looking,
             },
             &overlays,
         )

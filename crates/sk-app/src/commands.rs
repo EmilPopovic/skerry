@@ -721,6 +721,18 @@ fn grouping(registry: &mut Registry<App>) {
             run: |app: &mut App| app.set_mode(crate::cells::Mode::Columns),
         },
         CommandSpec {
+            id: "view.quick_look",
+            name: "action.quick_look",
+            group: Group::View,
+            // **A bare `Space`, which is free.** `keys::type_ahead` refuses
+            // whitespace — a filename search that begins with a space is not a
+            // thing anybody does — so this takes no key that meant something, and
+            // it is what every quick look on every desktop is bound to.
+            keys: &["space"],
+            enabled: |app: &App| app.panes.focused().selection.cursor().is_some(),
+            run: App::toggle_quick_look,
+        },
+        CommandSpec {
             id: "view.band_toggle",
             name: "action.band_toggle",
             group: Group::View,

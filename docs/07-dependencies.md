@@ -96,8 +96,8 @@ build:
 
 | Binary | Brings | Sandbox |
 | --- | --- | --- |
-| `skerry-thumbnailer` | `image` and the codec crates — by far the largest tree in the workspace | seccomp + Landlock, no network, write access to the thumbnail cache only |
-| `skerry-preview-doc` | A PDF/document renderer, built only if its toolchain is available | Same |
+| `skerry-thumbnailer` | `png`, `zune-jpeg` and `resvg` — by far the largest tree in the workspace, and none of it in the product | Landlock and rlimits: read-only everywhere, **no execute right anywhere**, and the thumbnail cache the one thing writable. `seccomp` is named by [ADR 0006](adr/0006-out-of-process-decoders.md) and is not written; the child's own report line says so |
+| `skerry-preview-doc` | Nothing but `png`. The renderer is a program on `PATH` — `pdftoppm` or `mutool` — so a machine with neither loses one preview and builds the same | The same, except that execute is granted: a dynamically linked renderer needs it on its loader and every library it maps, so the grant is the root and what is load-bearing is that nothing is writable |
 | *(external, optional)* | `ffmpeg` for video thumbnails, discovered on `PATH` at first use | Spawned with a timeout and a memory cap |
 
 This is the same boundary that rule 1 and the security model already wanted. Getting

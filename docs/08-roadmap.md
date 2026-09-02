@@ -133,8 +133,8 @@ fixture, input-trace replay, the layering check, the dependency budget.
 > The most expensive milestone and the one with the least to show. It is first because
 > every later milestone sits on it and because Spike D has already de-risked it.
 
-**In progress. The workspace exists and there is a window on screen.** Eleven
-crates, 633 tests, 112 GUI scenarios on two display servers and forty-seven golden frames, every gate green. What "the least to show" turned out to mean in practice:
+**In progress. The workspace exists and there is a window on screen.** Twelve
+crates and two sandboxed helpers, 674 tests, 113 GUI scenarios on two display servers and fifty-three golden frames, every gate green. What "the least to show" turned out to mean in practice:
 the milestone with nothing visible would also have been the milestone with nothing
 *measurable*, so the first artifact carries enough of M1 to put a real directory in a
 real window — which is what produced the numbers in
@@ -344,6 +344,29 @@ cache.
 
 > Includes the PDF preview File Pilot lacks, via `skerry-preview-doc`.
 
+**Started, and the spine of it is in.** Two helpers under
+[ADR 0006](adr/0006-out-of-process-decoders.md)'s sandbox — `skerry-thumbnailer`
+for PNG, JPEG and SVG in pure Rust, `skerry-preview-doc` for a PDF's first page
+through whatever renderer is on `PATH` — talking to a host that decodes nothing,
+over the protocol
+[ADR 0017](adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md)
+settles. Thumbnails go to the XDG shared cache, so one Nautilus wrote is one this
+reads and the other way round, and they are drawn from a slot atlas
+([ADR 0018](adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md)) in
+Details and in the grid. `Space` opens a quick look at a picture, a page or a text
+file; `Space` or `Escape` closes it.
+
+**The product's dependency count did not move**, which is ADR 0006's whole
+argument: a helper is a separate binary and `tools/dep-budget.py` measures the
+product's tree. Still 32.
+
+Owed here: **syntax highlighting**, whose seam is written and whose highlighter is
+not — every line is already cut into runs carrying a tone, there is one tone, and
+adding real ones replaces one function. Then EXIF orientation, zoom, a *docked*
+inspector rather than an overlay, archive contents, media metadata, hex, and
+navigable folder listings. `seccomp` is named by ADR 0006 and is not written; the
+child's own report line says so.
+
 ### M6 · 3 wk — Command palette and keymap
 The registry made visible: fuzzy palette over every action and setting, inline hotkey
 binding, key sequences and chords, aliases, contextual shortcut hints, an optional vim
@@ -531,15 +554,19 @@ pane's own path, which removed neither file.
 
 Extension facets and ignore rules are untouched.
 
-Then **quick look and the inspector** (M5), then **desktop citizenship** (M7)
+Then the **rest of** quick look and the inspector (M5 — the two helpers, the
+atlas, the cache and the three previews are in; syntax highlighting, EXIF, zoom
+and the docked form are not), then **desktop citizenship** (M7)
 — FileManager1, udisks2, portals, the GoTo popup — then **M8**, whose first job is the
 performance regression gate that CI deliberately does not have yet.
 
-Two things are further down than their obvious priority, and for the same reason:
-**gestures** and **the grid view with thumbnails** are both large, both visible, and
-neither serves a rule that is currently unserved. A thumbnail is a decoder, a cache
-format and a sandbox — [ADR 0006](adr/0006-out-of-process-decoders.md) — and it is
-worth that when the file manager underneath it can already move a file.
+**Gestures** are further down than their obvious priority, and **the grid view
+with thumbnails** was there beside them: both large, both visible, neither serving
+a rule that was unserved. A thumbnail is a decoder, a cache format and a sandbox —
+[ADR 0006](adr/0006-out-of-process-decoders.md) — and it is worth that when the file
+manager underneath it can already move a file. Which it now can, so that half is
+built: the grid landed in M0 and the pictures in it are M5's. Gestures are still
+where they were, and still for the same reason.
 
 ## What comes next
 

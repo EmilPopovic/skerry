@@ -308,6 +308,13 @@ history.changed_many = Changed {0} items
 history.now = now
 history.count[one] = {0} edit
 history.count[other] = {0} edits
+# The quick look, and the four ways a preview can come back with nothing.
+action.quick_look = Quick look
+preview.unreadable = This file could not be read.
+preview.undecodable = This file could not be read as a picture.
+preview.no_renderer = No document renderer is installed. Install poppler-utils or mupdf-tools to preview a PDF.
+preview.too_large = This file is too large to preview.
+preview.more = …
 band.future = In the future
 band.today = Today
 band.yesterday = Yesterday
@@ -422,7 +429,6 @@ error.launch_failed = Could not start {0}.
 # found. Names the variable, because setting it is the fix.
 error.no_terminal = {0} needs a terminal, and none was found. Set $TERMINAL.
 error.no_terminal_at_all = No terminal was found. Set $TERMINAL to the one you use.
-notice.terminal = Opening a terminal
 notice.terminal = Opening a terminal
 notice.opening = Opening with {0}
 

@@ -214,6 +214,17 @@ FRAMES = [
     # is metrics arithmetic — right at one scale and wrong at another is the class
     # of defect a second scale exists to catch.
     ("thumbnails-200", ["--size", "760x440", "--scale", "200", "--grid"], "pictures"),
+    # **A quick look at each of the three things one can be of.** A picture through
+    # `skerry-thumbnailer`, a page through whatever renderer is on `PATH`, and text
+    # read in this process because reading a file is not decoding.
+    ("quick-look-image", ["--size", "900x600", "--scale", "125", "--look", "circle.png"],
+     "pictures"),
+    ("quick-look-page", ["--size", "900x600", "--scale", "125", "--look", "paper.pdf"],
+     "pictures"),
+    # The text one is where the syntax-highlighting seam is: every line is drawn as
+    # runs carrying a tone, and there is one tone.
+    ("quick-look-text", ["--size", "900x600", "--scale", "125", "--look", "readme.txt"],
+     "pictures"),
     # **The visible history**, expanded, with one step undone — which is the state
     # that shows the whole design in one frame: the present marked with an accent
     # bar, the future below it in grey, and a hovered row. Every `Change::summary`
@@ -354,6 +365,46 @@ def build_fixture() -> Path:
     return directory
 
 
+def one_page_pdf() -> bytes:
+    """A single-page PDF with a line of text on it, valid enough for a renderer.
+
+    **Hand-assembled with a real cross-reference table**, because the first version
+    of this fixture had none and poppler answered `Syntax Warning: No valid XRef`
+    — which it recovers from, and which makes a frame depend on a recovery path
+    rather than on the file being right.
+    """
+    # **Inside the MediaBox**, which the first draft was not: 680 on a page 595
+    # tall put the line above the paper and the frame rendered a blank page, which
+    # is exactly the "frame of the fallback" this file keeps warning about.
+    body = (
+        # 18pt, not 22: at 22 the line is about 396 points of Helvetica and the
+        # MediaBox is 420 wide, so it ran off the right edge of its own paper.
+        b"BT /F1 18 Tf 40 500 Td (A page, rendered by poppler or mupdf.) Tj ET\n"
+        b"0.15 0.35 0.75 rg 40 380 340 90 re f\n"
+        b"BT /F1 16 Tf 40 330 Td (Whatever is on PATH renders it, sandboxed.) Tj ET"
+    )
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += str(number).encode() + b" 0 obj\n" + obj + b"\nendobj\n"
+    start = len(out)
+    out += b"xref\n0 " + str(len(objects) + 1).encode() + b"\n0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (b"trailer\n<< /Size " + str(len(objects) + 1).encode()
+            + b" /Root 1 0 R >>\nstartxref\n" + str(start).encode() + b"\n%%EOF\n")
+    return bytes(out)
+
+
 def build_pictures() -> None:
     """A directory of real images, for the frames that draw thumbnails.
 
@@ -398,8 +449,24 @@ def build_pictures() -> None:
             f' fill="{colour}"/></svg>'
         )
     # One file that is not a picture, so a frame shows the fallback mark beside
-    # the thumbnails rather than only in another frame.
-    (directory / "readme.txt").write_bytes(b"z" * 400)
+    # the thumbnails rather than only in another frame — and real lines, because it
+    # is also what the text quick look draws.
+    (directory / "readme.txt").write_text(
+        "A quick look at a text file.\n"
+        "\n"
+        "Lines are drawn one per row, each cut into runs that carry a tone.\n"
+        "There is one tone today and the highlighter is not written; what is\n"
+        "written is everything around it, so adding one replaces a single\n"
+        "function and nothing here.\n"
+        "\n"
+        "\tA tab, and a line long enough that it runs past the panel and is "
+        "elided rather than wrapped, which is what a glance at a file gives you.\n"
+        "  ¡Ünïcödé, שלום, 日本語!\n"
+    )
+    # A one-page PDF, written by hand so it needs no tool to generate — and it is
+    # the only fixture whose *rendering* is somebody else's, which is the point:
+    # `skerry-preview-doc` drives whatever is on `PATH`.
+    (directory / "paper.pdf").write_bytes(one_page_pdf())
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
 

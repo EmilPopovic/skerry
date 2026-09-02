@@ -885,6 +885,8 @@ pub struct App {
     filtering: bool,
     typed_at: Instant,
     pointer: Point,
+    /// The file being looked at, if any. `Space` opens and closes it.
+    quick_look: Option<crate::quicklook::QuickLook>,
     /// The preview host: which children are running, and what is wanted.
     ///
     /// **Spawns nothing until something is asked for**, so a session in a folder
@@ -1168,6 +1170,7 @@ impl App {
             filtering: false,
             typed_at: now,
             pointer: Point::default(),
+            quick_look: None,
             previews: sk_preview::Previews::new(),
             thumbs: crate::previews::Thumbs::default(),
             history_open: false,
@@ -2064,6 +2067,7 @@ impl App {
         let Self { measurer, panes, jobs, .. } = self;
         measurer.update(panes.focused_mut(), visible, jobs);
         self.settle_thumbnails();
+        self.settle_quick_look();
     }
 
     /// Puts the caret where a click in the path field landed.
@@ -3244,6 +3248,15 @@ impl App {
             if let Some(menu) = self.menu.as_mut() {
                 menu.wheel(delta.y, room);
             }
+        } else if let Some(look) = self.quick_look.as_mut() {
+            // The panel is over everything, so the wheel is its own — the same
+            // rule the palette and a tall menu follow.
+            let inner = crate::view::quick_look_area(&self.layout);
+            let step = self.theme.metrics.row_height;
+            let lines = look.text.as_ref().map_or(0, |it| it.lines.len());
+            look.scroll.set_extent(lines as f32 * step, inner.height);
+            look.scroll.by(delta.y, precise, time);
+            self.dirty = true;
         } else if self.history_open && self.layout.history.contains(self.pointer.x, self.pointer.y)
         {
             // **The panel under the pointer takes the wheel**, which is the rule
@@ -4712,6 +4725,70 @@ search_active={active:?}",
         self.dirty = true;
     }
 
+    /// Opens a quick look at the cursor's file, or closes the one that is open.
+    ///
+    /// **The same key both ways**, which is what every quick look on every desktop
+    /// does — and it is why this is one command rather than two: a person presses
+    /// `Space` to see a file and presses it again when they have seen it.
+    pub(crate) fn toggle_quick_look(&mut self) {
+        if self.quick_look.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        let Some(desktop) = self.desktop.clone() else { return };
+        let pane = self.panes.focused();
+        let Some(id) = pane.selection.cursor() else { return };
+        let kind = sk_desktop::kind_of(&pane.listing, id, Some(&desktop.mime));
+        let Some(shows) = crate::previews::shows(pane.listing.name(id), kind, Some(&desktop.mime))
+        else {
+            // Nothing this program can draw. Not a message: a quick look at a
+            // spreadsheet saying "no preview" is a panel whose only content is an
+            // apology, and the file is still there in the list behind it.
+            return;
+        };
+        let (path, mtime) = (pane.path_of(id), pane.listing.mtime(id));
+        self.quick_look = Some(crate::quicklook::QuickLook::open(path, mtime, shows, &self.jobs));
+        self.dirty = true;
+    }
+
+    /// The box a quick look's picture is rendered into, in device pixels.
+    ///
+    /// **Device, because that is what a renderer is asked for.** Everything above
+    /// the `Painter` is logical and this is the one number that crosses on purpose:
+    /// a page rendered at logical pixels on a 200% screen is a page at half the
+    /// resolution of the screen showing it.
+    fn quick_look_box(&self) -> (u32, u32) {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let scale = f32::from(u16::try_from(self.scale_120).unwrap_or(120)) / 120.0;
+        ((inner.width * scale).max(1.0) as u32, (inner.height * scale).max(1.0) as u32)
+    }
+
+    /// Keeps the quick look fed: asks for its picture, takes delivery of its text.
+    fn settle_quick_look(&mut self) {
+        let within = self.quick_look_box();
+        let Some(look) = &mut self.quick_look else { return };
+        if look.drain() {
+            self.dirty = true;
+        }
+        if !look.wants(within) {
+            return;
+        }
+        look.asked = within;
+        let (kind, path, mtime) = (look.shows, look.path.clone(), look.mtime);
+        let helper = match kind {
+            crate::previews::Shows::Picture => sk_preview::Kind::Image,
+            crate::previews::Shows::Page => sk_preview::Kind::Document,
+            crate::previews::Shows::Text => return,
+        };
+        self.previews.want(sk_preview::Want {
+            kind: helper,
+            ask: sk_preview::Ask::Preview,
+            path,
+            mtime,
+            within,
+        });
+    }
+
     /// Asks for the thumbnails of what is on screen, and forgets the rest.
     ///
     /// **Once a frame, over the visible rows only.** A folder of ten thousand
@@ -4775,6 +4852,23 @@ search_active={active:?}",
             return;
         }
         for answer in answers {
+            // **A preview first, because it is the one somebody is waiting for.**
+            // It is not in the slot atlas — ADR 0018 — so it gets a key of its own
+            // and a texture the size of the panel.
+            if let Some(look) = &mut self.quick_look
+                && look.is_of(&answer.key.path, answer.key.mtime)
+                && answer.key.within == look.asked
+            {
+                if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
+                    let key = self.thumbs.name_preview();
+                    self.renderer.hold_preview(key, answer.size, &answer.pixels);
+                    look.image = Some((key, answer.size));
+                } else {
+                    look.refusal = Some(answer.refusal);
+                }
+                self.dirty = true;
+                continue;
+            }
             if answer.refusal != sk_preview::Refusal::None || answer.pixels.is_empty() {
                 continue;
             }
@@ -5006,6 +5100,13 @@ search_active={active:?}",
     /// different things depending on state is worse than Escape doing all of
     /// them.
     pub(crate) fn clear(&mut self) {
+        // **A quick look is the most specific thing `Escape` can mean**, the same
+        // way a drag in flight is: what is on screen goes before what is selected
+        // behind it.
+        if self.quick_look.take().is_some() {
+            self.dirty = true;
+            return;
+        }
         // A drag in flight is the most specific thing Escape can mean, and
         // leaving it running would drop files on the next release with no
         // highlight to say where.
@@ -5150,10 +5251,28 @@ search_active={active:?}",
         let history = format!("{}/{}", self.edits.history.applied(), self.edits.history.len());
         let history_open = self.history_open;
         let history_aim = self.history_aim();
+        // What the quick look is showing, for a scenario: which file, and whether
+        // a picture, some text, or a sentence saying why neither.
+        let looking = self.quick_look.as_ref().map_or_else(
+            || "none".to_owned(),
+            |look| {
+                let what = if look.image.is_some() {
+                    "picture"
+                } else if look.text.is_some() {
+                    "text"
+                } else if look.refusal.is_some() {
+                    "refused"
+                } else {
+                    "waiting"
+                };
+                format!("{}:{what}", look.title())
+            },
+        );
         format!(
             "mode={} grouping={} bands={} remembered={} columns={} cell={:.1}x{:.1} \
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
+looking={looking} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -7621,6 +7740,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             hovered_mode,
             sidebar,
             edits,
+            quick_look,
             history_open,
             history_scroll,
             hovered_edit,
@@ -7688,6 +7808,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let chrome = Chrome {
             keys: rows.as_deref(),
             stats: *show_stats,
+            quick_look: quick_look.as_ref(),
             edits: Some(edits),
             history: (*history_open, history_scroll.offset()),
             hovered_edit: *hovered_edit,
