@@ -201,7 +201,19 @@ pub(crate) struct Quad {
 /// array is what makes draw order the call order, with no sorting pass.
 pub(crate) enum Item {
     Quad(Quad),
-    Glyph { key: GlyphKey, x: f32, y: f32, color: Color },
+    Glyph {
+        key: GlyphKey,
+        x: f32,
+        y: f32,
+        color: Color,
+    },
+    /// A thumbnail. Where it landed in the atlas is the renderer's to know, the
+    /// same way a glyph's placement is — this records the intent and the box.
+    Image {
+        key: crate::images::ImageKey,
+        rect: Rect,
+        alpha: Color,
+    },
 }
 
 /// A run of items sharing one scissor rectangle.
@@ -253,7 +265,7 @@ impl DrawList {
     pub fn glyphs(&self) -> impl Iterator<Item = (GlyphKey, f32, f32)> + '_ {
         self.items.iter().filter_map(|item| match item {
             Item::Glyph { key, x, y, .. } => Some((*key, *x, *y)),
-            Item::Quad(_) => None,
+            Item::Quad(_) | Item::Image { .. } => None,
         })
     }
 
@@ -335,6 +347,22 @@ impl DrawList {
             return;
         }
         self.items.push(Item::Glyph { key, x, y, color });
+    }
+
+    /// One thumbnail, fitted inside `rect`.
+    ///
+    /// **The rectangle is where it may go, not where it goes.** The image keeps
+    /// its aspect ratio inside the box and is centred in it, because a photograph
+    /// stretched to a square is worse than a photograph with space beside it —
+    /// and the renderer is the only thing that knows the image's shape.
+    ///
+    /// An image the atlas does not hold draws nothing, which is what a cell looks
+    /// like while its thumbnail is still being decoded.
+    pub fn image(&mut self, key: crate::images::ImageKey, rect: Rect, alpha: Color) {
+        if rect.is_empty() || alpha.is_invisible() {
+            return;
+        }
+        self.items.push(Item::Image { key, rect, alpha });
     }
 
     /// Closes the last group. Called by the renderer before submitting, so a

@@ -41,6 +41,7 @@ mod openers;
 mod palette;
 mod pane;
 mod panes;
+mod previews;
 mod properties;
 mod search;
 mod session;

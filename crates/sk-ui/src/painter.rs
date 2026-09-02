@@ -423,6 +423,20 @@ impl Painter<'_> {
         }
     }
 
+    /// A thumbnail, fitted inside `box_rect` and centred in it.
+    ///
+    /// **A key and a rectangle, and no `wgpu` type in sight** — [ADR
+    /// 0003](../../../docs/adr/0003-wgpu-first-backend.md). Where the picture
+    /// lives is the renderer's, and whether it has arrived yet is the renderer's
+    /// too: an image the atlas does not hold draws nothing, which is what a cell
+    /// looks like while its thumbnail is still being decoded.
+    ///
+    /// `tint` carries only its alpha, so a thumbnail can be faded in or dimmed
+    /// without a second code path; its colour channels are ignored.
+    pub fn image(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
+        self.list.image(key, box_rect, tint);
+    }
+
     /// A check box: a framed square with a block of `ink` in it when it is on.
     ///
     /// **No tick, because a tick is a diagonal.** The display list has rectangles,

@@ -19,6 +19,7 @@ sk-fs = { workspace = true }
 sk-text = { workspace = true }
 sk-gpu = { workspace = true }
 sk-index = { workspace = true }
+sk-preview = { workspace = true }
 sk-ui = { workspace = true }
 sk-plat = { workspace = true }
 

@@ -202,6 +202,18 @@ FRAMES = [
     # every other scale, which is the one class of defect only a second scale
     # catches.
     ("grouped-200", ["--size", "900x520", "--scale", "200", "--grouped"]),
+    # **Thumbnails**, in both geometries, over a fixture of its own — see `render`.
+    # Three rasters and three vectors: a gradient, a fine checkerboard that point
+    # sampling turns into a solid colour, a circle whose edge is where aliasing
+    # shows, and vectors from sixteen pixels to a hundred and twenty-eight, which
+    # is the case a raster's "never enlarge" rule gets wrong. `readme.txt` is
+    # there so the fallback mark is beside them rather than in another frame.
+    ("thumbnails", ["--size", "900x400", "--scale", "125"], "pictures"),
+    ("thumbnails-grid", ["--size", "900x400", "--scale", "125", "--grid"], "pictures"),
+    # At 200%, because a thumbnail is fitted and centred inside a mark whose size
+    # is metrics arithmetic — right at one scale and wrong at another is the class
+    # of defect a second scale exists to catch.
+    ("thumbnails-200", ["--size", "760x440", "--scale", "200", "--grid"], "pictures"),
     # **The visible history**, expanded, with one step undone — which is the state
     # that shows the whole design in one frame: the present marked with an accent
     # bar, the future below it in grey, and a hovered row. Every `Change::summary`
@@ -336,16 +348,74 @@ def build_fixture() -> Path:
     # `statx`, and truncating to it costs nothing where writing it costs 2 MB.
     for name, size in entries:
         os.truncate(directory / name, size)
+    build_pictures()
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
     return directory
 
 
-def render(name: str, arguments: list[str], into: Path) -> list[str]:
-    """Renders one frame and returns the paths of the faces it shaped with."""
+def build_pictures() -> None:
+    """A directory of real images, for the frames that draw thumbnails.
+
+    **Generated rather than committed**, the same bargain the fixture above makes:
+    a checked-in PNG is a binary a reviewer cannot read, and these are eleven lines
+    of arithmetic whose output is identical on every machine. Every one is a shape
+    a *decoder* has to get right and a scaler has to not ruin — a gradient, a fine
+    checkerboard that point sampling turns into a solid colour, a circle whose edge
+    is where aliasing shows, and vectors at three sizes including one far smaller
+    than the slot it is drawn into.
+    """
+    import struct
+    import zlib
+
+    directory = FIXTURE / "pictures"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    def png(name: str, width: int, height: int, pixel) -> None:
+        def chunk(tag: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + tag + body
+                    + struct.pack(">I", zlib.crc32(tag + body)))
+        raw = b"".join(
+            b"\x00" + bytes(v for x in range(width) for v in pixel(x, y))
+            for y in range(height)
+        )
+        (directory / name).write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
+    png("gradient.png", 200, 140, lambda x, y: (250, 110 + y, 40 + x // 2))
+    png("checks.png", 160, 160, lambda x, y: (30, 90, 200) if (x // 8 + y // 8) % 2 else (245, 245, 250))
+    png("circle.png", 180, 180,
+        lambda x, y: (30, 200, 130) if (x - 90) ** 2 + (y - 90) ** 2 < 70 ** 2 else (250, 250, 250))
+    for name, side, colour in (("tiny.svg", 16, "#e0533c"), ("badge.svg", 64, "#3aa0e0"),
+                               ("wide.svg", 128, "#f0c020")):
+        (directory / name).write_text(
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{side}" height="{side * 2 // 3}">'
+            f'<rect x="1" y="1" width="{side - 2}" height="{side * 2 // 3 - 2}" rx="{side // 6}"'
+            f' fill="{colour}"/></svg>'
+        )
+    # One file that is not a picture, so a frame shows the fallback mark beside
+    # the thumbnails rather than only in another frame.
+    (directory / "readme.txt").write_bytes(b"z" * 400)
+    for path in sorted(directory.rglob("*")) + [directory]:
+        os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+
+
+def render(name: str, arguments: list[str], into: Path, root: str = "fixture") -> list[str]:
+    """Renders one frame and returns the paths of the faces it shaped with.
+
+    **`root` exists because a fixture is shared and a feature's files are not.**
+    Every frame but a handful lists `fixture`, so a file added there changes all of
+    them — and the pictures a thumbnail frame needs would have re-blessed forty
+    references to show two. A frame that needs its own contents names its own
+    directory instead, and the shared one is left alone.
+    """
     raw = into.with_suffix(".raw.png")
     done = subprocess.run(
-        [str(SKERRY), "--capture", str(raw), *arguments, str(FIXTURE / "fixture")],
+        [str(SKERRY), "--capture", str(raw), *arguments, str(FIXTURE / root)],
         capture_output=True,
         text=True,
         env=dict(os.environ, VK_LOADER_DRIVERS_SELECT="lvp_icd.json", TZ="UTC"),
@@ -544,13 +614,14 @@ def main(argv: list[str]) -> int:
 
     passed, failed = 0, []
     checked_faces = False
-    for name, arguments in FRAMES:
+    for name, arguments, *rest in FRAMES:
         if wanted and not any(needle in name for needle in wanted):
             continue
+        root = rest[0] if rest else "fixture"
         fresh = work / f"{name}.png"
         reference = REFERENCES / f"{name}.png"
         try:
-            chain = render(name, arguments, fresh)
+            chain = render(name, arguments, fresh, root)
             if bless:
                 write_faces(fingerprint(chain))
             elif not checked_faces:

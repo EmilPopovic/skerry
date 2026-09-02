@@ -3069,13 +3069,7 @@ fn cell_at(
     }
 
     let mark = mark_of(pane.mode, layout, box_, &metrics);
-    let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
-    let colour = kind_colour_of(&theme, types, &pane.listing, id, directory, broken);
-    if directory {
-        painter.folder(icon_box, colour);
-    } else {
-        painter.file(icon_box, colour);
-    }
+    mark_at(painter, pane, id, mark, MarkState { directory, broken }, types);
 
     let text_top = box_.y + box_.height * 0.58;
     let baseline = painter.baseline(text_top, metrics.row_height, metrics.text_size);
@@ -3098,6 +3092,53 @@ fn cell_at(
         theme.name_color(selected, directory, broken),
         Align::Center,
     );
+}
+
+/// What a mark needs to know that the listing alone does not say twice.
+#[derive(Clone, Copy)]
+struct MarkState {
+    directory: bool,
+    broken: bool,
+}
+
+/// An entry's mark: its thumbnail where the atlas has one, its kind mark where
+/// not.
+///
+/// **One or the other, never both.** `Pane::thumbs` holds only keys the atlas
+/// actually has — `App::settle_thumbnails` checks before it records — so this needs
+/// no fallback drawn underneath, and a picture with transparency in it shows the
+/// row behind rather than a file glyph through the middle of it.
+///
+/// **Details and Grid only, and a trail is not an omission.** A column fetches no
+/// metadata at all ([ADR
+/// 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md)), so it has
+/// no modification time — and without one there is no key, because a thumbnail is
+/// keyed on when the file changed ([ADR
+/// 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md)).
+/// A trail would have to `statx` every row to show a picture, which is the thing
+/// that decision exists to avoid.
+fn mark_at(
+    painter: &mut Painter<'_>,
+    pane: &Pane,
+    id: sk_model::EntryId,
+    mark: Area,
+    state: MarkState,
+    types: Option<&MimeDatabase>,
+) {
+    let theme = *painter.theme;
+    let box_ = painter.rect(mark.x, mark.y, mark.width, mark.height);
+    if let Some(image) = pane.thumbs.get(&id) {
+        // The tint carries only its alpha, which is opaque here: a dimmed
+        // thumbnail would be a second meaning for the colour a broken link uses.
+        painter.image(*image, box_, theme.palette.text);
+        return;
+    }
+    let colour = kind_colour_of(&theme, types, &pane.listing, id, state.directory, state.broken);
+    if state.directory {
+        painter.folder(box_, colour);
+    } else {
+        painter.file(box_, colour);
+    }
 }
 
 /// The colour of an entry's mark.
@@ -3197,13 +3238,7 @@ fn row_at(
         }
 
         let mark = mark_of(pane.mode, layout, cells.at(row, pane.scroll.offset()), &metrics);
-        let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
-        let icon_color = kind_colour_of(&theme, types, &pane.listing, id, directory, broken);
-        if directory {
-            painter.folder(icon_box, icon_color);
-        } else {
-            painter.file(icon_box, icon_color);
-        }
+        mark_at(painter, pane, id, mark, MarkState { directory, broken }, types);
 
         let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
         if let Some(naming) = naming.filter(|naming| naming.row == row) {

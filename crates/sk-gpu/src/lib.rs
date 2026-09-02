@@ -21,10 +21,12 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 mod atlas;
+mod images;
 mod renderer;
 
 pub mod capture;
 pub mod draw;
 
 pub use draw::{Color, Direction, DrawList, Rect};
+pub use images::{ImageKey, SLOT as THUMBNAIL_SLOT};
 pub use renderer::{FrameStats, Renderer};

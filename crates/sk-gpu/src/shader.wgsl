@@ -7,19 +7,27 @@ struct Uniforms {
     viewport: vec2<f32>,
     mask_size: vec2<f32>,
     color_size: vec2<f32>,
-    _pad: vec2<f32>,
+    image_size: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var mask_texture: texture_2d<f32>;
 @group(0) @binding(2) var color_texture: texture_2d<f32>;
 @group(0) @binding(3) var atlas_sampler: sampler;
+@group(0) @binding(4) var image_texture: texture_2d<f32>;
+// **A second sampler, and it is the only filtering one.** Glyphs are drawn 1:1
+// from a raster made at their device size; a thumbnail is 128 texels drawn at
+// forty, so it is always minified and nearest sampling would be the aliasing the
+// child's box filter exists to avoid.
+@group(0) @binding(5) var image_sampler: sampler;
 
 const KIND_RECT: u32 = 0u;
 const KIND_MASK: u32 = 1u;
 const KIND_COLOR: u32 = 2u;
 // Four kinds, one per direction: up, down, left, right.
 const KIND_TRIANGLE: u32 = 3u;
+// After the four triangles. A thumbnail from the image atlas — ADR 0018.
+const KIND_IMAGE: u32 = 7u;
 
 struct Instance {
     @location(0) rect: vec4<f32>,   // device px: x, y, w, h
@@ -56,7 +64,10 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> Vertex {
         1.0 - device.y / u.viewport.y * 2.0,
     );
 
-    let atlas = select(u.mask_size, u.color_size, instance.kind == KIND_COLOR);
+    var atlas = select(u.mask_size, u.color_size, instance.kind == KIND_COLOR);
+    if instance.kind == KIND_IMAGE {
+        atlas = u.image_size;
+    }
 
     var out: Vertex;
     out.position = vec4<f32>(clip, 0.0, 1.0);
@@ -118,6 +129,14 @@ fn fs(in: Vertex) -> @location(0) vec4<f32> {
         }
         let alpha = in.color.a * coverage;
         return vec4<f32>(in.color.rgb * alpha, alpha);
+    }
+    if in.kind == KIND_IMAGE {
+        // Straight RGBA from the child, premultiplied here — the blend state is
+        // premultiplied and a straight buffer drawn through it has dark fringes
+        // wherever it is transparent, which is every icon with a rounded corner.
+        let texel = textureSample(image_texture, image_sampler, in.uv);
+        let alpha = texel.a * in.color.a;
+        return vec4<f32>(texel.rgb * alpha, alpha);
     }
     if in.kind >= KIND_TRIANGLE {
         let distance = triangle(in.local - in.half_size, in.half_size, in.kind);

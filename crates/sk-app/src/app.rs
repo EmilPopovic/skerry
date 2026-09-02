@@ -885,6 +885,13 @@ pub struct App {
     filtering: bool,
     typed_at: Instant,
     pointer: Point,
+    /// The preview host: which children are running, and what is wanted.
+    ///
+    /// **Spawns nothing until something is asked for**, so a session in a folder
+    /// of text files costs exactly what it did before previews existed.
+    previews: sk_preview::Previews,
+    /// What the atlas knows each thumbnail by.
+    thumbs: crate::previews::Thumbs,
     /// Whether the history strip is showing its list or only its header.
     ///
     /// Collapsed by default and remembered across the process, which is
@@ -1161,6 +1168,8 @@ impl App {
             filtering: false,
             typed_at: now,
             pointer: Point::default(),
+            previews: sk_preview::Previews::new(),
+            thumbs: crate::previews::Thumbs::default(),
             history_open: false,
             hovered_edit: None,
             history_scroll: sk_ui::Scroll::default(),
@@ -1232,6 +1241,7 @@ impl App {
                 self.dirty = true;
             }
             self.drain_edits();
+            self.drain_previews();
             if self.sidebar.drain() {
                 self.dirty = true;
             }
@@ -2053,6 +2063,7 @@ impl App {
         let visible = cells.visible(self.panes.focused().scroll.offset());
         let Self { measurer, panes, jobs, .. } = self;
         measurer.update(panes.focused_mut(), visible, jobs);
+        self.settle_thumbnails();
     }
 
     /// Puts the caret where a click in the path field landed.
@@ -4698,6 +4709,81 @@ search_active={active:?}",
                 self.edits.stop_naming();
             }
         }
+        self.dirty = true;
+    }
+
+    /// Asks for the thumbnails of what is on screen, and forgets the rest.
+    ///
+    /// **Once a frame, over the visible rows only.** A folder of ten thousand
+    /// photographs asks for the forty somebody can see; scrolling asks for the
+    /// next forty. That is the same rule the folder-total walk next door follows
+    /// and the reason neither is a listing-sized piece of work.
+    ///
+    /// Nothing here decodes, opens or stats anything — [rule
+    /// 1](../../../docs/03-principles.md). The `mtime` is already in the listing,
+    /// and what leaves this function is a want on a queue.
+    fn settle_thumbnails(&mut self) {
+        // Nothing to ask about until the MIME databases land, which is the first
+        // few milliseconds of a session — see `sk_desktop::kind_of`.
+        let Some(desktop) = self.desktop.clone() else { return };
+        let types = desktop.mime.as_ref();
+        let mut wanted = Vec::new();
+        for leaf in &self.placement.leaves {
+            let Some(pane) = self.panes.leaf(leaf.id).map(crate::panes::Tabs::showing) else {
+                continue;
+            };
+            let cells = self.cells_of(leaf, pane);
+            for row in cells.visible(pane.scroll.offset()) {
+                let Some(id) = pane.listing.at(row) else { continue };
+                let kind = sk_desktop::kind_of(&pane.listing, id, Some(types));
+                if crate::previews::shows(pane.listing.name(id), kind, Some(types))
+                    != Some(crate::previews::Shows::Picture)
+                {
+                    continue;
+                }
+                wanted.push((leaf.id, id, pane.path_of(id), pane.listing.mtime(id)));
+            }
+        }
+        for (leaf, id, path, mtime) in wanted {
+            let (_, image) = self.thumbs.name(&path, mtime);
+            // **`holds_image`, not `get`.** Asking whether to fetch must not stamp
+            // the frame the atlas evicts by, or the least recently *drawn* entry
+            // would be whatever nobody has asked about.
+            let held = self.renderer.holds_image(image);
+            if let Some(tabs) = self.panes.leaf_mut(leaf) {
+                // **Only what the atlas actually has.** A row draws its kind mark
+                // or its picture, never a picture-shaped hole: an entry whose
+                // thumbnail has not arrived — or whose slot was evicted — is an
+                // entry with no thumbnail, and the mark is what goes there.
+                if held {
+                    tabs.showing_mut().thumbs.insert(id, image);
+                } else {
+                    tabs.showing_mut().thumbs.remove(&id);
+                }
+            }
+            if !held {
+                self.previews.want(crate::previews::thumbnail(path, mtime));
+            }
+        }
+        self.previews.pump(&self.jobs.pool, &self.waker.handle());
+    }
+
+    /// Puts finished thumbnails into the atlas.
+    fn drain_previews(&mut self) {
+        let answers = self.previews.drain();
+        if answers.is_empty() {
+            return;
+        }
+        for answer in answers {
+            if answer.refusal != sk_preview::Refusal::None || answer.pixels.is_empty() {
+                continue;
+            }
+            // A name nobody holds any more is an answer to a question about a
+            // folder somebody has left. Dropping it is the whole of the cleanup.
+            let Some(image) = self.thumbs.look_up(&answer.key) else { continue };
+            self.renderer.hold_image(image, answer.size.0, answer.size.1, &answer.pixels);
+        }
+        self.thumbs.forget_the_oldest();
         self.dirty = true;
     }
 

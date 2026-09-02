@@ -94,7 +94,13 @@ def source_check(report: Report) -> None:
             for rule, pattern, message in SOURCE_RULES:
                 if pattern.search(line) and not suppressed(line, rule):
                     report.fail(f"{rel(source)}:{number}", message)
-            if "wgpu" in line and "sk-gpu" not in source.parts and not suppressed(line, "gpu-seam"):
+            # **A comment naming `wgpu` is not a leak.** ADR 0003's rule is about
+            # *types* crossing the seam, and the first thing above `sk-gpu` to
+            # mention the crate at all was a doc comment saying it does not use it
+            # — which this failed, correctly by the letter and wrongly by the
+            # point. Code only, so the rule matches what the ADR is about.
+            code = line.split("//")[0]
+            if "wgpu" in code and "sk-gpu" not in source.parts and not suppressed(line, "gpu-seam"):
                 report.fail(f"{rel(source)}:{number}", "wgpu must not leak above sk-gpu — ADR 0003")
             # Which display server this is must not reach the code above the
             # platform layer. `sk-gpu` is the one exception: it converts the raw

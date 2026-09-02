@@ -723,6 +723,77 @@ fn settle_folder_totals(pane: &mut Pane, session: &Session) {
     measurer.stop();
 }
 
+/// Fetches every visible thumbnail and waits for it, so the frame is reproducible.
+///
+/// **A capture does synchronously what the window does over frames.** In the
+/// window, `App::settle_thumbnails` asks and a later frame draws whatever has
+/// arrived; here the answer has to be in the atlas before the one frame that gets
+/// taken. Bounded by the same deadline as the read, for the same reason — a
+/// capture of a directory of ten thousand photographs is not a reason to decode
+/// them all.
+///
+/// What landed is counted by the atlas, and `report` prints that count: a golden
+/// frame that silently drew no pictures is a golden frame of the fallback marks,
+/// and blessing one of those as if it showed the feature is exactly the mistake
+/// [12-measurement.md](../../../docs/12-measurement.md) keeps recording.
+fn settle_thumbnails(
+    pane: &mut Pane,
+    session: &mut Session,
+    types: Option<&sk_desktop::MimeDatabase>,
+    thumbs: &mut crate::previews::Thumbs,
+) {
+    let Some(types) = types else { return };
+    let mut previews = sk_preview::Previews::new();
+    let mut asked: Vec<(sk_model::EntryId, sk_gpu::ImageKey)> = Vec::new();
+    let mut wanted = 0usize;
+    for row in 0..pane.listing.rows().min(MEASURED) {
+        let Some(id) = pane.listing.at(row) else { continue };
+        let kind = sk_desktop::kind_of(&pane.listing, id, Some(types));
+        if crate::previews::shows(pane.listing.name(id), kind, Some(types))
+            != Some(crate::previews::Shows::Picture)
+        {
+            continue;
+        }
+        let path = pane.path_of(id);
+        let mtime = pane.listing.mtime(id);
+        let (_, image) = thumbs.name(&path, mtime);
+        asked.push((id, image));
+        previews.want(crate::previews::thumbnail(path, mtime));
+        wanted += 1;
+    }
+    if wanted == 0 {
+        return;
+    }
+
+    let deadline = std::time::Instant::now() + READ_DEADLINE;
+    let mut landed = 0usize;
+    while landed < wanted && std::time::Instant::now() < deadline {
+        previews.pump(&session.jobs.pool, &session.waker.handle());
+        for answer in previews.drain() {
+            landed += 1;
+            if answer.refusal != sk_preview::Refusal::None {
+                continue;
+            }
+            if let Some(image) = thumbs.look_up(&answer.key) {
+                session.renderer.hold_image(image, answer.size.0, answer.size.1, &answer.pixels);
+            }
+        }
+        std::thread::yield_now();
+    }
+    // **Only what the atlas actually holds** — the same rule
+    // `App::settle_thumbnails` follows, and the reason it is a rule: the first
+    // version of this recorded every key it asked about, so a file that came back
+    // `Undecodable` drew `painter.image` for a picture that was never there and
+    // its kind mark went with it. Three golden frames caught it as two rows whose
+    // marks had vanished; `holiday 🏖️.jpeg` and `img10.png` in the shared fixture
+    // are named like pictures and filled with junk, which is exactly that case.
+    for (id, image) in asked {
+        if session.renderer.holds_image(image) {
+            pane.thumbs.insert(id, image);
+        }
+    }
+}
+
 /// Puts the list into the state a golden frame is worth taking of.
 ///
 /// A selection, a cursor and a hover, at fixed rows: a frame with none of them
@@ -864,6 +935,10 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     settle_folder_totals(&mut pane, &session);
     pose(&mut pane, request.checked);
 
+    let types = sk_desktop::MimeDatabase::load();
+    let mut thumbs = crate::previews::Thumbs::default();
+    settle_thumbnails(&mut pane, &mut session, Some(&types), &mut thumbs);
+
     // The overlay reads the command registry, so a capture of it builds one.
     let keys_rows = request.keys.then(|| {
         let registry = crate::commands::registry();
@@ -872,7 +947,6 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 
     // Read here rather than left as `None`: the mark at the head of a row is
     // coloured from it, so a golden frame without it is a golden frame of grey.
-    let types = sk_desktop::MimeDatabase::load();
     // A fixed set rather than this machine's: the sidebar is part of the frame,
     // and a reference image that embeds somebody's `user-dirs.dirs` and mount
     // table is one nobody else can reproduce.
@@ -975,7 +1049,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 /// comparing against a stored reference has to be able to say so.
 fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) {
     eprintln!(
-        "skerry: wrote {} — {}×{} at {}%, {} entries, {} quads, {} draws, {} glyphs",
+        "skerry: wrote {} — {}×{} at {}%, {} entries, {} quads, {} draws, {} glyphs, \
+{} thumbnails",
         request.file.display(),
         session.physical.0,
         session.physical.1,
@@ -984,6 +1059,10 @@ fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) 
         stats.quads,
         stats.draws,
         session.renderer.atlas_stats().0,
+        // **Said out loud, because a frame that drew none is a frame of the
+        // fallback marks** — and blessing one of those as if it showed the feature
+        // is exactly the mistake docs/12 keeps recording.
+        session.renderer.image_stats().0,
     );
     for path in session.fonts.paths() {
         eprintln!("skerry: face {}", path.display());

@@ -6,6 +6,7 @@ use sk_text::{Fonts, GlyphKey};
 
 use crate::atlas::{Atlas, COLOR_SIDE, MASK_SIDE, Placed};
 use crate::draw::{DrawList, Item, KIND_COLOR, KIND_MASK, Quad};
+use crate::images::{ImageKey, Images, SIDE as IMAGE_SIDE};
 
 /// What one frame cost.
 ///
@@ -56,13 +57,20 @@ pub struct Renderer {
     queue: wgpu::Queue,
     target: Target,
     pipeline: wgpu::RenderPipeline,
+    /// Kept so the bind group can be rebuilt when the thumbnail atlas grows from
+    /// its placeholder — the layout is unchanged by that, only the view.
+    layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     instances: wgpu::Buffer,
     capacity: usize,
     mask: wgpu::Texture,
     color: wgpu::Texture,
+    /// The thumbnail atlas's texture — ADR 0018's grid of equal slots.
+    images: wgpu::Texture,
     atlas: Atlas,
+    /// What is in that grid, and what is queued for it.
+    pictures: Images,
     /// Resolved instances for the frame being submitted, kept between frames so
     /// a frame is not an allocation.
     quads: Vec<Quad>,
@@ -184,7 +192,8 @@ impl Renderer {
         target: Target,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let Built { pipeline, bind_group, uniforms, mask, color } = build(&device, format);
+        let Built { pipeline, layout, bind_group, uniforms, mask, color, images } =
+            build(&device, format);
         let capacity = 1 << 14;
         let instances = instance_buffer(&device, capacity);
         let info = adapter.get_info();
@@ -199,7 +208,10 @@ impl Renderer {
             capacity,
             mask,
             color,
+            layout,
+            images,
             atlas: Atlas::new(),
+            pictures: Images::default(),
             quads: Vec::with_capacity(capacity),
             adapter: info.name,
             backend: format!("{:?}", info.backend),
@@ -232,6 +244,87 @@ impl Renderer {
     pub fn atlas_stats(&self) -> (usize, f32, f32) {
         let (mask, color) = self.atlas.utilization();
         (self.atlas.len(), mask, color)
+    }
+
+    /// Replaces the placeholder with the real atlas, the first time one is needed.
+    ///
+    /// **Once, and never back.** A window that has shown a thumbnail is a window
+    /// that will show another; shrinking again would be a texture allocation on a
+    /// path that has already paid for one.
+    fn grow_the_image_atlas(&mut self) {
+        if !self.pictures.in_use() || self.images.width() == IMAGE_SIDE {
+            return;
+        }
+        self.images =
+            atlas_texture(&self.device, "thumbnails", IMAGE_SIDE, wgpu::TextureFormat::Rgba8Unorm);
+        // The layout is unchanged — same bindings, same types — so only the group
+        // is rebuilt and the pipeline is untouched.
+        let view =
+            |texture: &wgpu::Texture| texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = |filter| {
+            self.device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("atlas"),
+                mag_filter: filter,
+                min_filter: filter,
+                ..Default::default()
+            })
+        };
+        self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&view(&self.mask)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view(&self.color)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler(wgpu::FilterMode::Nearest)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&view(&self.images)),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&sampler(wgpu::FilterMode::Linear)),
+                },
+            ],
+        });
+    }
+
+    /// Puts a thumbnail in the atlas, or says it did not fit.
+    ///
+    /// `pixels` is straight `RGBA8`, `width` by `height`, neither above
+    /// [`crate::images::SLOT`]. A key already held is a no-op that returns where it
+    /// already is, so a caller may offer the same image every frame without
+    /// re-uploading it. See [ADR
+    /// 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md).
+    pub fn hold_image(&mut self, key: ImageKey, width: u32, height: u32, pixels: &[u8]) -> bool {
+        self.pictures.insert(key, width, height, pixels).is_some()
+    }
+
+    /// Whether the atlas already holds `key`, without marking it as drawn.
+    ///
+    /// For a caller deciding whether to ask a child for something. **Not
+    /// `Images::get`**, which is the drawing path and touches the frame stamp
+    /// eviction sorts on — asking "do I need to fetch this" must not make an
+    /// image look more recently used than it is.
+    #[must_use]
+    pub fn holds_image(&self, key: ImageKey) -> bool {
+        self.pictures.holds(key)
+    }
+
+    /// Thumbnails held, how full the atlas is, and how many uploads are waiting.
+    #[must_use]
+    pub fn image_stats(&self) -> (usize, f32, usize) {
+        let (held, full) = self.pictures.stats();
+        (held, full, self.pictures.pending())
     }
 
     /// The size the target is currently at, in device pixels.
@@ -275,6 +368,11 @@ impl Renderer {
     ) -> FrameStats {
         let mut stats = FrameStats::default();
         list.finish();
+        // **The image atlas's frame starts here, not at a caller's discretion.**
+        // Eviction sorts on the frame an image was last drawn in, so the count has
+        // to advance exactly once per frame — a caller who forgot would make every
+        // entry look equally old and eviction arbitrary.
+        self.pictures.begin_frame();
         let (width, height) = self.size();
 
         let acquire_started = std::time::Instant::now();
@@ -306,6 +404,8 @@ impl Renderer {
 
         let boundaries = self.resolve(list, fonts, &mut stats);
         self.atlas.flush(&self.queue, &self.mask, &self.color);
+        self.grow_the_image_atlas();
+        self.pictures.flush(&self.queue, &self.images);
 
         if self.quads.len() > self.capacity {
             self.capacity = self.quads.len().next_power_of_two();
@@ -319,8 +419,8 @@ impl Renderer {
             MASK_SIDE as f32,
             COLOR_SIDE as f32,
             COLOR_SIDE as f32,
-            0.0,
-            0.0,
+            IMAGE_SIDE as f32,
+            IMAGE_SIDE as f32,
         ];
         self.queue.write_buffer(&self.uniforms, 0, as_bytes(&uniforms));
         self.queue.write_buffer(&self.instances, 0, as_bytes(&self.quads));
@@ -462,6 +562,15 @@ impl Renderer {
                         Some(_) => {}
                         None => stats.dropped += 1,
                     },
+                    Item::Image { key, rect, alpha } => {
+                        if let Some(slot) = self.pictures.get(*key) {
+                            self.quads.push(image_quad(slot, *rect, alpha.packed()));
+                        }
+                        // An image the atlas does not hold yet draws nothing,
+                        // which is what a cell looks like while its thumbnail is
+                        // still being decoded. Not a dropped frame: nobody has
+                        // failed, the answer has not arrived.
+                    }
                 }
             }
             next = group.end;
@@ -579,6 +688,34 @@ fn timed_out<T>(value: Option<T>, what: &str) -> Result<T, Problem> {
     })
 }
 
+/// The quad for a thumbnail: fitted inside its box, centred, aspect kept.
+///
+/// **Centred rather than stretched.** A photograph pulled to a square is worse
+/// than a photograph with space beside it, and a grid where every cell's picture
+/// has a different distortion is a grid nobody can scan.
+fn image_quad(slot: crate::images::Slot, rect: crate::Rect, color: u32) -> Quad {
+    let scale = (rect.width / slot.width.max(1) as f32)
+        .min(rect.height / slot.height.max(1) as f32)
+        .min(1.0);
+    let (width, height) = (slot.width as f32 * scale, slot.height as f32 * scale);
+    Quad {
+        rect: [
+            (rect.x + (rect.width - width) / 2.0).round(),
+            (rect.y + (rect.height - height) / 2.0).round(),
+            width.round().max(1.0),
+            height.round().max(1.0),
+        ],
+        uv: [slot.x as f32, slot.y as f32, slot.width as f32, slot.height as f32],
+        color,
+        kind: KIND_IMAGE,
+        radius: 0.0,
+        border: 0.0,
+    }
+}
+
+/// The shader's `KIND_IMAGE`, after the four triangle directions.
+const KIND_IMAGE: u32 = 7;
+
 fn glyph_quad(placed: Placed, pen_x: f32, baseline_y: f32, color: u32) -> Quad {
     // `left` and `top` come from the rasterizer and are already in device pixels
     // at this glyph's size, so the destination is an integer translation of the
@@ -673,10 +810,12 @@ fn pick_format(capabilities: &wgpu::SurfaceCapabilities) -> Option<wgpu::Texture
 /// Everything that depends only on the device and the target format.
 struct Built {
     pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     mask: wgpu::Texture,
     color: wgpu::Texture,
+    images: wgpu::Texture,
 }
 
 fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
@@ -688,8 +827,23 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let (layout, bind_group) = bindings(device, &uniforms, &mask, &color);
-    Built { pipeline: pipeline(device, &layout, format), bind_group, uniforms, mask, color }
+    // **One texel until a thumbnail exists** — ADR 0018's "allocated lazily". A
+    // window that opens no image pays no sixteen megabytes, which is what makes
+    // that size affordable against an RSS budget that is already missed. `wgpu`
+    // has no null binding, so the placeholder is a real 1×1 texture and the swap
+    // is a bind group rebuilt; the *layout* never changes, so the pipeline does
+    // not either.
+    let images = atlas_texture(device, "thumbnails", 1, wgpu::TextureFormat::Rgba8Unorm);
+    let (layout, bind_group) = bindings(device, &uniforms, &mask, &color, &images);
+    Built {
+        pipeline: pipeline(device, &layout, format),
+        layout,
+        bind_group,
+        uniforms,
+        mask,
+        color,
+        images,
+    }
 }
 
 fn bindings(
@@ -697,6 +851,7 @@ fn bindings(
     uniforms: &wgpu::Buffer,
     mask: &wgpu::Texture,
     color: &wgpu::Texture,
+    images: &wgpu::Texture,
 ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
     // Nearest, deliberately. Every glyph is drawn 1:1 from a raster made at its
     // device size, so a filtering sampler could only hide a bug — which is
@@ -705,6 +860,17 @@ fn bindings(
         label: Some("atlas"),
         mag_filter: wgpu::FilterMode::Nearest,
         min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    // **And a filtering one, for thumbnails only.** The sentence above is about
+    // glyphs and stays true of them. A thumbnail is the other case: the XDG cache
+    // is 128 pixels square and a grid mark is forty to sixty, so it is *always*
+    // minified — and nearest-sampling a photograph down by half is the aliasing a
+    // box filter was used in the child to avoid, undone on the GPU.
+    let smooth = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("images"),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
 
@@ -721,12 +887,19 @@ fn bindings(
                 },
                 count: None,
             },
-            texture_entry(1),
-            texture_entry(2),
+            texture_entry(1, false),
+            texture_entry(2, false),
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+            texture_entry(4, true),
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
         ],
@@ -748,6 +921,11 @@ fn bindings(
                 resource: wgpu::BindingResource::TextureView(&view(color)),
             },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(&view(images)),
+            },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&smooth) },
         ],
     });
     (layout, bind_group)
@@ -863,12 +1041,12 @@ fn instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
     })
 }
 
-fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
         ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            sample_type: wgpu::TextureSampleType::Float { filterable },
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },

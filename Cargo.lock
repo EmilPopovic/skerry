@@ -940,6 +940,7 @@ dependencies = [
  "sk-index",
  "sk-model",
  "sk-plat",
+ "sk-preview",
  "sk-text",
  "sk-ui",
  "sk-util",

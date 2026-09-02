@@ -217,6 +217,12 @@ pub struct Pane {
     /// trap the whole design is avoiding. So the run stays and
     /// [`crate::groups::Bands`] lends out none of its rows.
     pub closed: crate::groups::Closed,
+    /// The atlas key of each visible entry that has a thumbnail.
+    ///
+    /// **Per pane and per entry, filled once a frame by `App::settle_thumbnails`.**
+    /// Drawing cannot mint one: it has `&Pane`, and minting is a map insert. Keying
+    /// by `EntryId` rather than by row means a sort moves nothing.
+    pub thumbs: std::collections::HashMap<sk_model::EntryId, sk_gpu::ImageKey>,
     /// The band byte per entry the current order was computed with, indexed by
     /// [`EntryId`], and empty for every banding but [`Banding::Kind`].
     ///
@@ -397,6 +403,7 @@ impl Pane {
             view_owed: true,
             bands: Vec::new(),
             closed: crate::groups::Closed::default(),
+            thumbs: std::collections::HashMap::new(),
             kinds: Vec::new(),
             filter: String::new(),
             show_hidden: false,
@@ -514,6 +521,9 @@ impl Pane {
         // what it was holding, which is why this is tidiness rather than the trap
         // below; it is still not what anybody asked for.
         self.closed = crate::groups::Closed::default();
+        // The pictures go with the listing they were keyed against: an `EntryId`
+        // is an index into arrays the next read rebuilds.
+        self.thumbs.clear();
         // The filter goes too. It narrows *this* directory, and following you
         // into the next one means arriving somewhere that silently hides most
         // of what is there — with the only explanation a line in the status bar
