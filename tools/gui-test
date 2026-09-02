@@ -5290,6 +5290,38 @@ def pinning_a_folder(run: Run, fixture: Path) -> None:
         until(back, pinned="")
         if bookmarks.read_text() != "":
             raise Failure(f"unpinning left {bookmarks.read_text()!r}")
+
+        # **And a folder somebody can see, from its own menu.** The pane stands
+        # in the fixture and the row is `alpha`, so a Pin that acted on the
+        # folder being *shown* would put the fixture on the list — which is what
+        # this asserts against, and what the command used to do.
+        back.drive("key backspace\nsleep 800\n")
+        until(back, path=str(fixture))
+        row = point_at(back, 0)
+        expect(row, hover_name="alpha")
+        back.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(back, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        if "place.pin" not in opened["menu_aim"]:
+            raise Failure(f"a folder's menu has no Pin: {opened['menu_aim']!r}")
+        if "place.pin" in opened["menu_dim"]:
+            raise Failure("Pin is dimmed over a folder that is not on the list")
+        aimed = menu_aim(back, opened, "place.pin")
+        back.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 600\nkey f12\nsleep 200\n")
+        landed = until(back, pinned="alpha")
+        expect(landed, path=str(fixture))
+        if bookmarks.read_text() != f"file://{fixture / 'alpha'}\n":
+            raise Failure(f"the file holds {bookmarks.read_text()!r}")
+
+        # A file's row falls back to the folder on screen, which is the only
+        # thing "this folder" can mean there — and the fixture is not pinned yet.
+        file_row = point_at(back, 3)
+        if file_row["hover_name"].startswith(("alpha", "beta", "gamma")):
+            raise Failure(f"row 3 is {file_row['hover_name']!r}, wanted a file")
+        back.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        over_file = holds(back, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        aimed = menu_aim(back, over_file, "place.pin")
+        back.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 600\nkey f12\nsleep 200\n")
+        until(back, pinned=f"alpha,{fixture.name}")
     finally:
         back.close()
 
@@ -5615,7 +5647,18 @@ def the_sidebar_tree(run: Run, fixture: Path) -> None:
         # The session came back standing in the folder the tree row opened, so
         # the parent is the place the chord is about.
         again.drive("key backspace\nsleep 700\n")
-        until(again, path=str(fixture))
+        # **The place the chord is about is the folder the pane is in**, and the
+        # tree's shape is asserted before it rather than assumed: a target that
+        # followed the *cursor* instead — which is what pinning's does, and what
+        # one careless edit gave both of them — opened the row the cursor was on
+        # and left the place open. This is the assertion that failed six times out
+        # of six. Counted rather than compared to a string, because how many
+        # well-known directories a machine has is that machine's business.
+        standing = until(again, path=str(fixture))
+        shape = standing["place_depths"].split(",")
+        opens = [at for at, depth in enumerate(shape) if depth == "0+"]
+        if len(opens) != 1 or shape.count("1") != 3 or "1+" in shape:
+            raise Failure(f"the tree is not one open place with three rows under it: {shape}")
         again.drive("key ctrl+shift+e\nsleep 500\nkey f12\nsleep 200\n")
         shut = holds(
             again,

@@ -34,7 +34,12 @@ pub const ON_ROW: &[&[&str]] = &[
     &["file.copy", "file.cut", "file.paste"],
     &["file.copy_path", "file.copy_content"],
     &["file.duplicate", "file.rename", "file.trash", "file.delete"],
-    &["file.properties"],
+    // **Pin, on a row, is about the row.** A folder somebody has found is the
+    // commonest thing they want on the list of places, and reaching it used to
+    // mean entering the folder first — the command's target is the entry the menu
+    // opened over, so this row and the background's mean two different folders
+    // and both read as "this folder".
+    &["place.pin", "file.properties"],
 ];
 
 /// What a secondary click inside a text preview offers.

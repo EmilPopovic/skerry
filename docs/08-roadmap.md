@@ -314,8 +314,10 @@ is one read and one place a reply lands, and `pane::spawn_read` and
 `Panes::take_reply` are those.
 
 **The sidebar is a list somebody arranges**, which is the rest of what M2 owed
-it. A folder that is not one of the well-known directories can be **pinned**, and
-the well-known ones cannot be unpinned — the two verbs are one line in GTK's
+it. A folder that is not one of the well-known directories can be **pinned** — from
+its own row's menu as well as from the folder being shown, because the folder a
+person wants on the list is usually one they have just found rather than one they
+are standing in — and the well-known ones cannot be unpinned — the two verbs are one line in GTK's
 `bookmarks` file, so a pin here is a pin in Nautilus, Thunar, Nemo and `PCManFM`,
 and every line that file holds which this program cannot interpret comes back out
 of it unchanged. [ADR 0021](adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)

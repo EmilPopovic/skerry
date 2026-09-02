@@ -3475,11 +3475,36 @@ impl App {
         self.place_target.clone().unwrap_or_else(|| self.panes.focused().path.clone())
     }
 
-    /// Whether the place in question could be added to the list.
+    /// The folder a pin would add to the list of places.
+    ///
+    /// **What is being pointed at, and the folder on screen when that is not a
+    /// folder.** Three surfaces offer Pin and each points at something
+    /// different: a place's own menu names a place, a row's menu opens over the
+    /// row it selects, and the background menu points at nothing — so the order
+    /// here is the order of specificity. A file's row falls through to the
+    /// directory on screen, which is the only thing "this folder" can mean when
+    /// the row is not one.
+    ///
+    /// **Not [`App::place_in_question`]**, which the other four place commands
+    /// use: unpinning, reordering and opening act on a *place*, and a place is
+    /// never a row of the listing. Only pinning can be asked about a folder that
+    /// is not on the list yet, which is the whole point of it.
+    fn folder_to_pin(&self) -> PathBuf {
+        self.place_target
+            .clone()
+            .or_else(|| self.focused_directory())
+            .unwrap_or_else(|| self.panes.focused().path.clone())
+    }
+
+    /// Whether the folder in question could be added to the list.
+    ///
+    /// Dimmed for something already on it: a well-known directory is there from
+    /// `user-dirs.dirs` and a volume from the mount table, and `sidebar::build`
+    /// drops a bookmark that duplicates a well-known directory — so the line
+    /// would be written and change nothing on screen.
     #[must_use]
     pub(crate) fn can_pin(&self) -> bool {
-        let path = self.place_in_question();
-        !self.sidebar.holds(&path) && self.panes.focused().path == path
+        !self.sidebar.holds(&self.folder_to_pin())
     }
 
     /// Whether the place in question is one that can be taken off the list.
@@ -3488,9 +3513,9 @@ impl App {
         self.sidebar.is_pinned(&self.place_in_question())
     }
 
-    /// Adds the place in question to the list of places.
+    /// Adds the folder in question to the list of places.
     pub(crate) fn pin_place(&mut self) {
-        let path = self.place_in_question();
+        let path = self.folder_to_pin();
         self.write_the_places(crate::sidebar::Edit::Pinned, path.clone(), move || {
             sk_desktop::pin(&path)
         });
