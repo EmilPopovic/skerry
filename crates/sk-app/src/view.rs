@@ -1116,10 +1116,12 @@ fn quick_look(
             painter.preview(key, shape, theme.palette.text);
             page_selection(painter, look, box_);
             painter.list.pop_clip();
+            page_find(painter, look, inner, hits);
             return;
         }
         painter.preview(key, fitted(painter, inner, size, look.coarse), theme.palette.text);
         page_selection(painter, look, box_);
+        page_find(painter, look, inner, hits);
         return;
     }
     if let Some((key, aspect)) = look.standby {
@@ -1586,6 +1588,20 @@ fn page_selection(painter: &mut Painter<'_>, look: &crate::quicklook::QuickLook,
     }
     let theme = *painter.theme;
     let scale = (page.width / across, page.height / down);
+    // **The matches a find has not walked to yet, fainter.** `3 of 7` is a
+    // number; seven marks on the page is where they are — and the seventh is
+    // often the one somebody was looking for.
+    if let Some(query) = look.finding.as_ref().map(|field| field.text.as_str()) {
+        for (left, top, width, height) in text.other_matches(query) {
+            let shape = painter.rect(
+                page.x + left * scale.0,
+                page.y + top * scale.1,
+                (width * scale.0).max(1.0),
+                (height * scale.1).max(1.0),
+            );
+            painter.list.rect(shape, theme.palette.accent.with_alpha(40), 0.0);
+        }
+    }
     for (left, top, width, height) in text.highlights() {
         let shape = painter.rect(
             page.x + left * scale.0,
@@ -1596,6 +1612,56 @@ fn page_selection(painter: &mut Painter<'_>, look: &crate::quicklook::QuickLook,
         painter.list.rect(shape, theme.palette.accent.with_alpha(90), 0.0);
     }
 }
+
+/// The find bar, along the bottom of the panel.
+///
+/// **At the bottom, because the strip is full and a browser puts it there.** The
+/// panel's own strip already carries the file arrows, the page pair, the play
+/// control, the zoom and Edit; a find field in it would be a sixth thing
+/// competing for a 34-pixel row.
+fn page_find(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    inner: Area,
+    hits: &mut Hits,
+) {
+    let Some(field) = look.finding.as_ref() else { return };
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let height = PAGE_FIND_HEIGHT;
+    let area = Area { x: inner.x, y: inner.bottom() - height, width: inner.width, height };
+    let ground = painter.rect(area.x, area.y, area.width, area.height);
+    painter.list.rect(ground, theme.palette.chrome, 0.0);
+    painter.hairline(area.x, area.y, area.width, theme.palette.divider);
+    let baseline = painter.baseline(area.y, height, metrics.path_size);
+    let said = look.found_label();
+    let width = text_width(painter, &said, metrics.header_size, false) + 6.0;
+    if !said.is_empty() {
+        let ink = if look.found.0 == 0 { theme.palette.danger } else { theme.palette.dim };
+        let style = TextStyle::new(metrics.header_size, ink).right();
+        line(painter, &said, style, area.right() - 12.0 - width, width, baseline);
+    }
+    let room = Area { width: area.width - 24.0 - width, ..area };
+    if field.text.is_empty() {
+        let prompt = TextStyle::new(metrics.path_size, theme.palette.dim);
+        line(
+            painter,
+            i18n::lookup("look.find_prompt"),
+            prompt,
+            area.x + 12.0,
+            room.width,
+            baseline,
+        );
+    }
+    let style = TextStyle::new(metrics.path_size, theme.palette.text);
+    field_text(painter, room, field.into(), style, 12.0, baseline);
+    // The bar is a panel as far as the pointer is concerned: a press in it must
+    // not reach the list behind the look.
+    hits.panels.push(area);
+}
+
+/// How tall the page's find bar is.
+const PAGE_FIND_HEIGHT: f32 = 34.0;
 
 /// Which place on the page a point in the panel lands on.
 ///

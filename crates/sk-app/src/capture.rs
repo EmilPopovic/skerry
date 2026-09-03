@@ -273,6 +273,16 @@ fn sample_quick_look(
         }
         std::thread::yield_now();
     }
+    // **After the page has arrived, because the find is over its words.** A bar
+    // with a query and no matches is a different frame from a bar with both, and
+    // the one worth having is the one that found something.
+    if !request.look_find.is_empty() && look.page_text.is_some() {
+        look.toggle_finding();
+        if let Some(field) = look.finding.as_mut() {
+            field.insert(&request.look_find);
+        }
+        look.find_again(0);
+    }
     // **After the page has arrived, because the selection is over its words.**
     // `--look-selected` is one flag for both kinds of text: over a file it
     // selects the lines, and over a page it selects everything the tool found.
@@ -447,6 +457,8 @@ pub struct Capture {
     pub pinned: bool,
     /// Whether one of its places is open, with what is under it.
     pub tree: bool,
+    /// What the page's find bar is looking for, where a frame wants one open.
+    pub look_find: String,
     /// How much the quick look's picture is magnified, where a frame wants it
     /// zoomed.
     ///

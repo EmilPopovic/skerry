@@ -46,7 +46,7 @@ fn main() {
             // what a page answer carries and the one a person will ask about:
             // selection is absent on a machine without `pdftotext` and on a
             // document that is a scan, and those look the same from the window.
-            match words::of(Path::new(&path), 1) {
+            match words::of(Path::new(&path), 1, rotation(tool, Path::new(&path), 1)) {
                 Some(layer) => println!(
                     "skerry-preview-doc: words: {} on a {:.0}×{:.0} pt page, first {:?}",
                     layer.words.len(),
@@ -146,7 +146,9 @@ fn answer(request: &Request) -> Reply {
             pages,
             delay_ms: 0,
             pixels,
-            words: words::of(&path, page).map(|layer| layer.pack()).unwrap_or_default(),
+            words: words::of(&path, page, rotation(tool, &path, page))
+                .map(|layer| layer.pack())
+                .unwrap_or_default(),
         },
         Err(refusal) => Reply {
             refusal,
@@ -209,6 +211,31 @@ fn on_path(program: &str) -> bool {
 /// It ships in the same package as `pdftoppm`, so in practice it is there
 /// whenever the renderer is — and "in practice" is why the answer is an `Option`
 /// rather than a number.
+/// How far the page is turned, from the tool that already answers about pages.
+///
+/// **`pdfinfo`, per page, because a `/Rotate 90` page is where poppler's own two
+/// answers disagree**: its text layer reports the unrotated `MediaBox` as the
+/// page's size and the boxes in the rotated space, and its renderer draws the
+/// rotated image. Zero where nothing can say, which is the same as no rotation
+/// and is what every page that is not turned reports anyway.
+fn rotation(tool: Tool, path: &Path, page: u32) -> u32 {
+    if tool != Tool::PdfToPpm {
+        // mupdf's structured text is already in the rotated space, so the angle
+        // is not a question that arm has to ask.
+        return 0;
+    }
+    let page = page.max(1).to_string();
+    let Ok(done) = Command::new("pdfinfo").args(["-f", &page, "-l", &page]).arg(path).output()
+    else {
+        return 0;
+    };
+    String::from_utf8_lossy(&done.stdout)
+        .lines()
+        .find_map(|line| line.split_once("rot:").map(|(_, rest)| rest.trim().to_owned()))
+        .and_then(|rest| rest.parse::<i32>().ok())
+        .map_or(0, |angle| angle.rem_euclid(360).unsigned_abs())
+}
+
 fn count(tool: Tool, path: &Path) -> Option<u32> {
     let mut command = Command::new(match tool {
         Tool::PdfToPpm => "pdfinfo",

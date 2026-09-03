@@ -144,6 +144,8 @@ struct Shape {
     look_page: u32,
     /// How much `--look-zoom` magnified the picture, or one.
     look_zoom: f32,
+    /// What `--look-find` asked the page's find bar to look for.
+    look_find: String,
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
@@ -201,6 +203,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         aside: shape.aside,
         look_page: shape.look_page,
         look_zoom: shape.look_zoom,
+        look_find: shape.look_find.clone(),
         pinned: overlays.pinned,
         tree: overlays.tree,
         coloured: overlays.coloured,
@@ -236,6 +239,7 @@ fn main() -> std::process::ExitCode {
     let mut aside = None;
     let mut look_page = 0;
     let mut look_zoom = 1.0;
+    let mut look_find = String::new();
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
@@ -264,6 +268,10 @@ fn main() -> std::process::ExitCode {
             "--size" => match arguments.next().as_deref().and_then(parse_size) {
                 Some(size) => logical = size,
                 None => return usage_error("--size needs WIDTHxHEIGHT"),
+            },
+            "--look-find" => match arguments.next() {
+                Some(text) => look_find = text,
+                None => return usage_error("--look-find needs something to look for"),
             },
             "--look-zoom" => {
                 match arguments.next().as_deref().and_then(|it| it.parse::<f32>().ok()) {
@@ -328,6 +336,7 @@ fn main() -> std::process::ExitCode {
                 aside,
                 look_page,
                 look_zoom,
+                look_find,
                 at,
                 looking,
             },
@@ -427,6 +436,7 @@ skerry [OPTIONS] [PATH]
   --look-editing   put a text preview into edit mode, for a frame of the caret
   --look-page <n>  which page or animation frame the quick look is on
   --look-zoom <f>  how much the quick look's picture is magnified
+  --look-find <s>  open the page's find bar looking for this
   --aside <px>     how wide the sidebar is, which decides what a volume's row fits
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree

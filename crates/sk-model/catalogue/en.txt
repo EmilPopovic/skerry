@@ -372,10 +372,15 @@ look.edit = Edit
 look.done = Done
 # The button beside it, drawn only while an edit is outstanding.
 look.discard = Discard
+# The find bar over a page, and what it says it found.
+look.find_prompt = Find on this page
+look.found = {0} of {1}
+look.found_none = not found
 action.look_edit = Edit this text
 action.look_save = Save it
 action.look_discard = Discard the edit
 action.look_play = Play or pause the animation
+action.look_find = Find on this page
 action.look_copy = Copy the selected text
 notice.copied_lines[one] = Copied {0} line
 notice.copied_lines[other] = Copied {0} lines

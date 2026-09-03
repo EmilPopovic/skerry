@@ -560,6 +560,15 @@ pub(crate) struct QuickLook {
     /// `Ctrl+Z` takes back a save nobody meant — which is the whole reason
     /// `Change::Edited` carries both sides.
     pub(crate) unsaved: bool,
+    /// The find bar over a page, where one is open, and what it found.
+    ///
+    /// **This page's words, and it says so.** Searching a whole document means a
+    /// child round trip per page — the layer arrives with the pixels and there is
+    /// one page on screen — so what this finds is what is in front of you, and
+    /// the bar's own label carries that rather than leaving it to be discovered.
+    pub(crate) finding: Option<crate::field::Field>,
+    /// How many matches the query has, and which one is selected.
+    pub(crate) found: (usize, usize),
     /// The words on the page on screen, where the child could say.
     ///
     /// **Per page, and dropped when the page turns** — ADR 0024. A layer belongs
@@ -619,6 +628,8 @@ impl QuickLook {
             editing: false,
             unsaved: false,
             page_text: None,
+            finding: None,
+            found: (0, 0),
             zoom: 1.0,
             pan: (0.0, 0.0),
             playing: true,
@@ -735,8 +746,11 @@ impl QuickLook {
         };
         let moved = wanted != self.page;
         if moved {
-            // The words belong to the page that is going away.
+            // The words belong to the page that is going away, and so does what
+            // was found in them.
             self.page_text = None;
+            self.finding = None;
+            self.found = (0, 0);
         }
         self.page = wanted;
         // **A turn is a draft first, for the same reason opening one is.** `↓`
@@ -748,6 +762,53 @@ impl QuickLook {
         // the middle of a loop.
         self.coarse |= moved && self.shows == Shows::Page;
         moved
+    }
+
+    /// Opens the find bar, or closes it. Whether it is open now.
+    pub(crate) fn toggle_finding(&mut self) -> bool {
+        if self.page_text.is_none() {
+            return false;
+        }
+        if self.finding.take().is_some() {
+            self.found = (0, 0);
+            if let Some(page) = self.page_text.as_mut() {
+                page.clear();
+            }
+            return false;
+        }
+        self.finding = Some(crate::field::Field::new(String::new()));
+        true
+    }
+
+    /// Runs the query again, from match `at`.
+    pub(crate) fn find_again(&mut self, at: usize) {
+        let Some(query) = self.finding.as_ref().map(|field| field.text.clone()) else { return };
+        let Some(page) = self.page_text.as_mut() else { return };
+        self.found = page.find(&query, at);
+    }
+
+    /// Steps to the next match, or the previous one.
+    pub(crate) fn step_found(&mut self, by: isize) {
+        let (count, at) = self.found;
+        if count == 0 {
+            return;
+        }
+        let next = (at.cast_signed() + by).rem_euclid(count.cast_signed()).unsigned_abs();
+        self.find_again(next);
+    }
+
+    /// What the find bar says between its field and its edge.
+    pub(crate) fn found_label(&self) -> String {
+        let (count, at) = self.found;
+        if count == 0 {
+            let empty = self.finding.as_ref().is_none_or(|field| field.text.trim().is_empty());
+            return if empty {
+                String::new()
+            } else {
+                sk_model::i18n::lookup("look.found_none").to_owned()
+            };
+        }
+        sk_model::i18n::format("look.found", &[&(at + 1), &count])
     }
 
     /// Whether there is a picture that a zoom would mean anything to.
@@ -1454,6 +1515,8 @@ mod tests {
             editing: false,
             unsaved: false,
             page_text: None,
+            finding: None,
+            found: (0, 0),
             zoom: 1.0,
             pan: (0.0, 0.0),
             playing: true,

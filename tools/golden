@@ -287,6 +287,12 @@ FRAMES = [
     ("quick-look-chosen",
      ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-selected"],
      "pictures"),
+    # **A quarter-turned page with its words selected**, which is the frame the
+    # rotation fix is asserted by: the highlight has to land on the words of a
+    # page whose renderer and whose text layer disagree about which way up it is.
+    ("quick-look-page-turned",
+     ["--size", "900x600", "--scale", "125", "--look", "turned.pdf", "--look-selected"],
+     "pictures"),
     # **A page with its words selected.** The renderer answers with pixels and
     # `pdftotext -bbox-layout` with a box per word — ADR 0024 — and this is the
     # frame that says the transform between the page's points and the panel's
@@ -302,6 +308,14 @@ FRAMES = [
     ("quick-look-page-selected-zoomed",
      ["--size", "900x600", "--scale", "125", "--look", "paper.pdf", "--look-selected",
       "--look-zoom", "2.0"],
+     "pictures"),
+    # **The find bar, with matches on the page behind it.** The current match is
+    # the selection and the others are fainter, which is what turns `1 of 3` from
+    # a number into three places on the paper. A bar with a query that found
+    # nothing says so in the same place, and that is one assertion in the
+    # scenario rather than a second frame.
+    ("quick-look-page-found",
+     ["--size", "900x600", "--scale", "125", "--look", "paper.pdf", "--look-find", "render"],
      "pictures"),
     # **A picture zoomed and dragged off centre.** A pinch — `Ctrl` and the wheel
     # where there are no touchpad gestures — magnifies past the panel's fit, which
@@ -475,7 +489,7 @@ def build_fixture() -> Path:
     return directory
 
 
-def three_page_pdf() -> bytes:
+def three_page_pdf(rotate: int = 0) -> bytes:
     """A three-page PDF, valid enough for a renderer, with its pages numbered.
 
     **Hand-assembled with a real cross-reference table**, because the first version
@@ -508,9 +522,13 @@ def three_page_pdf() -> bytes:
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>",
     ]
+    # `/Rotate` is a page attribute, and the one that makes poppler's two answers
+    # about the same page disagree — see the `turned.pdf` fixture.
+    turn = f" /Rotate {rotate}".encode() if rotate else b""
     objects.extend(
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] "
-        b"/Resources << /Font << /F1 9 0 R >> >> /Contents "
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595]"
+        + turn
+        + b" /Resources << /Font << /F1 9 0 R >> >> /Contents "
         + str(6 + index).encode()
         + b" 0 R >>"
         for index in range(3)
@@ -661,6 +679,13 @@ def build_pictures() -> None:
         duration=120,
         loop=0,
     )
+
+    # **A page turned a quarter, which is where poppler disagrees with itself**:
+    # its text layer reports the *unrotated* MediaBox as the page's size and the
+    # word boxes in the *rotated* space, while its renderer draws the rotated
+    # image. Every highlight landed a factor of 1.4 from its word until the child
+    # started asking `pdfinfo` for the angle — and this is the frame that says so.
+    (directory / "turned.pdf").write_bytes(three_page_pdf(rotate=90))
 
     # A one-page PDF, written by hand so it needs no tool to generate — and it is
     # the only fixture whose *rendering* is somebody else's, which is the point:

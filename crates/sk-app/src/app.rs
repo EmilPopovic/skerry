@@ -2981,7 +2981,7 @@ impl App {
     /// somebody is looking at is not a button. A press *outside* falls through, so
     /// clicking the list behind the look closes it by choosing a different file —
     /// which is what a person means by clicking a list they can see.
-    fn press_in_the_quick_look(&mut self, position: Point, shift: bool) -> bool {
+    fn press_in_the_quick_look(&mut self, position: Point, shift: bool, clicks: u8) -> bool {
         if self.quick_look.is_none() {
             return false;
         }
@@ -2998,7 +2998,7 @@ impl App {
                 let strip = crate::view::quick_look_strip(&self.layout);
                 if inside.contains(position.x, position.y)
                     && (self.start_choosing_text(position, shift)
-                        || self.start_choosing_a_page(position, shift)
+                        || self.start_choosing_a_page(position, shift, clicks)
                         || self.start_panning(position))
                 {
                     self.dirty = true;
@@ -3028,7 +3028,7 @@ impl App {
     /// palette: the margin moves the page and the text selects out of it. A page
     /// with no text layer — a scan — is all margin, so it pans everywhere it
     /// used to.
-    fn start_choosing_a_page(&mut self, position: Point, shift: bool) -> bool {
+    fn start_choosing_a_page(&mut self, position: Point, shift: bool, clicks: u8) -> bool {
         let inner = crate::view::quick_look_area(&self.layout);
         let at = (position.x, position.y);
         let Some(look) = self.quick_look.as_ref() else { return false };
@@ -3039,8 +3039,16 @@ impl App {
         let Some(page) = self.quick_look.as_mut().and_then(|look| look.page_text.as_mut()) else {
             return false;
         };
-        page.choose(place, shift);
-        self.page_drag = true;
+        // **Two clicks take the word and three take the line**, which is what a
+        // double and a triple click mean in every text there is — and a drag that
+        // begins on the second click extends from the word rather than from the
+        // character, which is also what they do.
+        match clicks {
+            0 | 1 => page.choose(place, shift),
+            2 => page.select_run(place, false),
+            _ => page.select_run(place, true),
+        }
+        self.page_drag = clicks <= 1;
         true
     }
 
@@ -5106,6 +5114,15 @@ impl App {
     /// else everywhere in the program.
     fn quick_look_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
         use sk_plat::{Key, Named};
+        // **The find bar takes the keyboard while it is open**, on the same terms
+        // the search over a listing does: every letter belongs to the query, and
+        // the two chords a person expects — `Enter` for the next match and
+        // `Escape` for never mind — are answered here rather than fought over.
+        if self.quick_look.as_ref().is_some_and(|look| look.finding.is_some())
+            && self.finding_key(event)
+        {
+            return true;
+        }
         // **Editing takes the keyboard, and that is the whole of what edit mode
         // is.** The same panel, the same selection, the same scroll — what
         // changes is that `Space` is a space rather than the key that closes the
@@ -5127,6 +5144,60 @@ impl App {
         }
         self.dirty = true;
         true
+    }
+
+    /// One key to the find bar. Whether it was taken.
+    fn finding_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
+        use sk_plat::{Key, Named};
+        match event.key {
+            Key::Named(Named::Escape) => {
+                self.toggle_finding();
+                return true;
+            }
+            Key::Named(Named::Enter) => {
+                let by = if event.mods.shift { -1 } else { 1 };
+                if let Some(look) = self.quick_look.as_mut() {
+                    look.step_found(by);
+                }
+                self.dirty = true;
+                return true;
+            }
+            Key::Named(Named::Down) if event.mods.none() => {
+                if let Some(look) = self.quick_look.as_mut() {
+                    look.step_found(1);
+                }
+                self.dirty = true;
+                return true;
+            }
+            Key::Named(Named::Up) if event.mods.none() => {
+                if let Some(look) = self.quick_look.as_mut() {
+                    look.step_found(-1);
+                }
+                self.dirty = true;
+                return true;
+            }
+            _ => {}
+        }
+        // Everything else is typing, which is what a field does with it — and a
+        // query that changed starts again from the first match rather than from
+        // wherever the last one had walked to.
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        let Some(field) = look.finding.as_mut() else { return false };
+        if !field.key(event) {
+            return false;
+        }
+        look.find_again(0);
+        self.dirty = true;
+        true
+    }
+
+    /// Opens the find bar over a page, or closes it.
+    pub(crate) fn toggle_finding(&mut self) {
+        if self.quick_look.as_mut().is_some_and(crate::quicklook::QuickLook::toggle_finding) {
+            self.dirty = true;
+            return;
+        }
+        self.dirty = true;
     }
 
     /// Whether a text preview is open and being edited.
@@ -6950,6 +7021,24 @@ scope_aim={scope_aim:?}",
                 Some(format!("{:.1}:{:.1}:{:.1}:{:.1}", box_.x, box_.y, box_.width, box_.height))
             })
             .unwrap_or_default();
+        // What is typed in the find bar, so a scenario can tell a query that
+        // found nothing from a query that never arrived.
+        let look_query = self
+            .quick_look
+            .as_ref()
+            .and_then(|look| look.finding.as_ref())
+            .map(|field| field.text.clone())
+            .unwrap_or_default();
+        // What the find bar found, as `which/count`, or `none` when it is shut.
+        let look_found =
+            self.quick_look.as_ref().filter(|look| look.finding.is_some()).map_or_else(
+                || "none".to_owned(),
+                |look| {
+                    let (count, at) = look.found;
+                    let which = if count == 0 { 0 } else { at + 1 };
+                    format!("{which}/{count}")
+                },
+            );
         let look_picked = self
             .quick_look
             .as_ref()
@@ -6958,7 +7047,7 @@ scope_aim={scope_aim:?}",
             .unwrap_or_default();
         format!(
             "look_words={look_words} look_picked={look_picked:?} \
-look_page_box={look_page_box}"
+look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
         )
     }
 
@@ -7915,7 +8004,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         commands: &Registry<Self>,
     ) {
         self.pointer = position;
-        if self.press_in_an_overlay(position, shift, commands) {
+        if self.press_in_an_overlay(position, (shift, clicks), commands) {
             return;
         }
         if self.press_in_a_field(position) {
@@ -8416,9 +8505,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     fn press_in_an_overlay(
         &mut self,
         position: Point,
-        shift: bool,
+        held: (bool, u8),
         commands: &Registry<Self>,
     ) -> bool {
+        let (shift, clicks) = held;
         // First, and it takes every press: the question has no dismissal, so a
         // press that fell through to the list behind it would move a selection
         // the queue is about to act on.
@@ -8457,7 +8547,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // that took every press inside the panel first swallowed the click on the
         // menu row — and started an empty selection where the row was, which is
         // how `Copy` came to copy nothing.
-        if self.press_in_the_quick_look(position, shift) {
+        if self.press_in_the_quick_look(position, shift, clicks) {
             return true;
         }
         false

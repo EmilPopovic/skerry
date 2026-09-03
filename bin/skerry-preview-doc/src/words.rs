@@ -28,14 +28,25 @@ use sk_preview::wire::{Word, Words};
 
 /// The words on one page, or nothing where the machine cannot say.
 ///
-/// **`None` is a page with no selection, not an error.** A machine with `mutool`
-/// and no poppler renders pages and cannot say where their words are; a scanned
-/// document has no words at all. Both answer the same way, and the panel's three
-/// text commands stay dimmed — [06-portability.md](../../../docs/06-portability.md).
-pub fn of(path: &Path, page: u32) -> Option<Words> {
-    if !on_path("pdftotext") {
-        return None;
-    }
+/// **`None` is a page with no selection, not an error.** A scanned document has
+/// no words at all, and a machine with neither tool renders nothing to select on.
+/// Both answer the same way, and the panel's three text commands stay dimmed —
+/// [06-portability.md](../../../docs/06-portability.md).
+///
+/// `turned` is the page's `/Rotate`, which poppler needs and mupdf does not.
+pub fn of(path: &Path, page: u32, turned: u32) -> Option<Words> {
+    let layer = if on_path("pdftotext") {
+        poppler(path, page, turned)
+    } else if on_path("mutool") {
+        mupdf(path, page)
+    } else {
+        None
+    };
+    layer.filter(|it| !it.words.is_empty() && it.page.0 > 0.0 && it.page.1 > 0.0)
+}
+
+/// poppler's answer: `pdftotext -bbox-layout`.
+fn poppler(path: &Path, page: u32, turned: u32) -> Option<Words> {
     let page = page.max(1).to_string();
     let done = Command::new("pdftotext")
         .args(["-bbox-layout", "-f", &page, "-l", &page])
@@ -46,8 +57,17 @@ pub fn of(path: &Path, page: u32) -> Option<Words> {
     if !done.status.success() {
         return None;
     }
-    let layer = parse(&String::from_utf8_lossy(&done.stdout));
-    layer.filter(|it| !it.words.is_empty())
+    let mut layer = parse(&String::from_utf8_lossy(&done.stdout))?;
+    // **A quarter turn swaps the page and nothing else.** On a `/Rotate 90` page
+    // poppler reports the *unrotated* `MediaBox` as the page's size and the word
+    // boxes in the *rotated* space — a 420-point-wide page with a word at x=496 —
+    // while `pdftoppm` renders the rotated image. Dividing by the reported width
+    // put every highlight a factor of 1.4 from its word and off the paper.
+    // mupdf's answer below reports the rotated size and needs none of this.
+    if turned % 180 == 90 {
+        layer.page = (layer.page.1, layer.page.0);
+    }
+    Some(layer)
 }
 
 /// Whether a program is on `PATH`.
@@ -103,6 +123,101 @@ pub fn parse(text: &str) -> Option<Words> {
         }
     }
     (layer.page.0 > 0.0 && layer.page.1 > 0.0).then_some(layer)
+}
+
+/// mupdf's answer: `mutool draw -F stext`, which is characters and their quads.
+///
+/// **Words are built here, because stext has none.** Each `<char>` carries a quad
+/// and the character it drew; a word is the run between spaces, and its box is
+/// the union of its characters'. poppler groups words itself, which is why that
+/// arm is the shorter one — and why this one exists at all is that a machine with
+/// mupdf and no poppler could otherwise render a page and not select on it.
+fn mupdf(path: &Path, page: u32) -> Option<Words> {
+    let done = Command::new("mutool")
+        .args(["draw", "-F", "stext", "-o", "-"])
+        .arg(path)
+        .arg(page.max(1).to_string())
+        .output()
+        .ok()?;
+    if !done.status.success() {
+        return None;
+    }
+    parse_stext(&String::from_utf8_lossy(&done.stdout))
+}
+
+/// Reads mupdf's structured text into words.
+pub fn parse_stext(text: &str) -> Option<Words> {
+    let mut layer = Words::default();
+    let mut line = 0u32;
+    let mut used = false;
+    let mut word: Option<(f32, f32, f32, f32, String)> = None;
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        rest = &rest[at + 1..];
+        if let Some(tail) = rest.strip_prefix("page ") {
+            if layer.page != (0.0, 0.0) {
+                break;
+            }
+            // **Already rotated**, unlike poppler's: mupdf reports the size the
+            // page is drawn at, which is what the boxes are in.
+            layer.page = (attribute(tail, "width")?, attribute(tail, "height")?);
+        } else if rest.starts_with("line ") {
+            finish(&mut word, line, &mut layer, &mut used);
+            if used {
+                line += 1;
+                used = false;
+            }
+        } else if let Some(tail) = rest.strip_prefix("char ") {
+            let quad = tail.split_once("quad=\"").and_then(|(_, after)| after.split_once('"'));
+            let letter = tail.split_once("c=\"").and_then(|(_, after)| after.split_once('"'));
+            let (Some(quad), Some(letter)) = (quad, letter) else { continue };
+            let numbers: Vec<f32> =
+                quad.0.split_whitespace().filter_map(|it| it.parse().ok()).collect();
+            if numbers.len() < 8 {
+                continue;
+            }
+            let left = numbers.iter().step_by(2).copied().fold(f32::MAX, f32::min);
+            let right = numbers.iter().step_by(2).copied().fold(f32::MIN, f32::max);
+            let top = numbers[1..].iter().step_by(2).copied().fold(f32::MAX, f32::min);
+            let bottom = numbers[1..].iter().step_by(2).copied().fold(f32::MIN, f32::max);
+            let letter = unescape(letter.0);
+            if letter.trim().is_empty() {
+                finish(&mut word, line, &mut layer, &mut used);
+                continue;
+            }
+            match word.as_mut() {
+                Some(held) => {
+                    held.0 = held.0.min(left);
+                    held.1 = held.1.min(top);
+                    held.2 = held.2.max(right);
+                    held.3 = held.3.max(bottom);
+                    held.4.push_str(&letter);
+                }
+                None => word = Some((left, top, right, bottom, letter)),
+            }
+        }
+    }
+    finish(&mut word, line, &mut layer, &mut used);
+    (layer.page.0 > 0.0 && layer.page.1 > 0.0).then_some(layer)
+}
+
+/// Puts the word being built into the layer, if there is one.
+fn finish(
+    word: &mut Option<(f32, f32, f32, f32, String)>,
+    line: u32,
+    layer: &mut Words,
+    used: &mut bool,
+) {
+    let Some((left, top, right, bottom, text)) = word.take() else { return };
+    if text.is_empty() {
+        return;
+    }
+    layer.words.push(Word {
+        at: (left, top, (right - left).max(0.0), (bottom - top).max(0.0)),
+        line,
+        text,
+    });
+    *used = true;
 }
 
 /// One `name="1.5"` out of an element's attributes.
@@ -214,6 +329,67 @@ mod tests {
         assert_eq!(layer.words[1].line, 0);
         assert_eq!(layer.words[2].line, 1);
         assert_eq!(layer.words[3].line, 2);
+    }
+
+    /// mupdf's structured text: characters and quads, made into words.
+    ///
+    /// **A real sample, as `mutool draw -F stext` wrote it here.** Two words on
+    /// one line, so the assertion covers the thing this arm does that poppler's
+    /// does not: the space is where a word ends, and a word's box is the union of
+    /// its characters'.
+    #[test]
+    fn mupdfs_characters_become_words_with_boxes() {
+        const STEXT: &str = r#"<?xml version="1.0"?>
+<document filename="x.pdf">
+<page id="page1" width="595" height="420">
+<block bbox="40 81.878 197.068 95.414" justify="unknown">
+<line bbox="40 81.878 197.068 95.414" wmode="0" dir="1 0" flags="0" text="Ro ta">
+<font name="Helvetica" size="18">
+<char quad="40 81.878 52.996 81.878 40 95 52.996 95" x="40" y="95" c="R"/>
+<char quad="52.996 85.298 63.004 85.298 52.996 95.414 63.004 95.414" x="52.996" y="95" c="o"/>
+<char quad="63.004 95 68.008 95 63.004 95 68.008 95" x="63.004" y="95" c=" "/>
+<char quad="68.008 85.298 78.016 85.298 68.008 95.414 78.016 95.414" x="68.008" y="95" c="t"/>
+<char quad="78.016 82.976 83.020 82.976 78.016 95.414 83.020 95.414" x="78.016" y="95" c="a"/>
+</font>
+</line>
+</block>
+</page>
+</document>
+"#;
+        let layer = super::parse_stext(STEXT).expect("a layer");
+        // **Already rotated**, which is the whole difference from poppler: the
+        // page mupdf reports is the page it draws.
+        assert_eq!(layer.page, (595.0, 420.0));
+        let words: Vec<&str> = layer.words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(words, ["Ro", "ta"]);
+        let first = &layer.words[0];
+        assert!((first.at.0 - 40.0).abs() < 0.001, "{:?}", first.at);
+        assert!((first.at.2 - 23.004).abs() < 0.01, "the box spans both characters");
+        assert_eq!(layer.words[1].line, 0, "one line, so both words are on it");
+        assert!(super::parse_stext("").is_none());
+    }
+
+    /// A quarter turn swaps the page poppler reports, because its boxes are
+    /// already in the turned space and its own renderer draws the turned image.
+    #[test]
+    fn a_rotated_page_is_as_wide_as_it_is_drawn() {
+        let layer = parse(SAMPLE).expect("a layer");
+        assert_eq!(layer.page, (420.0, 595.0));
+        // The swap is `poppler`'s, on the same parse, so this asserts the shape of
+        // the arithmetic rather than reaching for a tool: 90 and 270 swap, 0 and
+        // 180 do not.
+        for (turned, wanted) in [
+            (0, (420.0, 595.0)),
+            (90, (595.0, 420.0)),
+            (180, (420.0, 595.0)),
+            (270, (595.0, 420.0)),
+        ] {
+            let mut turned_layer = parse(SAMPLE).expect("a layer");
+            if turned % 180 == 90 {
+                turned_layer.page = (turned_layer.page.1, turned_layer.page.0);
+            }
+            assert_eq!(turned_layer.page, wanted, "at {turned} degrees");
+        }
     }
 
     /// Anything that is not a page's XHTML is no layer, and never a panic.

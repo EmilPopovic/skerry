@@ -81,6 +81,30 @@ impl Page {
         true
     }
 
+    /// Selects the word at `at`, or its whole line.
+    ///
+    /// **What a double and a triple click mean in every text there is.** A word
+    /// box is already the unit the layer carries, so the first is exact; a line
+    /// is the run of words the tool grouped, which is the same grouping a
+    /// selection across two of them puts a newline between.
+    pub(crate) fn select_run(&mut self, at: Place, whole_line: bool) {
+        let Some(word) = self.layer.words.get(at.word) else { return };
+        if !whole_line {
+            let end = word.text.chars().count();
+            self.chosen = Some((
+                Place { word: at.word, character: 0 },
+                Place { word: at.word, character: end },
+            ));
+            return;
+        }
+        let line = word.line;
+        let first = self.layer.words.iter().position(|it| it.line == line).unwrap_or(at.word);
+        let last = self.layer.words.iter().rposition(|it| it.line == line).unwrap_or(at.word);
+        let end = self.layer.words.get(last).map_or(0, |it| it.text.chars().count());
+        self.chosen =
+            Some((Place { word: first, character: 0 }, Place { word: last, character: end }));
+    }
+
     /// Selects the whole page.
     pub(crate) fn select_all(&mut self) {
         let last = self.layer.words.len().saturating_sub(1);
@@ -149,22 +173,7 @@ impl Page {
     /// character for anything else.
     pub(crate) fn highlights(&self) -> Vec<(f32, f32, f32, f32)> {
         let Some((from, to)) = self.span() else { return Vec::new() };
-        let mut out = Vec::new();
-        for (index, word) in self.layer.words.iter().enumerate() {
-            if index < from.word || index > to.word {
-                continue;
-            }
-            let characters = word.text.chars().count().max(1);
-            let start = if index == from.word { from.character.min(characters) } else { 0 };
-            let end = if index == to.word { to.character.min(characters) } else { characters };
-            if start >= end {
-                continue;
-            }
-            let per = word.at.2 / characters as f32;
-            let left = word.at.0 + per * start as f32;
-            out.push((left, word.at.1, per * (end - start) as f32, word.at.3));
-        }
-        out
+        self.boxes_between(from, to)
     }
 
     /// Whether a point in the page's points is inside a word's own box.
@@ -187,6 +196,128 @@ impl Page {
                 && at.1 >= top - SLACK
                 && at.1 <= top + height + SLACK
         })
+    }
+
+    /// Selects the `at`th place `needle` appears, counting from zero.
+    ///
+    /// **Word by word, and a needle with a space in it spans them.** The layer
+    /// has no gaps inside a line, so a search joins each line's words with single
+    /// spaces and looks in that — which is exactly what a selection across them
+    /// copies, so what is found is what a paste would produce.
+    ///
+    /// Returns how many there are, and which one is selected.
+    pub(crate) fn find(&mut self, needle: &str, at: usize) -> (usize, usize) {
+        let hits = self.matches(needle);
+        if hits.is_empty() {
+            self.chosen = None;
+            return (0, 0);
+        }
+        let which = at % hits.len();
+        self.chosen = Some(hits[which]);
+        (hits.len(), which)
+    }
+
+    /// Every place `needle` appears, in reading order.
+    fn matches(&self, needle: &str) -> Vec<(Place, Place)> {
+        let needle = needle.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        // One line at a time, because a match does not cross the newline a
+        // selection would put between two of them.
+        let mut line = Vec::new();
+        for (index, word) in self.layer.words.iter().enumerate() {
+            let starts =
+                line.last().is_some_and(|(_, _, last): &(usize, usize, u32)| *last != word.line);
+            if starts {
+                out.extend(self.matches_in(&line, &needle));
+                line.clear();
+            }
+            line.push((index, word.text.chars().count(), word.line));
+        }
+        out.extend(self.matches_in(&line, &needle));
+        out
+    }
+
+    /// Where `needle` appears in one line's joined words.
+    fn matches_in(&self, line: &[(usize, usize, u32)], needle: &str) -> Vec<(Place, Place)> {
+        let mut joined = String::new();
+        // Where each character of `joined` came from: the word and the character
+        // inside it, so a match's two ends are places rather than offsets.
+        let mut from: Vec<Place> = Vec::new();
+        for (index, characters, _) in line {
+            if !joined.is_empty() {
+                joined.push(' ');
+                from.push(Place { word: *index, character: 0 });
+            }
+            let word = self.layer.words.get(*index).map_or("", |it| it.text.as_str());
+            for (character, letter) in word.chars().enumerate() {
+                joined.extend(letter.to_lowercase());
+                // A character that lowercases to two keeps one origin per
+                // character of the haystack, or the offsets stop lining up.
+                while from.len() < joined.chars().count() {
+                    from.push(Place { word: *index, character });
+                }
+            }
+            let _ = characters;
+        }
+        let letters: Vec<char> = joined.chars().collect();
+        let wanted: Vec<char> = needle.chars().collect();
+        let mut out = Vec::new();
+        if wanted.is_empty() || letters.len() < wanted.len() {
+            return out;
+        }
+        for start in 0..=letters.len() - wanted.len() {
+            if letters[start..start + wanted.len()] != wanted[..] {
+                continue;
+            }
+            let (Some(first), Some(last)) = (from.get(start), from.get(start + wanted.len() - 1))
+            else {
+                continue;
+            };
+            out.push((*first, Place { word: last.word, character: last.character + 1 }));
+        }
+        out
+    }
+
+    /// The boxes of every match but the one selected, in the page's points.
+    ///
+    /// **So a find says how many there are by showing them.** The current match
+    /// is the selection and is drawn as one; these are the others, fainter, which
+    /// is what every find bar in a browser does and what turns `3 of 7` from a
+    /// number into a place on the page.
+    pub(crate) fn other_matches(&self, needle: &str) -> Vec<(f32, f32, f32, f32)> {
+        let current = self.span();
+        self.matches(needle)
+            .into_iter()
+            .filter(|span| Some(*span) != current)
+            .flat_map(|(from, to)| self.boxes_between(from, to))
+            .collect()
+    }
+
+    /// The boxes one span covers, which is what a highlight is made of.
+    fn boxes_between(&self, from: Place, to: Place) -> Vec<(f32, f32, f32, f32)> {
+        let mut out = Vec::new();
+        for (index, word) in self.layer.words.iter().enumerate() {
+            if index < from.word || index > to.word {
+                continue;
+            }
+            let characters = word.text.chars().count().max(1);
+            let start = if index == from.word { from.character.min(characters) } else { 0 };
+            let end = if index == to.word { to.character.min(characters) } else { characters };
+            if start >= end {
+                continue;
+            }
+            let per = word.at.2 / characters as f32;
+            out.push((
+                word.at.0 + per * start as f32,
+                word.at.1,
+                per * (end - start) as f32,
+                word.at.3,
+            ));
+        }
+        out
     }
 
     /// Which place a point in the page's points lands on.
@@ -331,6 +462,68 @@ mod tests {
         page.clear();
         assert!(!page.has_selection());
         assert_eq!(page.text(), None);
+    }
+
+    /// A double click takes the word and a triple click takes the line.
+    #[test]
+    fn a_double_click_takes_a_word_and_a_triple_takes_the_line() {
+        let mut page = page();
+        page.select_run(Place { word: 1, character: 1 }, false);
+        assert_eq!(page.text().as_deref(), Some("two"));
+        page.select_run(Place { word: 1, character: 1 }, true);
+        assert_eq!(page.text().as_deref(), Some("one two three"));
+        // The second line, so the run is bounded at both ends by the line and not
+        // by the page.
+        page.select_run(Place { word: 4, character: 0 }, true);
+        assert_eq!(page.text().as_deref(), Some("four five six"));
+    }
+
+    /// The real fixture's shape: one line, six words, the needle twice.
+    ///
+    /// **Six words on one line**, which is what the scenario's page actually is —
+    /// and the case the synthetic two-line page below does not cover, because
+    /// `matches` accumulates a line and flushes it when the line *changes*.
+    #[test]
+    fn a_needle_twice_on_one_line_is_found_twice() {
+        let words: Vec<Word> = ["Find", "the", "word", "word", "twice", "here"]
+            .iter()
+            .enumerate()
+            .map(|(index, text)| Word {
+                at: (40.0 + index as f32 * 30.0, 82.0, 25.0, 16.0),
+                line: 0,
+                text: (*text).to_owned(),
+            })
+            .collect();
+        let mut page = Page::of(&Words { page: (420.0, 595.0), words }.pack()).expect("a layer");
+        assert_eq!(page.find("word", 0), (2, 0));
+        assert_eq!(page.text().as_deref(), Some("word"));
+        assert_eq!(page.find("word", 1), (2, 1));
+        assert_eq!(page.text().as_deref(), Some("word"));
+    }
+
+    /// Find selects a match, counts them, and wraps.
+    #[test]
+    fn find_selects_each_match_and_says_how_many() {
+        let mut page = page();
+        // Inside one word.
+        assert_eq!(page.find("hre", 0), (1, 0));
+        assert_eq!(page.text().as_deref(), Some("hre"));
+        // Across the space between two, which is where the joined line matters.
+        assert_eq!(page.find("two three", 0), (1, 0));
+        assert_eq!(page.text().as_deref(), Some("two three"));
+        // Case is not part of it.
+        assert_eq!(page.find("FOUR", 0), (1, 0));
+        assert_eq!(page.text().as_deref(), Some("four"));
+        // Two matches, and stepping wraps around them.
+        let (count, which) = page.find("e", 0);
+        assert!(count > 1, "`e` appears more than once: {count}");
+        assert_eq!(which, 0);
+        assert_eq!(page.find("e", count), (count, 0), "the step past the last is the first");
+        // A needle that is not there selects nothing rather than the last thing.
+        assert_eq!(page.find("zzz", 0), (0, 0));
+        assert!(!page.has_selection());
+        // And a match does not cross the line break a copy would put in.
+        assert_eq!(page.find("three four", 0).0, 0);
     }
 
     /// A page with no words is no page at all, which is what a scan answers.

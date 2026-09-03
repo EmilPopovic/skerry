@@ -67,7 +67,7 @@ pub const ON_ROW: &[&[&str]] = &[
 pub const IN_A_LOOK: &[&[&str]] = &[
     &["look.select_all", "look.copy"],
     &["look.edit", "look.save", "look.discard"],
-    &["look.play"],
+    &["look.play", "look.find"],
 ];
 
 /// What a secondary click on a sidebar row offers.

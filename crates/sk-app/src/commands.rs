@@ -1363,6 +1363,17 @@ fn look_scope(registry: &mut Registry<App>) {
             run: App::toggle_editing_the_look,
         },
         CommandSpec {
+            id: "look.find",
+            name: "action.look_find",
+            group: Group::View,
+            // **`Ctrl+F` in the scope where it can only mean this.** Over a
+            // listing it filters the rows; with a page in front of you the rows
+            // are behind a panel and the thing to search is the page.
+            keys: &["ctrl+f"],
+            enabled: App::looking_at_a_page_with_words,
+            run: App::toggle_finding,
+        },
+        CommandSpec {
             id: "look.play",
             name: "action.look_play",
             group: Group::View,

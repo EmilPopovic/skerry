@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 132
+FEWEST_SCENARIOS = 133
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -6069,6 +6069,84 @@ def select_a_page(run: Run, fixture: Path) -> None:
     margin = at(across / 2.0, down - 20.0)
     run.drive(f"move {margin[0]:.2f} {margin[1]:.2f}\nclick left\nsleep 300\nkey f12\nsleep 200\n")
     until(run, look_picked="")
+
+
+@scenario("a-pages-words-are-found-and-a-double-click-takes-one", fresh=True)
+def find_on_a_page(run: Run, fixture: Path) -> None:
+    """`Ctrl+F` searches the page in front of you; a double click takes a word.
+
+    **This page, and the bar says so.** Searching a document means a child round
+    trip per page — the layer arrives with the pixels — so what is searched is
+    what is on screen, which is a smaller promise than a viewer's and an honest
+    one. `Enter` walks the matches and wraps; `Escape` puts the bar away.
+
+    The double click is the other half of what a text view owes: a word box is
+    already the unit the layer carries, so the first click of the pair selects a
+    character and the second takes the word around it.
+    """
+    if not (shutil.which("pdftoppm") or shutil.which("mutool")):
+        raise Skipped("no pdftoppm or mutool, so there is no page to search")
+    if not shutil.which("pdftotext"):
+        raise Skipped("no pdftotext, so a page has no words — the documented degradation")
+
+    paper = fixture / "paper.pdf"
+    paper.write_bytes(one_page_pdf("Find the word word twice here"))
+    listed(run)
+    until(run, rows="10")
+    run.drive("text paper\nsleep 300\nkey f12\nsleep 150\n")
+    until(run, cursor="paper.pdf")
+    run.drive("key space\nsleep 900\nkey f12\nsleep 300\n")
+    holds(run, lambda it: int(it["look_words"] or 0) > 0, "a page with words on it")
+
+    # **`Ctrl+F`, which over a listing filters the rows.** With a page in front of
+    # you the rows are behind a panel and the thing to search is the page, which
+    # is what `Scope::Look` is for.
+    run.drive("key ctrl+f\nsleep 400\nkey f12\nsleep 200\n")
+    opened = run.state()
+    if opened["look_found"] == "none":
+        raise Failure(f"Ctrl+F did not open the find bar: last_key={opened['last_key']}")
+    run.drive("text word\nsleep 400\nkey f12\nsleep 200\n")
+    typed = run.state()
+    if typed["look_query"] != "word":
+        raise Failure(f"the field holds {typed['look_query']!r}, found {typed['look_found']}")
+    found = holds(run, lambda it: it["look_picked"] == "word", "the first match selected")
+    expect(found, look_found="1/2")
+
+    # `Enter` walks them and wraps at the end, which is what a find bar does.
+    run.drive("key enter\nsleep 300\nkey f12\nsleep 200\n")
+    expect(until(run, look_found="2/2"), look_picked="word")
+    run.drive("key enter\nsleep 300\nkey f12\nsleep 200\n")
+    until(run, look_found="1/2")
+
+    # A query nobody can find says so and selects nothing.
+    run.drive("text zzz\nsleep 400\nkey f12\nsleep 200\n")
+    empty = until(run, look_found="0/0")
+    expect(empty, look_picked="")
+
+    # `Escape` puts the bar away, and the panel stays open — the second `Escape`
+    # is the one that closes a look.
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
+    shut = until(run, look_found="none")
+    if not shut["looking"].endswith(":page"):
+        raise Failure(f"Escape closed the panel as well: {shut['looking']!r}")
+
+    # **And a double click takes the word under it**, aimed through the box the
+    # tool gives and the rectangle the window reports it drew the page into.
+    across, down, words = page_words(paper)
+    box = [float(value) for value in shut["look_page_box"].split(":")]
+    third = words[2]
+    at = aim(
+        run,
+        shut,
+        box[0] + (third[0] + third[2]) / 2.0 * box[2] / across,
+        box[1] + (third[1] + third[3]) / 2.0 * box[3] / down,
+    )
+    # `double` rather than two clicks: the window counts them from the display
+    # server's own timing, and two `click`s a script apart are two single clicks.
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\ndouble\nsleep 400\n")
+    run.drive("key f12\nsleep 200\n")
+    picked = until(run, look_picked=third[4])
+    assert picked is not None
 
 
 @scenario("a-picture-zooms-under-the-pointer-and-drags", fresh=True)
