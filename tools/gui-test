@@ -1257,7 +1257,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 122
+FEWEST_SCENARIOS = 124
 
 
 def scenario(name, fresh: bool = False):
@@ -5671,6 +5671,70 @@ def the_sidebar_tree(run: Run, fixture: Path) -> None:
         again.close()
 
 
+@scenario("a-folder-keeps-the-colour-it-was-given", fresh=True)
+def colour_a_folder(run: Run, fixture: Path) -> None:
+    """A folder's mark takes the colour somebody chose, and keeps it.
+
+    Three claims. The row menu offers the seven and they act on the row it opened
+    over — not on the folder being shown, which is what the fallback for Pin does
+    and what a colour must not. The record survives `kill -9`, because it is a
+    per-folder decision and rule 6 says those come back. And it is **not
+    inherited**: colouring `alpha` leaves `alpha/nested` alone, which is the one
+    way this record differs from every other in that file.
+    """
+    run.close()
+    state_home = run.log.parent / "state-colour"
+    place = {"XDG_STATE_HOME": str(state_home)}
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        row = point_at(own, 0)
+        expect(row, hover_name="alpha")
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        for wanted in ("view.colour_red", "view.colour_none"):
+            if wanted not in opened["menu_aim"]:
+                raise Failure(f"{wanted} is not on a folder's menu: {opened['menu_aim']!r}")
+        # Remove the colour is dimmed on a folder that has none, so the row says
+        # whether there is anything to take away.
+        if "view.colour_none" not in opened["menu_dim"]:
+            raise Failure(f"Remove the colour is offered on a plain folder: {opened['menu_dim']!r}")
+
+        aimed = menu_aim(own, opened, "view.colour_red")
+        own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
+        until(own, coloured="alpha:red")
+
+        # Into `alpha`: what is under it is not red, because a colour is one
+        # folder's and never its children's.
+        own.drive("key enter\nsleep 900\nkey f12\nsleep 200\n")
+        inside = until(own, path=str(fixture / "alpha"))
+        expect(inside, coloured="")
+        own.drive("key backspace\nsleep 900\nsleep 2000\nkey f12\nsleep 200\n")
+        until(own, coloured="alpha:red")
+        own.kill()
+    finally:
+        own.close()
+
+    back = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(back)
+        back.drive("key f12\nsleep 200\n")
+        until(back, coloured="alpha:red")
+
+        # And taking it away is the same menu, one row down.
+        row = point_at(back, 0)
+        expect(row, hover_name="alpha")
+        back.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(back, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        if "view.colour_none" in opened["menu_dim"]:
+            raise Failure("Remove the colour is dimmed on a folder that has one")
+        aimed = menu_aim(back, opened, "view.colour_none")
+        back.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
+        until(back, coloured="")
+    finally:
+        back.close()
+
+
 @scenario("navigation-buttons")
 def navigation_buttons(run: Run, fixture: Path) -> None:
     """Back, forward, parent and reload, clicked rather than pressed.
@@ -6129,6 +6193,83 @@ def progress_and_cancel(run: Run, fixture: Path) -> None:
     after = sum(1 for _ in (fixture / "target").rglob("*"))
     if after >= before:
         raise Failure(f"the undo removed nothing: {before} entries, then {after}")
+
+
+@scenario("a-stopped-copy-is-picked-up-where-it-left-off", fresh=True)
+def resume_a_copy(run: Run, fixture: Path) -> None:
+    """Rule 7's third word: a long operation is visible, cancellable and resumable.
+
+    Built like `a-big-copy-shows-progress-and-stops-when-told`, for the same two
+    reasons: a ten-entry queue rather than one folder, and one driver script so
+    the stop lands where this test chose rather than where a process happened to
+    start.
+
+    What is asserted beyond that scenario: the strip keeps saying what is owed
+    after the notice has expired, the button picks it up, and what arrives is the
+    *whole* tree — which is the claim `Conflict::Resume` exists for, because a
+    resume that started the interrupted folder again would land it beside itself
+    as `bucket-3 (copy)`.
+    """
+    big = fixture / "big"
+    for bucket in range(10):
+        (big / f"bucket-{bucket}").mkdir(parents=True)
+        for index in range(1500):
+            (big / f"bucket-{bucket}" / f"part-{index:04}.bin").write_bytes(b"x" * 64)
+    (fixture / "target").mkdir()
+    whole = sum(1 for _ in big.rglob("*.bin"))
+
+    run.drive("sleep 700\ntext big\nsleep 400\nkey enter\nsleep 900\nkey f12\nsleep 150\n")
+    expect(run.state(), rows="10")
+    run.drive("key ctrl+a\nsleep 250\nkey ctrl+c\nsleep 400\nkey f12\nsleep 150\n")
+    expect(run.state(), selected="10")
+    run.drive("key backspace\nsleep 900\nsleep 700\ntext target\nsleep 400\nkey enter\nsleep 900\n")
+
+    watch = "".join("key f12\nsleep 30\nkey ctrl+.\nsleep 40\n" for _ in range(8))
+    run.drive(f"key ctrl+v\nsleep 120\n{watch}sleep 1500\nkey f12\nsleep 200\n")
+    stopped = holds(
+        run,
+        lambda it: it["busy"] == "false" and it["owed"] != "0/0",
+        "a stopped queue that says what it owes",
+    )
+    left, of = (int(part) for part in stopped["owed"].split("/"))
+    if of != 10 or not 0 < left <= 10:
+        raise Failure(f"the queue owes {stopped['owed']}, of a paste of ten")
+    # **The strip says so after the notice would have gone.** `notice` is the
+    # four-second message that reports the stop; `progress` is the line that
+    # stands until the operation is picked up or replaced, and it is the one rule
+    # 7 means by "stays visible".
+    if "stopped" not in stopped["progress"]:
+        raise Failure(f"the strip's line is {stopped['progress']!r}")
+    arrived = sum(1 for _ in (fixture / "target").rglob("*.bin"))
+    if not 0 < arrived < whole:
+        raise Failure(f"{arrived} of {whole} arrived, so nothing was stopped part way")
+
+    # Picked up by the button on the strip, which is the pointer's way to it.
+    aim_at = stopped["pick_up_aim"]
+    if not aim_at:
+        raise Failure("the strip drew no Pick up button")
+    across, down = (float(value) for value in aim_at.split(":"))
+    at = aim(run, stopped, across, down)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick left\nsleep 400\nkey f12\nsleep 200\n")
+    holds(run, lambda it: it["busy"] == "true" or it["owed"] == "0/0", "a queue picked up")
+
+    deadline = time.time() + WAITING
+    while time.time() < deadline:
+        if sum(1 for _ in (fixture / "target").rglob("*.bin")) == whole:
+            break
+        time.sleep(0.2)
+    else:
+        got = sum(1 for _ in (fixture / "target").rglob("*.bin"))
+        raise Failure(f"the resume finished with {got} of {whole} files")
+
+    # **And nothing landed twice.** A resume that started the interrupted folder
+    # again would put it beside itself under a free name, which is what
+    # `Conflict::Resume` exists to prevent.
+    names = sorted(path.name for path in (fixture / "target").iterdir())
+    if names != [f"bucket-{bucket}" for bucket in range(10)]:
+        raise Failure(f"the target holds {names}")
+    settled = holds(run, lambda it: it["owed"] == "0/0", "an offer that was taken")
+    expect(settled, busy="false")
 
 
 @scenario("a-copy-pauses-where-it-is-and-carries-on", fresh=True)

@@ -150,6 +150,7 @@ fn chrome_of<'a>(
         progress: None,
         paused: false,
         pausable: false,
+        resumable: false,
         naming: None,
         filtering: false,
         types: Some(types),

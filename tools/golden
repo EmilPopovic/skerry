@@ -114,6 +114,12 @@ FRAMES = [
     # frame at all. Twelve rows in a body that holds eight is what puts it here.
     ("wide-columns", ["--size", "1600x360", "--scale", "100"]),
     ("light", ["--size", "900x520", "--scale", "125", "--light"]),
+    # **Two folders somebody coloured.** The mark takes the colour a person chose
+    # over the colour of what the thing is, so this is the frame that would catch
+    # a folder going back to blue — and it is taken in both palettes, because a
+    # hue that reads on the dark ground can vanish on the light one.
+    ("coloured", ["--size", "900x520", "--scale", "125", "--coloured"]),
+    ("coloured-light", ["--size", "900x520", "--scale", "125", "--coloured", "--light"]),
     # **The sidebar's third section, and the line a reorder drops onto.** The
     # Pinned rows are the only ones the list can be asked to change, so this is
     # the one frame that shows the heading, the rows under it, and the insertion
@@ -142,6 +148,11 @@ FRAMES = [
     # row offers, over a folder. Two menus and one of them had no frame at all,
     # which is how a row added to it could change nothing anyone could see.
     ("context-menu-row", ["--size", "900x520", "--scale", "125", "--menu-row"]),
+    # **The same menu, in a window tall enough to show its last group.** A folder
+    # row's menu ends in the seven colours, each drawing its own swatch — and at
+    # 520 logical pixels that group is below the fold, so the frame above would
+    # not catch a swatch that stopped being drawn.
+    ("context-menu-colours", ["--size", "900x820", "--scale", "100", "--menu-row"]),
     # The one panel with no way to dismiss it, and the only one whose content is
     # a *comparison*: two files' sizes and dates side by side, which is what
     # makes "replace or keep both" a question anybody can answer. Its check box
@@ -257,6 +268,11 @@ FRAMES = [
     # that shows the whole design in one frame: the present marked with an accent
     # bar, the future below it in grey, and a hovered row. Every `Change::summary`
     # shape is in it: a folder, a rename, a batch that reports a count, and a trash.
+    # **What a stopped copy leaves on the strip.** Rule 7's third word: the
+    # operation stays visible after it stops, saying what it still owes, with the
+    # button that picks it up beside the frame cost. The frame that would catch
+    # the line going away with the notice that reported the stop.
+    ("stopped", ["--size", "900x520", "--scale", "125", "--stopped"]),
     ("history", ["--size", "900x520", "--scale", "125", "--history"]),
     # And at 200%, because the strip's height is metrics arithmetic and the rows
     # are placed from it — the class of defect a second scale exists to catch.

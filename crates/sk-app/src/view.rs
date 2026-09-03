@@ -121,6 +121,14 @@ pub struct Chrome<'a> {
     /// Whether that operation is on the pause latch, so the button can say
     /// *Resume* rather than offering to pause something already paused.
     pub paused: bool,
+    /// Whether a stopped operation is waiting to be picked up.
+    ///
+    /// Its own field rather than a third state of `progress`: a stopped queue has
+    /// no fraction — nothing is running — and the button that picks it up has to
+    /// be there anyway, which is [rule
+    /// 7](../../../docs/03-principles.md#7-honest-progress)'s "resumable" made
+    /// pressable.
+    pub resumable: bool,
     /// Whether the operation on the strip is one a latch can hold.
     ///
     /// An index build is cancellable and not pausable — it is seconds long — and
@@ -263,6 +271,8 @@ pub struct Hits {
     pub answers: Vec<Area>,
     /// Its "for the rest of them" toggle, when there is a rest.
     pub for_the_rest: Option<Area>,
+    /// The strip's Pick up button, while a stopped operation is owed.
+    pub pick_up: Option<Area>,
     /// The palette's query field, so a click into it can place the caret.
     pub palette_field: Option<Area>,
     /// The two buttons of the delete-for-good question, while it is up.
@@ -868,10 +878,22 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
             (true, false) => (theme.palette.text, theme.palette.dim),
         };
         let baseline = painter.baseline(top, STEP, metrics.text_size);
-        let inner = area.width - INSET * 2.0;
+        let mut inner = area.width - INSET * 2.0;
         let keys_width = text_width(painter, &item.keys, metrics.header_size, true);
         let name_style = TextStyle::new(metrics.text_size, name_colour);
-        let x = area.x + INSET;
+        let mut x = area.x + INSET;
+        // **A colour's row shows the colour.** Seven rows of colour names with no
+        // colours on them is a menu somebody has to try rather than read, which
+        // is the difference between this and every other row here.
+        if let Some(colour) = crate::colours::of_command(item.id) {
+            let dot = 10.0;
+            let ink = colour.ink(&theme.palette);
+            let ink = if item.enabled { ink } else { ink.with_alpha(90) };
+            let box_ = painter.rect(x, top + (STEP - dot) / 2.0, dot, dot);
+            painter.list.rect(box_, ink, painter.px(dot / 2.0));
+            x += dot + 8.0;
+            inner -= dot + 8.0;
+        }
         line(painter, &item.name, name_style, x, inner - keys_width - SPACING * 0.5, baseline);
         let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
         line(painter, &item.keys, keys_style, x, inner, baseline);
@@ -3760,7 +3782,14 @@ fn mark_at(
         painter.image(*image, box_, theme.palette.text);
         return;
     }
-    let colour = kind_colour_of(&theme, types, &pane.listing, id, state.directory, state.broken);
+    // **A colour somebody chose beats the colour of what the thing is.** A folder
+    // is blue because it is a folder; one that is red is red because a person
+    // said so, and the whole point of saying so is that it stops looking like the
+    // others — see `crate::colours`.
+    let colour = pane.colour_of(id).filter(|_| !state.broken).map_or_else(
+        || kind_colour_of(&theme, types, &pane.listing, id, state.directory, state.broken),
+        |chosen| chosen.ink(&theme.palette),
+    );
     if state.directory {
         painter.folder(box_, colour);
     } else {
@@ -4249,38 +4278,67 @@ fn status(
     // background menu, which satisfies the rule and not the person: somebody
     // watching a copy should not have to open a menu to stop it. Only while
     // there is something to stop, so the strip gains no permanent furniture.
+    let right_edge = strip_buttons(painter, layout, chrome, hits, baseline);
+    line(painter, &right, style, 0.0, right_edge, baseline);
+}
+
+/// Pause, Stop and Pick up, packed against the right of the status strip.
+///
+/// Returns where the frame-cost line has to stop. Its own function because
+/// `status` is at the hundred-line limit, and because these three are one
+/// subject: what can be done to the operation the strip is about.
+fn strip_buttons(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    chrome: &Chrome<'_>,
+    hits: &mut Hits,
+    baseline: f32,
+) -> f32 {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
     hits.pause = None;
     hits.cancel = None;
+    hits.pick_up = None;
     let mut right_edge = layout.status.width - metrics.gutter;
+    let button = |painter: &mut Painter<'_>, right_edge: &mut f32, key: &'static str, ink| {
+        let text = i18n::lookup(key);
+        let width = text_width(painter, text, metrics.header_size, false) + 12.0;
+        let area = Area {
+            x: *right_edge - width,
+            y: layout.status.y,
+            width,
+            height: layout.status.height,
+        };
+        line(
+            painter,
+            text,
+            TextStyle::new(metrics.header_size, ink),
+            area.x + 6.0,
+            width,
+            baseline,
+        );
+        *right_edge -= width + 8.0;
+        area
+    };
+    // **Pick up is drawn when nothing is running**, which is the whole of what it
+    // is for: the operation stopped, and rule 7 says it stays visible and
+    // resumable until somebody decides otherwise.
+    if chrome.resumable {
+        let ink = theme.palette.accent;
+        hits.pick_up = Some(button(painter, &mut right_edge, "status.pick_up", ink));
+        right_edge -= metrics.gutter;
+    }
     if chrome.progress.is_some() {
-        for (label, paused_label, is_cancel) in
-            [("status.cancel", "status.cancel", true), ("status.pause", "status.resume", false)]
-        {
-            if !is_cancel && !chrome.pausable {
-                continue;
-            }
-            let key = if !is_cancel && chrome.paused { paused_label } else { label };
-            let text = i18n::lookup(key);
-            let width = text_width(painter, text, metrics.header_size, false) + 12.0;
-            let button = Area {
-                x: right_edge - width,
-                y: layout.status.y,
-                width,
-                height: layout.status.height,
-            };
-            let ink = if is_cancel { theme.palette.danger } else { theme.palette.accent };
-            let centre = button.x + (button.width - (width - 12.0)) / 2.0;
-            line(painter, text, TextStyle::new(metrics.header_size, ink), centre, width, baseline);
-            if is_cancel {
-                hits.cancel = Some(button);
-            } else {
-                hits.pause = Some(button);
-            }
-            right_edge -= width + 8.0;
+        let danger = theme.palette.danger;
+        hits.cancel = Some(button(painter, &mut right_edge, "status.cancel", danger));
+        if chrome.pausable {
+            let key = if chrome.paused { "status.resume" } else { "status.pause" };
+            let ink = theme.palette.accent;
+            hits.pause = Some(button(painter, &mut right_edge, key, ink));
         }
         right_edge -= metrics.gutter;
     }
-    line(painter, &right, style, 0.0, right_edge, baseline);
+    right_edge
 }
 
 fn type_ahead(painter: &mut Painter<'_>, layout: &PaneLayout, typed: &str) {
@@ -4646,6 +4704,7 @@ mod tests {
             let chrome = Chrome {
                 quick_look: None,
                 hovered_look: None,
+                resumable: false,
                 aside_grabbed: false,
                 place_drop: None,
                 edits: None,

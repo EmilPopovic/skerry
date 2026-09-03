@@ -30,6 +30,7 @@ pub fn registry() -> Registry<App> {
     directions(&mut registry);
     view(&mut registry);
     places(&mut registry);
+    colours(&mut registry);
     grouping(&mut registry);
     zoom(&mut registry);
     file(&mut registry);
@@ -38,6 +39,70 @@ pub fn registry() -> Registry<App> {
     help(&mut registry);
     field(&mut registry);
     registry
+}
+
+/// The six colours a folder can be given, and the one that takes it away.
+///
+/// **One command each**, which is [rule 2](../../../docs/03-principles.md): the
+/// four groupings are four commands for the same reason, and it is what puts
+/// every colour in the palette and on the menu with its chord beside it. Seven
+/// rows is more than a submenu would take and a submenu is a thing this program
+/// does not have — and the menu draws each row's swatch, so the list reads as a
+/// palette rather than as seven words.
+fn colours(registry: &mut Registry<App>) {
+    for (index, colour) in crate::colours::Colour::ALL.into_iter().enumerate() {
+        // `Ctrl+Alt+1` to `6`, in the order they are offered. A digit family for
+        // a small numbered set is what `Ctrl+1..3` already does for the view
+        // modes and `Alt+1..3` for the sorts — and **not `Ctrl+Shift+<digit>`**,
+        // because shift is part of a digit's identity (`Chord::shift_matters`),
+        // so `Ctrl+Shift+1` *is* `Ctrl+1` and would have quietly taken the
+        // details view's chord. The registry's conflict test said so.
+        let keys: &'static [&'static str] = match index {
+            0 => &["ctrl+alt+1"],
+            1 => &["ctrl+alt+2"],
+            2 => &["ctrl+alt+3"],
+            3 => &["ctrl+alt+4"],
+            4 => &["ctrl+alt+5"],
+            _ => &["ctrl+alt+6"],
+        };
+        registry.add(CommandSpec {
+            id: colour.command(),
+            name: colour.name(),
+            group: Group::View,
+            keys,
+            enabled: App::can_colour,
+            run: match colour {
+                crate::colours::Colour::Red => |app: &mut App| {
+                    app.colour_folder(Some(crate::colours::Colour::Red));
+                },
+                crate::colours::Colour::Orange => |app: &mut App| {
+                    app.colour_folder(Some(crate::colours::Colour::Orange));
+                },
+                crate::colours::Colour::Yellow => |app: &mut App| {
+                    app.colour_folder(Some(crate::colours::Colour::Yellow));
+                },
+                crate::colours::Colour::Green => |app: &mut App| {
+                    app.colour_folder(Some(crate::colours::Colour::Green));
+                },
+                crate::colours::Colour::Blue => |app: &mut App| {
+                    app.colour_folder(Some(crate::colours::Colour::Blue));
+                },
+                crate::colours::Colour::Purple => |app: &mut App| {
+                    app.colour_folder(Some(crate::colours::Colour::Purple));
+                },
+            },
+        });
+    }
+    registry.add(CommandSpec {
+        id: crate::colours::NONE,
+        name: "action.colour_none",
+        group: Group::View,
+        keys: &["ctrl+alt+0"],
+        // Dimmed on a folder with no colour, so the row says whether there is
+        // anything to take away.
+        enabled: App::can_uncolour,
+        run: |app: &mut App| app.colour_folder(None),
+    });
 }
 
 /// The list of places: what is on it, and in what order.
@@ -963,6 +1028,17 @@ fn file(registry: &mut Registry<App>) {
             keys: &["pause"],
             enabled: App::can_pause,
             run: App::toggle_pause,
+        },
+        CommandSpec {
+            id: "edit.resume",
+            name: "action.resume",
+            group: Group::Edit,
+            // `Ctrl+Shift+Y` beside the undo family: it is the one command that
+            // says "carry on with what you were doing", and `Ctrl+Y` is already
+            // Redo's second binding.
+            keys: &["ctrl+shift+y"],
+            enabled: App::can_resume,
+            run: App::resume_operation,
         },
         CommandSpec {
             id: "edit.cancel",

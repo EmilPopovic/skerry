@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 715 tests, 122 GUI scenarios **on both Wayland and X11**,
-fifty-eight golden frames, every gate green: a Details view
+sandboxed helpers, 724 tests, 124 GUI scenarios **on both Wayland and X11**,
+sixty-two golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -36,8 +36,9 @@ Compose on both servers, `text-input-v3` on Wayland. Files drag between the halv
 of a split and between the tabs of one, with a card under the pointer saying what
 is held and a folder — or a tab — held over for nine hundred milliseconds opening
 to be dropped into; a taken name **stops the queue and asks**, and Replace trashes what it
-replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA** and can
-be **paused** on a latch; `Ctrl+Shift+F` searches everything under the folder, first
+replaces so `Ctrl+Z` walks both halves back; a copy shows a **counted ETA**, can
+be **paused** on a latch, and is **picked up where it stopped** — the queue keeps
+what it owes and the merge skips what is already there; `Ctrl+Shift+F` searches everything under the folder, first
 result at **0.7 ms over 817,288 entries**, `Ctrl+Alt+F` searches **every local
 filesystem** — the sidebar's own Volumes, as
 [ADR 0022](docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
@@ -57,6 +58,9 @@ navigating ([ADR
 0015](docs/adr/0015-a-column-is-a-directory-and-a-choice.md), which supersedes
 0014: a column is not a pane, because a pane is independent and columns are one
 path decomposed);
+a folder can be given **one of six colours** and its mark takes it — a second,
+deliberately un-inherited list in the same per-folder file, because a colour every
+folder has says nothing;
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —

@@ -15,6 +15,13 @@
 //! usable rather than tedious: setting a grid on `~/Pictures` means the albums
 //! under it are grids too, without visiting each one.
 //!
+//! # A colour is not inherited
+//!
+//! The same file also holds the colour somebody gave a folder, in a list of its
+//! own — and that one does **not** inherit. Colouring `~/Projects` red so it
+//! stands out would turn every folder inside it red, and a colour every folder
+//! has is a colour that means nothing. See [`crate::colours`].
+//!
 //! # Only what was asked for
 //!
 //! A record is written when somebody changes a view and **removed when they set
@@ -124,6 +131,14 @@ pub struct Views {
     /// A `Vec` rather than a map: two hundred and fifty-six entries walked
     /// linearly is nothing beside the `openat` that reads them.
     held: Vec<(PathBuf, View)>,
+    /// The folders somebody gave a colour, most recent first.
+    ///
+    /// **Its own list, with its own cap.** A colour is not a view: it does not
+    /// inherit, it is far cheaper to give out — a person can colour thirty
+    /// folders in a minute — and it must not compete with view records for the
+    /// same two hundred and fifty-six slots, or colouring a directory would
+    /// silently forget that Pictures is a grid.
+    colours: Vec<(PathBuf, crate::colours::Colour)>,
 }
 
 impl Views {
@@ -202,6 +217,57 @@ impl Views {
         self.held.len()
     }
 
+    /// The colour `path` was given, if it was given one.
+    ///
+    /// **Exactly `path`.** No ancestor walk, which is the one way this differs
+    /// from every other record in this file — see the module header.
+    #[must_use]
+    pub fn colour_of(&self, path: &Path) -> Option<crate::colours::Colour> {
+        self.colours.iter().find(|(kept, _)| kept == path).map(|(_, colour)| *colour)
+    }
+
+    /// The coloured children of one directory, as names.
+    ///
+    /// **One pass over the list per directory, not one per row.** The listing's
+    /// rows all share a parent, so the question "which of these has a colour" is
+    /// asked once and answered against names — which costs no path joining and
+    /// no allocation per row.
+    pub fn coloured_in<'a>(
+        &'a self,
+        parent: &'a Path,
+    ) -> impl Iterator<Item = (&'a std::ffi::OsStr, crate::colours::Colour)> + 'a {
+        self.colours.iter().filter_map(move |(path, colour)| {
+            if path.parent() != Some(parent) {
+                return None;
+            }
+            Some((path.file_name()?, *colour))
+        })
+    }
+
+    /// Gives `path` a colour, or takes its colour away. Whether anything changed.
+    pub fn colour(&mut self, path: &Path, colour: Option<crate::colours::Colour>) -> bool {
+        let was = self.colours.iter().position(|(kept, _)| kept == path);
+        let Some(colour) = colour else {
+            return was.map(|at| self.colours.remove(at)).is_some();
+        };
+        if let Some(at) = was {
+            let changed = self.colours[at].1 != colour;
+            let entry = self.colours.remove(at);
+            self.colours.insert(0, (entry.0, colour));
+            return changed || at != 0;
+        }
+        self.colours.insert(0, (path.to_path_buf(), colour));
+        self.colours.truncate(MOST);
+        true
+    }
+
+    /// How many folders have a colour. For the tests; the program asks the
+    /// records themselves.
+    #[cfg(test)]
+    fn coloured_for_tests(&self) -> usize {
+        self.colours.len()
+    }
+
     /// Whether nothing is remembered. For the tests; the program asks `len`.
     #[cfg(test)]
     fn is_empty_for_tests(&self) -> bool {
@@ -224,6 +290,9 @@ impl Views {
                 path.display()
             );
         }
+        for (path, colour) in &self.colours {
+            let _ = writeln!(out, "colour {} {}", colour.token(), path.display());
+        }
         out
     }
 
@@ -236,7 +305,17 @@ impl Views {
             return None;
         }
         let mut held = Vec::new();
+        let mut colours = Vec::new();
         for line in lines {
+            if let Some(rest) = line.strip_prefix("colour ") {
+                let Some((token, path)) = rest.split_once(' ') else { continue };
+                let path = Path::new(path);
+                let Some(colour) = crate::colours::Colour::from_token(token) else { continue };
+                if path.is_absolute() && colours.len() < MOST {
+                    colours.push((path.to_path_buf(), colour));
+                }
+                continue;
+            }
             let Some(rest) = line.strip_prefix("view ") else { continue };
             let Some((layout, rest)) = rest.split_once(' ') else { continue };
             let Some((grouping, path)) = rest.split_once(' ') else { continue };
@@ -259,7 +338,7 @@ impl Views {
                 break;
             }
         }
-        Some(Self { held })
+        Some(Self { held, colours })
     }
 }
 
@@ -530,5 +609,83 @@ mod tests {
         // And the album with no grouping is redundant again, so nothing is kept.
         assert!(views.remember(album, views.chosen(album, Mode::Columns, Grouping::None)));
         assert_eq!(views.len(), 1, "an album back to what it inherits was recorded");
+    }
+
+    /// A colour is one folder's and never its children's.
+    ///
+    /// The one way this record differs from every other in the file, and the
+    /// reason it is a second list: inherited, a red `~/Projects` would make
+    /// every folder under it red, and a colour every folder has is a colour that
+    /// says nothing.
+    #[test]
+    fn a_colour_belongs_to_one_folder_and_is_not_inherited() {
+        use crate::colours::Colour;
+        let mut views = Views::default();
+        let projects = Path::new("/home/emil/projects");
+        assert!(views.colour(projects, Some(Colour::Red)));
+        assert_eq!(views.colour_of(projects), Some(Colour::Red));
+        assert_eq!(views.colour_of(Path::new("/home/emil/projects/skerry")), None);
+        assert_eq!(views.colour_of(Path::new("/home/emil")), None);
+
+        // And it does not disturb the view records, which have their own list and
+        // their own inheritance.
+        assert!(views.is_empty_for_tests(), "a colour was written as a view");
+
+        // Setting the same colour again changes nothing; a different one does;
+        // and clearing removes the record rather than writing "no colour".
+        assert!(!views.colour(projects, Some(Colour::Red)));
+        assert!(views.colour(projects, Some(Colour::Blue)));
+        assert_eq!(views.coloured_for_tests(), 1);
+        assert!(views.colour(projects, None));
+        assert_eq!(views.colour_of(projects), None);
+        assert_eq!(views.coloured_for_tests(), 0);
+        assert!(!views.colour(projects, None), "clearing nothing changed something");
+    }
+
+    /// The colours survive the file, beside the views and without disturbing
+    /// them — and a colour this build does not have reads as no colour.
+    #[test]
+    fn colours_round_trip_through_the_file_beside_the_views() {
+        use crate::colours::Colour;
+        let mut views = Views::default();
+        views.remember(
+            Path::new("/home/emil/pictures"),
+            View { layout: Layout::Grid, grouping: Grouping::None },
+        );
+        assert!(views.colour(Path::new("/home/emil/projects"), Some(Colour::Red)));
+        assert!(views.colour(Path::new("/home/emil/wor k"), Some(Colour::Purple)));
+
+        let text = views.render();
+        assert!(text.contains("colour red /home/emil/projects"), "{text}");
+        let read = Views::parse(&text).expect("refused its own file");
+        assert_eq!(read.colour_of(Path::new("/home/emil/projects")), Some(Colour::Red));
+        // A path with a space in it, which is why the path is last on the line.
+        assert_eq!(read.colour_of(Path::new("/home/emil/wor k")), Some(Colour::Purple));
+        assert_eq!(read.for_path(Path::new("/home/emil/pictures")).layout, Layout::Grid);
+
+        // A newer build's seventh colour, and a line that is neither.
+        let odd = text.replace("colour red", "colour magenta")
+            + "nonsense
+";
+        let read = Views::parse(&odd).expect("one unknown line refused the whole file");
+        assert_eq!(read.colour_of(Path::new("/home/emil/projects")), None);
+        assert_eq!(read.colour_of(Path::new("/home/emil/wor k")), Some(Colour::Purple));
+    }
+
+    /// The children of one directory, which is what a frame asks for.
+    #[test]
+    fn the_coloured_children_of_a_directory_are_found_by_name() {
+        use crate::colours::Colour;
+        let mut views = Views::default();
+        views.colour(Path::new("/home/emil/one"), Some(Colour::Red));
+        views.colour(Path::new("/home/emil/two"), Some(Colour::Green));
+        views.colour(Path::new("/home/emil/deeper/three"), Some(Colour::Blue));
+        let mut found: Vec<(String, Colour)> = views
+            .coloured_in(Path::new("/home/emil"))
+            .map(|(name, colour)| (name.to_string_lossy().into_owned(), colour))
+            .collect();
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(found, [("one".to_owned(), Colour::Red), ("two".to_owned(), Colour::Green)]);
+        assert_eq!(views.coloured_in(Path::new("/nowhere")).count(), 0);
     }
 }

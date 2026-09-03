@@ -223,6 +223,14 @@ pub struct Pane {
     /// Drawing cannot mint one: it has `&Pane`, and minting is a map insert. Keying
     /// by `EntryId` rather than by row means a sort moves nothing.
     pub thumbs: std::collections::HashMap<sk_model::EntryId, sk_gpu::ImageKey>,
+    /// The colour of each entry somebody has given one, in this listing.
+    ///
+    /// **Per pane, filled by `App::settle_colours` when the listing or the
+    /// records change.** Drawing has `&Pane` and no access to the records, and
+    /// looking one up by path per row per frame would join a path forty times a
+    /// frame for a feature most folders do not use. A `Vec` because it is
+    /// usually empty and never more than a handful.
+    pub colours: Vec<(sk_model::EntryId, crate::colours::Colour)>,
     /// The band byte per entry the current order was computed with, indexed by
     /// [`EntryId`], and empty for every banding but [`Banding::Kind`].
     ///
@@ -404,6 +412,7 @@ impl Pane {
             bands: Vec::new(),
             closed: crate::groups::Closed::default(),
             thumbs: std::collections::HashMap::new(),
+            colours: Vec::new(),
             kinds: Vec::new(),
             filter: String::new(),
             show_hidden: false,
@@ -1170,6 +1179,16 @@ impl Pane {
         let child = self.path_of(id);
         self.open(child, jobs);
         true
+    }
+
+    /// The colour somebody gave this entry, if they gave it one.
+    ///
+    /// From [`Pane::colours`], which `App::settle_colours` fills: the records are
+    /// keyed by path and this is asked per row per frame, so the join happens
+    /// once per pane instead.
+    #[must_use]
+    pub fn colour_of(&self, id: sk_model::EntryId) -> Option<crate::colours::Colour> {
+        self.colours.iter().find(|(kept, _)| *kept == id).map(|(_, colour)| *colour)
     }
 
     /// Where an entry of this pane's listing actually is.

@@ -40,6 +40,20 @@ pub const ON_ROW: &[&[&str]] = &[
     // opened over, so this row and the background's mean two different folders
     // and both read as "this folder".
     &["place.pin", "file.properties"],
+    // **The colours, last and in spectrum order.** A row of seven is what Finder
+    // and Drive both put on this menu, and each one draws its own swatch — a list
+    // of colour names with no colours on it is a menu a person has to try rather
+    // than read. Dimmed on anything that is not a folder, because that is what
+    // they act on.
+    &[
+        "view.colour_red",
+        "view.colour_orange",
+        "view.colour_yellow",
+        "view.colour_green",
+        "view.colour_blue",
+        "view.colour_purple",
+        "view.colour_none",
+    ],
 ];
 
 /// What a secondary click inside a text preview offers.
@@ -70,7 +84,7 @@ pub const ON_A_PLACE: &[&[&str]] =
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],
-    &["edit.undo", "edit.redo", "edit.pause", "edit.cancel"],
+    &["edit.undo", "edit.redo", "edit.pause", "edit.cancel", "edit.resume"],
     &[
         "select.all",
         "view.filter",

@@ -283,6 +283,9 @@ pub struct Capture {
     /// Whether to draw the status strip mid-operation: the bar behind its own
     /// text, with Pause and Stop in it.
     pub progress: bool,
+    /// Whether to draw the strip after an operation was stopped: what it still
+    /// owes, and the button that picks it up.
+    pub stopped: bool,
     /// Whether to draw the strip mid-index-build, which is the same bar over a
     /// different operation — and the frame that would catch the two drifting
     /// apart.
@@ -368,6 +371,8 @@ pub struct Capture {
     pub pinned: bool,
     /// Whether one of its places is open, with what is under it.
     pub tree: bool,
+    /// Whether two of the listing's folders carry a colour somebody chose.
+    pub coloured: bool,
     /// Whether to draw the window frame the program draws for itself.
     ///
     /// A capture has no compositor to ask, so it is told. Without this the
@@ -923,7 +928,18 @@ fn settle_thumbnails(
 ///
 /// A selection, a cursor and a hover, at fixed rows: a frame with none of them
 /// covers none of the three shapes a row can have.
-fn pose(pane: &mut Pane, checked: bool) {
+fn pose(pane: &mut Pane, checked: bool, coloured: bool) {
+    // **Two folders with a colour somebody chose**, which is the only way a frame
+    // shows what `crate::colours` does: the records live in a file this capture
+    // does not read, and the drawing takes them from the pane.
+    if coloured {
+        for (row, colour) in [(0, crate::colours::Colour::Red), (1, crate::colours::Colour::Green)]
+        {
+            if let Some(id) = pane.listing.at(row) {
+                pane.colours.push((id, colour));
+            }
+        }
+    }
     for row in SELECTED {
         if let Some(id) = pane.listing.at(row) {
             pane.selection.toggle(id);
@@ -985,7 +1001,8 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         notice: request
             .progress
             .then_some("Copying 1,204 of 1,776 · 42 MB/s · about 14 s left")
-            .or(request.indexing.then_some("Indexing… 214,880 of 563,605 entries")),
+            .or(request.indexing.then_some("Indexing… 214,880 of 563,605 entries"))
+            .or(request.stopped.then_some("Copying stopped — 572 of 1,776 left")),
         // The pointer is on a row, so nothing in the frame is hovered
         // — the hover shapes are covered by the GUI scenarios, which can
         // actually move a pointer.
@@ -1013,6 +1030,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
             .or(request.indexing.then_some(214_880.0 / 563_605.0)),
         paused: false,
         pausable: request.progress,
+        resumable: request.stopped,
         naming: sample.overlays.naming.as_ref(),
         // What a freshly opened directory looks like: nowhere to go
         // back to, nowhere forward, a parent and a reload. Hardcoded
@@ -1064,7 +1082,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     let (mut pane, _) = session.read_fully(&where_);
 
     settle_folder_totals(&mut pane, &session);
-    pose(&mut pane, request.checked);
+    pose(&mut pane, request.checked, request.coloured);
 
     let types = sk_desktop::MimeDatabase::load();
     let mut thumbs = crate::previews::Thumbs::default();

@@ -145,6 +145,29 @@ pub struct Edits {
     counting: Option<Cancel>,
     /// Whether the queue in flight was stopped, so the notice says so once.
     cancelled_queue: bool,
+    /// Whether the queue in flight is picking up what a stopped one left.
+    ///
+    /// **A flag on the run, not a verb of its own.** It turns an unanswered
+    /// conflict into [`sk_fs::ops::Conflict::Resume`], which merges into what is
+    /// there instead of refusing it — and only where nobody has answered,
+    /// because a person's Replace or Keep both is a decision about this file and
+    /// outranks the queue's provenance.
+    resuming: bool,
+    /// What a stopped queue still owes, until it is picked up or replaced.
+    ///
+    /// **[Rule 7](../../../docs/03-principles.md#7-honest-progress)'s last
+    /// clause**: an operation stays "visible, cancellable and resumable", and
+    /// this is the third word. Stop used to drop the rest of the queue on the
+    /// floor — the files already moved were recorded, and the ones still owed
+    /// were simply gone, so picking up meant selecting them again and knowing
+    /// which ones had already arrived.
+    ///
+    /// **In memory and not in a file.** A queue that survived the process would
+    /// be an offer to continue a copy whose sources may have moved, which is the
+    /// same argument [ADR
+    /// 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md)
+    /// makes for leaving the undo stack out of the session.
+    stopped: Option<Stopped>,
     /// What a queued operation has changed so far, recorded as one entry when it
     /// drains. A cancelled queue still records what it did: those files moved,
     /// and an undo has to be able to bring them back.
@@ -157,6 +180,12 @@ pub struct Edits {
     doing: Queued,
     /// Paths still to work through, next one last.
     queue: Vec<PathBuf>,
+    /// The one the job in flight is working on, so a stop can keep it.
+    ///
+    /// It is off the queue by then — `next_in_queue` pops it — and it is the
+    /// item a resume has something to merge into, so it is the one thing a
+    /// stopped queue must not forget.
+    running_path: Option<PathBuf>,
     /// The clash a person is being asked about, while one is open.
     ///
     /// The queue does not advance while this is set: that is what makes it a
@@ -175,6 +204,25 @@ pub struct Edits {
     done: Receiver<Outcome>,
     sender: Sender<Outcome>,
     wake: WakeHandle,
+}
+
+/// What a stopped queue still owes.
+struct Stopped {
+    /// What it was doing. The merge is a flag on the run rather than a change to
+    /// the verb — [`Edits::resuming`] — because a move carries no conflict answer
+    /// of its own and would otherwise be the one verb that could not be picked
+    /// up.
+    doing: Queued,
+    /// Everything still owed, including the item that was interrupted: it is
+    /// the one the merge is for.
+    owed: Vec<PathBuf>,
+    /// How many the queue was originally given, so the line keeps counting the
+    /// same total rather than restarting at the remainder.
+    queued: usize,
+    /// How many of them had finished.
+    done: usize,
+    /// The verb, for the line that says what stopped.
+    verb: &'static str,
 }
 
 /// What the queue is doing to each path it holds.
@@ -346,12 +394,15 @@ impl Edits {
             totals_tx,
             counting: None,
             cancelled_queue: false,
+            resuming: false,
+            stopped: None,
             batch: Vec::new(),
             running: None,
             progress,
             progress_tx,
             doing: Queued::Trash,
             queue: Vec::new(),
+            running_path: None,
             clash: None,
             answering: 0,
             for_the_rest: false,
@@ -481,6 +532,12 @@ impl Edits {
         }
         self.doing = doing;
         self.queued = paths.len();
+        // A fresh batch replaces whatever a stopped one still owed: two queues at
+        // once is the thing `pending` exists to prevent, and an offer to resume
+        // something a person has moved on from is a button that does the wrong
+        // thing quietly.
+        self.stopped = None;
+        self.resuming = false;
         // Reversed, so `pop` takes them in the order they were given — which is
         // display order, so the notice counts down the list a person is looking
         // at.
@@ -576,10 +633,12 @@ impl Edits {
         }
         let Some(path) = self.queue.pop() else {
             self.queued = 0;
+            self.running_path = None;
             self.standing = None;
             self.for_the_rest = false;
             return;
         };
+        self.running_path = Some(path.clone());
         let doing = self.doing.clone();
         let verb = match doing {
             Queued::Trash => "verb.trashing",
@@ -602,6 +661,7 @@ impl Edits {
         // The answer this one item runs under, whether it came from the panel
         // just now or from a "for the rest" given several items ago.
         let answer = self.once.take().or(self.standing);
+        let resuming = self.resuming;
         let queue_left = self.queue.len();
         let pause = self.pause.clone();
         let reported = std::sync::Arc::clone(&self.reported);
@@ -638,7 +698,15 @@ impl Edits {
             // and rule 1 has no exemption for a fast one — so the question is
             // put where the work already is, and what comes back is either the
             // clash or the change.
+            // **A resumed copy does not ask about the name it is merging into.**
+            // That destination is the half-copied tree this run exists to finish,
+            // and the question has an answer nobody chose from the panel. A
+            // resumed *move* still asks: within one filesystem a move is a
+            // rename, which either happened or did not, so a destination that is
+            // there is a real clash rather than a remainder.
+            let merging = resuming && !moving;
             if let Some(into) = &into
+                && !merging
                 && let Some(clash) = clash_at(&path, into, moving, answer, queue_left)
             {
                 return Outcome::Clashed(Box::new(clash));
@@ -646,6 +714,10 @@ impl Edits {
             let conflict = match answer {
                 Some(Answer::Replace) => sk_fs::ops::Conflict::Replace,
                 Some(Answer::KeepBoth) => sk_fs::ops::Conflict::Rename,
+                // **A resume merges where nobody has answered.** A person's
+                // Replace or Keep both is a decision about this file and outranks
+                // where the queue came from.
+                None if resuming => sk_fs::ops::Conflict::Resume,
                 _ => sk_fs::ops::Conflict::Refuse,
             };
             Outcome::Did(match doing {
@@ -712,6 +784,8 @@ impl Edits {
 
     /// Records what a drained queue changed, as one undo entry.
     fn finish_the_batch(&mut self) {
+        self.running_path = None;
+        self.resuming = false;
         if !self.batch.is_empty() {
             let changes = std::mem::take(&mut self.batch);
             self.history.record(Change::Batch(changes));
@@ -953,6 +1027,21 @@ impl Edits {
     /// there is nothing between its start and its end to stop at.
     pub fn cancel(&mut self) {
         self.cancelled_queue = self.busy();
+        // **Kept, not dropped.** What is left includes the item in flight: it is
+        // the one that stopped part way, and resuming is exactly the merge
+        // `Conflict::Resume` performs — see `Stopped`.
+        if self.cancellable() {
+            let mut owed = std::mem::take(&mut self.queue);
+            owed.extend(self.running_path.clone());
+            let verb = self.running.as_ref().map_or("verb.copying", |it| it.verb);
+            self.stopped = (!owed.is_empty()).then(|| Stopped {
+                doing: self.doing.clone(),
+                queued: self.queued,
+                done: self.queued.saturating_sub(owed.len()),
+                owed,
+                verb,
+            });
+        }
         self.queue.clear();
         if let Some(stop) = self.stop.as_ref() {
             stop.cancel();
@@ -973,6 +1062,48 @@ impl Edits {
         self.busy() && !matches!(self.doing, Queued::Trash)
     }
 
+    /// Whether a stopped queue is waiting to be picked up.
+    #[must_use]
+    pub fn resumable(&self) -> bool {
+        self.stopped.is_some() && !self.busy()
+    }
+
+    /// How much a stopped queue still owes: what is left, of how many.
+    #[must_use]
+    pub fn owed(&self) -> Option<(usize, usize)> {
+        self.stopped.as_ref().map(|it| (it.owed.len(), it.queued))
+    }
+
+    /// Picks up what a stopped queue left.
+    ///
+    /// **The item that was interrupted goes first**, because it is the one with
+    /// something on disk to merge into — and the queue pops from the back, so it
+    /// is pushed last. Everything the stopped queue had already finished stays
+    /// finished: `Conflict::Resume` skips a file that is there at the source's
+    /// size and enters a directory that is already there, which is what makes
+    /// pressing this twice cost a walk and no bytes.
+    pub fn resume(&mut self, jobs: &Jobs) {
+        let Some(stopped) = self.stopped.take() else { return };
+        if self.pending.is_some() {
+            return;
+        }
+        self.doing = stopped.doing;
+        self.queued = stopped.queued;
+        self.resuming = true;
+        // `owed` is in the order the queue would have worked through it, with the
+        // interrupted item appended; `queue` is popped from the back.
+        self.queue = stopped.owed;
+        self.queue.reverse();
+        if let Some(front) = self.queue.pop() {
+            self.queue.insert(0, front);
+        }
+        self.reported = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        self.batch.clear();
+        self.start_counting(jobs);
+        self.next_in_queue(jobs);
+        let _ = stopped.done;
+    }
+
     /// What to say about the operation in flight, if anything.
     ///
     /// **Three sentences, and which one appears says how much is known.** What
@@ -987,6 +1118,16 @@ impl Edits {
     /// was observed.
     #[must_use]
     pub fn progress_line(&self) -> Option<String> {
+        // **A stopped queue keeps saying so.** Rule 7 is that a long operation
+        // stays visible, and the notice that reports the stop expires after four
+        // seconds — after which a person who looked away would have nothing on
+        // screen telling them that six of nine files are still where they were.
+        if let Some(stopped) = self.stopped.as_ref().filter(|_| self.running.is_none()) {
+            return Some(sk_model::i18n::format(
+                "notice.stopped",
+                &[&sk_model::i18n::lookup(stopped.verb), &stopped.owed.len(), &stopped.queued],
+            ));
+        }
         let running = self.running.as_ref()?;
         let elapsed = running.started.elapsed().as_secs_f64();
         let queued = self.queued.max(1);
@@ -1055,5 +1196,162 @@ impl Edits {
             }
         }
         moved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Edits, Queued};
+    use crate::pane::Jobs;
+    use sk_util::{Pool, Waker};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// An `Edits` with a real pool behind it, and the channels it answers on.
+    struct Harness {
+        edits: Edits,
+        jobs: Jobs,
+        _waker: Waker,
+        _updates: mpsc::Receiver<crate::pane::Message>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let waker = Waker::new().expect("eventfd");
+            let (sender, updates) = mpsc::channel();
+            let jobs = Jobs {
+                pool: std::sync::Arc::new(Pool::with_width(2)),
+                wake: waker.handle(),
+                sender,
+                mime: None,
+            };
+            Self { edits: Edits::new(waker.handle()), jobs, _waker: waker, _updates: updates }
+        }
+
+        /// Drains outcomes until the queue is idle, or the deadline passes.
+        ///
+        /// **`next_in_queue` is the caller's**, which is `App::drain_edits` in the
+        /// program and this loop here: the engine holds no pool, so the thing
+        /// that advances the queue is whoever has one.
+        fn settle(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                let landed = self.edits.drain();
+                if landed.is_some() {
+                    self.edits.next_in_queue(&self.jobs);
+                    continue;
+                }
+                if !self.edits.busy() {
+                    return;
+                }
+                // **Yielded rather than slept**, which is `sk_fs::watch`'s own
+                // test loop and the reason `tools/check-invariants.py` forbids
+                // the other one anywhere in a crate: the rule is about the frame
+                // path and a grep cannot tell a test from it.
+                std::thread::yield_now();
+            }
+            panic!(
+                "the queue never went idle: busy={} queue={} owed={:?}",
+                self.edits.busy(),
+                self.edits.queue.len(),
+                self.edits.owed(),
+            );
+        }
+    }
+
+    fn scratch(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("skerry-edits-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A stopped queue keeps what it owes, and picking it up finishes exactly
+    /// that — [rule 7](../../../docs/03-principles.md#7-honest-progress)'s third
+    /// word.
+    ///
+    /// Stopped *before the pool has run anything*, which is the state a person
+    /// reaches by pressing Stop early: all three are still owed, and the one
+    /// that was in flight is owed too, because a copy that stopped part way is
+    /// the one with something to merge into.
+    #[test]
+    fn a_stopped_queue_keeps_what_it_owes_and_a_resume_finishes_it() {
+        let root = scratch("resume");
+        let into = root.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let paths: Vec<PathBuf> = ["one", "two", "three"]
+            .iter()
+            .map(|name| {
+                let path = root.join(name);
+                std::fs::write(&path, b"contents").unwrap();
+                path
+            })
+            .collect();
+
+        let mut harness = Harness::new();
+        assert!(harness.edits.paste_all(paths, into.clone(), false, &harness.jobs));
+        harness.edits.cancel();
+        let (owed, of) = harness.edits.owed().expect("a stopped queue owes nothing");
+        assert_eq!(of, 3);
+        assert!(owed > 0 && owed <= 3, "{owed} of {of} owed");
+
+        // The queue goes idle, the offer stands until it is taken — and the line
+        // says so, because the notice that reported the stop expires and rule 7
+        // says a long operation stays visible.
+        harness.settle();
+        assert!(harness.edits.resumable());
+        let line = harness.edits.progress_line().expect("the strip says nothing about the stop");
+        assert!(line.contains("stopped"), "{line}");
+
+        harness.edits.resume(&harness.jobs);
+        harness.settle();
+        assert!(harness.edits.owed().is_none(), "the offer outlived the resume");
+        for name in ["one", "two", "three"] {
+            assert_eq!(
+                std::fs::read(into.join(name)).unwrap_or_default(),
+                b"contents",
+                "{name} did not arrive"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fresh batch replaces the offer, rather than leaving a button that would
+    /// pick up something the person has moved on from.
+    #[test]
+    fn a_new_operation_forgets_what_a_stopped_one_owed() {
+        let root = scratch("replaced");
+        let into = root.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let first = root.join("first");
+        std::fs::write(&first, b"x").unwrap();
+
+        let mut harness = Harness::new();
+        assert!(harness.edits.paste_all(vec![first.clone()], into.clone(), false, &harness.jobs));
+        harness.edits.cancel();
+        harness.settle();
+        assert!(harness.edits.resumable());
+
+        let second = root.join("second");
+        std::fs::write(&second, b"y").unwrap();
+        assert!(harness.edits.paste_all(vec![second], into.clone(), false, &harness.jobs));
+        assert!(!harness.edits.resumable(), "the old offer survived a new batch");
+        harness.settle();
+        assert!(into.join("second").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Trash is not stoppable, so it leaves nothing to pick up.
+    #[test]
+    fn a_verb_that_cannot_be_stopped_leaves_no_offer() {
+        let mut harness = Harness::new();
+        assert!(!harness.edits.cancellable());
+        harness.edits.cancel();
+        assert!(!harness.edits.resumable());
+        assert!(matches!(harness.edits.doing, Queued::Trash));
     }
 }

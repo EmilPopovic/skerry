@@ -113,6 +113,24 @@ pub struct Options {
     pub reflink: bool,
     /// Whether `copy_file_range` may be tried. See [`Self::reflink`].
     pub kernel_copy: bool,
+    /// Whether a destination that is already there is left alone.
+    ///
+    /// **What makes a stopped copy resumable**, which is
+    /// [rule 7](../../../docs/03-principles.md#7-honest-progress)'s last clause.
+    /// A copy writes each file to a staging name and renames it, so inside a
+    /// half-copied tree every file is either whole or absent — there is no such
+    /// thing as half a file to continue. Resuming is therefore not "seek to an
+    /// offset" but "copy what is missing": a regular file whose destination
+    /// exists at the same size is skipped, an existing symlink is skipped, and a
+    /// directory that is already there is entered rather than refused.
+    ///
+    /// Compared by size and not by content. A byte-for-byte check would read
+    /// both trees in full, which is the copy this exists to avoid doing twice,
+    /// and a source that changed under a stopped copy is a source that changed —
+    /// the mtime is the destination's own, set from the source when it was
+    /// written, so a file that differs in size differs and one that does not is
+    /// taken on trust.
+    pub resume: bool,
     /// Whether the destination is flushed before the copy is reported done.
     ///
     /// Off in the product, because the page cache is the kernel's business and a
@@ -124,7 +142,14 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { replace: false, xattrs: true, reflink: true, kernel_copy: true, fsync: false }
+        Self {
+            replace: false,
+            resume: false,
+            xattrs: true,
+            reflink: true,
+            kernel_copy: true,
+            fsync: false,
+        }
     }
 }
 
@@ -457,6 +482,15 @@ fn copy_any(
         statat(fs::CWD, source, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, source, "stat"))?;
     match fs::FileType::from_raw_mode(stat.st_mode) {
         fs::FileType::RegularFile => {
+            // Already there and the same size: what a stopped copy got to.
+            // Counted as done, because it is — the progress line is about the
+            // work the queue was given rather than about this attempt at it.
+            if options.resume && same_size(destination, stat.st_size) {
+                progress.done += 1;
+                progress.bytes += stat.st_size.cast_unsigned();
+                watch(*progress);
+                return Ok(());
+            }
             let copied = copy_file(source, destination, options)?;
             progress.done += 1;
             progress.bytes += copied.bytes;
@@ -466,6 +500,11 @@ fn copy_any(
         // Recreated rather than followed. A link is 40 bytes and what it points at
         // may be a terabyte, or may be the directory this walk is inside.
         fs::FileType::Symlink => {
+            if options.resume && statat(fs::CWD, destination, AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+                progress.done += 1;
+                watch(*progress);
+                return Ok(());
+            }
             let target = fs::readlinkat(fs::CWD, source, Vec::new())
                 .map_err(|error| at(error, source, "readlink"))?;
             fs::symlinkat(target.as_c_str(), fs::CWD, destination)
@@ -508,7 +547,7 @@ fn copy_directory(
     // goes on at the end.
     match fs::mkdir(destination, Mode::from_bits_truncate(0o700)) {
         Ok(()) => {}
-        Err(Errno::EXIST) if options.replace => {}
+        Err(Errno::EXIST) if options.replace || options.resume => {}
         Err(error) => return Err(at(error, destination, "mkdir")),
     }
     for child in children(source)? {
@@ -530,6 +569,18 @@ fn copy_directory(
     progress.done += 1;
     watch(*progress);
     Ok(())
+}
+
+/// Whether `path` is a regular file of exactly `bytes`.
+///
+/// `SYMLINK_NOFOLLOW`, so a symlink where a file should be is not the file: it
+/// is something else with the same name, and copying over it is the right
+/// answer rather than skipping it.
+fn same_size(path: &Path, bytes: i64) -> bool {
+    statat(fs::CWD, path, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+        fs::FileType::from_raw_mode(stat.st_mode) == fs::FileType::RegularFile
+            && stat.st_size == bytes
+    })
 }
 
 /// Every name in a directory except `.` and `..`.

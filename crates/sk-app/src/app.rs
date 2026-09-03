@@ -2192,6 +2192,7 @@ impl App {
         let visible = cells.visible(self.panes.focused().scroll.offset());
         let Self { measurer, panes, jobs, .. } = self;
         measurer.update(panes.focused_mut(), visible, jobs);
+        self.settle_colours();
         self.settle_thumbnails();
         self.settle_quick_look();
         // **Last, because both of the above put things in the queue.** The pump
@@ -2862,6 +2863,10 @@ impl App {
             self.cancel_operation();
             return true;
         }
+        if self.hits.pick_up.is_some_and(|a| a.contains(position.x, position.y)) {
+            self.resume_operation();
+            return true;
+        }
         false
     }
 
@@ -3473,6 +3478,40 @@ impl App {
     /// neither reading needs a second command.
     fn place_in_question(&self) -> PathBuf {
         self.place_target.clone().unwrap_or_else(|| self.panes.focused().path.clone())
+    }
+
+    /// The folder a colour would be given to, if there is one.
+    ///
+    /// **No fallback to the folder on screen**, which is where this differs from
+    /// [`App::folder_to_pin`]: "pin this folder" means the one you are in when
+    /// the row is a file, and "make this red" cannot — a person who right-clicks
+    /// a PDF and picks Red means the PDF, and the honest answer to that is a
+    /// dimmed row rather than a folder somewhere else turning red. Finder and
+    /// Drive both colour the thing that was clicked, and neither offers it for
+    /// nothing.
+    fn folder_to_colour(&self) -> Option<PathBuf> {
+        self.place_target.clone().or_else(|| self.focused_directory())
+    }
+
+    /// Whether the entry in question is a folder a colour can be given to.
+    #[must_use]
+    pub(crate) fn can_colour(&self) -> bool {
+        self.folder_to_colour().is_some()
+    }
+
+    /// Whether the folder in question has a colour to take away.
+    #[must_use]
+    pub(crate) fn can_uncolour(&self) -> bool {
+        self.folder_to_colour().is_some_and(|path| self.views.colour_of(&path).is_some())
+    }
+
+    /// Gives the folder in question a colour, or takes its colour away.
+    pub(crate) fn colour_folder(&mut self, colour: Option<crate::colours::Colour>) {
+        let Some(path) = self.folder_to_colour() else { return };
+        if self.views.colour(&path, colour) {
+            self.keep_the_views();
+        }
+        self.dirty = true;
     }
 
     /// The folder a pin would add to the list of places.
@@ -4270,6 +4309,18 @@ impl App {
         };
         self.notice = Some((message, Instant::now()));
         self.cutting = matches!(intent, Intent::Cut) && count > 0;
+    }
+
+    /// Whether a stopped queue is waiting to be picked up.
+    #[must_use]
+    pub(crate) fn can_resume(&self) -> bool {
+        self.edits.resumable()
+    }
+
+    /// Picks up what a stopped queue left.
+    pub(crate) fn resume_operation(&mut self) {
+        self.edits.resume(&self.jobs);
+        self.dirty = true;
     }
 
     /// Puts the selected paths on the clipboard and marks them to be moved.
@@ -5716,6 +5767,37 @@ scope_aim={scope_aim:?}",
     /// Nothing here decodes, opens or stats anything — [rule
     /// 1](../../../docs/03-principles.md). The `mtime` is already in the listing,
     /// and what leaves this function is a want on a queue.
+    /// Hands every visible pane the colours of the entries in it.
+    ///
+    /// **Once per settle, not once per frame and not once per row.** The records
+    /// are keyed by path and a listing's rows all share a parent, so the question
+    /// is asked once per pane against names — see
+    /// [`crate::views::Views::coloured_in`]. Drawing then reads a `Vec` of a
+    /// handful, which is what `Pane::colours` is.
+    fn settle_colours(&mut self) {
+        let leaves: Vec<crate::panes::PaneId> =
+            self.placement.leaves.iter().map(|leaf| leaf.id).collect();
+        for leaf in leaves {
+            let Some(tabs) = self.panes.leaf_mut(leaf) else { continue };
+            let pane = tabs.showing_mut();
+            let coloured: Vec<(&std::ffi::OsStr, crate::colours::Colour)> =
+                self.views.coloured_in(&pane.path).collect();
+            pane.colours.clear();
+            if coloured.is_empty() {
+                continue;
+            }
+            for row in 0..pane.listing.rows() {
+                let Some(id) = pane.listing.at(row) else { continue };
+                let name = pane.listing.name(id);
+                if let Some((_, colour)) =
+                    coloured.iter().find(|(kept, _)| kept.as_encoded_bytes() == name.as_bytes())
+                {
+                    pane.colours.push((id, *colour));
+                }
+            }
+        }
+    }
+
     fn settle_thumbnails(&mut self) {
         // Nothing to ask about until the MIME databases land, which is the first
         // few milliseconds of a session — see `sk_desktop::kind_of`.
@@ -5981,6 +6063,16 @@ scope_aim={scope_aim:?}",
         if !self.views.remember(&path, view) {
             return;
         }
+        self.keep_the_views();
+    }
+
+    /// Writes the per-folder records, if they have moved.
+    ///
+    /// **Compared rather than tracked**, the same bargain the session file makes:
+    /// rendering is a few hundred bytes of string and comparing it is a `str`
+    /// compare, and a `dirty` flag every caller has to remember to set is a flag
+    /// one of them will not.
+    fn keep_the_views(&mut self) {
         let text = self.views.render();
         if text == self.views_text {
             return;
@@ -6331,41 +6423,41 @@ index={index} indexing={indexing} search_indexed={searched}",
             .join(",")
     }
 
+    /// What the operation queue is doing, for the diagnostic line.
+    ///
+    /// Its own method rather than twenty lines inside `listing_state`, which is
+    /// at the hundred-line limit: what is queued, what a stopped one owes, where
+    /// its Pick up button is and which rows carry a colour are all things a
+    /// scenario asks about the work rather than about the listing.
+    fn queue_state(&self) -> String {
+        let (queue_left, queue_total) = self.edits.queue_state();
+        // What a stopped queue still owes, so a scenario can assert the remainder
+        // rather than infer it from a sentence.
+        let (owed_left, owed_total) = self.edits.owed().unwrap_or((0, 0));
+        // Which of the rows carry a colour somebody chose, by name, so a scenario
+        // asserts what is drawn rather than what a file says.
+        let coloured = {
+            let pane = self.panes.focused();
+            pane.colours
+                .iter()
+                .map(|(id, colour)| format!("{}:{}", pane.listing.name(*id), colour.token()))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        // Where the strip's Pick up button is, so a pointer can reach it without
+        // the harness owning a copy of the strip's arithmetic.
+        let pick_up_aim = self.hits.pick_up.map_or_else(String::new, |area| {
+            format!("{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
+        });
+        format!(
+            "queue={queue_left}/{queue_total} owed={owed_left}/{owed_total} \
+pick_up_aim={pick_up_aim} coloured={coloured:?}"
+        )
+    }
+
     /// What the pane is showing.
     #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
     fn listing_state(&mut self) -> String {
-        let cursor = self
-            .panes
-            .focused()
-            .selection
-            .cursor()
-            .map(|id| self.panes.focused().listing.name(id).to_owned())
-            .unwrap_or_default();
-        let hover = self.panes.focused().hover.map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
-        let hover_name = self
-            .panes
-            .focused()
-            .hover
-            .and_then(|row| self.panes.focused().listing.at(row))
-            .map(|id| self.panes.focused().listing.name(id).to_owned())
-            .unwrap_or_default();
-        let (known, running) = self.measurer.stats();
-        let (jobs, panics) = self.jobs.pool.stats();
-        let naming = self.edits.naming.as_ref().map(|it| it.field.text.clone()).unwrap_or_default();
-        let typing_path =
-            self.typing_path.as_ref().map(|field| field.text.clone()).unwrap_or_default();
-        // The caret and the selection, because a field's *text* says nothing about
-        // either — and a click that fails to move the caret looks identical to one
-        // that lands, from the text alone.
-        let path_caret =
-            self.typing_path.as_ref().map_or(-1, |field| i64::try_from(field.caret).unwrap_or(-1));
-        let path_selected =
-            self.typing_path.as_ref().map(|field| field.selected().to_owned()).unwrap_or_default();
-        let naming_selected =
-            self.edits.naming.as_ref().map(|it| it.field.selected().to_owned()).unwrap_or_default();
-        let naming_row =
-            self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
-        let (queue_left, queue_total) = self.edits.queue_state();
         let cursor_row =
             self.panes.focused().cursor_row().map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
         let progress = self.edits.progress_line().unwrap_or_default();
@@ -6420,6 +6512,38 @@ index={index} indexing={indexing} search_indexed={searched}",
         // nothing — the panel never opens on an empty selection.
         let erasing = self.erasing.as_ref().map_or(0, |asking| asking.paths.len());
         let (panel_area, erase_aim, erasing_on) = self.question_state();
+        let cursor = self
+            .panes
+            .focused()
+            .selection
+            .cursor()
+            .map(|id| self.panes.focused().listing.name(id).to_owned())
+            .unwrap_or_default();
+        let hover = self.panes.focused().hover.map_or(-1, |row| i64::try_from(row).unwrap_or(-1));
+        let hover_name = self
+            .panes
+            .focused()
+            .hover
+            .and_then(|row| self.panes.focused().listing.at(row))
+            .map(|id| self.panes.focused().listing.name(id).to_owned())
+            .unwrap_or_default();
+        let (known, running) = self.measurer.stats();
+        let (jobs, panics) = self.jobs.pool.stats();
+        let naming = self.edits.naming.as_ref().map(|it| it.field.text.clone()).unwrap_or_default();
+        let typing_path =
+            self.typing_path.as_ref().map(|field| field.text.clone()).unwrap_or_default();
+        // The caret and the selection, because a field's *text* says nothing about
+        // either — and a click that fails to move the caret looks identical to one
+        // that lands, from the text alone.
+        let path_caret =
+            self.typing_path.as_ref().map_or(-1, |field| i64::try_from(field.caret).unwrap_or(-1));
+        let path_selected =
+            self.typing_path.as_ref().map(|field| field.selected().to_owned()).unwrap_or_default();
+        let naming_selected =
+            self.edits.naming.as_ref().map(|it| it.field.selected().to_owned()).unwrap_or_default();
+        let naming_row =
+            self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
+        let queues = self.queue_state();
         let drag_in = self.window.dragging().is_some();
         let drag_out = self.window.dragging_out();
         format!(
@@ -6430,7 +6554,8 @@ selected={} scroll={:.1} loading={} watching={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
-undo={} redo={} busy={} queue={queue_left}/{queue_total} progress={progress:?} \
+undo={} redo={} busy={} {queues} \
+progress={progress:?} \
 asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
 for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
 theme={theme} zoom={zoom} sidebar_open={sidebar_open} {search} \
@@ -8963,6 +9088,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             progress: edits.fraction().or_else(|| indexes.fraction()),
             // Only where there is something a latch can hold. See `can_pause`.
             pausable: edits.busy(),
+            resumable: edits.resumable(),
             paused: edits.held(),
             naming: edits.naming.as_ref(),
             filtering: *filtering,

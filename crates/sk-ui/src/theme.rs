@@ -66,6 +66,27 @@ pub struct Palette {
     /// enough that fifteen of them in a column do not read as a chart — the row
     /// is still a name, and the mark is still furniture.
     pub kinds: Kinds,
+    /// The six colours a folder can be given.
+    pub folders: Folders,
+}
+
+/// The colours somebody can mark a folder with.
+///
+/// **Six, and their own palette rather than the kind hues.** A folder's colour is
+/// a choice a person made and a kind's colour is what a file *is*; sharing the
+/// values would make a folder somebody coloured green indistinguishable from the
+/// green a source file gets. Six because a row of swatches is scanned rather
+/// than read, and the spectrum is legible at that many — Finder ships seven and
+/// Drive twenty-four, and the twenty-four are a grid nobody remembers.
+#[derive(Clone, Copy, Debug)]
+#[allow(missing_docs, reason = "each field is the colour of that name")]
+pub struct Folders {
+    pub red: Color,
+    pub orange: Color,
+    pub yellow: Color,
+    pub green: Color,
+    pub blue: Color,
+    pub purple: Color,
 }
 
 /// The colour of the mark for each kind of file.
@@ -231,6 +252,17 @@ impl Theme {
                     executable: Color::hex(0xe0705c),
                     unknown: Color::hex(0x788091),
                 },
+                // Lifted a step towards white against the dark ground, the way
+                // the kind hues above are: a saturated red at 13 pixels on a
+                // near-black row reads as brown.
+                folders: Folders {
+                    red: Color::hex(0xe8615c),
+                    orange: Color::hex(0xe0913f),
+                    yellow: Color::hex(0xd8bd45),
+                    green: Color::hex(0x5fb85f),
+                    blue: Color::hex(0x5b9cf0),
+                    purple: Color::hex(0xb07fe8),
+                },
             },
             metrics: Metrics::default(),
             dark: true,
@@ -267,6 +299,14 @@ impl Theme {
                     document: Color::hex(0x646c7d),
                     executable: Color::hex(0xc0432c),
                     unknown: Color::hex(0x7d8493),
+                },
+                folders: Folders {
+                    red: Color::hex(0xd0332e),
+                    orange: Color::hex(0xb56a0f),
+                    yellow: Color::hex(0x9a8508),
+                    green: Color::hex(0x2f8c37),
+                    blue: Color::hex(0x2f6fd0),
+                    purple: Color::hex(0x8149c4),
                 },
             },
             metrics: Metrics::default(),

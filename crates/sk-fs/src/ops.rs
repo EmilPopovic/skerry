@@ -310,14 +310,11 @@ pub fn copy_into(
         });
     }
     let mut progress = crate::copy::Progress::default();
-    match crate::copy::copy_into(
-        source,
-        into,
-        crate::copy::Options::default(),
-        cancel,
-        &mut progress,
-        watch,
-    ) {
+    let options = crate::copy::Options {
+        resume: conflict == Conflict::Resume,
+        ..crate::copy::Options::default()
+    };
+    match crate::copy::copy_into(source, into, options, cancel, &mut progress, watch) {
         Ok(destination) => Ok(Change::Copied { source: source.to_path_buf(), destination }),
         // **A cancelled copy is still a change.** It stopped part way and left
         // what it had written, and the only thing that can take that back is the
@@ -344,6 +341,14 @@ pub enum Conflict {
     /// tell which is which — so a move with a taken name is refused and said out
     /// loud.
     Rename,
+    /// Merge into what is already there, copying only what is missing.
+    ///
+    /// **The verb a stopped copy is picked up with**, and the only conflict
+    /// answer nobody chooses from a panel: it is what a resumed queue sets on
+    /// every item it still owes. A file that is there at the same size is
+    /// skipped, a directory that is there is entered, and everything else is
+    /// copied — [`crate::copy::Options::resume`] says why size is the test.
+    Resume,
     /// Put what is already there in the Trash, then place this one.
     ///
     /// **Trash, never overwrite.** Every other file manager writes over the file
@@ -400,14 +405,14 @@ pub fn move_into(
         return Ok(Change::Batch(vec![displaced, moved]));
     }
     let mut progress = crate::copy::Progress::default();
-    let destination = crate::copy::move_into(
-        source,
-        into,
-        crate::copy::Options::default(),
-        cancel,
-        &mut progress,
-        watch,
-    )?;
+    // A move across filesystems is a copy and then a removal, so a resumed one
+    // merges for the same reason a resumed copy does. Within one filesystem it
+    // is a `rename`, which has nothing to resume.
+    let options = crate::copy::Options {
+        resume: conflict == Conflict::Resume,
+        ..crate::copy::Options::default()
+    };
+    let destination = crate::copy::move_into(source, into, options, cancel, &mut progress, watch)?;
     Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
 }
 
@@ -1149,5 +1154,84 @@ mod tests {
         ]);
         assert_eq!(batch.subject(), Path::new("/x/four"));
         assert_eq!(batch.origin(), Some(Path::new("/x/one")));
+    }
+
+    /// A stopped copy is picked up rather than done twice.
+    ///
+    /// [Rule 7](../../../docs/03-principles.md#7-honest-progress)'s last clause.
+    /// The half-copied tree here is what a cancel leaves: one file written, one
+    /// missing, and a directory that already exists. Resuming copies the missing
+    /// one, enters the directory rather than refusing it, and leaves the file
+    /// that is already there alone — asserted by its *contents*, because a resume
+    /// that copied it again would also produce the right size.
+    #[test]
+    fn a_resumed_copy_fills_in_what_is_missing_and_leaves_the_rest() {
+        let root = scratch("resume");
+        let from = root.join("from/folder");
+        let into = root.join("into");
+        std::fs::create_dir_all(from.join("deeper")).unwrap();
+        std::fs::write(from.join("first.txt"), b"one").unwrap();
+        std::fs::write(from.join("second.txt"), b"two").unwrap();
+        std::fs::write(from.join("deeper/third.txt"), b"three").unwrap();
+        std::os::unix::fs::symlink("first.txt", from.join("link")).unwrap();
+
+        // What a stop left: the directory, one file of the right size with the
+        // wrong contents, and nothing else.
+        let landed = into.join("folder");
+        std::fs::create_dir_all(&landed).unwrap();
+        std::fs::write(landed.join("first.txt"), b"ONE").unwrap();
+
+        let change =
+            copy_into(&from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {})
+                .expect("the resume was refused");
+        assert_eq!(change.subject(), landed);
+        assert_eq!(std::fs::read(landed.join("first.txt")).unwrap(), b"ONE", "it was copied again");
+        assert_eq!(std::fs::read(landed.join("second.txt")).unwrap(), b"two");
+        assert_eq!(std::fs::read(landed.join("deeper/third.txt")).unwrap(), b"three");
+        assert!(landed.join("link").is_symlink());
+
+        // And a second resume over a complete tree is a walk that writes nothing
+        // and refuses nothing, which is what makes Resume safe to press twice.
+        copy_into(&from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {})
+            .expect("a second resume was refused");
+        assert_eq!(std::fs::read(landed.join("first.txt")).unwrap(), b"ONE");
+
+        // **A file of a different size is refused, not overwritten.** It is not
+        // what the stop left — something else has that name — and
+        // [rule 3](../../../docs/03-principles.md#3-everything-is-reversible)
+        // lets nothing here destroy a file without the trash. Resume's whole
+        // authority is to skip what matches; anything else is the ordinary
+        // taken-name refusal, which the queue turns into the question with four
+        // answers.
+        std::fs::write(landed.join("second.txt"), b"a longer thing").unwrap();
+        let refused =
+            copy_into(&from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {});
+        assert_eq!(
+            refused.err().map(|problem| problem.kind()),
+            Some(ProblemKind::NameTaken),
+            "a resume overwrote a file it did not put there"
+        );
+        assert_eq!(std::fs::read(landed.join("second.txt")).unwrap(), b"a longer thing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same tree, refused rather than merged when nobody asked to resume.
+    ///
+    /// The guard on the behaviour above: without it, every ordinary copy into a
+    /// directory that exists would quietly merge, which is the one thing a
+    /// conflict answer is for choosing.
+    #[test]
+    fn a_copy_that_is_not_a_resume_still_refuses_what_is_there() {
+        let root = scratch("resume-guard");
+        let from = root.join("from/folder");
+        let into = root.join("into");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("first.txt"), b"one").unwrap();
+        std::fs::create_dir_all(into.join("folder")).unwrap();
+
+        let refused =
+            copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {});
+        assert!(refused.is_err(), "a copy over an existing folder merged without being asked");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

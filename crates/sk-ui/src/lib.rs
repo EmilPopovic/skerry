@@ -22,7 +22,7 @@ pub mod theme;
 pub use painter::{Align, Painter, TextStyle, advance_of, advance_to, caret_offset};
 pub use scroll::{GAIN as SCROLL_GAIN, MIN_THUMB, Scroll, thumb, visible_rows};
 pub use sk_gpu::Direction;
-pub use theme::{Kinds, Metrics, Palette, Theme};
+pub use theme::{Folders, Kinds, Metrics, Palette, Theme};
 
 // Re-exported so a view needs one `use` for the drawing vocabulary rather than
 // three, and so the layout cache's key type travels with the painter that needs

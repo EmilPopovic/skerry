@@ -39,6 +39,7 @@ struct Overlays {
     clash: bool,
     erase: bool,
     progress: bool,
+    stopped: bool,
     indexing: bool,
     grid: bool,
     columns: bool,
@@ -64,6 +65,7 @@ struct Overlays {
     look_selected: bool,
     pinned: bool,
     tree: bool,
+    coloured: bool,
 }
 
 impl Overlays {
@@ -90,11 +92,13 @@ impl Overlays {
             "--clash" => &mut self.clash,
             "--erase" => &mut self.erase,
             "--progress" => &mut self.progress,
+            "--stopped" => &mut self.stopped,
             "--indexing" => &mut self.indexing,
             "--grid" => &mut self.grid,
             "--look-selected" => &mut self.look_selected,
             "--pinned" => &mut self.pinned,
             "--tree" => &mut self.tree,
+            "--coloured" => &mut self.coloured,
             "--columns" => &mut self.columns,
             "--grouped" => &mut self.grouped,
             "--grouped-size" => &mut self.grouped_size,
@@ -156,6 +160,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         clash: overlays.clash,
         erase: overlays.erase,
         progress: overlays.progress,
+        stopped: overlays.stopped,
         indexing: overlays.indexing,
         grid: overlays.grid,
         columns: overlays.columns,
@@ -186,6 +191,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         sidebar: shape.sidebar,
         pinned: overlays.pinned,
         tree: overlays.tree,
+        coloured: overlays.coloured,
     })
 }
 
@@ -349,6 +355,7 @@ skerry [OPTIONS] [PATH]
   --menu           show the context menu, for a golden frame of it
   --menu-row       show the menu a secondary click on a row opens
   --clash          show the panel that asks about a name already taken
+  --stopped        show the strip after a stop: what is owed, and Pick up
   --search         show the search over everything under this folder
   --carrying       show the card that follows a drag of files
   --path-entry     show the path bar as a field, for a golden frame of it
@@ -364,6 +371,7 @@ skerry [OPTIONS] [PATH]
   --look-selected  select all of a text preview's text, for a frame of it
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree
+  --coloured       give two folders a colour, for a frame of the marks
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,
