@@ -1349,6 +1349,26 @@ fn look_scope(registry: &mut Registry<App>) {
             enabled: App::look_has_a_selection,
             run: App::copy_the_look_selection,
         },
+        CommandSpec {
+            id: "look.edit",
+            name: "action.look_edit",
+            group: Group::Edit,
+            // `Ctrl+E` for edit, in the scope where it can only mean this: over a
+            // listing the same chord is free, and the panel is what decides.
+            keys: &["ctrl+e"],
+            enabled: App::looking_at_text,
+            run: App::toggle_editing_the_look,
+        },
+        CommandSpec {
+            id: "look.save",
+            name: "action.look_save",
+            group: Group::Edit,
+            // What `Ctrl+S` means everywhere. Dimmed with nothing to write, so
+            // the row says whether there is an edit outstanding.
+            keys: &["ctrl+s"],
+            enabled: App::look_is_unsaved,
+            run: App::save_the_look,
+        },
     ] {
         registry.add_in(sk_cmd::Scope::Look, spec);
     }

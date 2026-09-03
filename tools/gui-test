@@ -1257,7 +1257,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 124
+FEWEST_SCENARIOS = 125
 
 
 def scenario(name, fresh: bool = False):
@@ -5733,6 +5733,84 @@ def colour_a_folder(run: Run, fixture: Path) -> None:
         until(back, coloured="")
     finally:
         back.close()
+
+
+@scenario("a-text-preview-is-an-editor-when-it-is-asked-to-be", fresh=True)
+def edit_a_text_preview(run: Run, fixture: Path) -> None:
+    """`Ctrl+E` turns the preview into an editor; what is typed reaches the file.
+
+    Four claims. Typing does nothing until edit mode is on — `Space` closes the
+    panel, which is what it does for a reader. Once it is on, the same panel takes
+    characters and the caret moves with them. Leaving edit mode writes the file,
+    because a question with an answer that loses work is worse than a save the
+    undo stack can take back. And `Ctrl+Z` takes it back, which is
+    [rule 3](../docs/03-principles.md#3-everything-is-reversible) — an edit is a
+    mutation like any other and it is one entry on the one stack.
+    """
+    note = fixture / "note.txt"
+    note.write_text("one\ntwo\n")
+    # **Waited for, because the window may already have read the folder.** The
+    # fixture is made before the run starts and this file is written after it, so
+    # the row arrives with the watcher rather than with the first listing — and a
+    # type-ahead for a row that is not there yet moves nothing, which is what
+    # failed in a full sweep and passed alone.
+    listed(run)
+    until(run, rows="10")
+
+    # Onto the file, and **waited for** rather than slept at: the type-ahead is
+    # what moves the cursor, and a `Space` pressed before it lands opens a look at
+    # whatever the cursor was on — which under a full sweep was a folder, and the
+    # failure read as "never a text preview".
+    run.drive("text note\nsleep 300\nkey f12\nsleep 150\n")
+    until(run, cursor="note.txt")
+    run.drive("key space\nsleep 700\nkey f12\nsleep 250\n")
+    opened = holds(run, lambda it: it["looking"].endswith(":text"), "a text preview")
+    expect(opened, look_editing="false")
+
+    # **Reading first.** A letter typed at a reader is not an edit: `x` is
+    # type-ahead over the listing behind the panel, and the file is untouched.
+    run.drive("text x\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), look_editing="false")
+    if note.read_text() != "one\ntwo\n":
+        raise Failure(f"a keystroke reached the file before edit mode: {note.read_text()!r}")
+
+    run.drive("key ctrl+e\nsleep 300\nkey f12\nsleep 200\n")
+    editing = until(run, look_editing="true")
+    expect(editing, look_caret="0:0")
+
+    # A character, a newline, and the caret keeping up.
+    run.drive("text Z\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), look_caret="0:1")
+    run.drive("key enter\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), look_caret="1:0")
+    # **`Space` is a space now.** The key that opens and closes a quick look is
+    # the one that proves edit mode takes the keyboard.
+    run.drive("text  \nsleep 200\nkey f12\nsleep 200\n")
+    still = run.state()
+    expect(still, look_editing="true")
+    if not still["looking"].endswith(":text"):
+        raise Failure("Space closed the panel instead of typing a space")
+
+    # Escape leaves edit mode and writes what was typed.
+    run.drive("key escape\nsleep 600\nkey f12\nsleep 300\n")
+    saved = until(run, look_editing="false")
+    if not saved["looking"].endswith(":text"):
+        raise Failure(f"Escape closed the panel as well: {saved['looking']!r}")
+    deadline = time.time() + WAITING
+    while time.time() < deadline and note.read_text() == "one\ntwo\n":
+        time.sleep(0.1)
+    written = note.read_text()
+    if not written.startswith("Z\n"):
+        raise Failure(f"the file holds {written!r}")
+
+    # And it is one entry on the one stack, so Ctrl+Z puts the file back.
+    settled(run)
+    run.drive("key escape\nsleep 300\nkey ctrl+z\nsleep 900\nkey f12\nsleep 300\n")
+    deadline = time.time() + WAITING
+    while time.time() < deadline and note.read_text() != "one\ntwo\n":
+        time.sleep(0.1)
+    if note.read_text() != "one\ntwo\n":
+        raise Failure(f"the undo left {note.read_text()!r}")
 
 
 @scenario("navigation-buttons")

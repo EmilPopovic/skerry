@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 724 tests, 124 GUI scenarios **on both Wayland and X11**,
-sixty-two golden frames, every gate green: a Details view
+sandboxed helpers, 729 tests, 125 GUI scenarios **on both Wayland and X11**,
+sixty-three golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -84,7 +84,9 @@ the file's own text — **mono, numbered, and selectable**, where a drag and
 `Ctrl+C` put it on the clipboard through
 [`Scope::Look`](crates/sk-cmd/src/registry.rs), the third scope the resolver was
 written to expect — drawn as runs carrying a tone so a highlighter replaces one
-function and nothing else, where **`←`/`→` walk the files and `↑`/`↓` the pages**
+function and nothing else, and **an editor when `Ctrl+E` asks**: characters, both
+deletes, a caret, and a save on the way out that `Ctrl+Z` takes back, which is
+what makes not asking safe — where **`←`/`→` walk the files and `↑`/`↓` the pages**
 ([ADR 0019](docs/adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md):
 a request names a page and the child holds nothing, because page 400 of 1200 costs
 what page 1 costs) — and the **two pages ahead are already on the GPU**, a few

@@ -479,6 +479,18 @@ impl Edits {
         self.queue_all(Queued::Erase, paths, jobs)
     }
 
+    /// Writes a text file's new contents, as one undoable change.
+    ///
+    /// **One entry on the one stack**, which is [rule
+    /// 3](../../../docs/03-principles.md#3-everything-is-reversible): editing a
+    /// file is a mutation like any other, and the thing that makes it safe for
+    /// the editor to save without asking is that `Ctrl+Z` takes it back. The old
+    /// bytes travel on the change — see [`sk_fs::ops::Change::Edited`] — because
+    /// after the write there is nowhere else to read them from.
+    pub fn write_text(&mut self, path: PathBuf, after: String, jobs: &Jobs) {
+        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::edit_text(&path, &after)));
+    }
+
     /// Copies or moves several paths into `into`, one at a time.
     ///
     /// `moving` is what tells a paste after Cut from a paste after Copy. The same

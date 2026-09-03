@@ -69,6 +69,20 @@ pub enum Change {
         /// What is gone.
         path: PathBuf,
     },
+    /// A text file whose contents were replaced.
+    ///
+    /// **Both sides are kept, which is what makes it undoable.** Every other
+    /// change here is undone by moving something; this one is undone by putting
+    /// the old bytes back, and there is nowhere else they could come from. Bounded
+    /// by [`crate::TEXT_LIMIT`], because that is the most the editor will open.
+    Edited {
+        /// The file.
+        path: PathBuf,
+        /// What it held before.
+        before: String,
+        /// What it holds now.
+        after: String,
+    },
     /// Something moved into the trash, with both files the specification puts
     /// there so the undo can take both away.
     Trashed {
@@ -92,7 +106,9 @@ impl Change {
             // The last one, which is what the gesture finished by doing and
             // therefore where a person is looking.
             Self::Batch(changes) => changes.last().map_or(Path::new(""), Change::subject),
-            Self::Created { path } => path,
+            // The folder that was made, and the file that was edited: two
+            // different changes whose subject happens to be the path they carry.
+            Self::Created { path } | Self::Edited { path, .. } => path,
             Self::Renamed { to, .. } => to,
             Self::Copied { destination, .. } => destination,
             // Both are gone, so the cursor goes where they were: the listing
@@ -136,6 +152,7 @@ impl Change {
             Self::Copied { destination, .. } => ("history.copied", named(destination)),
             Self::Trashed { original, .. } => ("history.trashed", named(original)),
             Self::Erased { path } => ("history.erased", named(path)),
+            Self::Edited { path, .. } => ("history.edited", named(path)),
         }
     }
 
@@ -159,6 +176,8 @@ impl Change {
             // A copy's source never moved, so an undo leaves the cursor on it.
             Self::Copied { source, .. } => Some(source),
             Self::Trashed { original, .. } => Some(original),
+            // An edit moves nothing, so undoing one leaves the cursor where it is.
+            Self::Edited { path, .. } => Some(path),
         }
     }
 }
@@ -176,6 +195,7 @@ fn many_key(one: &'static str) -> &'static str {
         "history.copied" => "history.copied_many",
         "history.trashed" => "history.trashed_many",
         "history.erased" => "history.erased_many",
+        "history.edited" => "history.edited_many",
         _ => "history.changed_many",
     }
 }
@@ -416,6 +436,40 @@ pub fn move_into(
     Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
 }
 
+/// Replaces a text file's contents, and records what it held.
+///
+/// **The one mutation here that is not a move.** Everything else in this module
+/// changes where a file *is*; this changes what is in it, so undoing it means
+/// putting the old bytes back and they have to be carried on the change itself.
+///
+/// Written through [`crate::atomically`] — the four steps rule 6 asks for —
+/// because a text file half written is a text file lost, and the editor above
+/// this is the only thing in the program that can produce one.
+///
+/// **Runs on a job.**
+pub fn write_text(path: &Path, text: &str) -> Result<(), Problem> {
+    if crate::atomically(path, text) {
+        return Ok(());
+    }
+    Err(Problem::new(
+        ProblemKind::Unreadable,
+        path.display().to_string(),
+        "the file could not be written",
+    ))
+}
+
+/// Replaces a text file's contents and returns the change that did it.
+///
+/// Reads what was there first: an undo has to put it back, and after the write
+/// there is nowhere to read it from.
+///
+/// **Runs on a job.**
+pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
+    let before = crate::read_text(path, crate::TEXT_LIMIT)?;
+    write_text(path, after)?;
+    Ok(Change::Edited { path: path.to_path_buf(), before, after: after.to_owned() })
+}
+
 /// Whether something is already called that.
 ///
 /// `SYMLINK_NOFOLLOW`, so a dangling symlink counts as taken — which it is, to
@@ -508,6 +562,8 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         Change::Copied { destination, .. } => {
             crate::copy::remove_tree(destination, &sk_util::Cancel::new())
         }
+        // Straight back to what it held, which is the only way to undo bytes.
+        Change::Edited { path, before, .. } => write_text(path, before).map(|_| ()),
         Change::Trashed { original, stored, info } => {
             move_no_replace(stored, original)?;
             // The file is back; a leftover `.trashinfo` is the corruption the
@@ -525,6 +581,8 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
         Change::Batch(changes) => {
             changes.iter().map(apply).collect::<Result<_, _>>().map(Change::Batch)
         }
+        // The bytes it held after the edit, put back after an undo took them away.
+        Change::Edited { path, after, .. } => write_text(path, after).map(|()| change.clone()),
         Change::Created { path } => {
             let (Some(parent), Some(name)) =
                 (path.parent(), path.file_name().and_then(|name| name.to_str()))
@@ -1232,6 +1290,48 @@ mod tests {
         let refused =
             copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {});
         assert!(refused.is_err(), "a copy over an existing folder merged without being asked");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An edit is undone by putting the old bytes back, and redone by putting the
+    /// new ones there again.
+    ///
+    /// The one change in this module that is not a move, and the only one whose
+    /// undo needs something carried on the entry rather than read off the disk —
+    /// after the write there is nowhere else the old contents could come from.
+    #[test]
+    fn an_edit_is_undone_by_putting_the_old_bytes_back() {
+        let root = scratch("edit");
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("notes.txt");
+        std::fs::write(&file, b"before\n").unwrap();
+
+        let change = super::edit_text(&file, "after\n").expect("the edit was refused");
+        assert_eq!(std::fs::read(&file).unwrap(), b"after\n");
+        assert_eq!(change.subject(), file);
+        assert_eq!(change.origin(), Some(file.as_path()));
+
+        revert(&change).expect("the undo was refused");
+        assert_eq!(std::fs::read(&file).unwrap(), b"before\n");
+        let again = apply(&change).expect("the redo was refused");
+        assert_eq!(std::fs::read(&file).unwrap(), b"after\n");
+        assert_eq!(again.subject(), file);
+
+        // And nothing is left beside it: the write is the atomic one, so the
+        // staging name it renamed from is gone.
+        assert!(!root.join("notes.new").exists(), "the staging file was left behind");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file that is not there cannot be edited, and says so rather than
+    /// creating one.
+    #[test]
+    fn editing_a_file_that_is_not_there_is_refused() {
+        let root = scratch("edit-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        let missing = root.join("nothing.txt");
+        assert!(super::edit_text(&missing, "x").is_err());
+        assert!(!missing.exists(), "a refused edit created the file");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -2903,6 +2903,7 @@ impl App {
             Some(crate::view::LookControl::NextFile) => self.look_at_sibling(1),
             Some(crate::view::LookControl::PreviousPage) => self.look_by(-1, false),
             Some(crate::view::LookControl::NextPage) => self.look_by(1, false),
+            Some(crate::view::LookControl::Edit) => self.toggle_editing_the_look(),
             None => {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
@@ -2917,7 +2918,7 @@ impl App {
                     // person clicking a row they can see means to select that row,
                     // and a look that stayed open over a different file than the
                     // cursor would be two answers to "which file is this".
-                    self.quick_look = None;
+                    self.close_the_look();
                     self.dirty = true;
                     return false;
                 }
@@ -4785,6 +4786,13 @@ impl App {
     /// else everywhere in the program.
     fn quick_look_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
         use sk_plat::{Key, Named};
+        // **Editing takes the keyboard, and that is the whole of what edit mode
+        // is.** The same panel, the same selection, the same scroll — what
+        // changes is that `Space` is a space rather than the key that closes the
+        // look, and that the arrows move a caret rather than walking files.
+        if self.editing_the_look() && self.editor_key(event) {
+            return true;
+        }
         if !event.mods.none() {
             return false;
         }
@@ -4799,6 +4807,124 @@ impl App {
         }
         self.dirty = true;
         true
+    }
+
+    /// Whether a text preview is open and being edited.
+    #[must_use]
+    pub(crate) fn editing_the_look(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| look.editing && look.text.is_some())
+    }
+
+    /// One key to the editor. Whether it was taken.
+    ///
+    /// **Everything that is not a chord.** A character is typed, the two deletes
+    /// delete, `Enter` splits the line and the arrows move the caret — with
+    /// `Shift` dragging the selection along, which is what `Shift` does in every
+    /// text there is. Chords fall through: `Ctrl+C`, `Ctrl+A` and `Ctrl+S` are
+    /// commands in [`Scope::Look`] and the registry is where they belong.
+    fn editor_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
+        use crate::quicklook::Step;
+        use sk_plat::{Key, Named};
+        if event.mods.ctrl || event.mods.alt || event.mods.logo {
+            return false;
+        }
+        let shift = event.mods.shift;
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        let taken = match &event.key {
+            Key::Character(text) => look.type_in(&text.to_string()),
+            Key::Named(Named::Enter) => look.type_in("\n"),
+            Key::Named(Named::Tab) => look.type_in("\t"),
+            Key::Named(Named::Backspace) => look.delete_back(),
+            Key::Named(Named::Delete) => look.delete_forward(),
+            Key::Named(Named::Left) => look.move_caret(Step::Back, shift),
+            Key::Named(Named::Right) => look.move_caret(Step::On, shift),
+            Key::Named(Named::Up) => look.move_caret(Step::Up, shift),
+            Key::Named(Named::Down) => look.move_caret(Step::Down, shift),
+            Key::Named(Named::Home) => look.move_caret(Step::LineStart, shift),
+            Key::Named(Named::End) => look.move_caret(Step::LineEnd, shift),
+            // **A second `Escape` closes the panel**, which is what it does
+            // everywhere else — the first one leaves edit mode, saving on the way
+            // out like every other way of leaving it.
+            Key::Named(Named::Escape) => {
+                self.stop_editing_the_look();
+                return true;
+            }
+            _ => false,
+        };
+        if taken {
+            self.reveal_the_caret();
+            self.dirty = true;
+        }
+        taken
+    }
+
+    /// Turns edit mode on, or off and saves.
+    pub(crate) fn toggle_editing_the_look(&mut self) {
+        if self.editing_the_look() {
+            self.stop_editing_the_look();
+            return;
+        }
+        let Some(look) = self.quick_look.as_mut().filter(|look| look.text.is_some()) else {
+            return;
+        };
+        look.editing = true;
+        if look.chosen.is_none() {
+            look.put_caret(crate::quicklook::Spot { line: 0, byte: 0 });
+        }
+        self.dirty = true;
+    }
+
+    /// Leaves edit mode, writing what was typed.
+    ///
+    /// **Saved rather than asked about.** A panel that asked "save?" would be a
+    /// question whose every answer can lose work, and the undo stack is what
+    /// makes the other choice safe: the write is one entry, so `Ctrl+Z` takes
+    /// back a save nobody meant — which is what `Change::Edited` carries both
+    /// sides for.
+    pub(crate) fn stop_editing_the_look(&mut self) {
+        self.save_the_look();
+        if let Some(look) = self.quick_look.as_mut() {
+            look.editing = false;
+        }
+        self.dirty = true;
+    }
+
+    /// Closes the panel, writing anything the editor is holding.
+    ///
+    /// **One closer, because there are three ways out** — `Space`, `Escape` and a
+    /// click on the list behind it — and an edit that survived two of them and
+    /// not the third would be work lost by whichever way somebody happened to
+    /// use. Whether one was open.
+    pub(crate) fn close_the_look(&mut self) -> bool {
+        self.save_the_look();
+        self.quick_look.take().is_some()
+    }
+
+    /// Whether the panel is holding an edit that is not on disk.
+    #[must_use]
+    pub(crate) fn look_is_unsaved(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| look.unsaved)
+    }
+
+    /// Writes what the editor holds, if it differs from the file.
+    pub(crate) fn save_the_look(&mut self) {
+        let Some(look) = self.quick_look.as_mut().filter(|look| look.unsaved) else { return };
+        let Some(text) = look.text.as_ref() else { return };
+        let (path, body) = (look.path.clone(), text.body());
+        look.unsaved = false;
+        self.edits.write_text(path, body, &self.jobs);
+        self.dirty = true;
+    }
+
+    /// Scrolls the caret's line into view.
+    fn reveal_the_caret(&mut self) {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let step = self.theme.metrics.row_height;
+        let Some(look) = self.quick_look.as_mut() else { return };
+        let line = look.caret().line as f32;
+        // The same `reveal` a cursor uses, for the same reason: the least scroll
+        // that brings the line into view, rather than re-centring under it.
+        look.scroll.reveal(line * step, (line + 1.0) * step, inner.height.max(step));
     }
 
     /// A key while a name-taken question is open. Whether it was taken.
@@ -5571,7 +5697,7 @@ scope_aim={scope_aim:?}",
     /// does — and it is why this is one command rather than two: a person presses
     /// `Space` to see a file and presses it again when they have seen it.
     pub(crate) fn toggle_quick_look(&mut self) {
-        if self.quick_look.take().is_some() {
+        if self.close_the_look() {
             self.dirty = true;
             return;
         }
@@ -5627,6 +5753,9 @@ scope_aim={scope_aim:?}",
         if self.quick_look.is_none() {
             return;
         }
+        // Walking to the next file replaces the buffer, so what is in this one
+        // goes to disk first — the same rule closing the panel follows.
+        self.save_the_look();
         let rows = self.panes.focused().listing.rows();
         let Some(from) = self.panes.focused().cursor_row() else { return };
         let mut row = from;
@@ -6134,7 +6263,7 @@ scope_aim={scope_aim:?}",
         // **A quick look is the most specific thing `Escape` can mean**, the same
         // way a drag in flight is: what is on screen goes before what is selected
         // behind it.
-        if self.quick_look.take().is_some() {
+        if self.close_the_look() {
             self.dirty = true;
             return;
         }
@@ -6326,6 +6455,7 @@ scope_aim={scope_aim:?}",
                     crate::view::LookControl::NextFile => "next_file",
                     crate::view::LookControl::PreviousPage => "previous_page",
                     crate::view::LookControl::NextPage => "next_page",
+                    crate::view::LookControl::Edit => "edit",
                 };
                 format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
             })
@@ -6348,6 +6478,16 @@ scope_aim={scope_aim:?}",
         // How many pages are rendered and on the GPU, which is what says the
         // prefetch ran: one is the page on screen alone — ADR 0020.
         let look_held = self.quick_look.as_ref().map_or(0, |look| look.held.len());
+        // Whether the panel is being typed into, and where the caret is — the two
+        // things edit mode adds that nothing else on this line reports.
+        let look_editing = self.editing_the_look();
+        let look_caret = self.quick_look.as_ref().filter(|look| look.editing).map_or_else(
+            || "none".to_owned(),
+            |look| {
+                let at = look.caret();
+                format!("{}:{}", at.line, at.byte)
+            },
+        );
         let look_page = self.quick_look.as_ref().map_or_else(
             || "none".to_owned(),
             |look| {
@@ -6365,7 +6505,7 @@ scope_aim={scope_aim:?}",
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
 looking={looking} look_page={look_page} look_aim={look_aim:?} \
-look_held={look_held} \
+look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
 look_chosen={look_chosen} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),

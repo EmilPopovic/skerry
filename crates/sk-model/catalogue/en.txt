@@ -332,6 +332,8 @@ history.copied_many = Copied {0} items
 history.trashed = Moved {0} to Trash
 history.trashed_many = Moved {0} items to Trash
 history.erased = Deleted {0} for good
+history.edited = Edited {0}
+history.edited_many = Edited {0} files
 history.erased_many = Deleted {0} items for good
 history.changed_many = Changed {0} items
 # Where the present is: the row below this one is what a redo would do again.
@@ -362,6 +364,10 @@ action.look_select_all = Select all text
 # Not bare "Copy": the palette listed it beside `file.copy` with the same chord
 # and the same word, and a palette with two identical rows is the opposite of
 # what rule 4 is for. The wording follows `action.copy_content` next door.
+look.edit = Edit
+look.done = Done
+action.look_edit = Edit this text
+action.look_save = Save it
 action.look_copy = Copy the selected text
 notice.copied_lines[one] = Copied {0} line
 notice.copied_lines[other] = Copied {0} lines

@@ -191,6 +191,8 @@ pub enum LookControl {
     PreviousPage,
     /// The page after it.
     NextPage,
+    /// Turns editing on, or off and saves.
+    Edit,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -1164,6 +1166,25 @@ fn quick_look_controls(
         at += side;
     }
 
+    // **The Edit control, only where there is text.** A picture and a page are
+    // not editable, so the button that says a preview can be typed into is drawn
+    // exactly where that is true — rule 4, which is that a feature reachable only
+    // by knowing the chord is a feature most people never find.
+    if look.text.is_some() {
+        let key = if look.editing { "look.done" } else { "look.edit" };
+        let label = i18n::lookup(key);
+        let width = text_width(painter, label, metrics.header_size, false) + 16.0;
+        let area = Area { x: strip.right() - 8.0 - width, y: strip.y, width, height: side };
+        let ink = if look.editing { theme.palette.accent } else { theme.palette.dim };
+        if hovered == Some(LookControl::Edit) {
+            let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
+            painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
+        }
+        let style = TextStyle::new(metrics.header_size, ink).centred();
+        line(painter, label, style, area.x, area.width, baseline);
+        hits.look.push((LookControl::Edit, area));
+    }
+
     // **The page pair only where there are pages**, drawn from the right edge
     // inwards so the whole group stays put as the numbers widen from `1` to
     // `1000`.
@@ -1365,6 +1386,7 @@ fn quick_look_text(
         let top = inner.y + offset as f32 * step - look.scroll.offset();
         let baseline = painter.baseline(top, step, metrics.text_size);
         text_selection(painter, look, (offset, body), (placed, top, inner));
+        text_caret(painter, look, (offset, body), (placed, top, inner));
         let number = (offset + 1).to_string();
         let numbers = TextStyle::new(metrics.text_size, theme.palette.dim).right();
         let column = painter.rect(inner.x + TEXT_PAD, 0.0, digits, 0.0);
@@ -1432,6 +1454,41 @@ fn text_selection(
     let width = (right - left + tail).max(1.0).min(inner.right() - x);
     let shape = painter.rect(x, top, width, placed.step);
     painter.list.rect(shape, theme.palette.accent.with_alpha(80), 0.0);
+}
+
+/// The caret, while the text is being edited.
+///
+/// **Only while editing.** A preview is for reading and a bar blinking in it
+/// would be a promise that typing does something — which it does not until
+/// somebody says so. Not blinking either: an animation is a wake-up with an
+/// owner, and a caret that blinks is a window that never sleeps
+/// ([12-measurement.md](../../../docs/12-measurement.md)).
+fn text_caret(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    line: (usize, &str),
+    where_: (TextLayout, f32, Area),
+) {
+    if !look.editing {
+        return;
+    }
+    let (offset, body) = line;
+    let (placed, top, inner) = where_;
+    let at = look.caret();
+    if at.line != offset {
+        return;
+    }
+    let theme = *painter.theme;
+    let size = theme.metrics.text_size;
+    let left = {
+        let Painter { fonts, scale, .. } = painter;
+        let px = size * *scale;
+        sk_ui::advance_to(fonts, body, sk_text::Weight::Mono, px, at.byte.min(body.len()))
+            / scale.max(0.01)
+    };
+    let x = (placed.text_x + left).min(inner.right() - TEXT_PAD);
+    let bar = painter.rect(x, top + 2.0, painter.logical(2.0), placed.step - 4.0);
+    painter.list.rect(bar, theme.palette.accent, 0.0);
 }
 
 /// The Properties panel: a title, and a label-and-value row per fact.

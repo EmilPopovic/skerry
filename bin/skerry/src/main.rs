@@ -63,6 +63,7 @@ struct Overlays {
     collapsed: bool,
     history: bool,
     look_selected: bool,
+    look_editing: bool,
     pinned: bool,
     tree: bool,
     coloured: bool,
@@ -96,6 +97,7 @@ impl Overlays {
             "--indexing" => &mut self.indexing,
             "--grid" => &mut self.grid,
             "--look-selected" => &mut self.look_selected,
+            "--look-editing" => &mut self.look_editing,
             "--pinned" => &mut self.pinned,
             "--tree" => &mut self.tree,
             "--coloured" => &mut self.coloured,
@@ -170,6 +172,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         grouped_kind: overlays.grouped_kind,
         checked: overlays.checked,
         look_selected: overlays.look_selected,
+        look_editing: overlays.look_editing,
         collapsed: overlays.collapsed,
         history: overlays.history,
         looking: shape.looking.clone(),
@@ -369,6 +372,7 @@ skerry [OPTIONS] [PATH]
   --split          split the window, for a golden frame of two panes
   --rename         show a name being typed, for a golden frame of it
   --look-selected  select all of a text preview's text, for a frame of it
+  --look-editing   put a text preview into edit mode, for a frame of the caret
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree
   --coloured       give two folders a colour, for a frame of the marks

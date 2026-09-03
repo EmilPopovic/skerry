@@ -262,6 +262,13 @@ FRAMES = [
     # right when they decide whether the panel opens and wrong once it is open: an
     # empty panel cannot be told apart from a program that has stopped. This is the
     # frame that proves the catch-all reaches the screen.
+    # **A text preview being edited.** What edit mode adds to the panel is a caret
+    # and a control that says so; everything else — the numbers, the mono runs,
+    # the selection — is the reading panel's, which is the point of it being the
+    # same panel.
+    ("quick-look-editing",
+     ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-editing"],
+     "pictures"),
     ("quick-look-refused",
      ["--size", "900x600", "--scale", "125", "--look", "broken.pdf"], "pictures"),
     # **The visible history**, expanded, with one step undone — which is the state

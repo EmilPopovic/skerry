@@ -455,6 +455,18 @@ pressed.
 argument: a helper is a separate binary and `tools/dep-budget.py` measures the
 product's tree. Still 32.
 
+**And a text preview is an editor when it is asked to be.** `Ctrl+E` — or the
+control in the panel's own strip, because a feature reachable only by knowing the
+chord is one most people never find — turns the same panel into one that takes
+the keyboard: characters, `Enter`, both deletes, the arrows with `Shift`
+extending the selection the reader already had, and a caret that is drawn only
+while it means something. Leaving edit mode writes the file, rather than asking:
+a question whose every answer can lose work is worse than a save that
+[rule 3](03-principles.md#3-everything-is-reversible) can take back, and that is
+what `Change::Edited` is — one entry on the one stack, carrying both sides,
+because after the write there is nowhere else the old bytes could come from. The
+write itself is `sk_fs::atomically`, so a text file is never half replaced.
+
 Owed here: **syntax highlighting**, whose seam is written and whose highlighter is
 not — every line is already cut into runs carrying a tone, there is one tone, and
 adding real ones replaces one function. Then EXIF orientation, zoom, a *docked*

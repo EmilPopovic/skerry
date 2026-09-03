@@ -127,6 +127,23 @@ impl Chosen {
     }
 }
 
+/// One step of the caret.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Step {
+    /// One character back.
+    Back,
+    /// One character on.
+    On,
+    /// The line above.
+    Up,
+    /// The line below.
+    Down,
+    /// The start of this line.
+    LineStart,
+    /// The end of it.
+    LineEnd,
+}
+
 /// A file's text, cut into lines and each line into tones.
 pub(crate) struct Text {
     /// The lines, without their terminators.
@@ -152,6 +169,120 @@ fn highlight(lines: &[String]) -> Vec<Vec<Span>> {
 }
 
 impl Text {
+    /// The whole file, as it would be written back.
+    ///
+    /// **One trailing newline, always.** Every line was split on one and the last
+    /// terminator is not a line — a file that ends without one gains it here, and
+    /// that is the single normalisation this editor makes. POSIX text files end
+    /// with a newline and every tool that reads them expects it.
+    pub(crate) fn body(&self) -> String {
+        let mut out = self.lines.join("\n");
+        out.push('\n');
+        out
+    }
+
+    /// Puts `text` in at `at`, and says where the caret ends up.
+    ///
+    /// **Newlines split lines**, which is what makes this the same function for
+    /// typing a letter, pressing Enter and pasting six lines.
+    pub(crate) fn insert(&mut self, at: Spot, text: &str) -> Spot {
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+            self.spans.push(Vec::new());
+        }
+        let line = at.line.min(self.lines.len() - 1);
+        let byte = at.byte.min(self.lines[line].len());
+        let tail = self.lines[line].split_off(byte);
+        let mut pieces = text.split('\n');
+        let first = pieces.next().unwrap_or_default();
+        self.lines[line].push_str(&first.replace('\t', TAB));
+        let mut spot = Spot { line, byte: self.lines[line].len() };
+        for piece in pieces {
+            spot.line += 1;
+            let piece = piece.replace('\t', TAB);
+            spot.byte = piece.len();
+            self.lines.insert(spot.line, piece);
+            self.spans.insert(spot.line, Vec::new());
+        }
+        self.lines[spot.line].push_str(&tail);
+        self.retone(line..=spot.line);
+        spot
+    }
+
+    /// Takes out everything between two spots, and says where the caret lands.
+    pub(crate) fn remove(&mut self, from: Spot, to: Spot) -> Spot {
+        if self.lines.is_empty() || from >= to {
+            return from;
+        }
+        let last = self.lines.len() - 1;
+        let (from, to) = (self.clamped(from, last), self.clamped(to, last));
+        let tail = self.lines[to.line].split_off(to.byte);
+        self.lines[from.line].truncate(from.byte);
+        if to.line > from.line {
+            self.lines.drain(from.line + 1..=to.line);
+            self.spans.drain(from.line + 1..=to.line);
+        }
+        self.lines[from.line].push_str(&tail);
+        self.retone(from.line..=from.line);
+        from
+    }
+
+    /// The spot one step back from `at`, or `at` at the very beginning.
+    pub(crate) fn before(&self, at: Spot) -> Spot {
+        if at.byte > 0 {
+            let line = self.lines.get(at.line).map_or("", String::as_str);
+            let byte = line[..at.byte.min(line.len())]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index);
+            return Spot { line: at.line, byte };
+        }
+        if at.line == 0 {
+            return at;
+        }
+        let line = at.line - 1;
+        Spot { line, byte: self.lines.get(line).map_or(0, String::len) }
+    }
+
+    /// The spot one step on from `at`, or `at` at the very end.
+    pub(crate) fn after(&self, at: Spot) -> Spot {
+        let line = self.lines.get(at.line).map_or("", String::as_str);
+        if at.byte < line.len() {
+            let byte = line[at.byte..]
+                .chars()
+                .next()
+                .map_or(line.len(), |first| at.byte + first.len_utf8());
+            return Spot { line: at.line, byte };
+        }
+        if at.line + 1 >= self.lines.len() {
+            return at;
+        }
+        Spot { line: at.line + 1, byte: 0 }
+    }
+
+    /// A spot that names a place this text actually has.
+    fn clamped(&self, spot: Spot, last: usize) -> Spot {
+        let line = spot.line.min(last);
+        Spot { line, byte: spot.byte.min(self.lines[line].len()) }
+    }
+
+    /// Re-tones the lines an edit touched.
+    ///
+    /// **Only those lines.** Highlighting the whole file per keystroke is a pass
+    /// over a megabyte for one character, and the tones of a line an edit did not
+    /// reach cannot have changed — which stays true for a real highlighter as long
+    /// as it is line-local, and is the assumption to revisit when it is not.
+    fn retone(&mut self, lines: std::ops::RangeInclusive<usize>) {
+        for line in lines {
+            let Some(text) = self.lines.get(line) else { continue };
+            let span = vec![Span { from: 0, to: text.len(), tone: Tone::Plain }];
+            match self.spans.get_mut(line) {
+                Some(slot) => *slot = span,
+                None => self.spans.push(span),
+            }
+        }
+    }
+
     /// Cuts `body` into lines and tones.
     fn of(body: &str) -> Self {
         let mut lines: Vec<String> =
@@ -236,6 +367,21 @@ pub(crate) struct QuickLook {
     pub(crate) chosen: Option<Chosen>,
     /// Whether the pointer is still down and extending it.
     pub(crate) dragging: bool,
+    /// Whether the text is being edited rather than read.
+    ///
+    /// **Off until somebody asks.** A preview is for looking, and a panel that
+    /// took keystrokes as edits the moment it opened would turn `Space` — the key
+    /// that opens it — into the first character of a file. What edit mode changes
+    /// is what the keyboard means; the drawing gains a caret and nothing else.
+    pub(crate) editing: bool,
+    /// Whether the buffer differs from the file.
+    ///
+    /// **Saved on the way out rather than asked about.** A panel that asked
+    /// "save?" would be a question with an answer that loses work, and the undo
+    /// stack is what makes the other choice safe: an edit is one entry, so
+    /// `Ctrl+Z` takes back a save nobody meant — which is the whole reason
+    /// `Change::Edited` carries both sides.
+    pub(crate) unsaved: bool,
     reading: Option<mpsc::Receiver<Option<String>>>,
 }
 
@@ -259,6 +405,8 @@ impl QuickLook {
             scroll: sk_ui::Scroll::default(),
             chosen: None,
             dragging: false,
+            editing: false,
+            unsaved: false,
             reading: None,
         };
         if shows == Shows::Text {
@@ -506,6 +654,128 @@ impl QuickLook {
             out.push_str(&body[start..end]);
         }
         Some(out)
+    }
+
+    /// Where the caret is, while the text is being edited.
+    ///
+    /// **The selection's own caret**, because a click without a drag already
+    /// produces an empty selection — anchor and caret at the same spot — and
+    /// having two of them would be two answers to "where does the next character
+    /// go". Nothing there yet means the start of the file, which is where a
+    /// buffer nobody has clicked in begins.
+    pub(crate) fn caret(&self) -> Spot {
+        self.chosen.map_or(Spot { line: 0, byte: 0 }, |chosen| chosen.caret)
+    }
+
+    /// Puts the caret at `spot`, with nothing selected.
+    pub(crate) fn put_caret(&mut self, spot: Spot) {
+        self.chosen = Some(Chosen { anchor: spot, caret: spot });
+    }
+
+    /// Types `text` in, replacing whatever is selected.
+    ///
+    /// Whether anything changed, which is what tells a key that was taken from
+    /// one that was not.
+    pub(crate) fn type_in(&mut self, text: &str) -> bool {
+        if !self.editing || text.is_empty() {
+            return false;
+        }
+        self.take_out_the_selection();
+        let Some(buffer) = self.text.as_mut() else { return false };
+        let at = self.chosen.map_or(Spot { line: 0, byte: 0 }, |chosen| chosen.caret);
+        let landed = buffer.insert(at, text);
+        self.put_caret(landed);
+        self.unsaved = true;
+        true
+    }
+
+    /// Backspace: the selection if there is one, else the character before the
+    /// caret.
+    pub(crate) fn delete_back(&mut self) -> bool {
+        if !self.editing {
+            return false;
+        }
+        if self.take_out_the_selection() {
+            self.unsaved = true;
+            return true;
+        }
+        let Some(buffer) = self.text.as_mut() else { return false };
+        let to = self.chosen.map_or(Spot { line: 0, byte: 0 }, |chosen| chosen.caret);
+        let from = buffer.before(to);
+        if from == to {
+            return false;
+        }
+        let landed = buffer.remove(from, to);
+        self.put_caret(landed);
+        self.unsaved = true;
+        true
+    }
+
+    /// Delete: the selection if there is one, else the character after the caret.
+    pub(crate) fn delete_forward(&mut self) -> bool {
+        if !self.editing {
+            return false;
+        }
+        if self.take_out_the_selection() {
+            self.unsaved = true;
+            return true;
+        }
+        let Some(buffer) = self.text.as_mut() else { return false };
+        let from = self.chosen.map_or(Spot { line: 0, byte: 0 }, |chosen| chosen.caret);
+        let to = buffer.after(from);
+        if from == to {
+            return false;
+        }
+        let landed = buffer.remove(from, to);
+        self.put_caret(landed);
+        self.unsaved = true;
+        true
+    }
+
+    /// Removes what is selected. Whether there was anything to remove.
+    fn take_out_the_selection(&mut self) -> bool {
+        let Some(chosen) = self.chosen.filter(|it| !it.is_empty()) else { return false };
+        let Some(buffer) = self.text.as_mut() else { return false };
+        let (from, to) = chosen.ordered();
+        let landed = buffer.remove(from, to);
+        self.put_caret(landed);
+        true
+    }
+
+    /// Moves the caret one step, optionally dragging the selection with it.
+    ///
+    /// The four directions a keyboard has, and `Home` and `End`. Vertical
+    /// movement keeps the byte offset rather than the column, which is the
+    /// difference between this and a real editor and is honest for a monospaced
+    /// panel: every character is one cell wide, so the two agree until a line
+    /// holds something wider than one — an emoji, or a combining mark.
+    pub(crate) fn move_caret(&mut self, step: Step, extend: bool) -> bool {
+        let Some(buffer) = self.text.as_ref() else { return false };
+        let from = self.caret();
+        let last = buffer.lines.len().saturating_sub(1);
+        let spot = match step {
+            Step::Back => buffer.before(from),
+            Step::On => buffer.after(from),
+            Step::Up if from.line == 0 => Spot { line: 0, byte: 0 },
+            Step::Up => {
+                let line = from.line - 1;
+                Spot { line, byte: from.byte.min(buffer.lines[line].len()) }
+            }
+            Step::Down if from.line >= last => {
+                Spot { line: last, byte: buffer.lines.get(last).map_or(0, String::len) }
+            }
+            Step::Down => {
+                let line = from.line + 1;
+                Spot { line, byte: from.byte.min(buffer.lines[line].len()) }
+            }
+            Step::LineStart => Spot { line: from.line, byte: 0 },
+            Step::LineEnd => {
+                Spot { line: from.line, byte: buffer.lines.get(from.line).map_or(0, String::len) }
+            }
+        };
+        let anchor = if extend { self.chosen.map_or(spot, |chosen| chosen.anchor) } else { spot };
+        self.chosen = Some(Chosen { anchor, caret: spot });
+        true
     }
 
     /// What the page control says between its arrows.
@@ -773,6 +1043,8 @@ mod tests {
             scroll: sk_ui::Scroll::default(),
             chosen: None,
             dragging: false,
+            editing: false,
+            unsaved: false,
             reading: None,
         }
     }
@@ -969,5 +1241,80 @@ mod tests {
         assert!(text.truncated, "a file that was cut did not say so");
         // And one that fits does not claim to have been.
         assert!(!Text::of("short\n").truncated);
+    }
+
+    /// Typing, deleting and the caret's arithmetic, over the text a preview
+    /// holds.
+    ///
+    /// One test rather than six, because the interesting cases are the seams
+    /// between them: a newline typed in the middle of a line, a backspace at the
+    /// start of one, and a selection replaced by a character.
+    #[test]
+    fn the_editor_types_deletes_and_joins_lines() {
+        let mut text = super::Text::of("one\ntwo\nthree\n");
+        assert_eq!(text.lines, ["one", "two", "three"]);
+
+        // A character in the middle of a line.
+        let at = text.insert(Spot { line: 1, byte: 1 }, "X");
+        assert_eq!(at, Spot { line: 1, byte: 2 });
+        assert_eq!(text.lines, ["one", "tXwo", "three"]);
+
+        // A newline splits it, and the caret lands at the start of the new line.
+        let at = text.insert(Spot { line: 1, byte: 2 }, "\n");
+        assert_eq!(at, Spot { line: 2, byte: 0 });
+        assert_eq!(text.lines, ["one", "tX", "wo", "three"]);
+
+        // Backspace at the start of a line joins it to the one above, and the
+        // caret lands where the join happened.
+        let from = text.before(Spot { line: 2, byte: 0 });
+        assert_eq!(from, Spot { line: 1, byte: 2 });
+        let at = text.remove(from, Spot { line: 2, byte: 0 });
+        assert_eq!(at, Spot { line: 1, byte: 2 });
+        assert_eq!(text.lines, ["one", "tXwo", "three"]);
+
+        // A range across two lines goes in one piece.
+        let at = text.remove(Spot { line: 0, byte: 1 }, Spot { line: 2, byte: 2 });
+        assert_eq!(at, Spot { line: 0, byte: 1 });
+        assert_eq!(text.lines, ["oree"]);
+
+        // And the spans keep up with the lines, or the drawing reads past the
+        // end of one.
+        assert_eq!(text.spans.len(), text.lines.len());
+        assert_eq!(text.spans[0].first().map(|span| span.to), Some(4));
+        assert_eq!(text.body(), "oree\n");
+    }
+
+    /// A character is a character, not a byte.
+    ///
+    /// The caret walks by `char_indices`, so a backspace after `é` takes the
+    /// whole letter and not the second half of it — which would leave a string
+    /// that is no longer UTF-8 and panic the next time anything sliced it.
+    #[test]
+    fn the_caret_walks_characters_and_not_bytes() {
+        let mut text = super::Text::of("café\n");
+        let end = Spot { line: 0, byte: text.lines[0].len() };
+        let back = text.before(end);
+        assert_eq!(back.byte, end.byte - 2, "é is two bytes");
+        let at = text.remove(back, end);
+        assert_eq!(text.lines, ["caf"]);
+        assert_eq!(at, Spot { line: 0, byte: 3 });
+
+        // And past both ends it stands still rather than wrapping or panicking.
+        let start = Spot { line: 0, byte: 0 };
+        assert_eq!(text.before(start), start);
+        let last = Spot { line: 0, byte: 3 };
+        assert_eq!(text.after(last), last);
+    }
+
+    /// An empty file can be typed into, which is the one buffer with no line to
+    /// put a character on.
+    #[test]
+    fn an_empty_file_takes_the_first_character() {
+        let mut text = super::Text::of("");
+        assert!(text.lines.is_empty());
+        let at = text.insert(Spot { line: 0, byte: 0 }, "hello");
+        assert_eq!(at, Spot { line: 0, byte: 5 });
+        assert_eq!(text.lines, ["hello"]);
+        assert_eq!(text.body(), "hello\n");
     }
 }

@@ -137,6 +137,10 @@ fn sample_quick_look(
         if request.look_selected {
             look.select_all();
         }
+        if request.look_editing {
+            look.editing = true;
+            look.put_caret(crate::quicklook::Spot { line: 2, byte: 4 });
+        }
         return Some(look);
     }
     let mut previews = sk_preview::Previews::new();
@@ -328,6 +332,8 @@ pub struct Capture {
     /// selection is drawn behind the runs and across a blank line, and the whole
     /// file shows that in one picture.
     pub look_selected: bool,
+    /// Whether that preview is in edit mode, with a caret in it.
+    pub look_editing: bool,
     /// Which quick look to draw, by the name of the file it is of.
     ///
     /// A name rather than a flag, because the three kinds — a picture, a page and
