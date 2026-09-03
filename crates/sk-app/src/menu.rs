@@ -64,8 +64,11 @@ pub const ON_ROW: &[&[&str]] = &[
 /// 5](../../../docs/03-principles.md) wants both of them reachable without a
 /// keyboard. A menu is what every text view offers for exactly this, and it costs
 /// no new furniture: the rows come out of the same registry the chords do.
-pub const IN_A_LOOK: &[&[&str]] =
-    &[&["look.select_all", "look.copy"], &["look.edit", "look.save", "look.discard"]];
+pub const IN_A_LOOK: &[&[&str]] = &[
+    &["look.select_all", "look.copy"],
+    &["look.edit", "look.save", "look.discard"],
+    &["look.play"],
+];
 
 /// What a secondary click on a sidebar row offers.
 ///

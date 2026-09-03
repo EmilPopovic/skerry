@@ -141,7 +141,13 @@ pub struct Answer {
     /// The image's own size, inside the box that was asked for.
     pub size: (u32, u32),
     /// How many pages the document has, or zero for unknown — ADR 0019.
+    ///
+    /// **Or how many frames an animation has**, which is the same field for the
+    /// same reason: a GIF is a stack of pictures and the panel walks it with the
+    /// controls a document already has.
     pub pages: u32,
+    /// How long this frame is shown for, in milliseconds, or zero for untimed.
+    pub delay_ms: u32,
     /// Straight `RGBA8`.
     pub pixels: Vec<u8>,
 }
@@ -389,6 +395,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
                 refusal: reply.refusal,
                 size: reply.size,
                 pages: reply.pages,
+                delay_ms: reply.delay_ms,
                 pixels: reply.pixels,
             }),
             // A reply that arrived late is still a reply, and throwing it away
@@ -400,6 +407,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
                     refusal: reply.refusal,
                     size: reply.size,
                     pages: reply.pages,
+                    delay_ms: reply.delay_ms,
                     pixels: reply.pixels,
                 });
                 alive = false;
@@ -429,6 +437,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
             refusal: Refusal::Interrupted,
             size: (0, 0),
             pages: 0,
+            delay_ms: 0,
             pixels: Vec::new(),
         });
     }

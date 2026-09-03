@@ -140,6 +140,8 @@ struct Shape {
     sidebar: bool,
     /// How wide the sidebar is, where `--aside` said.
     aside: Option<f32>,
+    /// Which page or frame `--look-page` asked for, or zero for the first.
+    look_page: u32,
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
@@ -195,6 +197,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         own_frame: shape.own_frame,
         sidebar: shape.sidebar,
         aside: shape.aside,
+        look_page: shape.look_page,
         pinned: overlays.pinned,
         tree: overlays.tree,
         coloured: overlays.coloured,
@@ -228,6 +231,7 @@ fn main() -> std::process::ExitCode {
     let mut own_frame = false;
     let mut no_sidebar = false;
     let mut aside = None;
+    let mut look_page = 0;
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
@@ -257,6 +261,12 @@ fn main() -> std::process::ExitCode {
                 Some(size) => logical = size,
                 None => return usage_error("--size needs WIDTHxHEIGHT"),
             },
+            "--look-page" => {
+                match arguments.next().as_deref().and_then(|it| it.parse::<u32>().ok()) {
+                    Some(page) if page > 0 => look_page = page,
+                    _ => return usage_error("--look-page needs a page or frame number"),
+                }
+            }
             "--aside" => match arguments.next().as_deref().and_then(|it| it.parse::<f32>().ok()) {
                 Some(width) if width > 0.0 => aside = Some(width),
                 _ => return usage_error("--aside needs a width in logical pixels"),
@@ -306,6 +316,7 @@ fn main() -> std::process::ExitCode {
                 own_frame,
                 sidebar: !no_sidebar,
                 aside,
+                look_page,
                 at,
                 looking,
             },
@@ -403,6 +414,7 @@ skerry [OPTIONS] [PATH]
   --rename         show a name being typed, for a golden frame of it
   --look-selected  select all of a text preview's text, for a frame of it
   --look-editing   put a text preview into edit mode, for a frame of the caret
+  --look-page <n>  which page or animation frame the quick look is on
   --aside <px>     how wide the sidebar is, which decides what a volume's row fits
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree

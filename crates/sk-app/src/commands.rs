@@ -1360,6 +1360,18 @@ fn look_scope(registry: &mut Registry<App>) {
             run: App::toggle_editing_the_look,
         },
         CommandSpec {
+            id: "look.play",
+            name: "action.look_play",
+            group: Group::View,
+            // **`Ctrl+Space` in the scope where it can only mean this.** Plain
+            // `Space` is the key that closes a quick look, so it is not free —
+            // and over a listing this chord toggles the cursor row's selection,
+            // which is a row under a panel somebody is watching.
+            keys: &["ctrl+space"],
+            enabled: App::looking_at_an_animation,
+            run: App::toggle_playing,
+        },
+        CommandSpec {
             id: "look.discard",
             name: "action.look_discard",
             group: Group::Edit,

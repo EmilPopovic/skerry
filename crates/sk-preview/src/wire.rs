@@ -29,14 +29,22 @@ const MAGIC: u32 = 0x534b_5052;
 /// conversation means somebody has a stale binary and the useful thing to do is
 /// say which.
 ///
-/// **Two, since the header grew a page.** Both ends are the same build spawned
-/// from the same directory, so this is a recompile and not a migration — the
-/// number moves so that a stale helper says which side is old instead of
+/// **Three, since a reply grew a frame's delay.** Both ends are the same build
+/// spawned from the same directory, so this is a recompile and not a migration —
+/// the number moves so that a stale helper says which side is old instead of
 /// misparsing a header.
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 
-/// Header bytes before the payload: magic, version, a word, and four `u32`s.
+/// A request's header: magic, version, the ask, a box, a page and a length.
 const HEADER: usize = 24;
+
+/// A reply's, which is four bytes longer for the frame delay beside the count.
+///
+/// **Two constants rather than one**, because the two headers stopped being the
+/// same size the moment one of them grew: a shared `HEADER` made a request's
+/// reader ask for four bytes that were the *path's* first four, which is a parse
+/// that succeeds and is wrong.
+const REPLY_HEADER: usize = 28;
 
 /// The most pixels a reply may carry, in bytes.
 ///
@@ -223,6 +231,13 @@ pub struct Reply {
     /// it is, and the panel shows the page number without a total rather than
     /// inventing one. Anything that is not a document answers zero.
     pub pages: u32,
+    /// How long this page is shown for, in milliseconds, or zero for "not timed".
+    ///
+    /// **A GIF's frame, and nothing else so far.** A document's page is shown
+    /// until somebody turns it and answers zero; an animation's frame carries its
+    /// own delay, because a GIF's frames are not evenly spaced and one rate for
+    /// the whole file would be a number nothing behind it knows — rule 7.
+    pub delay_ms: u32,
     /// Straight, non-premultiplied `RGBA8`, row-major, no padding.
     pub pixels: Vec<u8>,
 }
@@ -231,7 +246,7 @@ impl Reply {
     /// A refusal with no pixels behind it.
     #[must_use]
     pub const fn refused(refusal: Refusal) -> Self {
-        Self { refusal, size: (0, 0), pages: 0, pixels: Vec::new() }
+        Self { refusal, size: (0, 0), pages: 0, delay_ms: 0, pixels: Vec::new() }
     }
 
     /// Writes this reply to the host, in a child.
@@ -240,13 +255,14 @@ impl Reply {
     ///
     /// Whatever the pipe says.
     pub fn write_to(&self, out: &mut impl Write) -> std::io::Result<()> {
-        let mut header = Vec::with_capacity(HEADER);
+        let mut header = Vec::with_capacity(REPLY_HEADER);
         header.extend_from_slice(&MAGIC.to_le_bytes());
         header.extend_from_slice(&VERSION.to_le_bytes());
         header.extend_from_slice(&(self.refusal as u16).to_le_bytes());
         header.extend_from_slice(&self.size.0.to_le_bytes());
         header.extend_from_slice(&self.size.1.to_le_bytes());
         header.extend_from_slice(&self.pages.to_le_bytes());
+        header.extend_from_slice(&self.delay_ms.to_le_bytes());
         header.extend_from_slice(&u32::try_from(self.pixels.len()).unwrap_or(0).to_le_bytes());
         out.write_all(&header)?;
         out.write_all(&self.pixels)?;
@@ -263,7 +279,7 @@ impl Reply {
     /// a length read off a pipe and handed to `Vec::with_capacity` is how a bug in
     /// one process becomes an out-of-memory kill in another.
     pub fn read_from(input: &mut impl Read) -> std::io::Result<Self> {
-        let head = exactly::<HEADER>(input)?;
+        let head = exactly::<REPLY_HEADER>(input)?;
         let (magic, version) = (word32(&head, 0), word16(&head, 4));
         if magic != MAGIC || version != VERSION {
             return Err(broken(&format!("magic {magic:#x} version {version}")));
@@ -271,7 +287,8 @@ impl Reply {
         let refusal = Refusal::from_word(word16(&head, 6));
         let size = (word32(&head, 8), word32(&head, 12));
         let pages = word32(&head, 16);
-        let len = word32(&head, 20) as usize;
+        let delay_ms = word32(&head, 20);
+        let len = word32(&head, 24) as usize;
         if len > MOST_PIXELS {
             return Err(broken(&format!("{len} bytes of pixels")));
         }
@@ -282,7 +299,7 @@ impl Reply {
         }
         let mut pixels = vec![0u8; len];
         input.read_exact(&mut pixels)?;
-        Ok(Self { refusal, size, pages, pixels })
+        Ok(Self { refusal, size, pages, delay_ms, pixels })
     }
 }
 
@@ -332,6 +349,7 @@ mod tests {
             refusal: Refusal::None,
             size: (2, 1),
             pages: 14,
+            delay_ms: 40,
             pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
         };
         let mut pipe = Vec::new();
@@ -347,8 +365,13 @@ mod tests {
         // **And a page count travels with a refusal too**, which is the whole of
         // how `↓` at the last page learns how long the document is: `NoSuchPage`
         // carries the count and no pixels — ADR 0019.
-        let ended =
-            Reply { refusal: Refusal::NoSuchPage, size: (0, 0), pages: 14, pixels: Vec::new() };
+        let ended = Reply {
+            refusal: Refusal::NoSuchPage,
+            size: (0, 0),
+            pages: 14,
+            delay_ms: 0,
+            pixels: Vec::new(),
+        };
         let mut pipe = Vec::new();
         ended.write_to(&mut pipe).unwrap();
         assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), ended);
@@ -365,10 +388,12 @@ mod tests {
         let head = |size: (u32, u32), len: u32| {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&0x534b_5052u32.to_le_bytes());
-            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&super::VERSION.to_le_bytes());
             bytes.extend_from_slice(&0u16.to_le_bytes());
             bytes.extend_from_slice(&size.0.to_le_bytes());
             bytes.extend_from_slice(&size.1.to_le_bytes());
+            // The page count and the frame delay, neither of which this is about.
+            bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes.extend_from_slice(&len.to_le_bytes());
             bytes

@@ -106,11 +106,19 @@ fn answer(request: &Request) -> Reply {
     // which the host answers by staying where it is. Refusing here rather than
     // spawning a renderer that will fail costs nothing and says something precise.
     if pages > 0 && page > pages {
-        return Reply { refusal: Refusal::NoSuchPage, size: (0, 0), pages, pixels: Vec::new() };
+        return Reply {
+            refusal: Refusal::NoSuchPage,
+            size: (0, 0),
+            pages,
+            delay_ms: 0,
+            pixels: Vec::new(),
+        };
     }
     match render(tool, &path, request.within, page) {
-        Ok((pixels, size)) => Reply { refusal: Refusal::None, size, pages, pixels },
-        Err(refusal) => Reply { refusal, size: (0, 0), pages, pixels: Vec::new() },
+        // **No delay, because a page is not timed.** A document is shown until
+        // somebody turns it; the field is a GIF's frame and answers zero here.
+        Ok((pixels, size)) => Reply { refusal: Refusal::None, size, pages, delay_ms: 0, pixels },
+        Err(refusal) => Reply { refusal, size: (0, 0), pages, delay_ms: 0, pixels: Vec::new() },
     }
 }
 

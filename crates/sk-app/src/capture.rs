@@ -160,6 +160,12 @@ fn sample_quick_look(
         }
         return Some(look);
     }
+    // **The frame or page asked for, set before the first request.** A picture
+    // with frames is asked for by page like a document is, and `--look-page` is
+    // how a frame of the *third* frame exists at all.
+    if request.look_page > 0 {
+        look.page = request.look_page;
+    }
     let mut previews = sk_preview::Previews::new();
     let helper = match shows {
         crate::previews::Shows::Page => sk_preview::Kind::Document,
@@ -199,6 +205,9 @@ fn sample_quick_look(
             // which is the panel's "unknown" shape standing in for a known answer.
             if answer.pages > 0 {
                 look.pages = answer.pages;
+            }
+            if answer.delay_ms > 0 {
+                look.delay_ms = answer.delay_ms;
             }
             if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
                 // **A key per answer, counting down from the top of the
@@ -394,6 +403,13 @@ pub struct Capture {
     pub pinned: bool,
     /// Whether one of its places is open, with what is under it.
     pub tree: bool,
+    /// Which page or frame the quick look is on, where a frame wants one other
+    /// than the first.
+    ///
+    /// **Because an animation's third frame is a different picture from its
+    /// first**, and a capture that could only ever ask for frame one would render
+    /// the one case where composing frames in order cannot go wrong.
+    pub look_page: u32,
     /// How wide the sidebar is, where a frame wants one other than the default.
     ///
     /// **Because the width decides what a volume's row can say.** The figure, the

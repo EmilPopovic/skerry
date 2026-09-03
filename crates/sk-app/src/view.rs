@@ -195,6 +195,8 @@ pub enum LookControl {
     Edit,
     /// Puts the file back the way it was, throwing the edit away.
     Discard,
+    /// Plays the animation, or stops it where it is.
+    Play,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -1206,10 +1208,36 @@ fn quick_look_controls(
         hits.look.push((LookControl::Discard, area));
     }
 
+    // **Play and pause, only where there is an animation.** A GIF plays when it
+    // opens, so this is the control that stops it — and the one that starts it
+    // again after a frame arrow has stepped somewhere, which is the gesture that
+    // pauses. Drawn as the two shapes everything with a play button draws, rather
+    // than as a glyph: a triangle and two bars are in no font's coverage table.
+    if look.animated() {
+        let side = QUICK_LOOK_TITLE;
+        let area = Area { x: right - side, y: strip.y, width: side, height: side };
+        if hovered == Some(LookControl::Play) {
+            let shape = painter.rect(area.x + 3.0, area.y + 5.0, side - 6.0, side - 10.0);
+            painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
+        }
+        let ink = theme.palette.accent;
+        let middle = area.y + (side - 10.0) / 2.0;
+        if look.playing {
+            for offset in [0.0, 6.0] {
+                let bar = painter.rect(area.x + 9.0 + offset, middle, 3.0, 10.0);
+                painter.list.rect(bar, ink, 0.0);
+            }
+        } else {
+            painter.triangle(area.x + 10.0, middle, 8.0, 10.0, ink, Direction::Right);
+        }
+        hits.look.push((LookControl::Play, area));
+        right = area.x - 2.0;
+    }
+
     // **The page pair only where there are pages**, drawn from the right edge
     // inwards so the whole group stays put as the numbers widen from `1` to
     // `1000`.
-    if look.shows == crate::previews::Shows::Page {
+    if look.paged() {
         let label = look.page_label();
         let style = TextStyle::new(metrics.path_size, theme.palette.dim);
         // **An estimate, and deliberately a generous one.** There is no measure
@@ -1220,7 +1248,7 @@ fn quick_look_controls(
         // number, so the error is spent in the harmless direction.
         let room = label.chars().count() as f32 * metrics.path_size * 0.62;
         let width = side * 2.0 + room + 12.0;
-        let from = (strip.right() - 8.0 - width).max(at);
+        let from = (right - width).max(at);
         let back = Area { x: from, y: strip.y, width: side, height: side };
         look_button(painter, back, (LookControl::PreviousPage, hovered), Direction::Left, hits);
         line(painter, &label, style, from + side + 6.0, room + 2.0, baseline);

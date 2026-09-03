@@ -55,6 +55,15 @@ hang that costs one preview.
 | `zune-jpeg` | JPEG, which is most of the pictures on any machine. Chosen over `jpeg-decoder` for having no `unsafe` in the hot path and a smaller tree; either would do and the exit is the other one. | `skerry-thumbnailer` |
 | `resvg` (with `usvg` and `tiny-skia`) | SVG, which is most of the icons and diagrams. Already named in tier 1 for a purpose it was never used for; this is that entry becoming real, in a helper rather than in the product, which is strictly better than the tier-1 row assumed. | `skerry-thumbnailer` |
 
+**A GIF decoder is deliberately not here either**, and that is a different
+argument from the document renderer below: `gif` and `weezl` are small, pure-Rust
+and would have been an easy row — but the format is a header, a palette, a block
+loop and LZW, and it has not moved since 1990. Four hundred lines of arithmetic
+against two crates, in a helper whose tree is already the largest in the
+workspace, is the trade this file exists to make explicitly rather than by
+reflex: `bin/skerry-thumbnailer/src/gif.rs`, with a fixture written by *Pillow*
+so the encoder under test is somebody else's.
+
 A document renderer is deliberately **not** here. `skerry-preview-doc` drives
 `pdftoppm` or `mutool` found on `PATH` — an external tool, which ADR 0006 already
 provides for — because every pure-Rust PDF *renderer* is a research project and
@@ -105,7 +114,7 @@ build:
 
 | Binary | Brings | Sandbox |
 | --- | --- | --- |
-| `skerry-thumbnailer` | `png`, `zune-jpeg` and `resvg` — by far the largest tree in the workspace, and none of it in the product | Landlock and rlimits: read-only everywhere, **no execute right anywhere**, and the thumbnail cache the one thing writable. `seccomp` is named by [ADR 0006](adr/0006-out-of-process-decoders.md) and is not written; the child's own report line says so |
+| `skerry-thumbnailer` | `png`, `zune-jpeg` and `resvg` — by far the largest tree in the workspace, and none of it in the product; GIF is ours, for the reason above | Landlock and rlimits: read-only everywhere, **no execute right anywhere**, and the thumbnail cache the one thing writable. `seccomp` is named by [ADR 0006](adr/0006-out-of-process-decoders.md) and is not written; the child's own report line says so |
 | `skerry-preview-doc` | Nothing but `png`. The renderer is a program on `PATH` — `pdftoppm` or `mutool` — so a machine with neither loses one preview and builds the same | The same, except that execute is granted: a dynamically linked renderer needs it on its loader and every library it maps, so the grant is the root and what is load-bearing is that nothing is writable |
 | *(external, optional)* | `ffmpeg` for video thumbnails, discovered on `PATH` at first use | Spawned with a timeout and a memory cap |
 

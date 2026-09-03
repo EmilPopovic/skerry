@@ -1,4 +1,4 @@
-//! The image helper: PNG, JPEG and SVG, in a process of its own.
+//! The image helper: PNG, JPEG, GIF and SVG, in a process of its own.
 //!
 //! **[ADR 0006](../../../docs/adr/0006-out-of-process-decoders.md).** A decoder is
 //! the largest attack surface in a file manager and it runs on whatever landed in a
@@ -20,6 +20,7 @@
 
 mod cache;
 mod decode;
+mod gif;
 mod md5;
 
 use std::io::{BufReader, BufWriter, Write};
@@ -91,7 +92,13 @@ fn answer(request: &Request) -> Reply {
     {
         // **Zero pages, because an image is not paged.** ADR 0019's field is a
         // document's business and this helper never has one.
-        return Reply { refusal: Refusal::None, size: (width, height), pages: 0, pixels };
+        return Reply {
+            refusal: Refusal::None,
+            size: (width, height),
+            pages: 0,
+            delay_ms: 0,
+            pixels,
+        };
     }
     let Ok(bytes) = std::fs::read(&path) else {
         return Reply::refused(Refusal::Unreadable);
@@ -102,12 +109,23 @@ fn answer(request: &Request) -> Reply {
         Ask::Thumbnail => (cache::SIDE, cache::SIDE),
         Ask::Preview => request.within,
     };
-    match decode::decode(&bytes, within) {
-        Ok(raster) => {
+    // **A thumbnail is always the first frame.** A grid of animating cells would
+    // be a window that never sleeps, and the cache holds one picture per file —
+    // so the frame a request may name is a preview's business only.
+    let frame = if request.ask == Ask::Thumbnail { 1 } else { request.page };
+    match decode::decode(&bytes, within, frame) {
+        Ok(decoded) => {
+            let raster = decoded.raster;
             if request.ask == Ask::Thumbnail {
                 cache::write(&path, mtime, &raster.pixels, raster.size);
             }
-            Reply { refusal: Refusal::None, size: raster.size, pages: 0, pixels: raster.pixels }
+            Reply {
+                refusal: Refusal::None,
+                size: raster.size,
+                pages: decoded.frames,
+                delay_ms: decoded.delay_ms,
+                pixels: raster.pixels,
+            }
         }
         Err(refusal) => Reply::refused(refusal),
     }
@@ -138,12 +156,13 @@ fn probe(path: Option<&Path>) {
     };
     match std::fs::read(path) {
         Err(why) => println!("skerry-thumbnailer: unreadable: {why}"),
-        Ok(bytes) => match decode::decode(&bytes, (cache::SIDE, cache::SIDE)) {
-            Ok(raster) => println!(
-                "skerry-thumbnailer: decoded {}×{}, {} bytes; cache at {:?}",
-                raster.size.0,
-                raster.size.1,
-                raster.pixels.len(),
+        Ok(bytes) => match decode::decode(&bytes, (cache::SIDE, cache::SIDE), 1) {
+            Ok(decoded) => println!(
+                "skerry-thumbnailer: decoded {}×{}, {} bytes, {} frames; cache at {:?}",
+                decoded.raster.size.0,
+                decoded.raster.size.1,
+                decoded.raster.pixels.len(),
+                decoded.frames,
                 cache::place(path)
             ),
             Err(refusal) => println!("skerry-thumbnailer: refused: {refusal:?}"),

@@ -1446,6 +1446,11 @@ impl App {
             // when the pointer next moves — which is the one thing a person who
             // is holding still is not doing.
             self.spring_due(),
+            // **A playing animation owes its next frame**, and nothing else will
+            // ask for it: a GIF is the one thing on screen that changes while the
+            // hands are still. `None` the moment it is paused or the file has one
+            // frame, which is what keeps an idle window at zero CPU.
+            self.quick_look.as_ref().and_then(crate::quicklook::QuickLook::due_in),
         ];
         deadlines.into_iter().flatten().min()
     }
@@ -1663,6 +1668,11 @@ impl App {
             moved |= crate::trail::advance(&mut pane.trail, elapsed);
         }
         self.dirty |= moved;
+        // The animation's own step, beside the scrolls: it is a wake-up with an
+        // owner and this is the owner.
+        if self.quick_look.as_mut().is_some_and(crate::quicklook::QuickLook::advance) {
+            self.dirty = true;
+        }
         if !self.typed.is_empty() && self.typed_at.elapsed() > TYPE_AHEAD_WINDOW {
             self.typed.clear();
             self.dirty = true;
@@ -1922,7 +1932,7 @@ impl App {
         // still open, and `Ctrl+A` then means the name being typed — the field is
         // where the caret is, and the caret decides.
         if self.field_scope() == Scope::Global
-            && self.looking_at_text()
+            && (self.looking_at_text() || self.looking_at_an_animation())
             && let Some(command) = commands.resolve(event, Scope::Look)
             && commands.scope_of(command) == Scope::Look
         {
@@ -2958,6 +2968,7 @@ impl App {
             Some(crate::view::LookControl::NextPage) => self.look_by(1, false),
             Some(crate::view::LookControl::Edit) => self.toggle_editing_the_look(),
             Some(crate::view::LookControl::Discard) => self.discard_the_look(),
+            Some(crate::view::LookControl::Play) => self.toggle_playing(),
             None => {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
@@ -6063,7 +6074,30 @@ scope_aim={scope_aim:?}",
                 let by = if whole { room } else { step } * delta as f32;
                 look.scroll.to(look.scroll.offset() + by);
             }
-            crate::previews::Shows::Picture => {}
+            crate::previews::Shows::Picture => {
+                // **Stepping stops the playback.** Somebody pressing an arrow has
+                // said which frame they want to look at, and an animation that
+                // carried on would take it away from them a tenth of a second
+                // later. The Play button is how it starts again.
+                if look.animated() {
+                    look.playing = false;
+                    look.turn(delta);
+                }
+            }
+        }
+    }
+
+    /// Whether the panel is showing something with frames that play.
+    #[must_use]
+    pub(crate) fn looking_at_an_animation(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::animated)
+    }
+
+    /// Plays the animation, or stops it where it is.
+    pub(crate) fn toggle_playing(&mut self) {
+        if let Some(look) = self.quick_look.as_mut().filter(|look| look.animated()) {
+            look.playing = !look.playing;
+            self.dirty = true;
         }
     }
 
@@ -6268,6 +6302,11 @@ scope_aim={scope_aim:?}",
                 // learns the length even when the first reply could not say it.
                 if answer.pages > 0 {
                     look.pages = answer.pages;
+                }
+                // A frame's own delay, which is a GIF's and zero for everything
+                // else — so `due_in` answers nothing for a document.
+                if answer.delay_ms > 0 {
+                    look.delay_ms = answer.delay_ms;
                 }
                 if answer.refusal == sk_preview::Refusal::NoSuchPage {
                     // A `↓` at the last page. The page on screen stays.
@@ -6661,27 +6700,13 @@ scope_aim={scope_aim:?}",
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
-    /// How the focused pane lays out, and what index it has.
+    /// What the quick look is showing, for the diagnostic line.
     ///
-    /// Split out of [`Self::listing_state`] because that function reached the
-    /// hundred-line lint, and these two belong together: both answer "what shape
-    /// is this pane in", which is exactly what the rest of the line cannot say —
-    /// [rule 8](../../../docs/03-principles.md) makes a grid and a details list
-    /// the same rows in the same order, and an indexed search and a walk give the
-    /// same answer on purpose.
-    fn shape_state(&self) -> String {
-        let cells = self.cells();
-        let index = self
-            .indexes
-            .covering(&self.panes.focused().path)
-            .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
-        let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
-        let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
-        let collapsed = self.panes.focused().hidden_count();
-        let headings = self.headings_state();
-        let history = format!("{}/{}", self.edits.history.applied(), self.edits.history.len());
-        let history_open = self.history_open;
-        let history_aim = self.history_aim();
+    /// **Its own method rather than forty lines inside `shape_state`**, which is
+    /// at the hundred-line limit: the panel is one subject — which file, which
+    /// frame of how many, where its controls are, and what edit mode is doing —
+    /// and `queue_state` is the same trade made for the same reason.
+    fn look_state(&self) -> String {
         // What the quick look is showing, for a scenario: which file, and whether
         // a picture, some text, or a sentence saying why neither.
         let looking = self.quick_look.as_ref().map_or_else(
@@ -6720,6 +6745,7 @@ scope_aim={scope_aim:?}",
                     crate::view::LookControl::NextPage => "next_page",
                     crate::view::LookControl::Edit => "edit",
                     crate::view::LookControl::Discard => "discard",
+                    crate::view::LookControl::Play => "play",
                 };
                 format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
             })
@@ -6761,10 +6787,17 @@ scope_aim={scope_aim:?}",
             .and_then(|look| look.text.as_ref())
             .map_or(0, |text| text.rows().len());
         let look_unsaved = self.look_is_unsaved();
+        // Whether an animation is running, which is the one thing on screen that
+        // changes while the hands are still.
+        let look_playing = self.looking_at_an_animation()
+            && self.quick_look.as_ref().is_some_and(|look| look.playing);
         let look_page = self.quick_look.as_ref().map_or_else(
             || "none".to_owned(),
             |look| {
-                if look.shows == crate::previews::Shows::Page {
+                // **Anything paged, which is a document or an animation.** A
+                // GIF's frames are its pages and a scenario about one asks the
+                // same question: which of how many is on screen.
+                if look.paged() {
                     let total =
                         if look.pages > 0 { look.pages.to_string() } else { "?".to_owned() };
                     format!("{}/{total}", look.page)
@@ -6774,12 +6807,40 @@ scope_aim={scope_aim:?}",
             },
         );
         format!(
+            "looking={looking} look_page={look_page} look_aim={look_aim:?} \
+look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
+look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
+look_playing={look_playing}"
+        )
+    }
+
+    /// How the focused pane lays out, and what index it has.
+    ///
+    /// Split out of [`Self::listing_state`] because that function reached the
+    /// hundred-line lint, and these two belong together: both answer "what shape
+    /// is this pane in", which is exactly what the rest of the line cannot say —
+    /// [rule 8](../../../docs/03-principles.md) makes a grid and a details list
+    /// the same rows in the same order, and an indexed search and a walk give the
+    /// same answer on purpose.
+    fn shape_state(&self) -> String {
+        let cells = self.cells();
+        let index = self
+            .indexes
+            .covering(&self.panes.focused().path)
+            .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
+        let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
+        let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
+        let collapsed = self.panes.focused().hidden_count();
+        let headings = self.headings_state();
+        let history = format!("{}/{}", self.edits.history.applied(), self.edits.history.len());
+        let history_open = self.history_open;
+        let history_aim = self.history_aim();
+        let look = self.look_state();
+        format!(
             "mode={} grouping={} bands={} remembered={} columns={} cell={:.1}x{:.1} \
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
-looking={looking} look_page={look_page} look_aim={look_aim:?} \
-look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
-look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
+{look} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -8641,7 +8702,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // secondary click inside a text preview is about the text, and a menu of
         // file operations over a panel covering the file would act on something
         // the person cannot see.
-        if self.looking_at_text()
+        if (self.looking_at_text() || self.looking_at_an_animation())
             && crate::view::quick_look_area(&self.layout).contains(position.x, position.y)
         {
             self.menu_wanted = Some((position, crate::menu::IN_A_LOOK));

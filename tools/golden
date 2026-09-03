@@ -243,6 +243,15 @@ FRAMES = [
     # is metrics arithmetic — right at one scale and wrong at another is the class
     # of defect a second scale exists to catch.
     ("thumbnails-200", ["--size", "760x440", "--scale", "200", "--grid"], "pictures"),
+    # **An animation, on a frame in the middle of it.** A GIF is a stack of
+    # pictures the panel walks with the controls a document already has: the pair
+    # of arrows, the count between them, and a play control beside them that is
+    # the pause shape because a GIF plays when it opens. Frame three of four,
+    # which is the one that proves the frames are composed in order rather than
+    # all drawn from the first.
+    ("quick-look-gif",
+     ["--size", "900x600", "--scale", "125", "--look", "spinner.gif", "--look-page", "3"],
+     "pictures"),
     # **A quick look at each of the three things one can be of.** A picture through
     # `skerry-thumbnailer`, a page through whatever renderer is on `PATH`, and text
     # read in this process because reading a file is not decoding.
@@ -545,6 +554,40 @@ def build_pictures() -> None:
         "unnumbered.\n"
         "  ¡Ünïcödé, שלום, 日本語!\n"
     )
+    # **A real animated GIF, and Pillow's encoder rather than ours.** The decoder
+    # in `skerry-thumbnailer` is hand-written — LZW, interlacing, disposal — and a
+    # fixture written by the same hand tests the two halves of one mistake
+    # together: the unit tests use a literal-only encoder that never fills the
+    # dictionary, and dictionary codes are where the arithmetic is. Pillow is
+    # already required for the comparison, so this costs nothing and is somebody
+    # else's bit stream.
+    from PIL import Image
+
+    frames = []
+    for step in range(4):
+        frame = Image.new("P", (72, 72), 0)
+        frame.putpalette([20, 22, 30, 240, 180, 40, 60, 200, 140, 250, 250, 250])
+        pixels = frame.load()
+        # A square that walks the diagonal, and a fixed bar so a frame that fails
+        # to compose is visible as a missing bar rather than as a moved square.
+        for y in range(72):
+            for x in range(72):
+                inside = step * 16 <= x < step * 16 + 24 and step * 16 <= y < step * 16 + 24
+                if inside:
+                    pixels[x, y] = 1
+                elif 60 <= y < 68 and 4 <= x < 68:
+                    pixels[x, y] = 2
+                elif (x // 8 + y // 8) % 2 == 0:
+                    pixels[x, y] = 3
+        frames.append(frame)
+    frames[0].save(
+        directory / "spinner.gif",
+        save_all=True,
+        append_images=frames[1:],
+        duration=120,
+        loop=0,
+    )
+
     # A one-page PDF, written by hand so it needs no tool to generate — and it is
     # the only fixture whose *rendering* is somebody else's, which is the point:
     # `skerry-preview-doc` drives whatever is on `PATH`.

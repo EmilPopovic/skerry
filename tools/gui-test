@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 129
+FEWEST_SCENARIOS = 130
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5903,6 +5903,83 @@ def edit_a_text_preview(run: Run, fixture: Path) -> None:
         time.sleep(0.1)
     if note.read_text() != "one\ntwo\n":
         raise Failure(f"the undo left {note.read_text()!r}")
+
+
+@scenario("an-animation-plays-in-the-preview-and-can-be-stepped", fresh=True)
+def animated_gif(run: Run, fixture: Path) -> None:
+    """A GIF plays on its own, pauses on a step, and starts again on the button.
+
+    **The one thing in this window that changes while the hands are still.** The
+    frame loop sleeps on descriptors and never on a timer — rule 1 — so an
+    animation is a wake-up with an owner, and the owner is the panel: it says when
+    it wants one, and says nothing the moment it is paused. Which is what makes
+    the `no-cpu-when-idle` scenario still true with a GIF on screen and stopped.
+    """
+    try:
+        from PIL import Image
+    except ImportError as missing:
+        raise Skipped("Pillow is not installed, and the fixture is a real GIF") from missing
+
+    # Six frames, an eighth of a second each, whose only content is which frame
+    # it is: a scenario about frames does not need a picture.
+    frames = []
+    for step in range(6):
+        frame = Image.new("P", (40, 40), 0)
+        frame.putpalette([0, 0, 0, 255, 255, 255])
+        pixels = frame.load()
+        for y in range(40):
+            for x in range(40):
+                pixels[x, y] = 1 if x // 7 == step else 0
+        frames.append(frame)
+    frames[0].save(
+        fixture / "loop.gif",
+        save_all=True,
+        append_images=frames[1:],
+        duration=120,
+        loop=0,
+    )
+
+    listed(run)
+    until(run, rows="10")
+    run.drive("text loop\nsleep 300\nkey f12\nsleep 150\n")
+    until(run, cursor="loop.gif")
+    run.drive("key space\nsleep 900\nkey f12\nsleep 250\n")
+    # The count comes from the child, so this is also the assertion that the
+    # decoder walked the blocks and found six frames.
+    opened = holds(
+        run,
+        lambda it: it["look_page"].endswith("/6"),
+        "a six-frame animation",
+    )
+    expect(opened, look_playing="true")
+
+    # **It advances with nothing touching it.** Six frames at 120 ms is 720 ms a
+    # loop, so a second of waiting has to have moved — and the poll is what waits,
+    # because a machine under load takes longer to get there.
+    moved = holds(
+        run,
+        lambda it: it["look_page"] not in ("none", opened["look_page"]),
+        "the frame to advance on its own",
+    )
+    assert moved is not None
+
+    # A frame arrow steps and stops it: somebody stepping has said which frame
+    # they want, and an animation that carried on would take it away from them.
+    run.drive("key down\nsleep 200\nkey f12\nsleep 200\n")
+    stopped = until(run, look_playing="false")
+    at = stopped["look_page"]
+    run.drive("sleep 700\nkey f12\nsleep 200\n")
+    expect(run.state(), look_page=at)
+
+    # And the play control starts it again, with the pointer alone.
+    aim = look_aim(run, "play")
+    run.drive(f"move {aim[0]:.2f} {aim[1]:.2f}\nclick left\nsleep 300\nkey f12\nsleep 200\n")
+    until(run, look_playing="true")
+    holds(
+        run,
+        lambda it: it["look_page"] not in ("none", at),
+        "the frame to advance again once it was played",
+    )
 
 
 @scenario("a-long-line-wraps-and-is-edited-where-it-wrapped", fresh=True)

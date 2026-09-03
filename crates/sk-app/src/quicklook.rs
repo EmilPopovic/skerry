@@ -552,6 +552,17 @@ pub(crate) struct QuickLook {
     /// `Ctrl+Z` takes back a save nobody meant — which is the whole reason
     /// `Change::Edited` carries both sides.
     pub(crate) unsaved: bool,
+    /// Whether an animation is playing.
+    ///
+    /// **On, for a file that has frames.** A GIF that sat on its first frame
+    /// until somebody found a control would be a GIF that looks broken; every
+    /// viewer plays one and this one does too. A press on a frame arrow stops it,
+    /// because somebody stepping frames has said what they want.
+    pub(crate) playing: bool,
+    /// How long the frame on screen is shown for, from the child's answer.
+    pub(crate) delay_ms: u32,
+    /// When the frame on screen went up, for the clock that turns the next one.
+    shown_at: Option<std::time::Instant>,
     /// The text as it last stood on disk, while edit mode is on.
     ///
     /// **What Discard puts back.** An edit that has not been written has nothing
@@ -584,6 +595,9 @@ impl QuickLook {
             dragging: false,
             editing: false,
             unsaved: false,
+            playing: true,
+            delay_ms: 0,
+            shown_at: None,
             as_on_disk: None,
             reading: None,
         };
@@ -662,18 +676,70 @@ impl QuickLook {
     /// without `pdfinfo` previews the document and cannot say how long it is —
     /// ADR 0019 — so `↓` there is allowed to ask for a page that may not exist,
     /// and `NoSuchPage` is how it finds out.
+    /// Whether this look has more than one image in it.
+    ///
+    /// **A document, or an animation.** Both are a stack of pictures the panel
+    /// walks with the same two arrows, the same prefetch and the same byte
+    /// budget — ADR 0020 — and the only difference is that one of them turns its
+    /// own pages.
+    pub(crate) fn paged(&self) -> bool {
+        self.shows == Shows::Page || self.pages > 1
+    }
+
+    /// Whether it is a stack of frames that plays rather than pages that turn.
+    pub(crate) fn animated(&self) -> bool {
+        self.shows == Shows::Picture && self.pages > 1
+    }
+
+    /// How long until the frame on screen has had its time, while playing.
+    ///
+    /// `None` where nothing is animating, which is what keeps an idle window
+    /// asleep: an animation is a wake-up with an owner, and this is the owner
+    /// saying when it wants one.
+    pub(crate) fn due_in(&self) -> Option<std::time::Duration> {
+        if !self.playing || !self.animated() || self.image.is_none() {
+            return None;
+        }
+        let delay = std::time::Duration::from_millis(u64::from(self.delay_ms.max(20)));
+        let since = self.shown_at?.elapsed();
+        Some(delay.saturating_sub(since))
+    }
+
+    /// Turns to the next frame if this one has had its time. Whether it did.
+    pub(crate) fn advance(&mut self) -> bool {
+        if self.due_in() != Some(std::time::Duration::ZERO) {
+            return false;
+        }
+        // **The clock restarts here and not when the picture lands.** A frame
+        // whose neighbour is not on the GPU yet would otherwise be asked for once
+        // per frame of the window, which is a spin rather than an animation.
+        self.shown_at = Some(std::time::Instant::now());
+        self.turn(1)
+    }
+
     pub(crate) fn turn(&mut self, delta: i32) -> bool {
-        if self.shows != Shows::Page {
+        if !self.paged() {
             return false;
         }
         let wanted = self.page.saturating_add_signed(delta).max(1);
-        let wanted = if self.pages > 0 { wanted.min(self.pages) } else { wanted };
+        // **An animation wraps and a document stops.** Coming off the end of a
+        // GIF is its next loop; coming off the end of a PDF is the end of the PDF.
+        let wanted = match (self.animated(), self.pages) {
+            (true, pages) if pages > 0 && wanted > pages => 1,
+            (true, pages) if pages > 0 && delta < 0 && self.page == 1 => pages,
+            (_, pages) if pages > 0 => wanted.min(pages),
+            _ => wanted,
+        };
         let moved = wanted != self.page;
         self.page = wanted;
         // **A turn is a draft first, for the same reason opening one is.** `↓`
         // twice in a row is a person looking for something, and two 65 ms drafts
         // answer that better than one 150 ms page.
-        self.coarse |= moved;
+        //
+        // **Not for an animation**, whose frames are already the panel's size and
+        // whose next two are on the GPU: a draft would be a third-size frame in
+        // the middle of a loop.
+        self.coarse |= moved && self.shows == Shows::Page;
         moved
     }
 
@@ -687,11 +753,12 @@ impl QuickLook {
     pub(crate) fn took(&mut self, key: ImageKey, size: (u32, u32), page: u32) {
         // **A draft is not remembered.** Only the full render goes in `held`, or a
         // turn back to a page would show the third-size version of it for ever.
-        if !self.coarse && self.shows == Shows::Page {
+        if !self.coarse && self.paged() {
             self.held.insert(page, (key, size));
         }
         if page == self.page {
             self.image = Some((key, size));
+            self.shown_at = Some(std::time::Instant::now());
             // The stand-in has done its job and must stop being drawn under a
             // picture with transparency in it.
             self.standby = None;
@@ -727,6 +794,7 @@ impl QuickLook {
     pub(crate) fn show_held(&mut self, within: (u32, u32)) -> bool {
         let Some(&(key, size)) = self.held.get(&self.page) else { return false };
         self.image = Some((key, size));
+        self.shown_at = Some(std::time::Instant::now());
         self.standby = None;
         self.coarse = false;
         self.asked = Some(Shot { within, page: self.page });
@@ -739,7 +807,7 @@ impl QuickLook {
     /// the current page is still being drafted would put the guess in front of the
     /// thing being waited for — see [`sk_preview::Want::is_urgent`].
     pub(crate) fn next_ahead(&self) -> Option<u32> {
-        if self.shows != Shows::Page || self.coarse || self.image.is_none() {
+        if !self.paged() || self.coarse || self.image.is_none() {
             return None;
         }
         (1..=AHEAD)
@@ -1262,6 +1330,9 @@ mod tests {
             dragging: false,
             editing: false,
             unsaved: false,
+            playing: true,
+            delay_ms: 0,
+            shown_at: None,
             as_on_disk: None,
             reading: None,
         }

@@ -1,10 +1,15 @@
 //! Bytes on disk to straight `RGBA8`, and nothing else.
 //!
-//! Three formats, chosen because they are what a person actually has: PNG and
-//! JPEG are most of the pictures on any machine, and SVG is most of the icons and
-//! diagrams. GIF, WebP and AVIF are each another crate and each another arm here;
-//! they are absent rather than half-done, and `Refusal::NotItsKind` is what says
-//! so to the host.
+//! Four formats, chosen because they are what a person actually has: PNG and
+//! JPEG are most of the pictures on any machine, SVG is most of the icons and
+//! diagrams, and GIF is most of the things that move. WebP and AVIF are each
+//! another crate and each another arm here; they are absent rather than
+//! half-done, and `Refusal::NotItsKind` is what says so to the host.
+//!
+//! **GIF is ours** — [`crate::gif`] — because the format is a header, a palette,
+//! a block loop and LZW, and because it is the only one of the four whose frames
+//! the panel walks: a GIF answers with a frame count and a delay beside its
+//! pixels, and everything else answers zero for both.
 //!
 //! **Sniffed, not extension-matched.** A `.png` that is a JPEG is common enough
 //! that every image viewer handles it, and the caller's MIME database guessed from
@@ -33,26 +38,55 @@ pub struct Raster {
 /// costs the whole batch rather than one file.
 const MOST_PIXELS: u64 = 64 * 1024 * 1024;
 
+/// A decode's answer: the pixels, and what the file said about its frames.
+pub struct Decoded {
+    /// The image, fitted inside the box that was asked for.
+    pub raster: Raster,
+    /// How many frames the file holds. Zero for everything that is one picture.
+    ///
+    /// **Zero rather than one**, which is ADR 0019's don't-care value on the wire:
+    /// a caller that has no frames to think about never learns the field exists.
+    pub frames: u32,
+    /// How long this frame is shown, in milliseconds, or zero.
+    pub delay_ms: u32,
+}
+
+impl Decoded {
+    /// One picture, with nothing to say about frames.
+    fn still(raster: Raster) -> Self {
+        Self { raster, frames: 0, delay_ms: 0 }
+    }
+}
+
 /// Decodes `bytes` and fits the result inside `within`.
+///
+/// `frame` is one-based and only a GIF has any; zero means the first.
 ///
 /// # Errors
 ///
 /// A [`Refusal`] the host turns into a message, or into nothing where there is
 /// nothing worth saying.
-pub fn decode(bytes: &[u8], within: (u32, u32)) -> Result<Raster, Refusal> {
+pub fn decode(bytes: &[u8], within: (u32, u32), frame: u32) -> Result<Decoded, Refusal> {
     let raster = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         png(bytes)
     } else if bytes.starts_with(b"\xff\xd8\xff") {
         jpeg(bytes)
+    } else if crate::gif::is_gif(bytes) {
+        let frames = crate::gif::decode(bytes, frame)?;
+        return Ok(Decoded {
+            raster: fit(frames.raster, within),
+            frames: frames.count,
+            delay_ms: frames.delay_ms,
+        });
     } else if looks_like_svg(bytes) {
         // SVG has no fixed size, so it is rendered *at* the wanted size rather
         // than decoded and scaled — which is the whole point of a vector format
         // and the reason this arm takes `within`.
-        return svg(bytes, within);
+        return svg(bytes, within).map(Decoded::still);
     } else {
         return Err(Refusal::NotItsKind);
     }?;
-    Ok(fit(raster, within))
+    Ok(Decoded::still(fit(raster, within)))
 }
 
 /// Whether the head of a file looks like SVG.
@@ -136,7 +170,7 @@ fn svg(bytes: &[u8], within: (u32, u32)) -> Result<Raster, Refusal> {
     Ok(Raster { pixels, size: (width.max(1), height.max(1)) })
 }
 
-fn too_big(pixels: u64) -> Result<(), Refusal> {
+pub(crate) fn too_big(pixels: u64) -> Result<(), Refusal> {
     if pixels > MOST_PIXELS { Err(Refusal::TooLarge) } else { Ok(()) }
 }
 
@@ -230,6 +264,15 @@ fn fit(raster: Raster, within: (u32, u32)) -> Raster {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+    /// The pixels alone, for the assertions that predate frames.
+    fn raster_of(
+        bytes: &[u8],
+        within: (u32, u32),
+        frame: u32,
+    ) -> Result<super::Raster, super::Refusal> {
+        super::decode(bytes, within, frame).map(|it| it.raster)
+    }
+
     use super::{Raster, box_fit, decode, fill, fit, looks_like_svg};
     use sk_preview::Refusal;
 
@@ -318,7 +361,7 @@ mod tests {
             0x00, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f,
             0x00, 0x80, 0x02, 0xe7, 0xff, 0xd9,
         ];
-        let raster = decode(TINY, (128, 128)).expect("a valid JPEG was refused");
+        let raster = raster_of(TINY, (128, 128), 1).expect("a valid JPEG was refused");
         assert_eq!(raster.size, (4, 4), "a 4×4 JPEG was not 4×4");
         assert_eq!(raster.pixels.len(), 4 * 4 * 4);
         for pixel in raster.pixels.chunks_exact(4) {
@@ -329,11 +372,11 @@ mod tests {
 
     #[test]
     fn something_that_is_not_an_image_is_not_its_kind() {
-        assert_eq!(decode(b"just some text", (128, 128)).err(), Some(Refusal::NotItsKind));
-        assert_eq!(decode(&[], (128, 128)).err(), Some(Refusal::NotItsKind));
+        assert_eq!(decode(b"just some text", (128, 128), 1).err(), Some(Refusal::NotItsKind));
+        assert_eq!(decode(&[], (128, 128), 1).err(), Some(Refusal::NotItsKind));
         // A PNG signature with nothing behind it is that kind, and broken.
         let stub = b"\x89PNG\r\n\x1a\n and then nothing";
-        assert_eq!(decode(stub, (128, 128)).err(), Some(Refusal::Undecodable));
+        assert_eq!(decode(stub, (128, 128), 1).err(), Some(Refusal::Undecodable));
     }
 
     #[test]
@@ -355,7 +398,7 @@ mod tests {
     fn an_svg_is_rendered_at_the_size_it_was_asked_for() {
         let source = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="5">
              <rect width="10" height="5" fill="#ff0000"/></svg>"##;
-        let raster = decode(source, (100, 100)).expect("a rectangle would not render");
+        let raster = raster_of(source, (100, 100), 1).expect("a rectangle would not render");
         // Fitted into the box, aspect kept: 10×5 into 100×100 is 100×50.
         assert_eq!(raster.size, (100, 50));
         assert_eq!(raster.pixels.len(), 100 * 50 * 4);
@@ -369,7 +412,7 @@ mod tests {
     fn a_transparent_svg_comes_back_straight_and_not_premultiplied() {
         let source = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">
              <rect width="4" height="4" fill="#ffffff" fill-opacity="0.5"/></svg>"##;
-        let raster = decode(source, (4, 4)).expect("a rectangle would not render");
+        let raster = raster_of(source, (4, 4), 1).expect("a rectangle would not render");
         let pixel = &raster.pixels[..4];
         assert!(pixel[3] > 100 && pixel[3] < 160, "alpha is {}", pixel[3]);
         assert!(pixel[0] > 240, "white came back at {} — premultiplied", pixel[0]);
