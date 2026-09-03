@@ -155,6 +155,8 @@ notice.places_ordered = The list of places was reordered
 notice.places_refused = The list of places could not be saved — check that the config directory can be written
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
+# What is left on a volume, at the right of its row in the list of places.
+sidebar.free = {0} free
 # The home directory, which is named after the user and is not what anyone calls
 # it.
 sidebar.home = Home

@@ -11,11 +11,28 @@
 //! is a real disk nobody sees, which is one line to fix and visible the moment
 //! somebody plugs one in.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A filesystem a person would call a place.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Mount {
+    /// The label the filesystem was formatted with, where it has one.
+    ///
+    /// **From `/dev/disk/by-label`, not from udisks2.** The names in that
+    /// directory are the labels and the symlinks point at the devices, which is
+    /// the whole lookup — so a session with no D-Bus, which is the bare Sway case
+    /// [06-portability.md](../../../docs/06-portability.md) is written for, gets
+    /// the same names a GNOME session does. The escaping is `\x20` for a space
+    /// and so on, because a label is a filename here.
+    pub label: Option<String>,
+    /// Bytes a person could still write there, and the size of the filesystem.
+    ///
+    /// **`statvfs`, on the job that reads the mount table.** Free space is one
+    /// syscall and udisks2 is a round trip; the only thing D-Bus knows that this
+    /// does not is a device that is *not* mounted, which has no free space to
+    /// report anyway. `None` for a remote mount, which is where the syscall can
+    /// take a network timeout — the one thing rule 1 will not have.
+    pub free: Option<(u64, u64)>,
     /// Where it is mounted.
     pub at: PathBuf,
     /// What it is: `ext4`, `vfat`, `fuse.sshfs`.
@@ -75,7 +92,85 @@ const INTERESTING: &[(&str, bool)] = &[
 /// sidebar this feeds is built off the frame loop anyway.
 #[must_use]
 pub fn mounts() -> Vec<Mount> {
-    read("/proc/self/mountinfo")
+    let mut found = read("/proc/self/mountinfo");
+    let labels = labels();
+    for mount in &mut found {
+        mount.label = labels
+            .iter()
+            .find(|(device, _)| *device == mount.source)
+            .map(|(_, label)| label.clone());
+        // **Not for a remote one.** `statvfs` over NFS is a round trip to a
+        // server that may not answer, and [Spike
+        // B](../../../spikes/b-enumeration/README.md) measured what one
+        // unresponsive mount costs: 28,000 ms.
+        if !mount.remote {
+            mount.free = room_on(&mount.at);
+        }
+    }
+    found
+}
+
+/// Every filesystem label this machine can see, with the device it names.
+///
+/// `/dev/disk/by-label` is a directory of symlinks: the *name* is the label and
+/// the target is the device. Absent on a machine with no udev, which is a machine
+/// with no labels rather than an error.
+fn labels() -> Vec<(String, String)> {
+    let Ok(names) = crate::scan::names(Path::new(BY_LABEL), &sk_util::Cancel::new()) else {
+        return Vec::new();
+    };
+    let listing = &names.listing;
+    let mut found = Vec::new();
+    for row in 0..listing.rows() {
+        let Some(id) = listing.at(row) else { continue };
+        let name = listing.name(id);
+        let link = Path::new(BY_LABEL).join(name);
+        let Ok(target) = std::fs::canonicalize(&link) else { continue };
+        found.push((target.to_string_lossy().into_owned(), unescape_label(name)));
+    }
+    found
+}
+
+/// Where udev puts the labels.
+const BY_LABEL: &str = "/dev/disk/by-label";
+
+/// `\x20` back to a space, and so on.
+///
+/// udev escapes anything that cannot be a filename — a space, a slash — as
+/// `\xNN`, which is a *different* escape from the octal one `/proc` uses for a
+/// mount point: two directories, two conventions, and a label that arrives with
+/// the escapes still in it reads as `My\x20disk`.
+fn unescape_label(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'\\'
+            && bytes.get(at + 1) == Some(&b'x')
+            && let Some(text) = name.get(at + 2..at + 4)
+            && let Ok(byte) = u8::from_str_radix(text, 16)
+        {
+            out.push(byte);
+            at += 4;
+            continue;
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Bytes free and bytes in total, from one `statvfs`.
+///
+/// **`f_bavail` and not `f_bfree`**: the difference is the reserve only root can
+/// write into, and a number that counts space this person cannot use is a number
+/// that says the disk is emptier than it is.
+///
+/// **Runs on a job.**
+fn room_on(at: &Path) -> Option<(u64, u64)> {
+    let stat = rustix::fs::statvfs(at).ok()?;
+    let block = if stat.f_frsize > 0 { stat.f_frsize } else { stat.f_bsize };
+    Some((stat.f_bavail.saturating_mul(block), stat.f_blocks.saturating_mul(block)))
 }
 
 fn read(from: &str) -> Vec<Mount> {
@@ -117,6 +212,8 @@ fn parse(line: &str, seen: &mut Vec<String>) -> Option<Mount> {
     }
     seen.push(device);
     Some(Mount {
+        label: None,
+        free: None,
         at: PathBuf::from(unescape(at)),
         kind: kind.to_owned(),
         source: unescape(source),
@@ -248,6 +345,37 @@ mod tests {
                 !matches!(mount.kind.as_str(), "tmpfs" | "squashfs" | "cgroup2" | "proc"),
                 "{mount:?}"
             );
+        }
+    }
+
+    /// udev's escaping is not `/proc`'s, and a label with a space in it is the
+    /// case that shows the difference.
+    #[test]
+    fn a_labels_escapes_are_udevs_and_not_procs() {
+        assert_eq!(super::unescape_label("My\\x20disk"), "My disk");
+        assert_eq!(super::unescape_label("plain"), "plain");
+        assert_eq!(super::unescape_label("caf\\xc3\\xa9"), "café");
+        // `/proc`'s octal is not udev's hex, and neither reads the other's.
+        assert_eq!(super::unescape_label("My\\040disk"), "My\\040disk");
+    }
+
+    /// This machine's own mounts, with whatever labels and free space it has.
+    ///
+    /// The numbers are the machine's, so what is asserted is the shape: a
+    /// filesystem that is mounted has a size, a free figure inside it, and a
+    /// label that is either absent or not empty.
+    #[test]
+    fn what_is_mounted_here_reports_room_that_makes_sense() {
+        for mount in super::mounts() {
+            if let Some((free, total)) = mount.free {
+                assert!(total > 0, "{mount:?} has no size at all");
+                assert!(free <= total, "{mount:?} has more free than it holds");
+            } else {
+                assert!(mount.remote, "a local mount reported no room: {mount:?}");
+            }
+            if let Some(label) = &mount.label {
+                assert!(!label.is_empty(), "{mount:?}");
+            }
         }
     }
 }

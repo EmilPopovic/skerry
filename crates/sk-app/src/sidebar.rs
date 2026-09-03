@@ -40,6 +40,12 @@ pub struct Entry {
     /// Whether reaching it may block for a network timeout. Drawn, because a
     /// row that takes eight seconds should have said so before it was clicked.
     pub remote: bool,
+    /// How much room is left on it, for a volume that could say.
+    ///
+    /// Drawn small and dim at the row's right edge, which is where every other
+    /// file manager puts it — and it is the number a person opens a file manager
+    /// to find out.
+    pub free: Option<u64>,
     /// Whether this row is a line in the bookmarks file — a place somebody
     /// chose, rather than one the machine has.
     ///
@@ -100,6 +106,8 @@ pub struct Row {
     pub mark: Mark,
     /// Whether reaching it may block for a network timeout.
     pub remote: bool,
+    /// How much room is left on it, for a volume that could say.
+    pub free: Option<u64>,
     /// Whether it is a line in the bookmarks file.
     pub pinned: bool,
     /// How deep: 0 for a place, 1 for a directory inside one.
@@ -260,6 +268,7 @@ impl Sidebar {
                     label: entry.label.clone(),
                     mark: entry.mark,
                     remote: entry.remote,
+                    free: entry.free,
                     pinned: entry.pinned,
                     depth: 0,
                     open,
@@ -290,6 +299,7 @@ impl Sidebar {
                 label: name.clone(),
                 mark: Mark::Place(Kind::Other),
                 remote: false,
+                free: None,
                 pinned: false,
                 depth,
                 open,
@@ -472,6 +482,7 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         label: label.to_owned(),
         mark: Mark::Place(kind),
         remote: false,
+        free: None,
         pinned: false,
         depth: 0,
         open: false,
@@ -516,6 +527,9 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         label: sk_model::i18n::lookup("sidebar.root").to_owned(),
         mark: Mark::Volume,
         remote: false,
+        // A fixed figure, because a golden frame of this machine's free space is
+        // a frame nobody else can reproduce.
+        free: Some(112_089_935_872),
         pinned: false,
         depth: 0,
         open: false,
@@ -562,6 +576,7 @@ fn row(place: &Place) -> Entry {
         label,
         mark: Mark::Place(place.kind),
         remote: false,
+        free: None,
         pinned: false,
     }
 }
@@ -569,17 +584,31 @@ fn row(place: &Place) -> Entry {
 /// A mount's row. The root filesystem is named rather than shown as `/`, and a
 /// mount point with no useful name falls back to what backs it.
 fn volume(mount: &Mount) -> Entry {
+    // **The filesystem's own label first.** It is the name somebody gave the
+    // disk, and it is what is printed on the outside of a USB stick; the mount
+    // point is where the system happened to put it. The root filesystem keeps its
+    // word, because "the filesystem" is what a person calls that one whatever it
+    // is labelled.
     let label = if mount.is_root() {
         sk_model::i18n::lookup("sidebar.root").to_owned()
     } else {
-        mount
-            .at
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| mount.source.clone())
+        mount.label.clone().unwrap_or_else(|| {
+            mount
+                .at
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| mount.source.clone())
+        })
     };
-    Entry { path: mount.at.clone(), label, mark: Mark::Volume, remote: mount.remote, pinned: false }
+    Entry {
+        path: mount.at.clone(),
+        label,
+        mark: Mark::Volume,
+        remote: mount.remote,
+        free: mount.free.map(|(free, _)| free),
+        pinned: false,
+    }
 }
 
 #[cfg(test)]
@@ -625,6 +654,7 @@ mod tests {
                     label: (*path).to_owned(),
                     mark: Mark::Place(Kind::Other),
                     remote: false,
+                    free: None,
                     pinned: false,
                 })
                 .collect(),
@@ -719,6 +749,7 @@ mod tests {
                     label: "Home".to_owned(),
                     mark: Mark::Place(Kind::Home),
                     remote: false,
+                    free: None,
                     pinned: false,
                 }],
             },
@@ -731,6 +762,7 @@ mod tests {
                         label: (*path).to_owned(),
                         mark: Mark::Place(Kind::Other),
                         remote: false,
+                        free: None,
                         pinned: true,
                     })
                     .collect(),

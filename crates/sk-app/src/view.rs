@@ -2686,7 +2686,30 @@ fn place_row(
     let ink = if current { theme.palette.selected_text } else { theme.palette.text };
     let baseline = painter.baseline(box_.y, box_.height, metrics.text_size);
     let text_at = mark_at + mark + 7.0;
-    let box_rect = painter.rect(text_at, 0.0, (box_.right() - 10.0 - text_at).max(0.0), 0.0);
+    // **The room left, at the right end of a volume's row.** It is the number a
+    // person opens a file manager to find out, and the only place it fits is
+    // where every other file manager puts it. Small and dim, because it is a
+    // fact about the row rather than the row's name — and the name gives up the
+    // space rather than overlapping it.
+    let mut room = (box_.right() - 10.0 - text_at).max(0.0);
+    if let Some(free) = row.free {
+        let text = i18n::format("sidebar.free", &[&format::size(free)]);
+        let ink = if current { theme.palette.selected_text } else { theme.palette.dim };
+        // **All of it or none of it.** `104 GiB fre…` is a number that has stopped
+        // being one, so where the row is too narrow for both the figure goes and
+        // the name keeps the width — a name can lose its tail and still be read.
+        // A pixel of slack on the box: the measure and the draw agree to within
+        // rounding at a fractional scale, and a box exactly as wide as the text
+        // ellipsizes it — `104 GiB fre…`, which is what this looked like first.
+        let width = text_width(painter, &text, metrics.header_size, false) + 2.0;
+        if width + 44.0 <= room {
+            let at = box_.right() - 10.0 - width;
+            let style = TextStyle::new(metrics.header_size, ink).right();
+            line(painter, &text, style, at, width, baseline);
+            room = (room - width - 6.0).max(0.0);
+        }
+    }
+    let box_rect = painter.rect(text_at, 0.0, room, 0.0);
     painter.label(&row.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
 }
 
