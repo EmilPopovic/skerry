@@ -5852,6 +5852,43 @@ scope_aim={scope_aim:?}",
     /// slow, so this is a thing a person asks for and can stop.
     pub(crate) fn build_index(&mut self) {
         let root = self.panes.focused().path.clone();
+        self.start_a_build(root);
+    }
+
+    /// Builds an index for every local filesystem, one after another.
+    ///
+    /// **The sidebar's own Volumes, which is what "everywhere" already means** —
+    /// [ADR 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+    /// settled that for a search and this is the same set: what the sidebar calls
+    /// a place is what a root is, and a remote mount is excluded because walking
+    /// one costs its timeout.
+    ///
+    /// It was two steps — stand in Filesystem, then Build the index — and two
+    /// steps is a feature nobody finds for the machine's *other* disks at all.
+    pub(crate) fn build_every_index(&mut self) {
+        let mut roots = self.sidebar.volumes();
+        if roots.is_empty() {
+            return;
+        }
+        let first = roots.remove(0);
+        self.indexes.owe(roots);
+        self.start_a_build(first);
+    }
+
+    /// Whether the sidebar found any local filesystem to index.
+    #[must_use]
+    pub(crate) fn has_volumes(&self) -> bool {
+        !self.sidebar.volumes().is_empty()
+    }
+
+    /// How many roots a queued build has left to do, including the one running.
+    #[must_use]
+    pub(crate) fn indexes_owed(&self) -> usize {
+        self.indexes.owed().len()
+    }
+
+    /// Starts one build, with its counting pass beside it.
+    fn start_a_build(&mut self, root: PathBuf) {
         let cancel = sk_util::Cancel::new();
         self.indexes.begins(&root, cancel.clone());
         let sender = self.replies.index_tx.clone();
@@ -5930,6 +5967,16 @@ scope_aim={scope_aim:?}",
             if self.indexes.arrived(note) {
                 self.dirty = true;
             }
+        }
+        // **The next root, when one is owed and nothing is running.** This is
+        // where a queued build steps: the reply that ends one is the event that
+        // starts the next, so there is no timer and no second scheduler — the
+        // same shape the preview's page-ahead uses.
+        if !self.indexing()
+            && let Some(next) = self.indexes.next_owed()
+        {
+            self.start_a_build(next);
+            self.dirty = true;
         }
     }
 
@@ -7189,6 +7236,9 @@ look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan} \
             .covering(&self.panes.focused().path)
             .map_or(-1i64, |it| i64::try_from(it.len()).unwrap_or(-1));
         let indexing = i64::try_from(self.indexes.building().map_or(0, |(_, at)| at)).unwrap_or(0);
+        // How many roots a queued build still owes, so a scenario can see that
+        // "every filesystem" is a queue rather than one walk.
+        let owed_roots = self.indexes_owed();
         let searched = self.search.as_ref().is_some_and(|it| it.indexed.is_some());
         let collapsed = self.panes.focused().hidden_count();
         let headings = self.headings_state();
@@ -7201,7 +7251,7 @@ look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan} \
 collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
 {look} \
-index={index} indexing={indexing} search_indexed={searched}",
+index={index} indexing={indexing} owed_roots={owed_roots} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
             cells.count(),
@@ -9951,13 +10001,24 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             // Once the counting pass has landed, the sentence says the
             // denominator the bar is drawn from — a bar with no number beside it
             // is a bar a person has to trust rather than read.
-            indexes.counted().map_or_else(
+            let said = indexes.counted().map_or_else(
                 || sk_model::i18n::plural("index.building", count as u64, &[&done]),
                 |total| {
                     let all = sk_ui::format::grouped(total);
                     sk_model::i18n::plural("index.building_of", total as u64, &[&done, &all])
                 },
-            )
+            );
+            // **And which root of how many**, where a queue is running: three
+            // filesystems is three walks, and a line that said the same thing for
+            // eleven minutes would be a line nobody could tell from a stuck one.
+            let owed = indexes.owed().len();
+            if owed == 0 {
+                said
+            } else {
+                let at = 1;
+                let all = owed + 1;
+                format!("{said} · {}", sk_model::i18n::format("index.of_roots", &[&at, &all]))
+            }
         });
         let progress = edits.progress_line().or(indexing);
         let doomed: Option<(Vec<String>, usize, bool)> = erasing.as_ref().map(|asking| {

@@ -308,6 +308,8 @@ index.building[one] = Indexing… {0} entry so far
 index.building[other] = Indexing… {0} entries so far
 index.building_of[one] = Indexing… {0} of {1} entry
 index.building_of[other] = Indexing… {0} of {1} entries
+# Which filesystem of how many, while a queued build works through them.
+index.of_roots = filesystem {0} of {1}
 action.search_everywhere = Search everywhere
 action.search = Find a file
 action.search_results = Show all results in this pane
@@ -418,6 +420,7 @@ action.cursor_right = Cursor right
 action.extend_left = Extend selection left
 action.extend_right = Extend selection right
 action.index_build = Index this folder
+action.index_build_all = Index every filesystem
 action.index_forget = Delete this folder's index
 
 # Properties.

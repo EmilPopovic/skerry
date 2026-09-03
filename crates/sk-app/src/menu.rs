@@ -95,6 +95,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
         "go.search",
         "go.search_everywhere",
         "index.build",
+        "index.build_all",
         "index.forget",
     ],
     &[

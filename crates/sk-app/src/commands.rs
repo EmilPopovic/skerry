@@ -195,6 +195,16 @@ fn finding(registry: &mut Registry<App>) {
             run: App::build_index,
         },
         CommandSpec {
+            id: "index.build_all",
+            name: "action.index_build_all",
+            group: Group::Navigate,
+            // **`Shift` on the same letter as the pair above**, so the three sit
+            // together in the palette and finding one teaches the others.
+            keys: &["ctrl+alt+shift+i"],
+            enabled: |app: &App| !app.indexing() && app.has_volumes(),
+            run: App::build_every_index,
+        },
+        CommandSpec {
             id: "index.forget",
             name: "action.index_forget",
             group: Group::Navigate,

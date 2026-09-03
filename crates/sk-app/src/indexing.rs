@@ -59,6 +59,12 @@ pub(crate) struct Indexes {
     total: (usize, bool),
     /// The token that stops a build in flight.
     cancel: Option<sk_util::Cancel>,
+    /// The roots still owed a build, oldest first.
+    ///
+    /// **What "index every filesystem" is**: one build is one walk of one
+    /// filesystem, so indexing several is the same build repeated — and the
+    /// strip's line says which of how many while it works through them.
+    owed: Vec<PathBuf>,
     /// The roots a load or a build has been asked about.
     ///
     /// A reply names no root, so this is what stops a second load being asked
@@ -112,9 +118,39 @@ impl Indexes {
         self.building.as_ref().map(|(root, count)| (root.as_path(), *count))
     }
 
+    /// The roots still owed a build, after the one running.
+    pub(crate) fn owed(&self) -> &[std::path::PathBuf] {
+        &self.owed
+    }
+
+    /// Puts `roots` in the queue, in order, behind whatever is running.
+    ///
+    /// **A queue rather than a batch.** One build is one walk of one filesystem
+    /// and the strip reports one — so indexing every root is the same build run
+    /// as many times as there are roots, and the line says which of how many.
+    /// The alternative is a walk of several devices at once, which is [ADR
+    /// 0022](../../../docs/adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)'s
+    /// question for a *search* and the wrong shape for a build: the file is one
+    /// per root, so the work is too.
+    pub(crate) fn owe(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.owed = roots;
+    }
+
+    /// The next root owed, if any, taken out of the queue.
+    pub(crate) fn next_owed(&mut self) -> Option<std::path::PathBuf> {
+        if self.owed.is_empty() {
+            return None;
+        }
+        Some(self.owed.remove(0))
+    }
+
     /// Starts a build, replacing any that was running.
     pub(crate) fn begins(&mut self, root: &Path, cancel: sk_util::Cancel) {
+        // **The queue survives this**, because `begins` is how each root in it
+        // starts: a stop is what empties it, and a stop is somebody saying so.
+        let owed = std::mem::take(&mut self.owed);
         self.stop();
+        self.owed = owed;
         self.asking(root);
         self.building = Some((root.to_path_buf(), 0));
         self.total = (0, false);
@@ -141,12 +177,17 @@ impl Indexes {
         }
     }
 
-    /// Stops a build in flight, if there is one.
+    /// Stops a build in flight, if there is one, and forgets what was owed.
+    ///
+    /// **Both, because a stop is one gesture.** A queue that outlived the stop
+    /// would start the next root a moment after somebody asked for nothing to be
+    /// running — which is the shape of a progress bar that will not go away.
     pub(crate) fn stop(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
         }
         self.building = None;
+        self.owed.clear();
     }
 
     /// Forgets the index for `root` — the bytes, and that there was one.
@@ -204,6 +245,8 @@ impl Indexes {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
     use super::{Indexes, Note};
     use std::path::Path;
 
@@ -258,6 +301,34 @@ mod tests {
         // And it goes away with the build rather than lingering over the strip.
         indexes.arrived(Note::Built(None));
         assert!(indexes.fraction().is_none());
+    }
+
+    /// Three roots, one at a time, and a stop that means all of them.
+    #[test]
+    fn a_queue_of_roots_is_worked_through_and_a_stop_empties_it() {
+        let mut indexes = Indexes::default();
+        let roots: Vec<std::path::PathBuf> =
+            ["/", "/home", "/mnt/backup"].iter().map(std::path::PathBuf::from).collect();
+        let mut queue = roots.clone();
+        let first = queue.remove(0);
+        indexes.owe(queue);
+        indexes.begins(&first, sk_util::Cancel::new());
+        // **The queue survives the start**, which is the thing `begins` had to be
+        // taught: it stops whatever was running, and a stop empties the queue.
+        assert_eq!(indexes.owed().len(), 2);
+        assert_eq!(indexes.building().map(|(root, _)| root), Some(roots[0].as_path()));
+
+        let next = indexes.next_owed().expect("a second root");
+        assert_eq!(next, roots[1]);
+        indexes.begins(&next, sk_util::Cancel::new());
+        assert_eq!(indexes.owed().len(), 1);
+
+        // A stop is one gesture: nothing running and nothing owed, or the next
+        // root starts a moment after somebody asked for nothing to be.
+        indexes.stop();
+        assert!(indexes.building().is_none());
+        assert!(indexes.owed().is_empty());
+        assert!(indexes.next_owed().is_none());
     }
 
     /// A build that is cancelled stops being a build in flight.

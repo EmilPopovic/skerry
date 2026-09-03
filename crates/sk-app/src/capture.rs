@@ -1110,7 +1110,12 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         notice: request
             .progress
             .then_some("Copying 1,204 of 1,776 · 42 MB/s · about 14 s left")
-            .or(request.indexing.then_some("Indexing… 214,880 of 563,605 entries"))
+            // **With the queue's own clause**, because "index every filesystem"
+            // is three walks and the line that says which one is the difference
+            // between a build in progress and a build that looks stuck.
+            .or(request
+                .indexing
+                .then_some("Indexing… 214,880 of 563,605 entries · filesystem 1 of 3"))
             .or(request.stopped.then_some("Copying stopped — 572 of 1,776 left")),
         // The pointer is on a row, so nothing in the frame is hovered
         // — the hover shapes are covered by the GUI scenarios, which can

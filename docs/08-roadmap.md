@@ -702,10 +702,17 @@ search's summary line — puts every result into the pane as rows, and then they
 rows. Selecting, copying, dragging, trashing and undoing all work on them with no
 second implementation, which is what [rule 8](03-principles.md) asks for.
 
-What is still owed in M4: **one action that indexes every root** — `index.build`
-acts on the folder you are standing in, so indexing the whole filesystem is two
-steps, Filesystem in the sidebar and then Build the index — and extension facets
-and ignore rules, which are untouched.
+**One action now indexes every root.** `index.build` acts on the folder you are
+standing in, so indexing the machine used to be two steps — Filesystem in the
+sidebar, then Build the index — and two steps is a feature nobody finds for the
+machine's *other* disks at all. `index.build_all` takes the sidebar's own
+Volumes, which is the set [ADR
+0022](adr/0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md)
+already settled "everywhere" to mean, and queues them: one build is one walk of
+one filesystem, so several is the same build repeated, and the strip's line says
+`filesystem 1 of 3` while it works through them. The reply that ends one starts
+the next, so there is no timer and no second scheduler. What is still owed in M4
+is extension facets and ignore rules, which are untouched.
 
 What made it a bigger change than it looks was the sentence above: every
 `path.join(name)` assumed one directory behind it, at ten call sites. A `Listing`
