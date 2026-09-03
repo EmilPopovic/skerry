@@ -248,13 +248,18 @@ FRAMES = [
     # runs carrying a tone, and there is one tone. In the mono face, with its lines
     # numbered, because a file's own text is the one place in this program where the
     # columns are the content.
+    #
+    # **And it is where the wrap shows.** The fixture's eighth line is wider than
+    # the panel: it takes two rows, the second of them unnumbered, which is the
+    # frame that says a long line is readable rather than cut off at the edge.
     ("quick-look-text", ["--size", "900x600", "--scale", "125", "--look", "readme.txt"],
      "pictures"),
     # **And with all of it selected.** What this shows is the highlight behind the
     # runs rather than over them, that a blank line inside the selection is
     # highlighted rather than skipped, and that a line which continues into the
-    # next one is highlighted past its own last character — three things that make
-    # a selection read as one region instead of nine.
+    # next one — or onto its own second row — is highlighted past its own last
+    # character: the things that make a selection read as one region instead of
+    # nine.
     ("quick-look-chosen",
      ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-selected"],
      "pictures"),
@@ -529,8 +534,9 @@ def build_pictures() -> None:
         "written is everything around it, so adding one replaces a single\n"
         "function and nothing here.\n"
         "\n"
-        "\tA tab, and a line long enough that it runs past the panel and is "
-        "elided rather than wrapped, which is what a glance at a file gives you.\n"
+        "\tA tab, and a line long enough that it runs past the panel and wraps "
+        "onto a second row, which is the row the gutter deliberately leaves "
+        "unnumbered.\n"
         "  ¡Ünïcödé, שלום, 日本語!\n"
     )
     # A one-page PDF, written by hand so it needs no tool to generate — and it is

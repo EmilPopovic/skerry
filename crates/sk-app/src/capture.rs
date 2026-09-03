@@ -110,8 +110,9 @@ fn sample_quick_look(
     request: &Capture,
     session: &mut Session,
     pane: &Pane,
-    layout: &Layout,
+    where_: (&Layout, &Theme, &mut LayoutCache),
 ) -> Option<crate::quicklook::QuickLook> {
+    let (layout, theme, cache) = where_;
     let wanted = request.looking.as_deref()?;
     let types = sk_desktop::MimeDatabase::load();
     let row = (0..pane.listing.rows())
@@ -134,12 +135,28 @@ fn sample_quick_look(
         while !look.drain() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
+        // **Cut to the panel's width, the same way a window does it.** The rows
+        // are the wrap and the wrap is what is drawn, so a capture that skipped
+        // this would render long lines elided — a frame of a state the program
+        // no longer has. `App::fit_the_look` is the window's half.
+        if let Some(text) = look.text.as_mut() {
+            let cells = crate::view::text_cells(
+                text.lines.len(),
+                (inner, &theme.metrics),
+                (cache, &mut session.fonts, scale),
+            );
+            text.wrap(cells);
+        }
         if request.look_selected {
             look.select_all();
         }
         if request.look_editing {
-            look.editing = true;
+            look.start_editing();
             look.put_caret(crate::quicklook::Spot { line: 2, byte: 4 });
+            // **With an edit outstanding**, because that is the state whose strip
+            // is worth a frame: Done beside Discard, which is the only way out
+            // that writes nothing and therefore the one that has to be visible.
+            look.unsaved = true;
         }
         return Some(look);
     }
@@ -1169,7 +1186,8 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // so a capture is never an image with holes in the text.
     let keyboard_hint = crate::commands::hint(&crate::commands::registry());
     let edits = sample_edits(request, &session);
-    let look = sample_quick_look(request, &mut session, panes.focused(), &layout);
+    let look =
+        sample_quick_look(request, &mut session, panes.focused(), (&layout, &theme, &mut cache));
     let sample = Sample {
         look: look.as_ref(),
         edits: &edits,

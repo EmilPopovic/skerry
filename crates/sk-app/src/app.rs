@@ -2947,7 +2947,7 @@ impl App {
     /// somebody is looking at is not a button. A press *outside* falls through, so
     /// clicking the list behind the look closes it by choosing a different file —
     /// which is what a person means by clicking a list they can see.
-    fn press_in_the_quick_look(&mut self, position: Point) -> bool {
+    fn press_in_the_quick_look(&mut self, position: Point, shift: bool) -> bool {
         if self.quick_look.is_none() {
             return false;
         }
@@ -2957,10 +2957,13 @@ impl App {
             Some(crate::view::LookControl::PreviousPage) => self.look_by(-1, false),
             Some(crate::view::LookControl::NextPage) => self.look_by(1, false),
             Some(crate::view::LookControl::Edit) => self.toggle_editing_the_look(),
+            Some(crate::view::LookControl::Discard) => self.discard_the_look(),
             None => {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
-                if inside.contains(position.x, position.y) && self.start_choosing_text(position) {
+                if inside.contains(position.x, position.y)
+                    && self.start_choosing_text(position, shift)
+                {
                     self.dirty = true;
                     return true;
                 }
@@ -2986,10 +2989,19 @@ impl App {
     /// **Only for text.** A press on a picture or a page is not the start of
     /// anything — there is nothing there to select — and a click that quietly
     /// armed a drag would make the panel feel like it had a mode.
-    fn start_choosing_text(&mut self, position: Point) -> bool {
+    fn start_choosing_text(&mut self, position: Point, shift: bool) -> bool {
         let Some(spot) = self.text_spot_at(position) else { return false };
         let Some(look) = self.quick_look.as_mut() else { return false };
-        look.chosen = Some(crate::quicklook::Chosen { anchor: spot, caret: spot });
+        // **`Shift` keeps the anchor**, which is what a shift-click means in
+        // every text there is: select from where the last click left off to here.
+        // Without it the only way to select a paragraph was to hold the button
+        // down for the whole of it, and a drag that has to cross a scroll is a
+        // gesture nobody completes.
+        let anchor = match look.chosen.filter(|_| shift) {
+            Some(chosen) => chosen.anchor,
+            None => spot,
+        };
+        look.chosen = Some(crate::quicklook::Chosen { anchor, caret: spot });
         look.dragging = true;
         true
     }
@@ -3623,26 +3635,40 @@ impl App {
     /// dimmed row rather than a folder somewhere else turning red. Finder and
     /// Drive both colour the thing that was clicked, and neither offers it for
     /// nothing.
-    fn folder_to_colour(&self) -> Option<PathBuf> {
-        self.place_target.clone().or_else(|| self.focused_directory())
+    fn folders_to_colour(&self) -> Vec<PathBuf> {
+        // A place's own menu names one place and nothing else; over a listing the
+        // answer is the selection, which is [rule
+        // 8](../../../docs/03-principles.md): one selection, and every command
+        // that acts on entries acts on all of it. Colouring six folders one at a
+        // time is six menus for one decision.
+        if let Some(place) = self.place_target.clone() {
+            return vec![place];
+        }
+        self.selected_directories()
     }
 
-    /// Whether the entry in question is a folder a colour can be given to.
+    /// Whether there is a folder a colour can be given to.
     #[must_use]
     pub(crate) fn can_colour(&self) -> bool {
-        self.folder_to_colour().is_some()
+        !self.folders_to_colour().is_empty()
     }
 
-    /// Whether the folder in question has a colour to take away.
+    /// Whether any folder in question has a colour to take away.
     #[must_use]
     pub(crate) fn can_uncolour(&self) -> bool {
-        self.folder_to_colour().is_some_and(|path| self.views.colour_of(&path).is_some())
+        self.folders_to_colour().iter().any(|path| self.views.colour_of(path).is_some())
     }
 
-    /// Gives the folder in question a colour, or takes its colour away.
+    /// Gives every folder in question a colour, or takes their colours away.
     pub(crate) fn colour_folder(&mut self, colour: Option<crate::colours::Colour>) {
-        let Some(path) = self.folder_to_colour() else { return };
-        if self.views.colour(&path, colour) {
+        let mut changed = false;
+        for path in self.folders_to_colour() {
+            changed |= self.views.colour(&path, colour);
+        }
+        // **One write for the whole selection**, not one per folder: the record is
+        // a file per folder's *parent* and six writes of it would be six passes
+        // over the same lines.
+        if changed {
             self.keep_the_views();
         }
         self.dirty = true;
@@ -4018,8 +4044,8 @@ impl App {
             // rule the palette and a tall menu follow.
             let inner = crate::view::quick_look_area(&self.layout);
             let step = self.theme.metrics.row_height;
-            let lines = look.text.as_ref().map_or(0, |it| it.lines.len());
-            look.scroll.set_extent(lines as f32 * step, inner.height);
+            let rows = look.text.as_ref().map_or(0, |it| it.rows().len());
+            look.scroll.set_extent(rows as f32 * step, inner.height);
             look.scroll.by(delta.y, precise, time);
             self.dirty = true;
         } else if self.history_open && self.layout.history.contains(self.pointer.x, self.pointer.y)
@@ -4958,10 +4984,33 @@ impl App {
     fn editor_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
         use crate::quicklook::Step;
         use sk_plat::{Key, Named};
-        if event.mods.ctrl || event.mods.alt || event.mods.logo {
+        if event.mods.alt || event.mods.logo {
             return false;
         }
         let shift = event.mods.shift;
+        // **`Ctrl` moves by word, and nothing else.** `Ctrl+A`, `Ctrl+C`,
+        // `Ctrl+E` and `Ctrl+S` are commands in [`Scope::Look`] and are resolved
+        // before this is reached; what is left is the movement half of what every
+        // text field in this program does with `Ctrl` — with `Shift` selecting as
+        // it goes, which is the thing that could not be done here at all.
+        if event.mods.ctrl {
+            let step = match event.key {
+                Key::Named(Named::Left) => Step::WordBack,
+                Key::Named(Named::Right) => Step::WordOn,
+                Key::Named(Named::Home) => Step::Start,
+                Key::Named(Named::End) => Step::End,
+                Key::Named(Named::Backspace) => return self.delete_a_word(false),
+                Key::Named(Named::Delete) => return self.delete_a_word(true),
+                _ => return false,
+            };
+            let Some(look) = self.quick_look.as_mut() else { return false };
+            let taken = look.move_caret(step, shift);
+            if taken {
+                self.reveal_the_caret();
+                self.dirty = true;
+            }
+            return taken;
+        }
         let Some(look) = self.quick_look.as_mut() else { return false };
         let taken = match &event.key {
             Key::Character(text) => look.type_in(&text.to_string()),
@@ -4975,15 +5024,68 @@ impl App {
             Key::Named(Named::Down) => look.move_caret(Step::Down, shift),
             Key::Named(Named::Home) => look.move_caret(Step::LineStart, shift),
             Key::Named(Named::End) => look.move_caret(Step::LineEnd, shift),
-            // **A second `Escape` closes the panel**, which is what it does
-            // everywhere else — the first one leaves edit mode, saving on the way
-            // out like every other way of leaving it.
+            // **`Escape` throws the edit away**, which is what `Escape` means
+            // everywhere in this program: a menu closes without choosing, a
+            // question stops, a rename field abandons the name. Every *other* way
+            // out saves — the Done button, `Ctrl+E`, `Ctrl+S`, `Space`, a click on
+            // the list — so this is the one answer to "actually, never mind", and
+            // it says so in the status line because a discard is the only thing
+            // here that `Ctrl+Z` cannot walk back: nothing was written.
+            //
+            // With nothing to discard it falls through, and `Escape` closes the
+            // panel as it always has.
             Key::Named(Named::Escape) => {
+                if !self.discard_the_edit() {
+                    return false;
+                }
                 self.stop_editing_the_look();
                 return true;
             }
             _ => false,
         };
+        if taken {
+            self.reveal_the_caret();
+            self.dirty = true;
+        }
+        taken
+    }
+
+    /// Throws away an edit that has not been written. Whether there was one.
+    ///
+    /// **Not on the undo stack, because it never reached the filesystem.** Rule 3
+    /// is about mutations, and a buffer that was never saved is not one — which is
+    /// exactly why this says so out loud rather than doing it quietly.
+    pub(crate) fn discard_the_edit(&mut self) -> bool {
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        if !look.discard() {
+            return false;
+        }
+        self.notice =
+            Some((sk_model::i18n::lookup("notice.edit_discarded").to_owned(), Instant::now()));
+        self.dirty = true;
+        true
+    }
+
+    /// Throws the edit away and leaves edit mode — the command, and the button.
+    pub(crate) fn discard_the_look(&mut self) {
+        if self.discard_the_edit() {
+            self.stop_editing_the_look();
+        }
+    }
+
+    /// `Ctrl+Backspace` and `Ctrl+Delete`: the word beside the caret.
+    fn delete_a_word(&mut self, forward: bool) -> bool {
+        use crate::quicklook::Step;
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        if !look.editing {
+            return false;
+        }
+        // Selected first and then deleted, which is what makes this the same two
+        // functions a `Shift+Ctrl+←` and a `Backspace` already are.
+        if !look.has_selection() {
+            look.move_caret(if forward { Step::WordOn } else { Step::WordBack }, true);
+        }
+        let taken = if forward { look.delete_forward() } else { look.delete_back() };
         if taken {
             self.reveal_the_caret();
             self.dirty = true;
@@ -5000,10 +5102,7 @@ impl App {
         let Some(look) = self.quick_look.as_mut().filter(|look| look.text.is_some()) else {
             return;
         };
-        look.editing = true;
-        if look.chosen.is_none() {
-            look.put_caret(crate::quicklook::Spot { line: 0, byte: 0 });
-        }
+        look.start_editing();
         self.dirty = true;
     }
 
@@ -5044,9 +5143,36 @@ impl App {
         let Some(look) = self.quick_look.as_mut().filter(|look| look.unsaved) else { return };
         let Some(text) = look.text.as_ref() else { return };
         let (path, body) = (look.path.clone(), text.body());
-        look.unsaved = false;
+        // Remembered as the file's own text, so a Discard after two saves puts
+        // back what was last written rather than what was first opened.
+        look.saved_as(body.clone());
         self.edits.write_text(path, body, &self.jobs);
         self.dirty = true;
+    }
+
+    /// Cuts the open text preview to the panel's width.
+    ///
+    /// **Once a frame, and it does nothing when the width has not changed.** The
+    /// rows *are* the layout — where a line breaks decides what a click means and
+    /// what `Down` does — so they cannot be a per-frame pass over the file, and
+    /// they cannot be stale either. This is the one place that knows both the
+    /// panel and the font, which is why it is here rather than in the drawing.
+    fn fit_the_look(&mut self) {
+        if self.quick_look.is_none() {
+            return;
+        }
+        let inner = crate::view::quick_look_area(&self.layout);
+        let metrics = self.theme.metrics;
+        let scale = self.window.scale();
+        let Self { quick_look, cache, fonts, .. } = self;
+        let Some(look) = quick_look.as_mut() else { return };
+        let Some(text) = look.text.as_mut() else { return };
+        let cells =
+            crate::view::text_cells(text.lines.len(), (inner, &metrics), (cache, fonts, scale));
+        if cells != text.cells() {
+            text.wrap(cells);
+            self.dirty = true;
+        }
     }
 
     /// Scrolls the caret's line into view.
@@ -5054,10 +5180,14 @@ impl App {
         let inner = crate::view::quick_look_area(&self.layout);
         let step = self.theme.metrics.row_height;
         let Some(look) = self.quick_look.as_mut() else { return };
-        let line = look.caret().line as f32;
+        // **The drawn row, not the line.** A caret six rows down a wrapped
+        // paragraph is six rows down the panel, and revealing the line would
+        // scroll to the paragraph's first row and leave the caret off screen.
+        let at = look.caret();
+        let row = look.text.as_ref().map_or(0, |text| text.row_of(at)) as f32;
         // The same `reveal` a cursor uses, for the same reason: the least scroll
         // that brings the line into view, rather than re-centring under it.
-        look.scroll.reveal(line * step, (line + 1.0) * step, inner.height.max(step));
+        look.scroll.reveal(row * step, (row + 1.0) * step, inner.height.max(step));
     }
 
     /// A key while a name-taken question is open. Whether it was taken.
@@ -5925,8 +6055,8 @@ scope_aim={scope_aim:?}",
                 look.turn(delta);
             }
             crate::previews::Shows::Text => {
-                let lines = look.text.as_ref().map_or(0, |it| it.lines.len());
-                look.scroll.set_extent(lines as f32 * step, room);
+                let rows = look.text.as_ref().map_or(0, |it| it.rows().len());
+                look.scroll.set_extent(rows as f32 * step, room);
                 // `to` rather than `by`: a keystroke goes where it was sent and
                 // does not carry on afterwards, which is what `Scroll::to` is for
                 // and what `by` — whose job is a finger's velocity — is not.
@@ -6589,6 +6719,7 @@ scope_aim={scope_aim:?}",
                     crate::view::LookControl::PreviousPage => "previous_page",
                     crate::view::LookControl::NextPage => "next_page",
                     crate::view::LookControl::Edit => "edit",
+                    crate::view::LookControl::Discard => "discard",
                 };
                 format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
             })
@@ -6621,6 +6752,15 @@ scope_aim={scope_aim:?}",
                 format!("{}:{}", at.line, at.byte)
             },
         );
+        // **How many rows the text took**, which is the only way a scenario can
+        // see that a long line wrapped rather than being cut off at the panel's
+        // edge: the rows *are* the wrap.
+        let look_rows = self
+            .quick_look
+            .as_ref()
+            .and_then(|look| look.text.as_ref())
+            .map_or(0, |text| text.rows().len());
+        let look_unsaved = self.look_is_unsaved();
         let look_page = self.quick_look.as_ref().map_or_else(
             || "none".to_owned(),
             |look| {
@@ -6639,7 +6779,7 @@ collapsed={collapsed} headings={headings} \
 history={history} history_open={history_open} history_aim={history_aim} \
 looking={looking} look_page={look_page} look_aim={look_aim:?} \
 look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
-look_chosen={look_chosen} \
+look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
 index={index} indexing={indexing} search_indexed={searched}",
             cells.mode().token(),
             self.panes.focused().grouping.token(),
@@ -7443,7 +7583,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         commands: &Registry<Self>,
     ) {
         self.pointer = position;
-        if self.press_in_an_overlay(position, commands) {
+        if self.press_in_an_overlay(position, shift, commands) {
             return;
         }
         if self.press_in_a_field(position) {
@@ -7941,7 +8081,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// hundred-line limit; it is one idea — a surface over the list gets the press
     /// before the list does — and the chain below it is the other, which is the
     /// window's own furniture and then the rows.
-    fn press_in_an_overlay(&mut self, position: Point, commands: &Registry<Self>) -> bool {
+    fn press_in_an_overlay(
+        &mut self,
+        position: Point,
+        shift: bool,
+        commands: &Registry<Self>,
+    ) -> bool {
         // First, and it takes every press: the question has no dismissal, so a
         // press that fell through to the list behind it would move a selection
         // the queue is about to act on.
@@ -7980,7 +8125,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // that took every press inside the panel first swallowed the click on the
         // menu row — and started an empty selection where the row was, which is
         // how `Copy` came to copy nothing.
-        if self.press_in_the_quick_look(position) {
+        if self.press_in_the_quick_look(position, shift) {
             return true;
         }
         false
@@ -8966,6 +9111,35 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.point(if clickable { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow });
             return true;
         }
+        // **A quick look is over the whole window, so nothing under it hovers.**
+        // The panel already keeps the *rows* beneath it from lighting up —
+        // `hits.panels` — but the chrome, the sidebar, the tab strips and the
+        // dividers are not rows, and every one of them went on tracking a
+        // pointer that was reading a file, offering clicks that only close the
+        // panel. Its own controls and its own text are what is left.
+        if self.quick_look.is_some() {
+            let control = self.look_control_at(position);
+            if self.hovered_look != control {
+                self.hovered_look = control;
+                self.dirty = true;
+            }
+            self.nothing_hovers_under_the_look();
+            // **Before the return.** A drag that leaves the panel still extends
+            // the selection, which is what dragging past an edge means in every
+            // text view — and this branch is now the only place a motion event
+            // reaches while a look is open.
+            if self.extend_the_text_choice(position) {
+                self.dirty = true;
+            }
+            let over_text = self.looking_at_text()
+                && crate::view::quick_look_area(&self.layout).contains(position.x, position.y);
+            self.point(match (control.is_some(), over_text) {
+                (true, _) => sk_plat::Cursor::Hand,
+                (false, true) => sk_plat::Cursor::Text,
+                (false, false) => sk_plat::Cursor::Arrow,
+            });
+            return true;
+        }
         // A separator's menu is over the list, so nothing under it hovers: a row
         // lighting up behind a panel reads as a click that will land there, and
         // the click does not — a press outside this menu closes it and does
@@ -8990,6 +9164,34 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return true;
         }
         false
+    }
+
+    /// Puts out every highlight that belongs to something the panel covers.
+    ///
+    /// **Cleared rather than left alone**, because a hover is a fact about where
+    /// the pointer is and the pointer is over a panel: a button still lit from
+    /// before the panel opened is a button that looks pressable and is not.
+    fn nothing_hovers_under_the_look(&mut self) {
+        let lit = self.hovered_button.is_some()
+            || self.hovered_crumb.is_some()
+            || self.hovered_tool.is_some()
+            || self.hovered_mode.is_some()
+            || self.sidebar.hover.is_some()
+            || self.placement.hovered_tab.is_some()
+            || self.placement.hovered_plus
+            || self.placement.hovered_divider.is_some();
+        if !lit {
+            return;
+        }
+        self.hovered_button = None;
+        self.hovered_crumb = None;
+        self.hovered_tool = None;
+        self.hovered_mode = None;
+        self.sidebar.hover = None;
+        self.placement.hovered_tab = None;
+        self.placement.hovered_plus = false;
+        self.placement.hovered_divider = None;
+        self.dirty = true;
     }
 
     fn moved(&mut self, position: Point) {
@@ -9217,6 +9419,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     // and neither could be read without the other.
     #[expect(clippy::too_many_lines, reason = "a struct literal with one call site")]
     fn render(&mut self, commands: &Registry<Self>, turn: Instant) {
+        // **Before the frame, because the rows are the layout.** A width that has
+        // not changed costs a comparison; one that has costs a pass over four
+        // hundred lines, which is what a resize is.
+        self.fit_the_look();
         let (physical, scale) = self.before_frame(commands);
         self.list.begin(physical);
         // Two answers taken before the borrow is split, because both ask `self`

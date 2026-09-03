@@ -134,14 +134,37 @@ pub(crate) enum Step {
     Back,
     /// One character on.
     On,
-    /// The line above.
+    /// The row above — the *drawn* row, so a wrapped line has as many as it took.
     Up,
-    /// The line below.
+    /// The row below.
     Down,
-    /// The start of this line.
+    /// The start of this drawn row.
     LineStart,
     /// The end of it.
     LineEnd,
+    /// The start of the word before the caret.
+    WordBack,
+    /// The end of the word after it.
+    WordOn,
+    /// The first character of the file.
+    Start,
+    /// The last one.
+    End,
+}
+
+/// One drawn row: the part of one line that fitted across the panel.
+///
+/// **The unit of drawing, of clicking and of `Up`/`Down`**, because a line and a
+/// row stopped being the same thing when the text learned to wrap. A line that
+/// fits is one row; a paragraph is as many as it took.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Row {
+    /// Which line of the file it is part of.
+    pub(crate) line: usize,
+    /// The first byte of that line on this row.
+    pub(crate) from: usize,
+    /// One past its last byte.
+    pub(crate) to: usize,
 }
 
 /// A file's text, cut into lines and each line into tones.
@@ -152,6 +175,10 @@ pub(crate) struct Text {
     pub(crate) spans: Vec<Vec<Span>>,
     /// Whether the file went on past what was read.
     pub(crate) truncated: bool,
+    /// The drawn rows, in order: every line's, cut where it wrapped.
+    rows: Vec<Row>,
+    /// How many characters wide the rows were wrapped to. Zero is unwrapped.
+    cells: usize,
 }
 
 /// Cuts each line into tones.
@@ -206,6 +233,7 @@ impl Text {
         }
         self.lines[spot.line].push_str(&tail);
         self.retone(line..=spot.line);
+        self.rewrap();
         spot
     }
 
@@ -224,6 +252,7 @@ impl Text {
         }
         self.lines[from.line].push_str(&tail);
         self.retone(from.line..=from.line);
+        self.rewrap();
         from
     }
 
@@ -294,7 +323,148 @@ impl Text {
             lines.push(body.replace('\t', TAB));
         }
         let spans = highlight(&lines);
-        Self { lines, spans, truncated }
+        let mut text = Self { lines, spans, truncated, rows: Vec::new(), cells: 0 };
+        text.rewrap();
+        text
+    }
+
+    /// Cuts every line to `cells` characters wide, where that has changed.
+    ///
+    /// **Called once a frame from the one place that knows the width.** The rows
+    /// are the layout, so recomputing them per frame would be a pass over the
+    /// file inside the 8 ms budget; recomputing them when the panel's width
+    /// changes is a pass over four hundred lines when a window is resized.
+    pub(crate) fn wrap(&mut self, cells: usize) {
+        if cells == self.cells {
+            return;
+        }
+        self.cells = cells;
+        self.rewrap();
+    }
+
+    /// How wide the rows are cut, in characters.
+    pub(crate) fn cells(&self) -> usize {
+        self.cells
+    }
+
+    /// The drawn rows.
+    pub(crate) fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    /// Cuts the lines again at the width already remembered.
+    ///
+    /// **After every edit**, because a typed character can push a word onto the
+    /// next row and a `Backspace` can pull it back. Four hundred lines is the
+    /// most a preview reads — `LINES` — so this is a bounded pass and not a
+    /// function of the file's size.
+    fn rewrap(&mut self) {
+        self.rows.clear();
+        for (line, body) in self.lines.iter().enumerate() {
+            wrap_one(body, self.cells, line, &mut self.rows);
+        }
+        if self.rows.is_empty() {
+            self.rows.push(Row { line: 0, from: 0, to: 0 });
+        }
+    }
+
+    /// Which drawn row a spot is on.
+    ///
+    /// At a wrap the answer is the *following* row, which is where the caret
+    /// belongs: the character it is in front of is the first one of that row.
+    pub(crate) fn row_of(&self, at: Spot) -> usize {
+        let after = self.rows.partition_point(|row| (row.line, row.from) <= (at.line, at.byte));
+        after.saturating_sub(1)
+    }
+
+    /// How many characters into its row a spot is.
+    pub(crate) fn cell_of(&self, at: Spot) -> usize {
+        let Some(row) = self.rows.get(self.row_of(at)) else { return 0 };
+        let body = self.lines.get(row.line).map_or("", String::as_str);
+        let from = row.from.min(body.len());
+        let to = at.byte.clamp(from, body.len());
+        body.get(from..to).map_or(0, |slice| slice.chars().count())
+    }
+
+    /// The spot `cell` characters into the drawn row at `row`.
+    pub(crate) fn spot_at(&self, row: usize, cell: usize) -> Spot {
+        let Some(row) = self.rows.get(row.min(self.rows.len().saturating_sub(1))) else {
+            return Spot { line: 0, byte: 0 };
+        };
+        let body = self.lines.get(row.line).map_or("", String::as_str);
+        let (from, to) = (row.from.min(body.len()), row.to.min(body.len()));
+        let byte = body
+            .get(from..to)
+            .and_then(|slice| slice.char_indices().nth(cell))
+            .map_or(to, |(index, _)| from + index);
+        Spot { line: row.line, byte }
+    }
+
+    /// The start of the word before `at`, or the end of the line above.
+    pub(crate) fn word_before(&self, at: Spot) -> Spot {
+        let body = self.lines.get(at.line).map_or("", String::as_str);
+        let head = &body[..at.byte.min(body.len())];
+        if head.is_empty() {
+            return self.before(at);
+        }
+        // Whitespace first, then the run of word characters behind it: two
+        // presses to cross `foo   bar` is what every field in this program does,
+        // and `Field` settled the same rule for a name being typed.
+        let trimmed = head.trim_end();
+        let byte = trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, letter)| letter.is_whitespace())
+            .map_or(0, |(index, letter)| index + letter.len_utf8());
+        Spot { line: at.line, byte }
+    }
+
+    /// The end of the word after `at`, or the start of the line below.
+    pub(crate) fn word_after(&self, at: Spot) -> Spot {
+        let body = self.lines.get(at.line).map_or("", String::as_str);
+        let from = at.byte.min(body.len());
+        let tail = &body[from..];
+        if tail.is_empty() {
+            return self.after(at);
+        }
+        let skipped = tail.len() - tail.trim_start().len();
+        let byte = tail[skipped..]
+            .char_indices()
+            .find(|(_, letter)| letter.is_whitespace())
+            .map_or(body.len(), |(index, _)| from + skipped + index);
+        Spot { line: at.line, byte }
+    }
+}
+
+/// Cuts one line into rows of at most `cells` characters.
+///
+/// **Greedy, and at a space where there is one.** A hard cut every `cells`
+/// characters splits words in half, which is what makes wrapped prose unreadable;
+/// a word longer than a whole row is cut, because the alternative is a row wider
+/// than the panel. `cells` of zero is a panel too narrow to have measured yet, and
+/// leaves the line whole.
+fn wrap_one(body: &str, cells: usize, line: usize, out: &mut Vec<Row>) {
+    if cells == 0 || body.chars().count() <= cells {
+        out.push(Row { line, from: 0, to: body.len() });
+        return;
+    }
+    let mut from = 0;
+    while from < body.len() {
+        let rest = &body[from..];
+        if rest.chars().count() <= cells {
+            out.push(Row { line, from, to: body.len() });
+            return;
+        }
+        let hard = from + rest.char_indices().nth(cells).map_or(rest.len(), |(index, _)| index);
+        // The space is kept at the end of the row it broke, which is where a
+        // caret at the end of a wrapped row belongs.
+        let to = body[from..hard]
+            .rfind(' ')
+            .map(|index| from + index + 1)
+            .filter(|breaking| *breaking > from)
+            .unwrap_or(hard);
+        out.push(Row { line, from, to });
+        from = to;
     }
 }
 
@@ -382,6 +552,13 @@ pub(crate) struct QuickLook {
     /// `Ctrl+Z` takes back a save nobody meant — which is the whole reason
     /// `Change::Edited` carries both sides.
     pub(crate) unsaved: bool,
+    /// The text as it last stood on disk, while edit mode is on.
+    ///
+    /// **What Discard puts back.** An edit that has not been written has nothing
+    /// on the undo stack to walk back — the stack is about the filesystem — so
+    /// the one copy of the file as it was has to be here, taken when edit mode
+    /// starts and replaced by every save.
+    as_on_disk: Option<String>,
     reading: Option<mpsc::Receiver<Option<String>>>,
 }
 
@@ -407,6 +584,7 @@ impl QuickLook {
             dragging: false,
             editing: false,
             unsaved: false,
+            as_on_disk: None,
             reading: None,
         };
         if shows == Shows::Text {
@@ -672,6 +850,43 @@ impl QuickLook {
         self.chosen = Some(Chosen { anchor: spot, caret: spot });
     }
 
+    /// Turns edit mode on, remembering the file as it stands.
+    pub(crate) fn start_editing(&mut self) {
+        let Some(text) = self.text.as_ref() else { return };
+        self.as_on_disk = Some(text.body());
+        self.editing = true;
+        if self.chosen.is_none() {
+            self.put_caret(Spot { line: 0, byte: 0 });
+        }
+    }
+
+    /// Remembers what was just written as the file's own text.
+    pub(crate) fn saved_as(&mut self, body: String) {
+        self.as_on_disk = Some(body);
+        self.unsaved = false;
+    }
+
+    /// Puts the file back the way it was and forgets the edit.
+    ///
+    /// **The one way out that writes nothing.** Every other way of leaving edit
+    /// mode saves, which is what makes not asking safe; this is the answer to
+    /// "actually, never mind", and it is why the panel draws a button for it
+    /// rather than leaving `Escape` to be discovered.
+    pub(crate) fn discard(&mut self) -> bool {
+        let Some(body) = self.as_on_disk.clone() else { return false };
+        let Some(text) = self.text.as_ref() else { return false };
+        if !self.unsaved {
+            return false;
+        }
+        let cells = text.cells();
+        let mut fresh = Text::of(&body);
+        fresh.wrap(cells);
+        self.text = Some(fresh);
+        self.unsaved = false;
+        self.chosen = None;
+        true
+    }
+
     /// Types `text` in, replacing whatever is selected.
     ///
     /// Whether anything changed, which is what tells a key that was taken from
@@ -744,34 +959,36 @@ impl QuickLook {
 
     /// Moves the caret one step, optionally dragging the selection with it.
     ///
-    /// The four directions a keyboard has, and `Home` and `End`. Vertical
-    /// movement keeps the byte offset rather than the column, which is the
-    /// difference between this and a real editor and is honest for a monospaced
-    /// panel: every character is one cell wide, so the two agree until a line
-    /// holds something wider than one — an emoji, or a combining mark.
+    /// **`Up` and `Down` walk drawn rows, not lines**, and `Home` and `End` are
+    /// about the row too — which is what wrapping means for a caret: a paragraph
+    /// that took six rows takes six presses to cross, and the alternative is a
+    /// `Down` that jumps a screenful because the line it was on was long.
+    ///
+    /// The column is kept as a character count into the row rather than a byte
+    /// offset, which is honest for a monospaced panel: every character is one
+    /// cell wide until a line holds something wider than one — an emoji, or a
+    /// combining mark.
     pub(crate) fn move_caret(&mut self, step: Step, extend: bool) -> bool {
         let Some(buffer) = self.text.as_ref() else { return false };
         let from = self.caret();
         let last = buffer.lines.len().saturating_sub(1);
+        let bottom = buffer.rows().len().saturating_sub(1);
+        let row = buffer.row_of(from);
         let spot = match step {
             Step::Back => buffer.before(from),
             Step::On => buffer.after(from),
-            Step::Up if from.line == 0 => Spot { line: 0, byte: 0 },
-            Step::Up => {
-                let line = from.line - 1;
-                Spot { line, byte: from.byte.min(buffer.lines[line].len()) }
-            }
-            Step::Down if from.line >= last => {
+            Step::Up if row == 0 => Spot { line: 0, byte: 0 },
+            Step::Up => buffer.spot_at(row - 1, buffer.cell_of(from)),
+            Step::Down if row >= bottom => {
                 Spot { line: last, byte: buffer.lines.get(last).map_or(0, String::len) }
             }
-            Step::Down => {
-                let line = from.line + 1;
-                Spot { line, byte: from.byte.min(buffer.lines[line].len()) }
-            }
-            Step::LineStart => Spot { line: from.line, byte: 0 },
-            Step::LineEnd => {
-                Spot { line: from.line, byte: buffer.lines.get(from.line).map_or(0, String::len) }
-            }
+            Step::Down => buffer.spot_at(row + 1, buffer.cell_of(from)),
+            Step::LineStart => buffer.spot_at(row, 0),
+            Step::LineEnd => buffer.spot_at(row, usize::MAX),
+            Step::WordBack => buffer.word_before(from),
+            Step::WordOn => buffer.word_after(from),
+            Step::Start => Spot { line: 0, byte: 0 },
+            Step::End => Spot { line: last, byte: buffer.lines.get(last).map_or(0, String::len) },
         };
         let anchor = if extend { self.chosen.map_or(spot, |chosen| chosen.anchor) } else { spot };
         self.chosen = Some(Chosen { anchor, caret: spot });
@@ -812,7 +1029,7 @@ impl QuickLook {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Chosen, LINES, QuickLook, Spot, Text, Tone};
+    use super::{Chosen, LINES, QuickLook, Spot, Step, Text, Tone};
     use crate::previews::Shows;
     use sk_preview::Refusal;
 
@@ -1045,6 +1262,7 @@ mod tests {
             dragging: false,
             editing: false,
             unsaved: false,
+            as_on_disk: None,
             reading: None,
         }
     }
@@ -1316,5 +1534,146 @@ mod tests {
         assert_eq!(at, Spot { line: 0, byte: 5 });
         assert_eq!(text.lines, ["hello"]);
         assert_eq!(text.body(), "hello\n");
+    }
+
+    /// A long line is cut into rows, at spaces, and every row is a slice of it.
+    ///
+    /// The defect: the panel elided a long line with `…` and there was no way to
+    /// see or reach what was past the right edge — a paragraph could be read only
+    /// as far as the panel was wide.
+    #[test]
+    fn a_long_line_wraps_at_words_and_the_rows_cover_it() {
+        let mut text = Text::of(
+            "the quick brown fox jumps
+short
+",
+        );
+        text.wrap(10);
+        let rows: Vec<&str> =
+            text.rows().iter().map(|row| &text.lines[row.line][row.from..row.to]).collect();
+        assert_eq!(rows, ["the quick ", "brown fox ", "jumps", "short"]);
+        // Every row of a line, joined, is that line — no character is drawn twice
+        // and none is dropped.
+        for (line, body) in text.lines.iter().enumerate() {
+            let joined: String = text
+                .rows()
+                .iter()
+                .filter(|row| row.line == line)
+                .map(|row| &body[row.from..row.to])
+                .collect();
+            assert_eq!(&joined, body, "line {line}");
+        }
+
+        // A word longer than a whole row is cut, because the alternative is a row
+        // wider than the panel.
+        let mut long = Text::of(
+            "abcdefghijklmno
+",
+        );
+        long.wrap(6);
+        let cut: Vec<&str> =
+            long.rows().iter().map(|row| &long.lines[row.line][row.from..row.to]).collect();
+        assert_eq!(cut, ["abcdef", "ghijkl", "mno"]);
+    }
+
+    /// `Up` and `Down` walk drawn rows, and the column is kept across a wrap.
+    #[test]
+    fn the_caret_walks_wrapped_rows_and_not_lines() {
+        let mut look = texted(
+            "the quick brown fox jumps
+short
+",
+        );
+        look.editing = true;
+        look.text.as_mut().expect("text").wrap(10);
+        look.put_caret(Spot { line: 0, byte: 2 });
+
+        // Down from the first row of a wrapped line lands on its second row, at
+        // the same column — not on the next line of the file.
+        look.move_caret(Step::Down, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 12 });
+        look.move_caret(Step::Down, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 22 });
+        // And the row after the last row of that line is the next line.
+        look.move_caret(Step::Down, false);
+        assert_eq!(look.caret(), Spot { line: 1, byte: 2 });
+        look.move_caret(Step::Up, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 22 });
+
+        // Home and End are about the drawn row too, which is what makes them
+        // usable on a paragraph.
+        look.move_caret(Step::LineStart, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 20 });
+        look.move_caret(Step::LineEnd, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 25 });
+    }
+
+    /// `Ctrl ←` and `Ctrl →` cross words, and `Shift` selects as they go.
+    #[test]
+    fn the_caret_crosses_words_and_selects_while_it_does() {
+        let mut look = texted(
+            "one two  three
+",
+        );
+        look.editing = true;
+        look.put_caret(Spot { line: 0, byte: 14 });
+        look.move_caret(Step::WordBack, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 9 });
+        look.move_caret(Step::WordBack, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 4 });
+
+        // Extending from here selects the word, which is what `Ctrl+Shift+→` is
+        // for and what could not be done at all before.
+        look.move_caret(Step::WordOn, true);
+        assert_eq!(look.chosen_text().as_deref(), Some("two"));
+        look.move_caret(Step::WordOn, true);
+        assert_eq!(look.chosen_text().as_deref(), Some("two  three"));
+
+        // The ends of the file, from anywhere in it.
+        look.move_caret(Step::Start, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 0 });
+        look.move_caret(Step::End, false);
+        assert_eq!(look.caret(), Spot { line: 0, byte: 14 });
+    }
+
+    /// Discard puts back what is on disk, and only while something is unwritten.
+    #[test]
+    fn a_discard_puts_back_the_file_and_a_saved_one_has_nothing_to_put() {
+        let mut look = texted(
+            "one
+two
+",
+        );
+        look.start_editing();
+        assert!(!look.discard(), "there was nothing to discard yet");
+
+        look.put_caret(Spot { line: 0, byte: 3 });
+        assert!(look.type_in("X"));
+        assert!(look.unsaved);
+        assert_eq!(
+            look.text.as_ref().expect("text").body(),
+            "oneX
+two
+"
+        );
+
+        assert!(look.discard());
+        assert!(!look.unsaved);
+        assert_eq!(
+            look.text.as_ref().expect("text").body(),
+            "one
+two
+"
+        );
+
+        // What a *save* leaves behind is the new text, so a discard after it puts
+        // back what was last written rather than what was first opened.
+        assert!(look.type_in("Y"));
+        let after = look.text.as_ref().expect("text").body();
+        look.saved_as(after.clone());
+        assert!(!look.discard());
+        assert!(look.type_in("Z"));
+        assert!(look.discard());
+        assert_eq!(look.text.as_ref().expect("text").body(), after);
     }
 }

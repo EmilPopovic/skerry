@@ -193,6 +193,8 @@ pub enum LookControl {
     NextPage,
     /// Turns editing on, or off and saves.
     Edit,
+    /// Puts the file back the way it was, throwing the edit away.
+    Discard,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -1170,11 +1172,12 @@ fn quick_look_controls(
     // not editable, so the button that says a preview can be typed into is drawn
     // exactly where that is true — rule 4, which is that a feature reachable only
     // by knowing the chord is a feature most people never find.
+    let mut right = strip.right() - 8.0;
     if look.text.is_some() {
         let key = if look.editing { "look.done" } else { "look.edit" };
         let label = i18n::lookup(key);
         let width = text_width(painter, label, metrics.header_size, false) + 16.0;
-        let area = Area { x: strip.right() - 8.0 - width, y: strip.y, width, height: side };
+        let area = Area { x: right - width, y: strip.y, width, height: side };
         let ink = if look.editing { theme.palette.accent } else { theme.palette.dim };
         if hovered == Some(LookControl::Edit) {
             let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
@@ -1183,6 +1186,24 @@ fn quick_look_controls(
         let style = TextStyle::new(metrics.header_size, ink).centred();
         line(painter, label, style, area.x, area.width, baseline);
         hits.look.push((LookControl::Edit, area));
+        right = area.x - 4.0;
+    }
+
+    // **Discard, beside Done, and only while there is something to discard.**
+    // Leaving edit mode writes what was typed — which is what makes not asking
+    // safe — so the way out that writes nothing has to be *visible*, not a chord
+    // in the overlay: rule 4, and the same argument that put Edit here.
+    if look.unsaved {
+        let label = i18n::lookup("look.discard");
+        let width = text_width(painter, label, metrics.header_size, false) + 16.0;
+        let area = Area { x: right - width, y: strip.y, width, height: side };
+        if hovered == Some(LookControl::Discard) {
+            let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
+            painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
+        }
+        let style = TextStyle::new(metrics.header_size, theme.palette.dim).centred();
+        line(painter, label, style, area.x, area.width, baseline);
+        hits.look.push((LookControl::Discard, area));
     }
 
     // **The page pair only where there are pages**, drawn from the right edge
@@ -1311,6 +1332,30 @@ pub(crate) fn text_layout(inner: Area, metrics: &sk_ui::Metrics, digits: f32) ->
     TextLayout { gutter, text_x: gutter + TEXT_GUTTER_GAP, step: metrics.row_height }
 }
 
+/// How many monospaced characters fit across a text preview.
+///
+/// **The wrap width, measured where the text is drawn.** One cell, because the
+/// face is monospaced and every advance in it is the same — which is the same
+/// assumption the caret and the selection already make.
+pub(crate) fn text_cells(
+    lines: usize,
+    where_: (Area, &sk_ui::Metrics),
+    tools: (&mut sk_text::LayoutCache, &mut sk_text::Fonts, f32),
+) -> usize {
+    let (inner, metrics) = where_;
+    let (cache, fonts, scale) = tools;
+    let size = metrics.text_size;
+    let digits = gutter_width(lines, size, cache, fonts, scale);
+    let placed = text_layout(inner, metrics, digits);
+    let cell =
+        sk_ui::advance_of(cache, fonts, "0", sk_text::Weight::Mono, size * scale) / scale.max(0.01);
+    let room = inner.right() - TEXT_PAD - placed.text_x;
+    if cell < 0.5 || room < cell {
+        return 0;
+    }
+    (room / cell).floor() as usize
+}
+
 /// Which line and byte a point lands on, for a press or a drag.
 ///
 /// **Clamped rather than optional.** A drag that leaves the panel has to keep
@@ -1329,17 +1374,22 @@ pub(crate) fn text_spot(
     let size = metrics.text_size;
     let digits = gutter_width(text.lines.len(), size, cache, fonts, scale);
     let placed = text_layout(inner, metrics, digits);
-    let row = ((at.1 - inner.y + look.scroll.offset()) / placed.step).floor();
-    let line = (row.max(0.0) as usize).min(text.lines.len().saturating_sub(1));
-    let body = text.lines.get(line).map_or("", String::as_str);
+    let at_row = ((at.1 - inner.y + look.scroll.offset()) / placed.step).floor();
+    let index = (at_row.max(0.0) as usize).min(text.rows().len().saturating_sub(1));
+    // **The row's own slice, not the whole line.** A wrapped line is several rows
+    // and a click on the third of them is about the characters drawn there; before
+    // this, every row of a paragraph answered with a byte counted from the line's
+    // start, so a click below the first row landed at the end of the text.
+    let row = text.rows().get(index).copied();
+    let body =
+        row.and_then(|row| text.lines.get(row.line)?.get(row.from..row.to)).unwrap_or_default();
     // The colour is not part of a measurement; the weight is, and it has to be
     // the face the text was drawn in or the answer is a different font's.
     let style = mono(TextStyle::new(size, sk_gpu::Color::rgba(0, 0, 0, 0)));
     let want = (at.0 - placed.text_x).max(0.0) * scale;
-    crate::quicklook::Spot {
-        line,
-        byte: sk_ui::caret_offset(fonts, body, style, size * scale, want),
-    }
+    let byte = sk_ui::caret_offset(fonts, body, style, size * scale, want);
+    let cell = body.get(..byte).map_or(0, |slice| slice.chars().count());
+    text.spot_at(index, cell)
 }
 
 /// The text of a file, line by line, each line by its tones.
@@ -1368,6 +1418,11 @@ fn quick_look_text(
     let step = placed.step;
     let first = (look.scroll.offset() / step).floor().max(0.0) as usize;
     let room = (inner.height / step).ceil() as usize + 1;
+    // **Drawn by row, and a row is what wrapping made of a line.** The gutter
+    // numbers the first row of each line and leaves the continuations blank,
+    // which is what every editor with soft wrap does — a line number repeated
+    // down six rows says the file has six line 12s.
+    let rows = text.rows();
     let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
     painter.list.push_clip(clip);
     // The gutter's own rule, so the numbers read as a column rather than as the
@@ -1380,20 +1435,25 @@ fn quick_look_text(
         inner.height,
     );
     painter.list.rect(rule, theme.palette.divider, 0.0);
-    for (offset, (body, spans)) in
-        text.lines.iter().zip(&text.spans).enumerate().skip(first).take(room)
-    {
-        let top = inner.y + offset as f32 * step - look.scroll.offset();
+    for (index, row) in rows.iter().enumerate().skip(first).take(room) {
+        let Some(whole) = text.lines.get(row.line) else { continue };
+        let top = inner.y + index as f32 * step - look.scroll.offset();
         let baseline = painter.baseline(top, step, metrics.text_size);
-        text_selection(painter, look, (offset, body), (placed, top, inner));
-        text_caret(painter, look, (offset, body), (placed, top, inner));
-        let number = (offset + 1).to_string();
-        let numbers = TextStyle::new(metrics.text_size, theme.palette.dim).right();
-        let column = painter.rect(inner.x + TEXT_PAD, 0.0, digits, 0.0);
-        painter.label(&number, mono(numbers), column, baseline);
+        text_selection(painter, look, (index, whole), (placed, top, inner));
+        text_caret(painter, look, (index, whole), (placed, top, inner));
+        if row.from == 0 {
+            let number = (row.line + 1).to_string();
+            let numbers = TextStyle::new(metrics.text_size, theme.palette.dim).right();
+            let column = painter.rect(inner.x + TEXT_PAD, 0.0, digits, 0.0);
+            painter.label(&number, mono(numbers), column, baseline);
+        }
         let mut x = placed.text_x;
-        for span in spans {
-            let Some(run) = body.get(span.from..span.to) else { continue };
+        for span in text.spans.get(row.line).map_or(&[][..], Vec::as_slice) {
+            // The part of this run that is on this row, which is the whole of
+            // what wrapping costs the highlighter: a span is still a slice of a
+            // line, and a row is a window onto it.
+            let (from, to) = (span.from.max(row.from), span.to.min(row.to));
+            let Some(run) = whole.get(from..to).filter(|it| !it.is_empty()) else { continue };
             let colour = match span.tone {
                 crate::quicklook::Tone::Plain => theme.palette.text,
             };
@@ -1427,29 +1487,51 @@ fn text_selection(
     line: (usize, &str),
     where_: (TextLayout, f32, Area),
 ) {
-    let (offset, body) = line;
+    let (index, body) = line;
     let (placed, top, inner) = where_;
     let Some(chosen) = look.chosen.filter(|it| !it.is_empty()) else { return };
+    let Some(text) = look.text.as_ref() else { return };
+    let Some(row) = text.rows().get(index).copied() else { return };
     let (from, to) = chosen.ordered();
-    if offset < from.line || offset > to.line {
+    if row.line < from.line || row.line > to.line {
         return;
     }
     let theme = *painter.theme;
     let size = theme.metrics.text_size;
-    let start = if offset == from.line { from.byte } else { 0 };
-    let end = if offset == to.line { to.byte } else { body.len() };
+    // **Clamped to this row**, because the selection is in line-and-byte and the
+    // row is a window onto that line: a paragraph selected whole highlights each
+    // of its rows from its own start to its own end.
+    let line_start = if row.line == from.line { from.byte } else { 0 };
+    let line_end = if row.line == to.line { to.byte } else { body.len() };
+    // A row the selection does not reach draws nothing. One it does draws even
+    // where the intersection is empty — an empty line inside the region, whose
+    // stub is what keeps the region from having a notch in it.
+    if line_start > row.to || line_end < row.from {
+        return;
+    }
+    let start = line_start.clamp(row.from, row.to);
+    let end = line_end.clamp(row.from, row.to);
+    let continues = row.line < to.line || row.to < line_end;
+    if start >= end && !continues {
+        return;
+    }
     let (left, right) = {
         let Painter { fonts, scale, .. } = painter;
         let px = size * *scale;
         let weight = sk_text::Weight::Mono;
+        // Measured across the row's own slice, since that is what is drawn at
+        // `text_x`: an advance counted from the line's start puts the highlight
+        // off the right edge of every row but the first.
+        let drawn = body.get(row.from..row.to).unwrap_or_default();
+        let (head, tail) = (start - row.from, end - row.from);
         (
-            sk_ui::advance_to(fonts, body, weight, px, start) / scale.max(0.01),
-            sk_ui::advance_to(fonts, body, weight, px, end) / scale.max(0.01),
+            sk_ui::advance_to(fonts, drawn, weight, px, head) / scale.max(0.01),
+            sk_ui::advance_to(fonts, drawn, weight, px, tail) / scale.max(0.01),
         )
     };
     // Past the end of a line that continues into the next one, so the region has
     // no notch in it where a short line was.
-    let tail = if offset < to.line { size * 0.5 } else { 0.0 };
+    let tail = if continues { size * 0.5 } else { 0.0 };
     let x = placed.text_x + left;
     let width = (right - left + tail).max(1.0).min(inner.right() - x);
     let shape = painter.rect(x, top, width, placed.step);
@@ -1472,19 +1554,26 @@ fn text_caret(
     if !look.editing {
         return;
     }
-    let (offset, body) = line;
+    let (index, body) = line;
     let (placed, top, inner) = where_;
     let at = look.caret();
-    if at.line != offset {
+    let Some(text) = look.text.as_ref() else { return };
+    if text.row_of(at) != index {
         return;
     }
     let theme = *painter.theme;
     let size = theme.metrics.text_size;
     let left = {
+        let row = text.rows().get(index).copied().unwrap_or(crate::quicklook::Row {
+            line: at.line,
+            from: 0,
+            to: body.len(),
+        });
+        let drawn = body.get(row.from..row.to).unwrap_or_default();
+        let byte = at.byte.clamp(row.from, row.to) - row.from;
         let Painter { fonts, scale, .. } = painter;
         let px = size * *scale;
-        sk_ui::advance_to(fonts, body, sk_text::Weight::Mono, px, at.byte.min(body.len()))
-            / scale.max(0.01)
+        sk_ui::advance_to(fonts, drawn, sk_text::Weight::Mono, px, byte) / scale.max(0.01)
     };
     let x = (placed.text_x + left).min(inner.right() - TEXT_PAD);
     let bar = painter.rect(x, top + 2.0, painter.logical(2.0), placed.step - 4.0);

@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 746 tests, 127 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 750 tests, 129 GUI scenarios **on both Wayland and X11**,
 sixty-three golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
@@ -60,9 +60,10 @@ navigating ([ADR
 0015](docs/adr/0015-a-column-is-a-directory-and-a-choice.md), which supersedes
 0014: a column is not a pane, because a pane is independent and columns are one
 path decomposed);
-a folder can be given **one of six colours** and its mark takes it — a second,
-deliberately un-inherited list in the same per-folder file, because a colour every
-folder has says nothing;
+a folder can be given **one of six colours** and its mark takes it — **every
+folder the selection holds, from one menu**, and a second, deliberately
+un-inherited list in the same per-folder file, because a colour every folder has
+says nothing;
 a pane lays out as a **details list or a grid**, per tab and remembered, behind one
 cell geometry ([ADR 0013](docs/adr/0013-one-cell-geometry-behind-every-uniform-view.md))
 that every future view plugs into, and **groups by time, by size or by kind** —
@@ -87,8 +88,14 @@ the file's own text — **mono, numbered, and selectable**, where a drag and
 [`Scope::Look`](crates/sk-cmd/src/registry.rs), the third scope the resolver was
 written to expect — drawn as runs carrying a tone so a highlighter replaces one
 function and nothing else, and **an editor when `Ctrl+E` asks**: characters, both
-deletes, a caret, and a save on the way out that `Ctrl+Z` takes back, which is
-what makes not asking safe — where **`←`/`→` walk the files and `↑`/`↓` the pages**
+deletes, a caret, words under `Ctrl` and selected under `Ctrl+Shift`, a
+shift-click that extends what is chosen, and a save on the way out that `Ctrl+Z`
+takes back — which is what makes not asking safe, and `Escape` is the way out
+that writes nothing, said in the status line and drawn as a **Discard** button
+because a way out nobody can see is not one. **A line wider than the panel wraps**,
+and the row it wrapped onto is what a click, an `↑` and a `↓` are about: the
+gutter numbers a line once and the rest of it is readable rather than cut off at
+the edge — where **`←`/`→` walk the files and `↑`/`↓` the pages**
 ([ADR 0019](docs/adr/0019-a-preview-request-names-a-page-and-the-child-stays-stateless.md):
 a request names a page and the child holds nothing, because page 400 of 1200 costs
 what page 1 costs) — and the **two pages ahead are already on the GPU**, a few

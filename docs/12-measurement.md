@@ -2067,6 +2067,36 @@ exactly like a page that rendered. The capture already prints how many thumbnail
 landed, for precisely this reason; a document preview has no such count, and the
 only thing that caught it was looking at the picture.
 
+## A frame of a state the program could no longer reach
+
+The text preview learned to wrap: a line wider than the panel is cut into rows,
+and the row is what a click, an `↑` and a `↓` are about. The rows are computed
+once when the panel's width changes, because computing them per frame is a pass
+over the file inside the 8 ms budget.
+
+Then `tools/golden` passed. All sixty-three frames, including `quick-look-text`,
+whose fixture holds a deliberately long line — and whose reference showed that
+line **elided with an ellipsis**, which is what the program did the day before.
+The frame was green because it was a frame of the old behaviour and the capture
+still produced the old behaviour: the window fits the rows in `App::render`, and
+the capture does not go through `App` at all. It builds its own sample and calls
+`view::draw`.
+
+So the gate was measuring the capture's copy of the program rather than the
+program. Both halves needed the call, and the reference needed re-blessing —
+after which the same frame caught something the tests had not: an empty line
+inside a selection had stopped drawing its stub, because the new row-clamping
+guard returned early on a row where `from == to`. The tests asserted about bytes
+and rows and all passed; the notch was three pixels of missing highlight that only
+a picture shows.
+
+**The rule this adds to the two above it: a capture that samples its own state
+is a second implementation, and every per-frame step the window takes has to be
+taken there too — or the frame is of a state the program cannot reach.** The
+fixture's own text said "elided rather than wrapped", which is the tell I should
+have read first: a fixture that describes the behaviour is a comment that goes
+stale, and this one had.
+
 ## A gate catches the shape it was written for, and this was a different shape
 
 Two defects in one afternoon's scripted edits, both invisible in a diff read as an

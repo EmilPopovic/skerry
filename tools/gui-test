@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 127
+FEWEST_SCENARIOS = 129
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5850,11 +5850,17 @@ def edit_a_text_preview(run: Run, fixture: Path) -> None:
     if not still["looking"].endswith(":text"):
         raise Failure("Space closed the panel instead of typing a space")
 
-    # Escape leaves edit mode and writes what was typed.
-    run.drive("key escape\nsleep 600\nkey f12\nsleep 300\n")
+    # **The Discard button is drawn while there is something to discard**, which
+    # is what makes the way out that writes nothing findable with a pointer: rule
+    # 4, and the reason it is not left to a chord.
+    if "discard@" not in run.state()["look_aim"]:
+        raise Failure(f"no Discard button while unsaved: {run.state()['look_aim']!r}")
+
+    # `Ctrl+E` leaves edit mode and writes what was typed.
+    run.drive("key ctrl+e\nsleep 600\nkey f12\nsleep 300\n")
     saved = until(run, look_editing="false")
     if not saved["looking"].endswith(":text"):
-        raise Failure(f"Escape closed the panel as well: {saved['looking']!r}")
+        raise Failure(f"leaving edit mode closed the panel as well: {saved['looking']!r}")
     deadline = time.time() + WAITING
     while time.time() < deadline and note.read_text() == "one\ntwo\n":
         time.sleep(0.1)
@@ -5862,14 +5868,134 @@ def edit_a_text_preview(run: Run, fixture: Path) -> None:
     if not written.startswith("Z\n"):
         raise Failure(f"the file holds {written!r}")
 
+    # **And `Escape` throws an edit away.** Every other way out saves — which is
+    # what makes not asking safe — so the answer to "actually, never mind" has to
+    # exist, and it is the key that means that everywhere else in this program.
+    settled(run)
+    run.drive("key ctrl+e\nsleep 400\ntext QQQ\nsleep 300\nkey f12\nsleep 200\n")
+    typed = until(run, look_editing="true", look_unsaved="true")
+    if typed["look_caret"] == "0:0":
+        raise Failure("the three characters did not reach the buffer")
+    run.drive("key escape\nsleep 500\nkey f12\nsleep 300\n")
+    gone = until(run, look_editing="false", look_unsaved="false")
+    if "QQQ" in gone.get("notice", ""):
+        raise Failure("the notice quotes the discarded text rather than saying what happened")
+    if not gone.get("notice"):
+        raise Failure("a discard said nothing at all")
+    settled(run)
+    if note.read_text() != written:
+        raise Failure(f"Escape wrote {note.read_text()!r} over {written!r}")
+
+    # **Nothing under the panel hovers.** It covers most of the window, and the
+    # chrome and the sidebar beneath it went on lighting up under a pointer that
+    # was reading a file — offering clicks that only close the panel.
+    run.drive("key ctrl+e\nsleep 300\n")
+    over_places = place_point(run, run.state(), 0)
+    run.drive(f"move {over_places[0]:.2f} {over_places[1]:.2f}\nsleep 300\nkey f12\nsleep 200\n")
+    under = run.state()
+    expect(under, place_name="", hover_name="")
+
     # And it is one entry on the one stack, so Ctrl+Z puts the file back.
     settled(run)
-    run.drive("key escape\nsleep 300\nkey ctrl+z\nsleep 900\nkey f12\nsleep 300\n")
+    run.drive("key escape\nsleep 300\nkey escape\nsleep 300\nkey ctrl+z\nsleep 900\n")
     deadline = time.time() + WAITING
     while time.time() < deadline and note.read_text() != "one\ntwo\n":
         time.sleep(0.1)
     if note.read_text() != "one\ntwo\n":
         raise Failure(f"the undo left {note.read_text()!r}")
+
+
+@scenario("a-long-line-wraps-and-is-edited-where-it-wrapped", fresh=True)
+def wrapped_line(run: Run, fixture: Path) -> None:
+    """A line wider than the panel is cut into rows, and the rows are editable.
+
+    The defect: a long line was elided with `…` at the panel's right edge, and
+    what was past it could be neither read, clicked in, nor typed over — the caret
+    could only reach it by counting `→` presses. Wrapping makes the *row* the unit
+    of drawing, of clicking and of `Up`/`Down`, which is what an editor with soft
+    wrap does everywhere.
+    """
+    note = fixture / "wide.txt"
+    # One line, four hundred characters, no newline in it: this is the shape that
+    # elided. Words rather than one run of letters, because the wrap breaks at a
+    # space where it can and a scenario that used `zzzz…` would only test the
+    # hard cut.
+    note.write_text(" ".join(f"word{index:03}" for index in range(50)))
+    listed(run)
+    until(run, rows="10")
+    run.drive("text wide\nsleep 300\nkey f12\nsleep 150\n")
+    until(run, cursor="wide.txt")
+    run.drive("key space\nsleep 700\nkey f12\nsleep 250\n")
+    opened = holds(run, lambda it: it["looking"].endswith(":text"), "a text preview")
+    rows = int(opened["look_rows"])
+    if rows < 3:
+        raise Failure(f"a 400-character line took {rows} rows: it was not wrapped")
+
+    # `Down` on a wrapped line stays on that line and moves along it, which is
+    # the whole difference between a row and a line.
+    run.drive("key ctrl+e\nsleep 400\nkey f12\nsleep 200\n")
+    until(run, look_editing="true", look_caret="0:0")
+    run.drive("key down\nsleep 250\nkey f12\nsleep 200\n")
+    down = run.state()
+    line, byte = down["look_caret"].split(":")
+    if line != "0" or int(byte) == 0:
+        raise Failure(f"Down left the caret at {down['look_caret']} instead of along line 0")
+
+    # And what is typed there lands where the caret is, not at the line's end.
+    run.drive("key end\nsleep 200\ntext !\nsleep 300\nkey ctrl+s\nsleep 600\n")
+    deadline = time.time() + WAITING
+    while time.time() < deadline and "!" not in note.read_text():
+        time.sleep(0.1)
+    written = note.read_text()
+    if "!" not in written:
+        raise Failure("nothing was written to the wrapped line")
+    if written.rstrip("\n").endswith("!"):
+        raise Failure("the character landed at the end of the line, not at the caret")
+
+
+@scenario("a-colour-covers-every-folder-that-is-selected", fresh=True)
+def colour_a_selection(run: Run, fixture: Path) -> None:
+    """Three folders selected, one menu, three coloured marks.
+
+    [Rule 8](../docs/03-principles.md) is one selection, and every command that
+    acts on entries acts on all of it — colouring six folders one at a time is six
+    menus for one decision. A secondary click *inside* the selection keeps it,
+    which is what makes the menu the pointer's way to do this.
+    """
+    state_home = run.log.parent / "state-colours"
+    place = {"XDG_STATE_HOME": str(state_home)}
+    run.close()
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("key down\nsleep 200\nkey shift+down\nkey shift+down\nsleep 300\n")
+        own.drive("key f12\nsleep 200\n")
+        chosen = until(own, selected="3")
+
+        # The menu opens over a row that is already selected, so the selection
+        # survives the press — the claim this scenario turns on.
+        row = point_at(own, 0)
+        expect(row, hover_name="alpha")
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        expect(opened, selected="3")
+        aimed = menu_aim(own, opened, "view.colour_blue")
+        own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
+        coloured = until(own, coloured="alpha:blue,beta:blue,gamma:blue")
+        assert coloured is not None and chosen is not None
+
+        # And taking them away is the same one decision. Pointed at the row
+        # again first: the pointer is where the menu row was, which is over the
+        # list's background once the menu has gone — and a secondary click there
+        # opens the *background* menu, which has no colours on it.
+        point_at(own, 0)
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        aimed = menu_aim(own, opened, "view.colour_none")
+        own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
+        until(own, coloured="")
+    finally:
+        own.close()
 
 
 @scenario("navigation-buttons")

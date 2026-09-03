@@ -1360,6 +1360,19 @@ fn look_scope(registry: &mut Registry<App>) {
             run: App::toggle_editing_the_look,
         },
         CommandSpec {
+            id: "look.discard",
+            name: "action.look_discard",
+            group: Group::Edit,
+            // **`Ctrl+R` in the scope where it can only mean this**, which is the
+            // argument `Ctrl+E` already makes: reloading the file *is* what a
+            // discard does, and over a listing the chord is free. `Escape` does
+            // it too, and the panel draws a button for it — an edit that can only
+            // be abandoned by a chord somebody guessed is rule 4's failure.
+            keys: &["ctrl+r"],
+            enabled: App::look_is_unsaved,
+            run: App::discard_the_look,
+        },
+        CommandSpec {
             id: "look.save",
             name: "action.look_save",
             group: Group::Edit,

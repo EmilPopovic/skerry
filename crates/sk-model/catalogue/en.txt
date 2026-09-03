@@ -153,6 +153,8 @@ notice.pinned = Pinned {0}
 notice.unpinned = Unpinned {0}
 notice.places_ordered = The list of places was reordered
 notice.places_refused = The list of places could not be saved — check that the config directory can be written
+# When Escape throws away an edit in the preview that was never written.
+notice.edit_discarded = The edit was discarded
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
 # What is left on a volume, at the right of its row in the list of places.
@@ -368,8 +370,11 @@ action.look_select_all = Select all text
 # what rule 4 is for. The wording follows `action.copy_content` next door.
 look.edit = Edit
 look.done = Done
+# The button beside it, drawn only while an edit is outstanding.
+look.discard = Discard
 action.look_edit = Edit this text
 action.look_save = Save it
+action.look_discard = Discard the edit
 action.look_copy = Copy the selected text
 notice.copied_lines[one] = Copied {0} line
 notice.copied_lines[other] = Copied {0} lines
