@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 756 tests, 131 GUI scenarios **on both Wayland and X11**,
-sixty-six golden frames, every gate green: a Details view
+sandboxed helpers, 765 tests, 132 GUI scenarios **on both Wayland and X11**,
+sixty-seven golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -87,8 +87,11 @@ frames are pages, so the prefetch, the held textures and the 24 MiB budget are
 the ones a PDF already had, an arrow steps a frame and stops the loop, and the
 clock that turns the next one is a wake-up with an owner that says nothing at all
 while it is paused — and **`Space` is a quick
-look**: the picture, a PDF's page through whatever renderer is on `PATH`, or
-the file's own text — **mono, numbered, and selectable**, where a drag and
+look**: the picture, a PDF's page through whatever renderer is on `PATH` — **with
+its words, so a line can be dragged out of it and copied**, poppler's own boxes
+parsed in the sandboxed child into flat records ([ADR
+0024](docs/adr/0024-a-page-arrives-with-its-words.md)), where a press on a word
+selects and a press on the paper moves the page — or the file's own text — **mono, numbered, and selectable**, where a drag and
 `Ctrl+C` put it on the clipboard through
 [`Scope::Look`](crates/sk-cmd/src/registry.rs), the third scope the resolver was
 written to expect — drawn as runs carrying a tone so a highlighter replaces one

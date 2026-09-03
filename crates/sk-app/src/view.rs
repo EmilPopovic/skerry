@@ -1096,6 +1096,11 @@ fn quick_look(
     painter.hairline(outer.x, inner.y - 1.0, outer.width, theme.palette.divider);
 
     if let Some((key, size)) = look.image {
+        // **The page's own rectangle, and it is what the words are drawn onto.**
+        // A selection over a page is boxes in the page's points, and this is the
+        // one place that knows where those points landed — the same function the
+        // zoom and the pan go through, so a highlight cannot disagree with the
+        // page it is over.
         // **Fitted here, and this is the only place that fits it.** The child was
         // asked for a box and answered with what fitted inside it, so the size that
         // came back is already right — all that is left is to centre it.
@@ -1103,16 +1108,18 @@ fn quick_look(
         // **Except when it is zoomed**, where the picture is larger than the
         // panel and has to be clipped to it: a preview is a quad and a quad that
         // hangs over the panel's edge is drawn over the list behind it.
+        let box_ = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
         if look.zoomed() {
-            let box_ = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
             let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
             painter.list.push_clip(clip);
             let shape = painter.rect(box_.x, box_.y, box_.width, box_.height);
             painter.preview(key, shape, theme.palette.text);
+            page_selection(painter, look, box_);
             painter.list.pop_clip();
             return;
         }
         painter.preview(key, fitted(painter, inner, size, look.coarse), theme.palette.text);
+        page_selection(painter, look, box_);
         return;
     }
     if let Some((key, aspect)) = look.standby {
@@ -1562,6 +1569,78 @@ fn quick_look_text(
         let style = TextStyle::new(metrics.text_size, theme.palette.dim);
         line(painter, i18n::lookup("preview.more"), style, placed.text_x, inner.width, baseline);
     }
+}
+
+/// The highlight behind what is selected on a page.
+///
+/// **Over the page rather than behind it**, which is the opposite of the text
+/// preview's rule and is forced: a page is an opaque image, so a highlight under
+/// it would not be seen at all. Translucent, so the words stay readable through
+/// it — the same accent at the same alpha a text selection uses, and the reason
+/// it reads as a selection rather than as a redaction.
+fn page_selection(painter: &mut Painter<'_>, look: &crate::quicklook::QuickLook, page: Area) {
+    let Some(text) = look.page_text.as_ref() else { return };
+    let (across, down) = text.size();
+    if across <= 0.0 || down <= 0.0 {
+        return;
+    }
+    let theme = *painter.theme;
+    let scale = (page.width / across, page.height / down);
+    for (left, top, width, height) in text.highlights() {
+        let shape = painter.rect(
+            page.x + left * scale.0,
+            page.y + top * scale.1,
+            (width * scale.0).max(1.0),
+            (height * scale.1).max(1.0),
+        );
+        painter.list.rect(shape, theme.palette.accent.with_alpha(90), 0.0);
+    }
+}
+
+/// Which place on the page a point in the panel lands on.
+///
+/// **The inverse of the transform that drew it**, in the same file for the reason
+/// [`text_spot`] is: a hit test computed anywhere else is a second copy of the
+/// page's geometry, and the two drift apart the first time a zoom is involved.
+pub(crate) fn page_place(
+    look: &crate::quicklook::QuickLook,
+    inner: Area,
+    at: (f32, f32),
+) -> Option<crate::pagetext::Place> {
+    let text = look.page_text.as_ref()?;
+    let (_, size) = look.image?;
+    let (across, down) = text.size();
+    if across <= 0.0 || down <= 0.0 {
+        return None;
+    }
+    let page = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+    if page.width <= 0.0 || page.height <= 0.0 {
+        return None;
+    }
+    let point = ((at.0 - page.x) * across / page.width, (at.1 - page.y) * down / page.height);
+    Some(text.place_at(point))
+}
+
+/// Whether a point in the panel is over a word of the page.
+///
+/// **What decides between selecting and panning.** A press on a word starts a
+/// selection and a press on the paper moves the page — which needs no modifier
+/// and is what a hand expects: you grab the margin to move paper and the text to
+/// take a line out of it.
+pub(crate) fn page_word_at(
+    look: &crate::quicklook::QuickLook,
+    inner: Area,
+    at: (f32, f32),
+) -> bool {
+    let Some(text) = look.page_text.as_ref() else { return false };
+    let Some((_, size)) = look.image else { return false };
+    let (across, down) = text.size();
+    let page = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+    if across <= 0.0 || down <= 0.0 || page.width <= 0.0 {
+        return false;
+    }
+    let point = ((at.0 - page.x) * across / page.width, (at.1 - page.y) * down / page.height);
+    text.covers(point)
 }
 
 /// The same style in the mono face.

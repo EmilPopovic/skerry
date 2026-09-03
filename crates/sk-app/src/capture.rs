@@ -92,6 +92,44 @@ fn warm_and_draw(
     stats
 }
 
+/// The text half of a sample: the wrap, the selection and edit mode.
+///
+/// **Its own function because `sample_quick_look` is at the hundred-line limit**,
+/// and this is the half that has nothing to do with a child: a text file is read
+/// in this process, and everything below the early return is a round trip.
+fn sample_text(
+    request: &Capture,
+    session: &mut Session,
+    look: &mut crate::quicklook::QuickLook,
+    where_: (crate::layout::Area, &Theme, &mut LayoutCache),
+    scale: f32,
+) {
+    let (inner, theme, cache) = where_;
+    // **Cut to the panel's width, the same way a window does it.** The rows are
+    // the wrap and the wrap is what is drawn, so a capture that skipped this
+    // would render long lines elided — a frame of a state the program no longer
+    // has. `App::fit_the_look` is the window's half.
+    if let Some(text) = look.text.as_mut() {
+        let cells = crate::view::text_cells(
+            text.lines.len(),
+            (inner, &theme.metrics),
+            (cache, &mut session.fonts, scale),
+        );
+        text.wrap(cells);
+    }
+    if request.look_selected {
+        look.select_all();
+    }
+    if request.look_editing {
+        look.start_editing();
+        look.put_caret(crate::quicklook::Spot { line: 2, byte: 4 });
+        // **With an edit outstanding**, because that is the state whose strip is
+        // worth a frame: Done beside Discard, which is the only way out that
+        // writes nothing and therefore the one that has to be visible.
+        look.unsaved = true;
+    }
+}
+
 /// The history strip's height, the same way `App::history_height` works it out.
 fn history_height(request: &Capture, metrics: &sk_ui::Metrics) -> f32 {
     if !request.history {
@@ -135,29 +173,7 @@ fn sample_quick_look(
         while !look.drain() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
-        // **Cut to the panel's width, the same way a window does it.** The rows
-        // are the wrap and the wrap is what is drawn, so a capture that skipped
-        // this would render long lines elided — a frame of a state the program
-        // no longer has. `App::fit_the_look` is the window's half.
-        if let Some(text) = look.text.as_mut() {
-            let cells = crate::view::text_cells(
-                text.lines.len(),
-                (inner, &theme.metrics),
-                (cache, &mut session.fonts, scale),
-            );
-            text.wrap(cells);
-        }
-        if request.look_selected {
-            look.select_all();
-        }
-        if request.look_editing {
-            look.start_editing();
-            look.put_caret(crate::quicklook::Spot { line: 2, byte: 4 });
-            // **With an edit outstanding**, because that is the state whose strip
-            // is worth a frame: Done beside Discard, which is the only way out
-            // that writes nothing and therefore the one that has to be visible.
-            look.unsaved = true;
-        }
+        sample_text(request, session, &mut look, (inner, theme, cache), scale);
         return Some(look);
     }
     // **The frame or page asked for, set before the first request.** A picture
@@ -219,6 +235,12 @@ fn sample_quick_look(
             if answer.delay_ms > 0 {
                 look.delay_ms = answer.delay_ms;
             }
+            // The page's words, so a frame of a selection over one exists at all
+            // — ADR 0024, and the frame is what says the transform from points to
+            // pixels is the right one.
+            if !answer.words.is_empty() {
+                look.page_text = crate::pagetext::Page::of(&answer.words);
+            }
             if answer.refusal == sk_preview::Refusal::None && !answer.pixels.is_empty() {
                 // **A key per answer, counting down from the top of the
                 // range.** It was one fixed key, on the grounds that a capture
@@ -250,6 +272,12 @@ fn sample_quick_look(
             break;
         }
         std::thread::yield_now();
+    }
+    // **After the page has arrived, because the selection is over its words.**
+    // `--look-selected` is one flag for both kinds of text: over a file it
+    // selects the lines, and over a page it selects everything the tool found.
+    if request.look_selected {
+        look.select_all();
     }
     Some(look)
 }

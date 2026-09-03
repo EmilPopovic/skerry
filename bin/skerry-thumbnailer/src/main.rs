@@ -98,6 +98,9 @@ fn answer(request: &Request) -> Reply {
             pages: 0,
             delay_ms: 0,
             pixels,
+            // **No words, because a picture has none.** ADR 0024's field is a
+            // document's, and a thumbnail is not selected out of.
+            words: Vec::new(),
         };
     }
     let Ok(bytes) = std::fs::read(&path) else {
@@ -125,6 +128,7 @@ fn answer(request: &Request) -> Reply {
                 pages: decoded.frames,
                 delay_ms: decoded.delay_ms,
                 pixels: raster.pixels,
+                words: Vec::new(),
             }
         }
         Err(refusal) => Reply::refused(refusal),

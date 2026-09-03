@@ -29,22 +29,23 @@ const MAGIC: u32 = 0x534b_5052;
 /// conversation means somebody has a stale binary and the useful thing to do is
 /// say which.
 ///
-/// **Three, since a reply grew a frame's delay.** Both ends are the same build
+/// **Four, since a page reply grew its words.** Both ends are the same build
 /// spawned from the same directory, so this is a recompile and not a migration —
 /// the number moves so that a stale helper says which side is old instead of
 /// misparsing a header.
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
 /// A request's header: magic, version, the ask, a box, a page and a length.
 const HEADER: usize = 24;
 
-/// A reply's, which is four bytes longer for the frame delay beside the count.
+/// A reply's, which is eight bytes longer: the frame delay beside the page
+/// count, and the length of the text layer that follows the pixels.
 ///
 /// **Two constants rather than one**, because the two headers stopped being the
 /// same size the moment one of them grew: a shared `HEADER` made a request's
 /// reader ask for four bytes that were the *path's* first four, which is a parse
 /// that succeeds and is wrong.
-const REPLY_HEADER: usize = 28;
+const REPLY_HEADER: usize = 32;
 
 /// The most pixels a reply may carry, in bytes.
 ///
@@ -55,6 +56,14 @@ const REPLY_HEADER: usize = 28;
 /// length read off a pipe and handed to `Vec::with_capacity` is how a bug becomes
 /// an out-of-memory kill.
 const MOST_PIXELS: usize = 64 * 1024 * 1024;
+
+/// The most a page's text layer may carry, in bytes.
+///
+/// Four megabytes. A word record is twenty-two bytes and its text, so this is
+/// something like a hundred thousand words on one page — two orders of magnitude
+/// past the densest page measured, and the same kind of bound as
+/// [`MOST_PIXELS`]: a length read off a pipe is not a promise.
+const MOST_WORDS: usize = 4 * 1024 * 1024;
 
 /// What the host is asking for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -240,13 +249,22 @@ pub struct Reply {
     pub delay_ms: u32,
     /// Straight, non-premultiplied `RGBA8`, row-major, no padding.
     pub pixels: Vec<u8>,
+    /// Where this page's words are, or empty where there are none.
+    ///
+    /// **[ADR 0024](../../../docs/adr/0024-a-page-arrives-with-its-words.md).**
+    /// A page reply carries the renderer's own text layer beside its pixels, as
+    /// the flat records [`words`] describes — so the panel can select and copy a
+    /// line out of a document, which the same three commands already do for a
+    /// text file. Empty for every image, every thumbnail, and every page whose
+    /// document has no text in it.
+    pub words: Vec<u8>,
 }
 
 impl Reply {
     /// A refusal with no pixels behind it.
     #[must_use]
     pub const fn refused(refusal: Refusal) -> Self {
-        Self { refusal, size: (0, 0), pages: 0, delay_ms: 0, pixels: Vec::new() }
+        Self { refusal, size: (0, 0), pages: 0, delay_ms: 0, pixels: Vec::new(), words: Vec::new() }
     }
 
     /// Writes this reply to the host, in a child.
@@ -264,8 +282,10 @@ impl Reply {
         header.extend_from_slice(&self.pages.to_le_bytes());
         header.extend_from_slice(&self.delay_ms.to_le_bytes());
         header.extend_from_slice(&u32::try_from(self.pixels.len()).unwrap_or(0).to_le_bytes());
+        header.extend_from_slice(&u32::try_from(self.words.len()).unwrap_or(0).to_le_bytes());
         out.write_all(&header)?;
         out.write_all(&self.pixels)?;
+        out.write_all(&self.words)?;
         out.flush()
     }
 
@@ -289,8 +309,16 @@ impl Reply {
         let pages = word32(&head, 16);
         let delay_ms = word32(&head, 20);
         let len = word32(&head, 24) as usize;
+        let said = word32(&head, 28) as usize;
         if len > MOST_PIXELS {
             return Err(broken(&format!("{len} bytes of pixels")));
+        }
+        // **The layer is bounded too, and by a much smaller number.** It is
+        // records of a few dozen bytes each and a dense page has a few thousand
+        // of them; four megabytes is a hundred times the largest page measured
+        // and still a length a bug cannot turn into an allocation that matters.
+        if said > MOST_WORDS {
+            return Err(broken(&format!("{said} bytes of words")));
         }
         let wanted =
             (size.0 as usize).checked_mul(size.1 as usize).and_then(|pixels| pixels.checked_mul(4));
@@ -299,7 +327,94 @@ impl Reply {
         }
         let mut pixels = vec![0u8; len];
         input.read_exact(&mut pixels)?;
-        Ok(Self { refusal, size, pages, delay_ms, pixels })
+        let mut words = vec![0u8; said];
+        input.read_exact(&mut words)?;
+        Ok(Self { refusal, size, pages, delay_ms, pixels, words })
+    }
+}
+
+/// One word of a page, and where it is on it.
+///
+/// **In PDF points, with the origin at the page's top left**, which is what both
+/// `pdftotext -bbox-layout` and `mutool` answer in — the host maps them onto the
+/// drawn page with the one transform that already places it.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Word {
+    /// Its box: left, top, width, height, in points.
+    pub at: (f32, f32, f32, f32),
+    /// Which line of the page it belongs to, counted in the order the tool gave.
+    ///
+    /// **The tool's reading order, not ours** — ADR 0024. It is what turns a
+    /// selection into text with newlines in it, and deciding it ourselves would
+    /// be a page segmentation algorithm.
+    pub line: u32,
+    /// The word itself.
+    pub text: String,
+}
+
+/// A page's text layer: the page's own size, and its words.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Words {
+    /// The page's size in points, which is what the boxes are relative to.
+    pub page: (f32, f32),
+    /// Every word the tool found, in the order it found them.
+    pub words: Vec<Word>,
+}
+
+impl Words {
+    /// Packs a layer into the bytes a reply carries.
+    ///
+    /// **Flat records, not a serialization format.** Two floats, a count, and
+    /// then per word four floats, a line number, a length and its UTF-8 — which
+    /// is a `for` loop at each end and no dependency in the middle, the same
+    /// bargain the rest of this file makes.
+    #[must_use]
+    pub fn pack(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(24 * self.words.len() + 12);
+        out.extend_from_slice(&self.page.0.to_le_bytes());
+        out.extend_from_slice(&self.page.1.to_le_bytes());
+        out.extend_from_slice(&u32::try_from(self.words.len()).unwrap_or(0).to_le_bytes());
+        for word in &self.words {
+            for value in [word.at.0, word.at.1, word.at.2, word.at.3] {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+            out.extend_from_slice(&word.line.to_le_bytes());
+            let bytes = word.text.as_bytes();
+            out.extend_from_slice(&u16::try_from(bytes.len()).unwrap_or(0).to_le_bytes());
+            out.extend_from_slice(&bytes[..usize::from(u16::try_from(bytes.len()).unwrap_or(0))]);
+        }
+        out
+    }
+
+    /// Unpacks one, or nothing where the bytes do not describe a layer.
+    ///
+    /// **`None` rather than a partial answer.** A layer that stopped halfway
+    /// would be a page whose last paragraph cannot be selected and nothing
+    /// saying why; the whole of it is small enough that the honest answer to a
+    /// short read is no layer at all.
+    #[must_use]
+    pub fn unpack(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut at = 0usize;
+        let mut take = |count: usize| -> Option<&[u8]> {
+            let slice = bytes.get(at..at.checked_add(count)?)?;
+            at += count;
+            Some(slice)
+        };
+        let float = |slice: &[u8]| f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
+        let page = (float(take(4)?), float(take(4)?));
+        let count = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        let mut words = Vec::with_capacity(count.min(1 << 16));
+        for _ in 0..count {
+            let box_ = (float(take(4)?), float(take(4)?), float(take(4)?), float(take(4)?));
+            let line = u32::from_le_bytes(take(4)?.try_into().ok()?);
+            let len = usize::from(u16::from_le_bytes(take(2)?.try_into().ok()?));
+            let text = String::from_utf8(take(len)?.to_vec()).ok()?;
+            words.push(Word { at: box_, line, text });
+        }
+        Some(Self { page, words })
     }
 }
 
@@ -326,7 +441,7 @@ fn broken(what: &str) -> std::io::Error {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Ask, Refusal, Reply, Request};
+    use super::{Ask, Refusal, Reply, Request, Word, Words};
 
     #[test]
     fn a_request_round_trips_through_bytes() {
@@ -351,6 +466,11 @@ mod tests {
             pages: 14,
             delay_ms: 40,
             pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            words: Words {
+                page: (420.0, 595.0),
+                words: vec![Word { at: (40.0, 82.0, 12.0, 16.0), line: 0, text: "A".into() }],
+            }
+            .pack(),
         };
         let mut pipe = Vec::new();
         answered.write_to(&mut pipe).unwrap();
@@ -371,10 +491,36 @@ mod tests {
             pages: 14,
             delay_ms: 0,
             pixels: Vec::new(),
+            words: Vec::new(),
         };
         let mut pipe = Vec::new();
         ended.write_to(&mut pipe).unwrap();
         assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), ended);
+    }
+
+    /// The layer round trips, and a short or invalid one is no layer rather than
+    /// half of one.
+    #[test]
+    fn a_text_layer_round_trips_and_refuses_to_be_half_read() {
+        let layer = Words {
+            page: (420.0, 595.5),
+            words: vec![
+                Word { at: (40.0, 82.076, 12.006, 16.65), line: 0, text: "A".into() },
+                Word { at: (57.01, 82.076, 45.036, 16.65), line: 0, text: "page,".into() },
+                // A word whose bytes are not its characters, because a layer
+                // carries UTF-8 and a length in bytes.
+                Word { at: (40.0, 253.5, 68.464, 14.8), line: 1, text: "日本語".into() },
+            ],
+        };
+        let packed = layer.pack();
+        assert_eq!(Words::unpack(&packed).as_ref(), Some(&layer));
+
+        // Every truncation is nothing rather than a partial page.
+        for cut in 0..packed.len() {
+            assert_eq!(Words::unpack(&packed[..cut]), None, "{cut} bytes read as a layer");
+        }
+        // And an empty layer is a page with no text in it, which is a scan.
+        assert_eq!(Words::unpack(&[]), None);
     }
 
     /// **A length is not a promise.** Each of these is a header a buggy or
@@ -396,6 +542,8 @@ mod tests {
             bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes.extend_from_slice(&len.to_le_bytes());
+            // And no text layer, which is every reply this test is about.
+            bytes.extend_from_slice(&0u32.to_le_bytes());
             bytes
         };
         // Two pixels claimed, one pixel's worth of bytes.

@@ -150,6 +150,12 @@ pub struct Answer {
     pub delay_ms: u32,
     /// Straight `RGBA8`.
     pub pixels: Vec<u8>,
+    /// This page's words, packed as [`crate::wire::Words`], or empty.
+    ///
+    /// **[ADR 0024](../../../docs/adr/0024-a-page-arrives-with-its-words.md).**
+    /// Empty for a picture, for a thumbnail, and for a page whose document has
+    /// no text layer — which is a page with no selection rather than an error.
+    pub words: Vec<u8>,
 }
 
 /// A batch that has come back, with the child it borrowed.
@@ -397,6 +403,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
                 pages: reply.pages,
                 delay_ms: reply.delay_ms,
                 pixels: reply.pixels,
+                words: reply.words,
             }),
             // A reply that arrived late is still a reply, and throwing it away
             // would be throwing away work that is already done — but a child that
@@ -409,6 +416,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
                     pages: reply.pages,
                     delay_ms: reply.delay_ms,
                     pixels: reply.pixels,
+                    words: reply.words,
                 });
                 alive = false;
                 break;
@@ -439,6 +447,7 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
             pages: 0,
             delay_ms: 0,
             pixels: Vec::new(),
+            words: Vec::new(),
         });
     }
     // **The pipes go back on the child, or the child does not go back.** A

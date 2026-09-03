@@ -64,6 +64,13 @@ workspace, is the trade this file exists to make explicitly rather than by
 reflex: `bin/skerry-thumbnailer/src/gif.rs`, with a fixture written by *Pillow*
 so the encoder under test is somebody else's.
 
+**A PDF text extractor is not here either, and for the same reason as the
+renderer.** A page's words come from `pdftotext -bbox-layout` — the tool that
+ships beside `pdftoppm` — parsed in the sandboxed child into flat records
+([ADR 0024](adr/0024-a-page-arrives-with-its-words.md)). Extraction is a smaller
+research project than rendering and still one: fonts, CMaps and `ToUnicode`
+tables, whose failure mode is mojibake on exactly the files somebody cares about.
+
 A document renderer is deliberately **not** here. `skerry-preview-doc` drives
 `pdftoppm` or `mutool` found on `PATH` — an external tool, which ADR 0006 already
 provides for — because every pure-Rust PDF *renderer* is a research project and

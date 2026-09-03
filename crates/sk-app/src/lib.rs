@@ -39,6 +39,7 @@ mod keys;
 mod layout;
 mod menu;
 mod openers;
+mod pagetext;
 mod palette;
 mod pane;
 mod panes;

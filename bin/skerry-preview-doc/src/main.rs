@@ -1,4 +1,5 @@
-//! The document helper: one page of a PDF, through a renderer on `PATH`.
+//! The document helper: one page of a PDF and its words, through the tools on
+//! `PATH`.
 //!
 //! **[ADR 0006](../../../docs/adr/0006-out-of-process-decoders.md)** provides for
 //! exactly this — "plus external tools such as `ffmpeg` discovered on `PATH` at
@@ -21,6 +22,8 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+mod words;
+
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,6 +42,20 @@ fn main() {
             (renderer(), std::env::args().skip(1).find(|it| it != "--probe"))
         {
             println!("skerry-preview-doc: pages: {:?}", count(tool, Path::new(&path)));
+            // **And whether its words can be found**, which is the other half of
+            // what a page answer carries and the one a person will ask about:
+            // selection is absent on a machine without `pdftotext` and on a
+            // document that is a scan, and those look the same from the window.
+            match words::of(Path::new(&path), 1) {
+                Some(layer) => println!(
+                    "skerry-preview-doc: words: {} on a {:.0}×{:.0} pt page, first {:?}",
+                    layer.words.len(),
+                    layer.page.0,
+                    layer.page.1,
+                    layer.words.first().map(|word| word.text.as_str()).unwrap_or_default()
+                ),
+                None => println!("skerry-preview-doc: words: none — no text layer on this page"),
+            }
         }
         return;
     }
@@ -112,13 +129,33 @@ fn answer(request: &Request) -> Reply {
             pages,
             delay_ms: 0,
             pixels: Vec::new(),
+            words: Vec::new(),
         };
     }
     match render(tool, &path, request.within, page) {
         // **No delay, because a page is not timed.** A document is shown until
         // somebody turns it; the field is a GIF's frame and answers zero here.
-        Ok((pixels, size)) => Reply { refusal: Refusal::None, size, pages, delay_ms: 0, pixels },
-        Err(refusal) => Reply { refusal, size: (0, 0), pages, delay_ms: 0, pixels: Vec::new() },
+        //
+        // **And the page's words beside its pixels** — ADR 0024 — so the panel
+        // can select a line out of it the way it already can out of a text file.
+        // Its absence is a page with no selection and not a failure: a scan has
+        // no words, and a machine with `mutool` alone cannot say where any are.
+        Ok((pixels, size)) => Reply {
+            refusal: Refusal::None,
+            size,
+            pages,
+            delay_ms: 0,
+            pixels,
+            words: words::of(&path, page).map(|layer| layer.pack()).unwrap_or_default(),
+        },
+        Err(refusal) => Reply {
+            refusal,
+            size: (0, 0),
+            pages,
+            delay_ms: 0,
+            pixels: Vec::new(),
+            words: Vec::new(),
+        },
     }
 }
 

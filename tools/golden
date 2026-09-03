@@ -278,6 +278,22 @@ FRAMES = [
     ("quick-look-chosen",
      ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-selected"],
      "pictures"),
+    # **A page with its words selected.** The renderer answers with pixels and
+    # `pdftotext -bbox-layout` with a box per word — ADR 0024 — and this is the
+    # frame that says the transform between the page's points and the panel's
+    # pixels is the right one: the highlight lands on the words rather than beside
+    # them. Over the page rather than behind it, because a page is opaque.
+    ("quick-look-page-selected",
+     ["--size", "900x600", "--scale", "125", "--look", "paper.pdf", "--look-selected"],
+     "pictures"),
+    # **And the same selection at a zoom**, which is the other half of the
+    # transform: the highlight is mapped through the *drawn* rectangle, so it has
+    # to follow the page as it is magnified and dragged rather than staying where
+    # the page used to be.
+    ("quick-look-page-selected-zoomed",
+     ["--size", "900x600", "--scale", "125", "--look", "paper.pdf", "--look-selected",
+      "--look-zoom", "2.0"],
+     "pictures"),
     # **A picture zoomed and dragged off centre.** A pinch — `Ctrl` and the wheel
     # where there are no touchpad gestures — magnifies past the panel's fit, which
     # is two things at once: the child is asked for a *bigger* picture, since a

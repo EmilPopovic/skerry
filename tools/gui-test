@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 131
+FEWEST_SCENARIOS = 132
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5903,6 +5903,172 @@ def edit_a_text_preview(run: Run, fixture: Path) -> None:
         time.sleep(0.1)
     if note.read_text() != "one\ntwo\n":
         raise Failure(f"the undo left {note.read_text()!r}")
+
+
+def one_page_pdf(text: str) -> bytes:
+    """A one-page PDF whose only content is `text`, in Helvetica at 24 points.
+
+    **Written by hand so it needs no tool to generate**, the same bargain the
+    three-page one inside `arrows-walk-the-look-and-a-pdfs-pages` makes — and a
+    real one, so `pdftotext` finds real words in it with real boxes.
+    """
+    # **Eighteen points, and the caller keeps the line short.** At 24 the
+    # fixture's own sentence ran past the 420-point page and poppler dropped the
+    # last character out of the text layer — a layer that was right about a page
+    # whose text was clipped, which read as a decoder losing a letter.
+    body = f"BT /F1 18 Tf 40 500 Td ({text}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += str(number).encode() + b" 0 obj\n" + obj + b"\nendobj\n"
+    start = len(out)
+    out += b"xref\n0 " + str(len(objects) + 1).encode() + b"\n0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        b"trailer\n<< /Size "
+        + str(len(objects) + 1).encode()
+        + b" /Root 1 0 R >>\nstartxref\n"
+        + str(start).encode()
+        + b"\n%%EOF\n"
+    )
+    return bytes(out)
+
+
+def page_words(path: Path) -> tuple[float, float, list[tuple[float, float, float, float, str]]]:
+    """The page's size and its word boxes, straight from `pdftotext`.
+
+    **The scenario aims by the tool's own answer**, not by arithmetic of its own:
+    what is under test is whether the window puts the highlight where the words
+    are, so the harness has to know where the words are from the same place the
+    window's child got them — and then map through the rectangle the window
+    *reports* it drew the page into.
+    """
+    done = subprocess.run(
+        ["pdftotext", "-bbox-layout", "-f", "1", "-l", "1", str(path), "-"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise Failure(f"pdftotext failed: {done.stderr.strip()[:200]}")
+    page = re.search(r'<page width="([\d.]+)" height="([\d.]+)"', done.stdout)
+    if not page:
+        raise Failure("pdftotext named no page")
+    words = [
+        (float(a), float(b), float(c), float(d), text)
+        for a, b, c, d, text in re.findall(
+            r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">([^<]*)</word>',
+            done.stdout,
+        )
+    ]
+    return float(page.group(1)), float(page.group(2)), words
+
+
+@scenario("a-pages-words-are-selected-and-copied", fresh=True)
+def select_a_page(run: Run, fixture: Path) -> None:
+    """A PDF page's text selects with a drag and copies — [ADR 0024](../docs/adr/0024-a-page-arrives-with-its-words.md).
+
+    The panel has always selected and copied the text of a *text file*, and over a
+    page the same three commands were drawn dimmed: the page is pixels. Now the
+    reply carries the renderer's own word boxes beside them.
+
+    Four claims, and the third is the one only a scenario reaches:
+
+    * the layer arrives with the page, so `Ctrl+A` selects words rather than the
+      files behind the panel;
+    * `Ctrl+C` puts exactly those words on the clipboard, read by a separate
+      client — the window's own report would pass with the selection never taken;
+    * **a drag across one word selects that word**, aimed by mapping the tool's
+      own box through the rectangle the window reports it drew the page into,
+      which is the transform from points to pixels under test;
+    * and a press on the margin puts the selection away, because a press outside
+      text does that everywhere else in this program.
+    """
+    if not (shutil.which("pdftoppm") or shutil.which("mutool")):
+        raise Skipped("no pdftoppm or mutool, so there is no page to select on")
+    if not shutil.which("pdftotext"):
+        raise Skipped("no pdftotext, so a page has no words — the documented degradation")
+
+    sentence = "Selectable words on a page"
+    paper = fixture / "paper.pdf"
+    paper.write_bytes(one_page_pdf(sentence))
+    listed(run)
+    until(run, rows="10")
+    run.drive("text paper\nsleep 300\nkey f12\nsleep 150\n")
+    until(run, cursor="paper.pdf")
+    run.drive("key space\nsleep 900\nkey f12\nsleep 300\n")
+    # The layer arriving is the assertion: a page with no words reports zero, and
+    # that is what a machine without `pdftotext` and a scan both look like.
+    opened = holds(run, lambda it: int(it["look_words"] or 0) > 0, "a page with words on it")
+    if int(opened["look_words"]) != len(sentence.split()):
+        raise Failure(f"the page holds {opened['look_words']} words, not {len(sentence.split())}")
+
+    # `Ctrl+A` selects the page's words and not the files behind the panel.
+    files = int(opened["selected"])
+    run.drive("key ctrl+a\nsleep 300\nkey f12\nsleep 200\n")
+    whole = holds(run, lambda it: bool(it["look_picked"]), "a selection over the page")
+    if sentence not in whole["look_picked"]:
+        raise Failure(f"Ctrl+A selected {whole['look_picked']!r}")
+    if int(whole["selected"]) != files:
+        raise Failure("Ctrl+A over a page changed the file selection behind it")
+
+    run.drive("key ctrl+c\nsleep 400\n")
+    held = clipboard(run)
+    if held != sentence:
+        raise Failure(f"the clipboard holds {held!r}")
+
+    # **A drag across the first word**, aimed through the box the tool gives and
+    # the rectangle the window says it drew the page into. The longest word on
+    # the line, and inset a tenth of its width at each end: a character is a
+    # tenth of it, so the two ends round to its first and last rather than to a
+    # boundary a pixel of pointer rounding can fall the wrong side of.
+    across, down, words = page_words(paper)
+    box = [float(value) for value in whole["look_page_box"].split(":")]
+    third = words[0]
+    at = lambda x, y: aim(  # noqa: E731
+        run,
+        whole,
+        box[0] + x * box[2] / across,
+        box[1] + y * box[3] / down,
+    )
+    middle = (third[1] + third[3]) / 2.0
+    inset = (third[2] - third[0]) / 10.0
+    from_at = at(third[0] + inset, middle)
+    to_at = at(third[2] - inset, middle)
+    run.drive(
+        f"drag {from_at[0]:.2f} {from_at[1]:.2f} {to_at[0]:.2f} {to_at[1]:.2f}\n"
+        "sleep 400\nkey f12\nsleep 200\n"
+    )
+    dragged = holds(run, lambda it: it["look_picked"] != whole["look_picked"], "a shorter selection")
+    # **The middle of the word, exactly.** A tenth of a ten-character word is one
+    # character, so a drag inset a tenth at each end selects the eight between —
+    # which is the character interpolation asserted as a string rather than as a
+    # pixel: a word box divided by its character count is what puts the caret
+    # inside a word at all, and the boundary is four pixels from where this aimed.
+    wanted = third[4][1:-1]
+    if dragged["look_picked"] != wanted:
+        raise Failure(
+            f"a drag through {third[4]!r} selected {dragged['look_picked']!r}, wanted {wanted!r}: "
+            f"box={whole['look_page_box']} page={across}x{down} word={third} "
+            f"from={from_at} to={to_at} pointer={dragged['pointer_at']}"
+        )
+
+    # A press on the paper, well below the line, puts it away — and on a page
+    # that fits the panel it does nothing else, because there is nothing to pan.
+    margin = at(across / 2.0, down - 20.0)
+    run.drive(f"move {margin[0]:.2f} {margin[1]:.2f}\nclick left\nsleep 300\nkey f12\nsleep 200\n")
+    until(run, look_picked="")
 
 
 @scenario("a-picture-zooms-under-the-pointer-and-drags", fresh=True)

@@ -1335,7 +1335,10 @@ fn look_scope(registry: &mut Registry<App>) {
             name: "action.look_select_all",
             group: Group::Edit,
             keys: &["ctrl+a"],
-            enabled: App::looking_at_text,
+            // **Either kind of text.** A page's words are text somebody wants a
+            // line out of, which is the whole of ADR 0024 — and `Ctrl+A` over one
+            // was dimmed because this asked whether the panel held a text *file*.
+            enabled: App::looking_at_any_text,
             run: App::select_all_of_the_look,
         },
         CommandSpec {

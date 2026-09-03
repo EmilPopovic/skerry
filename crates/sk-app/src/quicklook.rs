@@ -560,6 +560,12 @@ pub(crate) struct QuickLook {
     /// `Ctrl+Z` takes back a save nobody meant — which is the whole reason
     /// `Change::Edited` carries both sides.
     pub(crate) unsaved: bool,
+    /// The words on the page on screen, where the child could say.
+    ///
+    /// **Per page, and dropped when the page turns** — ADR 0024. A layer belongs
+    /// to one page and arrives with it; keeping the last one across a turn would
+    /// draw page three's highlight over page four's text.
+    pub(crate) page_text: Option<crate::pagetext::Page>,
     /// How much the picture is magnified past the size it was fitted to.
     ///
     /// **One is fitted, not one hundred percent.** What a person zooms *from* is
@@ -612,6 +618,7 @@ impl QuickLook {
             dragging: false,
             editing: false,
             unsaved: false,
+            page_text: None,
             zoom: 1.0,
             pan: (0.0, 0.0),
             playing: true,
@@ -727,6 +734,10 @@ impl QuickLook {
             _ => wanted,
         };
         let moved = wanted != self.page;
+        if moved {
+            // The words belong to the page that is going away.
+            self.page_text = None;
+        }
         self.page = wanted;
         // **A turn is a draft first, for the same reason opening one is.** `↓`
         // twice in a row is a person looking for something, and two 65 ms drafts
@@ -960,6 +971,10 @@ impl QuickLook {
     /// panel says so with an ellipsis and the clipboard gets what is on screen.
     /// Copying bytes nobody has seen would be a paste nobody could predict.
     pub(crate) fn select_all(&mut self) {
+        if let Some(page) = self.page_text.as_mut() {
+            page.select_all();
+            return;
+        }
         let Some(text) = &self.text else { return };
         let Some(last) = text.lines.len().checked_sub(1) else { return };
         self.chosen = Some(Chosen {
@@ -969,8 +984,18 @@ impl QuickLook {
     }
 
     /// Whether there is a selection with anything in it.
+    ///
+    /// **Either kind of text**, because the command above this does not care
+    /// which: `Ctrl+C` over a text file copies lines and over a page copies
+    /// words, and both are "there is something to copy".
     pub(crate) fn has_selection(&self) -> bool {
         self.chosen.is_some_and(|chosen| !chosen.is_empty())
+            || self.page_text.as_ref().is_some_and(crate::pagetext::Page::has_selection)
+    }
+
+    /// Whether there is text on screen at all — a file's, or a page's words.
+    pub(crate) fn has_text(&self) -> bool {
+        self.text.is_some() || self.page_text.is_some()
     }
 
     /// The selected text, lines joined by newlines.
@@ -978,6 +1003,9 @@ impl QuickLook {
     /// **`\n` and not the platform's separator**, because there is one platform
     /// and it is the one whose separator is `\n`.
     pub(crate) fn chosen_text(&self) -> Option<String> {
+        if let Some(page) = self.page_text.as_ref() {
+            return page.text();
+        }
         let text = self.text.as_ref()?;
         let chosen = self.chosen.filter(|it| !it.is_empty())?;
         let (from, to) = chosen.ordered();
@@ -1425,6 +1453,7 @@ mod tests {
             dragging: false,
             editing: false,
             unsaved: false,
+            page_text: None,
             zoom: 1.0,
             pan: (0.0, 0.0),
             playing: true,

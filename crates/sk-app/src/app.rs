@@ -1011,6 +1011,8 @@ pub struct App {
     properties_owed: bool,
     /// Where a pan of a zoomed picture last had the pointer.
     look_pan: Option<Point>,
+    /// Whether a drag is selecting the words of a page.
+    page_drag: bool,
     /// Whether the display server has already reported this gesture's drop.
     ///
     /// **A drag ends twice.** The pointer's button comes up and the data device
@@ -1319,6 +1321,7 @@ impl App {
             files_drag: None,
             dropped: false,
             look_pan: None,
+            page_drag: false,
             properties_owed: false,
             on_the_bus: String::new(),
             thumb_grab: None,
@@ -1951,7 +1954,9 @@ impl App {
         // still open, and `Ctrl+A` then means the name being typed — the field is
         // where the caret is, and the caret decides.
         if self.field_scope() == Scope::Global
-            && (self.looking_at_text() || self.looking_at_an_animation())
+            && (self.looking_at_text()
+                || self.looking_at_an_animation()
+                || self.looking_at_a_page_with_words())
             && let Some(command) = commands.resolve(event, Scope::Look)
             && commands.scope_of(command) == Scope::Look
         {
@@ -2992,7 +2997,9 @@ impl App {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
                 if inside.contains(position.x, position.y)
-                    && (self.start_choosing_text(position, shift) || self.start_panning(position))
+                    && (self.start_choosing_text(position, shift)
+                        || self.start_choosing_a_page(position, shift)
+                        || self.start_panning(position))
                 {
                     self.dirty = true;
                     return true;
@@ -3014,12 +3021,61 @@ impl App {
         true
     }
 
+    /// A press on a word of a page: the start of a selection. Whether it took.
+    ///
+    /// **Only on a word.** A press on the paper falls through to the pan, which
+    /// is what makes the two gestures unambiguous without a modifier or a tool
+    /// palette: the margin moves the page and the text selects out of it. A page
+    /// with no text layer — a scan — is all margin, so it pans everywhere it
+    /// used to.
+    fn start_choosing_a_page(&mut self, position: Point, shift: bool) -> bool {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let at = (position.x, position.y);
+        let Some(look) = self.quick_look.as_ref() else { return false };
+        if !crate::view::page_word_at(look, inner, at) {
+            return false;
+        }
+        let Some(place) = crate::view::page_place(look, inner, at) else { return false };
+        let Some(page) = self.quick_look.as_mut().and_then(|look| look.page_text.as_mut()) else {
+            return false;
+        };
+        page.choose(place, shift);
+        self.page_drag = true;
+        true
+    }
+
+    /// Extends a page's selection while the button is down.
+    fn extend_the_page_choice(&mut self, position: Point) -> bool {
+        if !self.page_drag {
+            return false;
+        }
+        let inner = crate::view::quick_look_area(&self.layout);
+        let at = (position.x, position.y);
+        let Some(look) = self.quick_look.as_ref() else { return false };
+        // **The nearest place, not the word under the pointer.** A drag that
+        // leaves the text keeps extending, which is what dragging past an edge
+        // means in every text view — `Page::place_at` is the half of the hit test
+        // that is never nothing, and this is its one caller.
+        let Some(place) = crate::view::page_place(look, inner, at) else { return false };
+        self.quick_look
+            .as_mut()
+            .and_then(|look| look.page_text.as_mut())
+            .is_some_and(|page| page.drag_to(place))
+    }
+
     /// A press inside a zoomed picture: the start of a pan. Whether it took.
     ///
     /// **Only while it is zoomed.** A press on a picture that fits is not the
     /// start of anything — there is nowhere to drag it — and a gesture that
     /// quietly armed itself would make the panel feel like it had a mode.
     fn start_panning(&mut self, position: Point) -> bool {
+        // **The page's selection goes away first.** A press on the paper is a
+        // press outside the text, and everywhere else in this program that puts
+        // a selection away rather than leaving one nothing is acting on.
+        if let Some(page) = self.quick_look.as_mut().and_then(|look| look.page_text.as_mut()) {
+            page.clear();
+            self.dirty = true;
+        }
         let taken = self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomed);
         if taken {
             self.look_pan = Some(position);
@@ -3096,6 +3152,23 @@ impl App {
     /// Whether a quick look is showing text, so its two chords are live.
     pub(crate) fn looking_at_text(&self) -> bool {
         self.quick_look.as_ref().is_some_and(|look| look.text.is_some())
+    }
+
+    /// Whether the panel is showing a page whose words the child could find.
+    ///
+    /// **The condition that turns three commands on over a PDF** — ADR 0024 — and
+    /// it is about the *layer* rather than about the file being a document: a
+    /// scanned page is a document with no words, and there is nothing on it to
+    /// select.
+    #[must_use]
+    pub(crate) fn looking_at_a_page_with_words(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| look.page_text.is_some())
+    }
+
+    /// Whether there is text of either kind in the panel.
+    #[must_use]
+    pub(crate) fn looking_at_any_text(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::has_text)
     }
 
     /// Whether that text has something selected in it.
@@ -6439,6 +6512,21 @@ scope_aim={scope_aim:?}",
                 if answer.delay_ms > 0 {
                     look.delay_ms = answer.delay_ms;
                 }
+                // **The page's words, where the child could say** — ADR 0024.
+                // They arrive with the pixels because they cost a fifth of what
+                // the render does, and a page with none is a scan or a machine
+                // without `pdftotext`: both are a page with no selection.
+                // **Once per page, not once per render.** A zoom asks the child
+                // for the same page again and the words come back with it — and
+                // replacing the layer would throw away the selection somebody
+                // zoomed in to read. The layer is dropped when the page turns,
+                // which is the only time it stops being about what is on screen.
+                if !answer.words.is_empty()
+                    && answer.key.page == look.page
+                    && look.page_text.is_none()
+                {
+                    look.page_text = crate::pagetext::Page::of(&answer.words);
+                }
                 if answer.refusal == sk_preview::Refusal::NoSuchPage {
                     // A `↓` at the last page. The page on screen stays.
                     look.no_such_page(answer.pages);
@@ -6831,6 +6919,49 @@ scope_aim={scope_aim:?}",
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
+    /// What a page's own text layer says, for the diagnostic line.
+    ///
+    /// **Its own method for the reason `look_state` is one**: that is at the
+    /// hundred-line limit, and a page's words are one subject — how many there
+    /// are, what is selected out of them, and where the page was drawn so a
+    /// scenario can aim at one.
+    fn page_state(&self) -> String {
+        // How many words the page's layer holds, and what is selected out of it:
+        // a scenario about selecting text on a page cannot see either any other
+        // way, and the clipboard is a separate claim from the selection.
+        let look_words = self
+            .quick_look
+            .as_ref()
+            .and_then(|look| look.page_text.as_ref())
+            .map_or(0, crate::pagetext::Page::count);
+        // **Where the page was actually drawn**, so a scenario can aim at a word
+        // by mapping the tool's own box through it. The alternative is the
+        // harness keeping a copy of `fitted_box` — which is the arithmetic under
+        // test, and a second copy of it would agree with itself and with nothing
+        // else. The same argument `column_aim` and `history_aim` already make.
+        let look_page_box = self
+            .quick_look
+            .as_ref()
+            .filter(|look| look.page_text.is_some())
+            .and_then(|look| {
+                let (_, size) = look.image?;
+                let inner = crate::view::quick_look_area(&self.layout);
+                let box_ = crate::view::fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+                Some(format!("{:.1}:{:.1}:{:.1}:{:.1}", box_.x, box_.y, box_.width, box_.height))
+            })
+            .unwrap_or_default();
+        let look_picked = self
+            .quick_look
+            .as_ref()
+            .and_then(|look| look.page_text.as_ref())
+            .and_then(crate::pagetext::Page::text)
+            .unwrap_or_default();
+        format!(
+            "look_words={look_words} look_picked={look_picked:?} \
+look_page_box={look_page_box}"
+        )
+    }
+
     /// What the quick look is showing, for the diagnostic line.
     ///
     /// **Its own method rather than forty lines inside `shape_state`**, which is
@@ -6918,6 +7049,7 @@ scope_aim={scope_aim:?}",
             .and_then(|look| look.text.as_ref())
             .map_or(0, |text| text.rows().len());
         let look_unsaved = self.look_is_unsaved();
+        let page = self.page_state();
         // The magnification and where the picture has been dragged to, which is
         // the whole of what a pinch and a pan change: a scenario asserting on
         // pixels would be asserting on the machine's filtering.
@@ -6948,7 +7080,8 @@ scope_aim={scope_aim:?}",
             "looking={looking} look_page={look_page} look_aim={look_aim:?} \
 look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
 look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
-look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan}"
+look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan} \
+{page}"
         )
     }
 
@@ -8404,6 +8537,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let dragged = self.text_drag.take().is_some();
         let chose = self.quick_look.as_mut().is_some_and(|look| std::mem::take(&mut look.dragging));
         let panned = self.look_pan.take().is_some();
+        let read = std::mem::take(&mut self.page_drag);
         let divided = self.placement.dragging.take().is_some();
         // A width is part of the layout, so letting go of one is a thing to save.
         // The session is compared rather than tracked, so this only has to make
@@ -8415,7 +8549,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // and a title bar holds nothing to click: the path moved into the panes,
         // so there is nothing here for a press to be about.
         self.title_press = None;
-        if ended || released || dragged || divided || sized || chose || widened || ordered || panned
+        if ended
+            || released
+            || dragged
+            || divided
+            || sized
+            || chose
+            || widened
+            || ordered
+            || panned
+            || read
         {
             self.dirty = true;
         }
@@ -8842,7 +8985,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // secondary click inside a text preview is about the text, and a menu of
         // file operations over a panel covering the file would act on something
         // the person cannot see.
-        if (self.looking_at_text() || self.looking_at_an_animation())
+        if (self.looking_at_text()
+            || self.looking_at_an_animation()
+            || self.looking_at_a_page_with_words())
             && crate::view::quick_look_area(&self.layout).contains(position.x, position.y)
         {
             self.menu_wanted = Some((position, crate::menu::IN_A_LOOK));
@@ -9329,12 +9474,25 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             // the selection, which is what dragging past an edge means in every
             // text view — and this branch is now the only place a motion event
             // reaches while a look is open.
-            if self.extend_the_text_choice(position) || self.pan_the_look(position) {
+            if self.extend_the_text_choice(position)
+                || self.extend_the_page_choice(position)
+                || self.pan_the_look(position)
+            {
                 self.dirty = true;
             }
             let inside =
                 crate::view::quick_look_area(&self.layout).contains(position.x, position.y);
-            let over_text = self.looking_at_text() && inside;
+            // The I-beam over a page's words as well as over a text file's, which
+            // is the only thing that says a page can be selected out of.
+            let over_text = inside
+                && (self.looking_at_text()
+                    || self.quick_look.as_ref().is_some_and(|look| {
+                        crate::view::page_word_at(
+                            look,
+                            crate::view::quick_look_area(&self.layout),
+                            (position.x, position.y),
+                        )
+                    }));
             // A zoomed picture can be dragged, and a pointer that says so is the
             // only thing that tells somebody it can.
             let grabbable =
