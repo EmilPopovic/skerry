@@ -32,6 +32,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0022](0022-a-search-names-a-scope-and-everywhere-is-the-local-mounts.md) | A search names a scope, and everywhere is the local mounts, index-first per root | Accepted |
 | [0023](0023-d-bus-is-a-socket-we-speak-ourselves.md) | D-Bus is a socket we speak ourselves: a thread to serve, a connection per call | Accepted |
 | [0024](0024-a-page-arrives-with-its-words.md) | A page arrives with its words: the renderer's own text layer, in word boxes, beside the pixels | Accepted |
+| [0025](0025-the-config-file-is-the-keymap-written-out.md) | The config file is the keymap written out, and the program never writes it behind you | Accepted |
 
 ## Triggers that have been answered
 

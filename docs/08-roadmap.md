@@ -614,7 +614,7 @@ so no policy above `sk-plat` may depend on `dnd_finished` arriving.
 | | What | From | Bar |
 | --- | --- | --- | --- |
 | 11 | **Tabs, the split-pane tree, and per-folder view settings** | M2 | A pane tree of any shape survives a resize and a scale change with no reflow above 8 ms |
-| 12 | ~~**Session persistence**~~ **Done**, decided by [ADR 0011](adr/0011-one-plain-text-state-file-written-atomically.md); the **config file** that is a serialization of the same registry is M6's and is not | M2, [rule 6](03-principles.md#6-state-survives-everything) | Every tab, pane, scroll offset and sort survives `kill -9` — met, and the scenario uses that signal rather than a clean exit, which writes the file on its way out. **The filter and the selection are deliberately not saved**, and the ADR says why rather than leaving it looking like an oversight |
+| 12 | ~~**Session persistence**~~ **Done**, decided by [ADR 0011](adr/0011-one-plain-text-state-file-written-atomically.md); the **config file** that is a serialization of the same registry is M6's and is **now the keymap half of it** — [ADR 0025](adr/0025-the-config-file-is-the-keymap-written-out.md) | M2, [rule 6](03-principles.md#6-state-survives-everything) | Every tab, pane, scroll offset and sort survives `kill -9` — met, and the scenario uses that signal rather than a clean exit, which writes the file on its way out. **The filter and the selection are deliberately not saved**, and the ADR says why rather than leaving it looking like an oversight |
 
 M2 says the layout model is the hardest thing to retrofit later, which is an
 argument for doing it earlier than this. The reason it is not earlier: a split pane
@@ -728,6 +728,17 @@ atlas, the cache, the three previews, **syntax highlighting**, **the zoom** and 
 **PDF page's selectable words** are in; EXIF and the docked form are not), then **desktop citizenship** (M7)
 — FileManager1, udisks2, portals, the GoTo popup — then **M8**, whose first job is the
 performance regression gate that CI deliberately does not have yet.
+
+**M6 has its first half.** The keymap is a file — `$XDG_CONFIG_HOME/skerry/config`,
+one line per command, read at startup and written only when asked
+([ADR 0025](adr/0025-the-config-file-is-the-keymap-written-out.md)) — which is
+what rule 2's one registry was for: a chord belongs to a command, so rebinding one
+is a line rather than a branch in the event path. A bad line is a problem printed
+at startup and the command keeps what it had; an empty right-hand side unbinds.
+What is owed is *settings*: every one of them is something the window also changes
+as it runs, so each needs a precedence rule against the session file that ADR 0025
+deliberately does not invent — and user-defined actions, which are the plugin
+ABI's substitute [11-non-goals.md](11-non-goals.md) promises.
 
 **Gestures** are further down than their obvious priority, and **the grid view
 with thumbnails** was there beside them: both large, both visible, neither serving

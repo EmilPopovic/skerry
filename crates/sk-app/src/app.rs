@@ -1013,6 +1013,12 @@ pub struct App {
     look_pan: Option<Point>,
     /// Whether a drag is selecting the words of a page.
     page_drag: bool,
+    /// What the config file said about the keymap, if there was one.
+    ///
+    /// **Held rather than re-read.** A registry is built whenever one is needed —
+    /// the frame loop's, the palette's — and reading a file on the palette's path
+    /// would be a syscall on the frame loop, which is rule 1's whole subject.
+    keymap: crate::config::Config,
     /// Whether the display server has already reported this gesture's drop.
     ///
     /// **A drag ends twice.** The pointer's button comes up and the data device
@@ -1053,6 +1059,11 @@ impl App {
         // in the file. One `openat` and one read of a few hundred bytes, before
         // there is a frame loop for it to be a rule 1 violation of.
         let session = options.restore.then(crate::session::load).flatten();
+        // **Beside the session read and for the same reason** — ADR 0025. One
+        // `openat` and a few hundred bytes, before there is a frame loop for it
+        // to be a rule 1 violation of; and it has to be before the first registry
+        // is built, which is what every chord in the window resolves against.
+        let keymap = crate::config::Config::read();
         let window_started = Instant::now();
         let window = Window::open(&WindowConfig {
             own_frame: options.own_frame,
@@ -1068,6 +1079,7 @@ impl App {
         let background = Background::start(options.path.clone())?;
         let drawing = open_drawing(&window)?;
         let mut app = Self::assemble(options, window, window_us, background, drawing);
+        app.keymap = keymap;
         let restored = session.is_some();
         if let Some(session) = session {
             app.restore_session(&session, options);
@@ -1320,6 +1332,7 @@ impl App {
             band: None,
             files_drag: None,
             dropped: false,
+            keymap: crate::config::Config::of(""),
             look_pan: None,
             page_drag: false,
             properties_owed: false,
@@ -1351,7 +1364,7 @@ impl App {
         // can take `&mut App` without the registry being part of what is
         // borrowed. It is built once; a command's `run` is a plain function
         // pointer, so there is nothing to keep warm.
-        let commands = crate::commands::registry();
+        let commands = self.commands();
         self.hint = crate::commands::hint(&commands);
         if !commands.problems().is_empty() {
             // A conflicting binding is a bug and a test fails on it, but a
@@ -5945,6 +5958,29 @@ scope_aim={scope_aim:?}",
         self.dirty = true;
     }
 
+    /// The registry, with whatever the config file said applied to it.
+    ///
+    /// **Built rather than held**, which is the shape it already had: a command's
+    /// `run` is a plain function pointer, so there is nothing to keep warm, and a
+    /// registry that is not part of `&mut self` is what lets a command take one.
+    /// What is new is the keymap, which is applied here so that every registry
+    /// the window builds — the loop's and the palette's — is the same keymap.
+    fn commands(&self) -> Registry<Self> {
+        let mut registry = crate::commands::registry();
+        self.keymap.apply(&mut registry);
+        registry
+    }
+
+    /// Writes the keymap out, and says where it went or why it did not.
+    pub(crate) fn write_the_config(&mut self) {
+        let said = match crate::config::write(&self.commands()) {
+            Ok(path) => sk_model::i18n::format("notice.config_written", &[&path.display()]),
+            Err(why) => why,
+        };
+        self.notice = Some((said, Instant::now()));
+        self.dirty = true;
+    }
+
     /// Whether an index build is running.
     #[must_use]
     pub(crate) fn indexing(&self) -> bool {
@@ -9482,7 +9518,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         self.claim_keyboard(Claim::Palette);
         // Built here rather than held, so what it lists is what can run *now* —
         // the same question a menu row asks when it opens.
-        let commands = crate::commands::registry();
+        let commands = self.commands();
         self.palette = Some(crate::palette::open(&commands, |id| {
             commands.find(id).is_some_and(|command| commands.enabled(command, self))
         }));

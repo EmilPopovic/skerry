@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 765 tests, 132 GUI scenarios **on both Wayland and X11**,
-sixty-seven golden frames, every gate green: a Details view
+sandboxed helpers, 785 tests, 134 GUI scenarios **on both Wayland and X11**,
+seventy-four golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -134,7 +134,12 @@ blocking on a read to serve, a short-lived connection per call, so a browser's
 to the first and exits **before opening a window**, and a fresh install on a dark
 desktop opens dark because the settings portal was asked, once, in 0.15 ms.
 Every command is reachable by keyboard
-alone and by pointer alone, and a test fails the build for one that is not. What
+alone and by pointer alone, and a test fails the build for one that is not — and
+**the keymap is a file**: `Ctrl ,` writes every command and its chords to
+`$XDG_CONFIG_HOME/skerry/config`, a line rebinds one, an empty right-hand side
+unbinds it, and a typo is a problem printed at startup rather than a command that
+has quietly lost its key
+([ADR 0025](docs/adr/0025-the-config-file-is-the-keymap-written-out.md)). What
 is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the
 three budget rows currently missed:

@@ -1099,6 +1099,17 @@ fn file(registry: &mut Registry<App>) {
 fn help(registry: &mut Registry<App>) {
     for spec in [
         CommandSpec {
+            id: "config.write",
+            name: "action.config_write",
+            group: Group::Help,
+            // **`Ctrl ,` is where every program a person has met keeps its
+            // settings**, and this is the whole of the settings surface today:
+            // the keymap, as a file to edit — ADR 0025.
+            keys: &["ctrl+,"],
+            enabled: |_: &App| true,
+            run: App::write_the_config,
+        },
+        CommandSpec {
             id: "help.keys",
             name: "action.show_keys",
             group: Group::Help,

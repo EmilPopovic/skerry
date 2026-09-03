@@ -185,6 +185,68 @@ impl<C> Registry<C> {
         self.specs.push(spec);
     }
 
+    /// Replaces a command's chords with `keys`, in the scope it belongs to.
+    ///
+    /// **What a config file's line does** —
+    /// [ADR 0025](../../../docs/adr/0025-the-config-file-is-the-keymap-written-out.md).
+    /// A replacement rather than an addition, because "how do I get rid of this
+    /// binding" is the question a rebindable keymap exists to answer: an empty
+    /// `keys` unbinds the command entirely.
+    ///
+    /// Anything wrong goes where the defaults' problems go — an id nothing
+    /// registers, a chord that does not parse, a chord another command holds in
+    /// the same scope — and the binding that was there stays. A keymap is not an
+    /// all-or-nothing document, and a typo on line 40 must not take line 39 with
+    /// it. Whether the command was found at all.
+    pub fn rebind(&mut self, id: &str, keys: &[String]) -> bool {
+        let Some(&index) = self.by_id.get(id) else {
+            self.problems.push(format!("`{id}` is not a command"));
+            return false;
+        };
+        let scope = self.scope_of(CommandId(index));
+        // **Parsed before anything is unbound**, so a line with a typo in it
+        // leaves the command reachable by whatever it answered to before. The
+        // first version cleared first and refused the bad chord after — which
+        // unbound `help.dump` and took the diagnostic key with it.
+        let mut chords = Vec::with_capacity(keys.len());
+        for text in keys {
+            let Some(chord) = Chord::parse(text) else {
+                self.problems.push(format!("`{id}`: `{text}` is not a chord"));
+                return true;
+            };
+            chords.push(chord);
+        }
+        // Its own bindings go first, so a line that merely reorders a command's
+        // chords does not collide with itself.
+        self.bindings.retain(|(_, _, at)| *at != index);
+        for (chord, text) in chords.into_iter().zip(keys) {
+            if let Some((_, _, taken)) = self
+                .bindings
+                .iter()
+                .find(|(existing, at, _)| existing.canonical() == chord.canonical() && *at == scope)
+            {
+                let other = self.specs.get(*taken).map_or("?", |spec| spec.id);
+                self.problems.push(format!("`{id}`: `{text}` is already `{other}` in {scope:?}"));
+                continue;
+            }
+            self.bindings.push((chord, scope, index));
+        }
+        true
+    }
+
+    /// Every chord bound to a command, in the form a file holds them.
+    ///
+    /// **The current ones, not the spec's defaults**, which is what makes the
+    /// written file a picture of the keymap in force rather than of the build's.
+    #[must_use]
+    pub fn chords_of(&self, id: CommandId) -> Vec<String> {
+        self.bindings
+            .iter()
+            .filter(|(_, _, at)| *at == id.0)
+            .map(|(chord, _, _)| chord.text())
+            .collect()
+    }
+
     /// Everything wrong with the registered set. Empty in a sound program.
     #[must_use]
     pub fn problems(&self) -> &[String] {
@@ -315,12 +377,95 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{CommandSpec, Group, Registry, Scope};
+    use crate::chord::Chord;
     use sk_plat::{Key, KeyEvent, Modifiers, Named};
 
     #[derive(Default)]
     struct Context {
         count: usize,
         allowed: bool,
+    }
+
+    /// **What is written back can be read back**, which is the config file's
+    /// whole contract with the keymap — ADR 0025.
+    #[test]
+    fn every_chord_survives_the_round_trip_through_its_file_form() {
+        for text in [
+            "ctrl+a",
+            "ctrl+shift+f3",
+            "alt+left",
+            "f12",
+            "escape",
+            "space",
+            "ctrl+alt+shift+i",
+            "super+h",
+            "backspace",
+            "page_down",
+            "ctrl+,",
+            "1",
+            "ctrl+minus",
+        ] {
+            let chord = Chord::parse(text).unwrap_or_else(|| panic!("`{text}` did not parse"));
+            let written = chord.text();
+            let back =
+                Chord::parse(&written).unwrap_or_else(|| panic!("`{written}` did not parse back"));
+            assert_eq!(chord.canonical(), back.canonical(), "`{text}` was written as `{written}`");
+        }
+    }
+
+    /// A rebind replaces, an empty list unbinds, and a taken chord is refused.
+    #[test]
+    fn a_rebind_replaces_and_says_what_it_could_not_do() {
+        let mut registry: Registry<Context> = Registry::new();
+        registry.add(spec("a.one", &["ctrl+a"]));
+        registry.add(spec("a.two", &["ctrl+b"]));
+        assert!(registry.problems().is_empty());
+
+        // Replacing, not adding: the old chord stops working.
+        assert!(registry.rebind("a.one", &["ctrl+q".to_owned()]));
+        assert_eq!(registry.chords_of(registry.find("a.one").expect("one")), ["ctrl+q"]);
+        let ctrl = Modifiers { ctrl: true, ..Modifiers::default() };
+        assert_eq!(registry.resolve(&press(Key::Character('a'), ctrl), Scope::Global), None);
+        assert_eq!(
+            registry.resolve(&press(Key::Character('q'), ctrl), Scope::Global),
+            registry.find("a.one")
+        );
+
+        // An empty list unbinds it entirely.
+        assert!(registry.rebind("a.one", &[]));
+        assert!(registry.chords_of(registry.find("a.one").expect("one")).is_empty());
+        assert_eq!(registry.resolve(&press(Key::Character('q'), ctrl), Scope::Global), None);
+
+        // A chord another command holds in the same scope is refused, and the
+        // problem names both — the file's line is what a person is reading.
+        let before = registry.problems().len();
+        assert!(registry.rebind("a.one", &["ctrl+b".to_owned()]));
+        assert_eq!(registry.problems().len(), before + 1);
+        assert!(registry.problems().last().is_some_and(|it| it.contains("a.two")));
+        assert_eq!(
+            registry.resolve(&press(Key::Character('b'), ctrl), Scope::Global),
+            registry.find("a.two"),
+            "the command that had it keeps it"
+        );
+
+        // **A line with a bad chord leaves the command where it was**, which is
+        // the difference between a typo and an unbinding: the first version of
+        // this cleared the bindings before parsing and took `help.dump` — the
+        // diagnostic key — off the keyboard for the whole session.
+        registry.rebind("a.two", &["ctrl+z".to_owned()]);
+        let before = registry.problems().len();
+        registry.rebind("a.two", &["not a chord at all".to_owned()]);
+        assert_eq!(registry.problems().len(), before + 1);
+        assert_eq!(
+            registry.chords_of(registry.find("a.two").expect("two")),
+            ["ctrl+z"],
+            "a refused line unbound the command"
+        );
+
+        // And an id nothing registers is a problem rather than a panic.
+        let before = registry.problems().len();
+        assert!(!registry.rebind("a.nothing", &["f9".to_owned()]));
+        assert_eq!(registry.problems().len(), before + 1);
     }
 
     fn spec(id: &'static str, keys: &'static [&'static str]) -> CommandSpec<Context> {

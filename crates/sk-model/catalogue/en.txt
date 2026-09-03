@@ -155,6 +155,13 @@ notice.places_ordered = The list of places was reordered
 notice.places_refused = The list of places could not be saved — check that the config directory can be written
 # When Escape throws away an edit in the preview that was never written.
 notice.edit_discarded = The edit was discarded
+# The comment at the top of the written keymap, and what the command reports.
+config.header = Skerry's keymap. One line per command: id = chord, chord
+config.header_more = An empty right-hand side unbinds it. Delete this file for a fresh one.
+notice.config_written = The keymap was written to {0}
+error.no_config_home = There is no config directory to write a keymap into
+error.config_exists = {0} is already there — delete it for a fresh one
+error.config_refused = {0} could not be written — check that the directory can be written
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
 # What is left on a volume, at the right of its row in the list of places.
@@ -421,6 +428,7 @@ action.extend_left = Extend selection left
 action.extend_right = Extend selection right
 action.index_build = Index this folder
 action.index_build_all = Index every filesystem
+action.config_write = Write the keymap to a file
 action.index_forget = Delete this folder's index
 
 # Properties.

@@ -13,6 +13,12 @@ review by pointing at this file rather than by re-arguing it.
 - **Virtual filesystems beyond archive listing.** No FUSE layer, no `kio`-style slaves.
 - **An embedded terminal.** See below.
 - **A bundled image editor, media player or archive manager.** Launch the user's.
+- **A document viewer.** The preview shows a page, selects and copies its words and
+  finds text on the one in front of you — [ADR
+  0024](adr/0024-a-page-arrives-with-its-words.md) — because the panel already
+  makes that promise about a text file and declining it for a PDF was an
+  inconsistency. An outline, links, forms, annotations and a document-wide search
+  are a PDF reader, which is the thing to launch.
 - **Windows and macOS ports.** The platform layer, the integration surface and the
   portability policy are all Linux-shaped on purpose.
 - **A file manager that also does system tasks** — disk partitioning, permissions editors

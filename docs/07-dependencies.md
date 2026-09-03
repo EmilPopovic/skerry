@@ -110,6 +110,15 @@ and generality costs latency or control:
 - **D-Bus itself** — the socket, `EXTERNAL` authentication, the marshaller and
   the service side of `FileManager1`. `sk_desktop::bus`,
   [ADR 0023](adr/0023-d-bus-is-a-socket-we-speak-ourselves.md).
+- **Syntax highlighting.** Four roles — comment, keyword, literal, number — over
+  Rust, the C-likes, Python and the shells, as a scanner rather than a grammar:
+  `crates/sk-app/src/highlight.rs`. A grammar per language is what the crates in
+  this space are, and what a preview at thirteen pixels does not need.
+- **The keymap file.** `key = value` with `#` comments, read at startup and
+  written when asked — [ADR
+  0025](adr/0025-the-config-file-is-the-keymap-written-out.md). The third file
+  this program parses by hand, after GTK's `bookmarks` and its own session, and
+  under a hundred lines for the same reason.
 - **Natural-order collation and sort-key derivation.** Tightly coupled to the store layout.
 - **Localization.** A `t!` macro over an embedded catalogue is a hundred lines; a
   localization framework is a dependency and a build step.

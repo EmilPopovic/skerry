@@ -2156,6 +2156,38 @@ the thirteen that followed each looked like a real defect in a different feature
 I spent the first minutes of reading that output believing the change under test
 had broken four unrelated things.
 
+## A format's real test is the round trip, and a window's is the window
+
+The keymap became a file, which meant a chord had to survive being written and
+read back. There was a `Chord::display` — `Ctrl A`, with the locale's word for
+Ctrl and a real arrow glyph — and it is for the screen, so the file needed
+`Chord::text`: `ctrl+shift+f3`, exactly what `parse` takes.
+
+The test was written over every chord the registry binds rather than over a
+handful chosen by hand, and it failed on the first run. `ctrl+minus` parses to
+the character `-`, which `text` wrote as `ctrl+-`, which `parse` splits on its own
+separator. One chord in a hundred and thirty, and the one a hand-picked list would
+not have contained.
+
+**Then the scenario found two more that no unit test could.** The file the program
+writes puts each command's display name after its chords — `view.hidden = ctrl+h
+# Show hidden files` — and the parser read the comment as part of the chord list,
+so the program refused every line of its own output. The unit tests did not catch
+it because they parsed *hand-written* text; the file the program actually writes
+is a different string, and only writing one and reading it back in a window
+compares them.
+
+The second was worse and quieter: a refused line **unbound the command**, because
+`rebind` cleared the old chords before parsing the new ones. In the scenario that
+took `help.dump` — `F12`, the key the harness reads state with — off the
+keyboard, and the failure read as *the listing never arrived*. A typo on one line
+had silently disabled the diagnostic the harness runs on.
+
+**The rule: a serialiser is not tested by a parser test.** What has to be asserted
+is `read(write(x)) == x` over the real corpus, and for anything that leaves the
+process, over the bytes the program itself produces rather than a fixture someone
+typed.
+
 ## A gate catches the shape it was written for, and this was a different shape
 
 Two defects in one afternoon's scripted edits, both invisible in a diff read as an

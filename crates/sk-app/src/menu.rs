@@ -112,7 +112,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],
     &["place.pin", "file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
-    &["view.palette", "help.keys"],
+    &["view.palette", "help.keys", "config.write"],
 ];
 
 /// One row of an open menu.

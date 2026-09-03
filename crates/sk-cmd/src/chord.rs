@@ -124,7 +124,85 @@ impl Chord {
         out.push_str(&key_name(self.key));
         out
     }
+
+    /// The chord as a *file* holds it: `ctrl+shift+f3`, which is what [`Chord::parse`]
+    /// takes.
+    ///
+    /// **The inverse of `parse`, not a second display form.** `display` is for the
+    /// screen — spaces, arrows, the locale's word for `Ctrl` — and putting that in a
+    /// file would make the keymap unreadable by the parser that wrote it. The two are
+    /// tested against each other over every chord the registry binds: what is written
+    /// back can be read back, which is
+    /// [ADR 0025](../../../docs/adr/0025-the-config-file-is-the-keymap-written-out.md)'s
+    /// contract with the file.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let mut out = String::with_capacity(16);
+        for (held, word) in [
+            (self.mods.ctrl, "ctrl"),
+            (self.mods.alt, "alt"),
+            (self.mods.shift, "shift"),
+            (self.mods.logo, "super"),
+        ] {
+            if held {
+                out.push_str(word);
+                out.push('+');
+            }
+        }
+        // **The three characters that are also separators or invisible.** `parse`
+        // splits on `+` and `-`, so writing `ctrl+-` produces a chord nothing can
+        // read back — which the round-trip test caught, and which is why `parse`
+        // has the words in the first place.
+        match self.key {
+            Key::Character(' ') => out.push_str("space"),
+            Key::Character('+') => out.push_str("plus"),
+            Key::Character('-') => out.push_str("minus"),
+            Key::Character(character) => out.extend(character.to_lowercase()),
+            Key::Named(name) => out.push_str(name_for(name)),
+            Key::Unknown(code) => {
+                out.push_str("key");
+                out.push_str(&code.to_string());
+            }
+        }
+        out
+    }
 }
+
+/// The word `parse` accepts for a named key.
+///
+/// **The first spelling of each, so a round trip is stable**: `parse` takes
+/// `pgup` and `page_up` as well, and writing one of the aliases would make the
+/// file's spelling depend on which alias came first in the table.
+const fn name_for(name: Named) -> &'static str {
+    match name {
+        Named::Enter => "enter",
+        Named::Escape => "escape",
+        Named::Backspace => "backspace",
+        Named::Delete => "delete",
+        Named::Tab => "tab",
+        Named::Left => "left",
+        Named::Right => "right",
+        Named::Up => "up",
+        Named::Down => "down",
+        Named::Home => "home",
+        Named::End => "end",
+        Named::PageUp => "page_up",
+        Named::PageDown => "page_down",
+        Named::Insert => "insert",
+        Named::Menu => "menu",
+        Named::Pause => "pause",
+        Named::Function(number) => {
+            let at = if number as usize > 24 { 24 } else { number as usize };
+            FUNCTION_KEYS[at.saturating_sub(1)]
+        }
+    }
+}
+
+/// `f1` to `f24`, because a `const fn` cannot format a number.
+const FUNCTION_KEYS: [&str; 24] = [
+    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12", "f13", "f14", "f15",
+    "f16", "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
+];
 
 fn named(word: &str) -> Option<Named> {
     Some(match word {

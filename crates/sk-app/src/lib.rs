@@ -28,6 +28,7 @@ mod capture;
 mod cells;
 mod colours;
 mod commands;
+mod config;
 mod crumbs;
 mod edit;
 mod field;
