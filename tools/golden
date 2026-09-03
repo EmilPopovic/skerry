@@ -131,6 +131,12 @@ FRAMES = [
     # right where it is not, and the marks and labels shifted with it — which is
     # the arithmetic a second scale would catch and a description could not.
     ("sidebar-tree", ["--size", "900x520", "--scale", "125", "--tree"]),
+    # **A volume's row with room to say everything.** The name, the fullness gauge
+    # and the figure compete for one 26-pixel row: at the sidebar's default width
+    # the figure gives up its word and reads `104 GiB`, and only a dragged-open
+    # sidebar shows `104 GiB free`. Both are the shipped behaviour, so both are a
+    # frame — the default one is in every frame above, and this is the other.
+    ("sidebar-wide", ["--size", "900x520", "--scale", "125", "--aside", "300"]),
     ("sidebar-tree-200", ["--size", "760x440", "--scale", "200", "--tree"]),
     ("keyboard-overlay", ["--size", "900x520", "--scale", "125", "--keys"]),
     # **Not the statistics overlay.** Its content is job counts and cache

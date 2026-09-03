@@ -394,6 +394,13 @@ pub struct Capture {
     pub pinned: bool,
     /// Whether one of its places is open, with what is under it.
     pub tree: bool,
+    /// How wide the sidebar is, where a frame wants one other than the default.
+    ///
+    /// **Because the width decides what a volume's row can say.** The figure, the
+    /// gauge and the name compete for one row and the figure gives up its word
+    /// first, so the default width and a dragged-open one are two different
+    /// frames — and only one of them was ever rendered.
+    pub aside: Option<f32>,
     /// Whether two of the listing's folders carry a colour somebody chose.
     pub coloured: bool,
     /// Whether to draw the window frame the program draws for itself.
@@ -1138,7 +1145,11 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         logical,
         &theme.metrics,
         frame,
-        if request.sidebar { crate::sidebar::DEFAULT_WIDTH } else { 0.0 },
+        match (request.sidebar, request.aside) {
+            (false, _) => 0.0,
+            (true, Some(width)) => width,
+            (true, None) => crate::sidebar::DEFAULT_WIDTH,
+        },
         history_height(request, &theme.metrics),
     );
     // One leaf: a capture is a frame of one directory, and a split is its own

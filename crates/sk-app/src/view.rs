@@ -2781,25 +2781,88 @@ fn place_row(
     // fact about the row rather than the row's name — and the name gives up the
     // space rather than overlapping it.
     let mut room = (box_.right() - 10.0 - text_at).max(0.0);
-    if let Some(free) = row.free {
-        let text = i18n::format("sidebar.free", &[&format::size(free)]);
+    if let Some((free, total)) = row.free {
         let ink = if current { theme.palette.selected_text } else { theme.palette.dim };
-        // **All of it or none of it.** `104 GiB fre…` is a number that has stopped
-        // being one, so where the row is too narrow for both the figure goes and
-        // the name keeps the width — a name can lose its tail and still be read.
-        // A pixel of slack on the box: the measure and the draw agree to within
-        // rounding at a fractional scale, and a box exactly as wide as the text
-        // ellipsizes it — `104 GiB fre…`, which is what this looked like first.
-        let width = text_width(painter, &text, metrics.header_size, false) + 2.0;
-        if width + 44.0 <= room {
-            let at = box_.right() - 10.0 - width;
+        let size = format::size(free);
+        // Measured, not a floor. The old rule kept 44 pixels for the name, which
+        // was a guess that fitted `Home` and elided `Filesystem`; what the name
+        // needs is what the name measures, and a volume called `Backup` can then
+        // keep everything a volume called `Filesystem` cannot.
+        //
+        // **A pixel of slack on every box**: the measure and the draw agree to
+        // within rounding at a fractional scale, and a box exactly as wide as the
+        // text ellipsizes it — `104 GiB fre…`, which is what this looked like
+        // first.
+        let name = text_width(painter, &row.label, metrics.text_size, false) + 3.0;
+        let gauge = GAUGE_WIDTH + 6.0;
+        // **The figure gives up its word before the name gives up its tail, and
+        // the gauge outlasts both.** All three do not fit a sidebar at its
+        // default width, and of the three the gauge is the one that answers the
+        // question a person is actually asking — whether the disk is about to run
+        // out — in twenty-six pixels. `104 GiB` beside a bar three-quarters full
+        // still reads as what is left, because the empty part of the bar is what
+        // the number is naming.
+        let figure = [i18n::format("sidebar.free", &[&size]), size]
+            .into_iter()
+            .map(|text| (text_width(painter, &text, metrics.header_size, false) + 3.0, text))
+            .find(|(width, _)| name + gauge + width <= room);
+        let mut right = box_.right() - 10.0;
+        if let Some((width, text)) = figure {
             let style = TextStyle::new(metrics.header_size, ink).right();
-            line(painter, &text, style, at, width, baseline);
+            line(painter, &text, style, right - width, width, baseline);
+            right -= width + 6.0;
             room = (room - width - 6.0).max(0.0);
+        }
+        if gauge <= room {
+            fullness(painter, (free, total), right - GAUGE_WIDTH, box_, current);
+            room = (room - gauge).max(0.0);
         }
     }
     let box_rect = painter.rect(text_at, 0.0, room, 0.0);
     painter.label(&row.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
+}
+
+/// How wide the fullness gauge is.
+///
+/// **Fixed, not a fraction of the row.** The sidebar's width is dragged, and a
+/// gauge that grew with it would make two volumes read as different amounts on
+/// two different days; a bar is a comparison, and a comparison needs one scale.
+const GAUGE_WIDTH: f32 = 26.0;
+
+/// How full a volume is, as a bar beside the figure.
+///
+/// **A figure is not a proportion.** "40 GB free" is nearly empty on a laptop's
+/// disk and nearly full on a camera card, and the thing a person is actually
+/// asking is whether the disk is about to run out — which is the proportion. The
+/// two are drawn together because either one alone is half an answer.
+///
+/// **Red past nine tenths.** A disk with a tenth left is the state worth
+/// noticing, and it is the same `danger` the panel that deletes for good uses:
+/// one colour in this program means "this is the one to read twice".
+fn fullness(painter: &mut Painter<'_>, room: (u64, u64), at: f32, box_: Area, current: bool) {
+    let (free, total) = room;
+    if total == 0 {
+        return;
+    }
+    let theme = *painter.theme;
+    let height = 6.0;
+    let top = box_.y + (box_.height - height) / 2.0;
+    let radius = painter.px(height / 2.0);
+    let track = if current { theme.palette.selected_text } else { theme.palette.text };
+    painter.list.rect(
+        painter.rect(at, top, GAUGE_WIDTH, height),
+        track.with_alpha(if theme.dark { 48 } else { 40 }),
+        radius,
+    );
+    // Saturating, because `statvfs` on some filesystems reports more available
+    // than it reports in total — a reserve that is not ours to reason about, and
+    // a bar past its own track is a bar that says nothing.
+    let used = total.saturating_sub(free.min(total));
+    #[expect(clippy::cast_precision_loss, reason = "a disk's size in a 32-pixel bar")]
+    let part = (used as f64 / total as f64) as f32;
+    let filled = (GAUGE_WIDTH * part.clamp(0.0, 1.0)).max(2.0);
+    let ink = if part > 0.9 { theme.palette.danger } else { theme.palette.accent };
+    painter.list.rect(painter.rect(at, top, filled, height), ink, radius);
 }
 
 /// Back, forward, parent and reload, drawn from triangles and rectangles.

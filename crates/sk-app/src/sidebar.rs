@@ -40,12 +40,15 @@ pub struct Entry {
     /// Whether reaching it may block for a network timeout. Drawn, because a
     /// row that takes eight seconds should have said so before it was clicked.
     pub remote: bool,
-    /// How much room is left on it, for a volume that could say.
+    /// How much room is left on it and how much it holds, for a volume that
+    /// could say.
     ///
     /// Drawn small and dim at the row's right edge, which is where every other
     /// file manager puts it — and it is the number a person opens a file manager
-    /// to find out.
-    pub free: Option<u64>,
+    /// to find out. **Both halves, because a figure is not a proportion**: 40 GB
+    /// free is nearly empty on a laptop's disk and nearly full on a camera card,
+    /// and the gauge beside the figure is the half that says which.
+    pub free: Option<(u64, u64)>,
     /// Whether this row is a line in the bookmarks file — a place somebody
     /// chose, rather than one the machine has.
     ///
@@ -106,8 +109,8 @@ pub struct Row {
     pub mark: Mark,
     /// Whether reaching it may block for a network timeout.
     pub remote: bool,
-    /// How much room is left on it, for a volume that could say.
-    pub free: Option<u64>,
+    /// How much room is left on it and how much it holds.
+    pub free: Option<(u64, u64)>,
     /// Whether it is a line in the bookmarks file.
     pub pinned: bool,
     /// How deep: 0 for a place, 1 for a directory inside one.
@@ -527,9 +530,10 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         label: sk_model::i18n::lookup("sidebar.root").to_owned(),
         mark: Mark::Volume,
         remote: false,
-        // A fixed figure, because a golden frame of this machine's free space is
-        // a frame nobody else can reproduce.
-        free: Some(112_089_935_872),
+        // Fixed figures, because a golden frame of this machine's own disk is a
+        // frame nobody else can reproduce. Four fifths full, which is where the
+        // gauge is unmistakably a gauge.
+        free: Some((112_089_935_872, 500_107_862_016)),
         pinned: false,
         depth: 0,
         open: false,
@@ -606,7 +610,7 @@ fn volume(mount: &Mount) -> Entry {
         label,
         mark: Mark::Volume,
         remote: mount.remote,
-        free: mount.free.map(|(free, _)| free),
+        free: mount.free,
         pinned: false,
     }
 }
@@ -700,6 +704,32 @@ mod tests {
         paths.sort_unstable();
         paths.dedup();
         assert_eq!(paths.len(), count, "the same place twice: {rows:?}");
+    }
+
+    /// A volume's row carries a proportion, not just a figure.
+    ///
+    /// **Both halves or neither**, because the gauge divides by the total: a row
+    /// that knew the free space and not the size would draw a bar of nothing, and
+    /// `statvfs` answers both or is not called at all.
+    #[test]
+    fn a_volume_says_how_much_is_left_and_how_much_there_is() {
+        let sections = build();
+        let volumes: Vec<&Entry> = sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .filter(|entry| entry.mark == Mark::Volume)
+            .collect();
+        for volume in &volumes {
+            let Some((free, total)) = volume.free else { continue };
+            assert!(total > 0, "a volume that holds nothing: {volume:?}");
+            assert!(free <= total, "more free than it holds: {volume:?}");
+        }
+        // And the sample the golden frames draw is one, so a frame of the gauge
+        // is a frame of a proportion somebody could have.
+        let drawn = super::sample(std::path::Path::new("/"), false, false);
+        let volume = drawn.iter().find(|row| row.mark == Mark::Volume).expect("a volume row");
+        let (free, total) = volume.free.expect("the sample says how full it is");
+        assert!(free < total && free * 10 > total, "an unconvincing gauge: {free}/{total}");
     }
 
     /// The gap arithmetic, which is where an off-by-one would put a row one
