@@ -703,6 +703,10 @@ def build_pictures() -> None:
         "    let letter = 'x';\n"
         "    let lifetimes: &'static str = path;\n"
         "    let numbers = [42, 0x1f, 1_000, 2.5e3];\n"
+        # **The line that crashed the window.** `Ž` is two bytes and the scanner
+        # walked one at a time, so the index after it landed inside the character
+        # and the next slice panicked — on an ordinary file in a home directory.
+        '    let name = "Žofia";  // Ž, é and 日本語 are all more than a byte\n'
         "    let_go(count, numbers, lifetimes);\n"
         "    letter\n"
         "}\n"

@@ -241,7 +241,6 @@ fn line_spans(line: &str, language: Language, mode: Mode) -> (Vec<Span>, Mode) {
     if !language.highlights() || line.is_empty() {
         return (vec![Span { from: 0, to: line.len(), tone: Tone::Plain }], mode);
     }
-    let bytes = line.as_bytes();
     let mut spans: Vec<Span> = Vec::new();
     let mut mode = mode;
     let mut at = 0;
@@ -253,11 +252,11 @@ fn line_spans(line: &str, language: Language, mode: Mode) -> (Vec<Span>, Mode) {
             spans.push(Span { from, to, tone: Tone::Plain });
         }
     };
-    while at < bytes.len() {
+    while at < line.len() {
         if mode == Mode::Block {
-            let end = line[at..].find("*/").map_or(bytes.len(), |found| at + found + 2);
+            let end = line[at..].find("*/").map_or(line.len(), |found| at + found + 2);
             spans.push(Span { from: at, to: end, tone: Tone::Comment });
-            mode = if end == bytes.len() && !line[at..].contains("*/") {
+            mode = if end == line.len() && !line[at..].contains("*/") {
                 Mode::Block
             } else {
                 Mode::Code
@@ -269,7 +268,7 @@ fn line_spans(line: &str, language: Language, mode: Mode) -> (Vec<Span>, Mode) {
         let rest = &line[at..];
         if rest.starts_with(language.line_comment()) {
             flush(&mut spans, plain_from, at);
-            spans.push(Span { from: at, to: bytes.len(), tone: Tone::Comment });
+            spans.push(Span { from: at, to: line.len(), tone: Tone::Comment });
             return (spans, Mode::Code);
         }
         if language.blocks() && rest.starts_with("/*") {
@@ -277,38 +276,43 @@ fn line_spans(line: &str, language: Language, mode: Mode) -> (Vec<Span>, Mode) {
             mode = Mode::Block;
             continue;
         }
-        let byte = bytes[at];
-        if byte == b'"' || (byte == b'\'' && language.single_quotes_a_string()) {
+        // **A character, never a byte.** Every index here is a slice's start or
+        // end, so stepping one byte through `Ž` produced an index inside it and
+        // the next slice panicked — in the *window*, on somebody's ordinary file.
+        // Walking characters makes every index a boundary by construction, which
+        // is the difference between a guard and a shape that cannot be wrong.
+        let Some(letter) = rest.chars().next() else { break };
+        if letter == '"' || (letter == '\'' && language.single_quotes_a_string()) {
             flush(&mut spans, plain_from, at);
-            let end = closing(bytes, at, byte);
+            let end = closing(line, at, letter);
             spans.push(Span { from: at, to: end, tone: Tone::Literal });
             at = end;
             plain_from = at;
             continue;
         }
-        if byte == b'\'' && !language.single_quotes_a_string() {
+        if letter == '\'' && !language.single_quotes_a_string() {
             // A character literal is `'x'` or `'\n'`; anything longer is a
             // lifetime or a stray quote and stays as code.
-            if let Some(end) = character(bytes, at) {
+            if let Some(end) = character(line, at) {
                 flush(&mut spans, plain_from, at);
                 spans.push(Span { from: at, to: end, tone: Tone::Literal });
                 at = end;
                 plain_from = at;
                 continue;
             }
-            at += 1;
+            at += letter.len_utf8();
             continue;
         }
-        if byte.is_ascii_digit() && starts_a_word(bytes, at) {
+        if letter.is_ascii_digit() && starts_a_word(line, at) {
             flush(&mut spans, plain_from, at);
-            let end = number(bytes, at);
+            let end = number(line, at);
             spans.push(Span { from: at, to: end, tone: Tone::Number });
             at = end;
             plain_from = at;
             continue;
         }
-        if is_word(byte) && starts_a_word(bytes, at) {
-            let end = word(bytes, at);
+        if is_word(letter) && starts_a_word(line, at) {
+            let end = word(line, at);
             if language.keywords().contains(&&line[at..end]) {
                 flush(&mut spans, plain_from, at);
                 spans.push(Span { from: at, to: end, tone: Tone::Keyword });
@@ -317,11 +321,11 @@ fn line_spans(line: &str, language: Language, mode: Mode) -> (Vec<Span>, Mode) {
             at = end;
             continue;
         }
-        at += 1;
+        at += letter.len_utf8();
     }
-    flush(&mut spans, plain_from, bytes.len());
+    flush(&mut spans, plain_from, line.len());
     if spans.is_empty() {
-        spans.push(Span { from: 0, to: bytes.len(), tone: Tone::Plain });
+        spans.push(Span { from: 0, to: line.len(), tone: Tone::Plain });
     }
     (spans, mode)
 }
@@ -330,51 +334,60 @@ fn line_spans(line: &str, language: Language, mode: Mode) -> (Vec<Span>, Mode) {
 ///
 /// The end of the line where nothing closes it, which is the documented
 /// single-line rule: a string is not carried to the next line.
-fn closing(bytes: &[u8], from: usize, quote: u8) -> usize {
-    let mut at = from + 1;
-    while at < bytes.len() {
-        match bytes[at] {
-            b'\\' => at += 2,
-            byte if byte == quote => return at + 1,
-            _ => at += 1,
+fn closing(line: &str, from: usize, quote: char) -> usize {
+    let mut escaped = false;
+    for (at, letter) in line[from..].char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+        } else if letter == '\\' {
+            escaped = true;
+        } else if letter == quote {
+            return from + at + letter.len_utf8();
         }
     }
-    bytes.len()
+    line.len()
 }
 
 /// Where a character literal ends, or nothing if this quote does not open one.
-fn character(bytes: &[u8], from: usize) -> Option<usize> {
-    let escaped = bytes.get(from + 1) == Some(&b'\\');
-    let end = if escaped { from + 3 } else { from + 2 };
-    (bytes.get(end) == Some(&b'\'')).then_some(end + 1)
+///
+/// `'é'` is a character literal like `'x'` is, which is the other half of why
+/// this counts characters: the byte version tested the wrong index and called it
+/// a lifetime.
+fn character(line: &str, from: usize) -> Option<usize> {
+    let mut letters = line[from..].char_indices().skip(1);
+    let (_, first) = letters.next()?;
+    let (at, next) = letters.next()?;
+    if first == '\\' {
+        let (escaped_at, third) = letters.next()?;
+        return (third == '\'').then_some(from + escaped_at + 1);
+    }
+    (next == '\'').then_some(from + at + 1)
 }
 
 /// Where a number ends: digits, and what a number may hold between them.
-fn number(bytes: &[u8], from: usize) -> usize {
-    let mut at = from;
-    while at < bytes.len() {
-        let byte = bytes[at];
-        let inside = byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.';
-        if !inside {
-            break;
-        }
-        at += 1;
-    }
-    at
+fn number(line: &str, from: usize) -> usize {
+    line[from..]
+        .char_indices()
+        .find(|(_, letter)| !(letter.is_alphanumeric() || *letter == '_' || *letter == '.'))
+        .map_or(line.len(), |(at, _)| from + at)
 }
 
 /// Where a word ends.
-fn word(bytes: &[u8], from: usize) -> usize {
-    let mut at = from;
-    while at < bytes.len() && is_word(bytes[at]) {
-        at += 1;
-    }
-    at
+fn word(line: &str, from: usize) -> usize {
+    line[from..]
+        .char_indices()
+        .find(|(_, letter)| !is_word(*letter))
+        .map_or(line.len(), |(at, _)| from + at)
 }
 
-/// Whether a byte can be part of a word.
-fn is_word(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
+/// Whether a character can be part of a word.
+///
+/// **`is_alphanumeric`, not `is_ascii_alphanumeric`**: `naïve` and `größe` are
+/// identifiers in half the languages here, and splitting them would make the
+/// half after the accent a word of its own — which is how `let` inside `Žlet`
+/// would come out highlighted.
+fn is_word(letter: char) -> bool {
+    letter.is_alphanumeric() || letter == '_'
 }
 
 /// Whether a word or a number *starts* here rather than continuing one.
@@ -382,8 +395,8 @@ fn is_word(byte: u8) -> bool {
 /// **So `x2` is not a number and `let_go` is not `let`.** A keyword is a whole
 /// word, which means the byte before it has to be one that cannot be part of
 /// one — the check a table lookup cannot make for itself.
-fn starts_a_word(bytes: &[u8], at: usize) -> bool {
-    at == 0 || !is_word(bytes[at - 1])
+fn starts_a_word(line: &str, at: usize) -> bool {
+    line[..at].chars().next_back().is_none_or(|letter| !is_word(letter))
 }
 
 #[cfg(test)]
@@ -419,6 +432,17 @@ mod tests {
             "let c = 'x'; let r: &'a str = \"\";",
             "no_keywords_here(x2, y_3)",
             "0x1f + 1_000 + 2.5e3",
+            // **Every one of these crashed the window**, and none of the lines
+            // above could: each index below is a slice's start or end, and a
+            // scanner stepping one *byte* at a time lands inside a character and
+            // panics on the next slice. `Ž` is the one that did it, in a file in
+            // somebody's home directory.
+            "let name = \"Žofia\"; // Ž is two bytes",
+            "// a comment with é and 日本語 in it",
+            "let mixed = 'é'; let s = \"a\\\"é\"; // an escaped quote before it",
+            "größe = 42  # a word with an accent in it",
+            "Žlet not_a_keyword = 1",
+            "日本語 = \"値\"  # every byte of this line is multi-byte",
         ]
         .iter()
         .map(|it| (*it).to_owned())
@@ -439,6 +463,55 @@ mod tests {
                 assert_eq!(at, line.len(), "{line:?} for {language:?} stops short");
             }
         }
+    }
+
+    /// **The crash, as its own test.** A `Ž` in a string is two bytes, and the
+    /// scanner walked one byte at a time — so the index after it landed inside
+    /// the character and the next slice panicked, in the window, on an ordinary
+    /// file. Every language, because the loop is shared.
+    #[test]
+    fn a_multibyte_character_does_not_split_an_index() {
+        for language in [Language::Rust, Language::CLike, Language::Python, Language::Shell] {
+            for line in [
+                "let name = \"Žofia\";",
+                "x = 'Ž'",
+                "// Ž",
+                "# Ž",
+                "Ž",
+                "\"Ž",
+                "let é = 1",
+                "1Ž2",
+                "aŽb.cŽd",
+            ] {
+                let runs = toned(line, language);
+                let mut at = 0;
+                for (text, _) in &runs {
+                    assert!(
+                        line.is_char_boundary(at),
+                        "{line:?} in {language:?} split a character"
+                    );
+                    at += text.len();
+                }
+                assert_eq!(at, line.len(), "{line:?} in {language:?} did not cover the line");
+            }
+        }
+    }
+
+    /// A word with an accent in it is one word, so a keyword inside one is not a
+    /// keyword.
+    #[test]
+    fn a_word_is_a_word_whatever_alphabet_it_is_in() {
+        let runs = toned("Žlet größe = 1", Language::Rust);
+        assert!(
+            runs.iter().all(|(_, tone)| *tone != Tone::Keyword),
+            "`let` inside `Žlet` was highlighted: {runs:?}"
+        );
+        // And a character literal holding one is still a character literal.
+        let runs = toned("let c = 'é';", Language::Rust);
+        assert!(
+            runs.iter().any(|(text, tone)| text == "'é'" && *tone == Tone::Literal),
+            "{runs:?}"
+        );
     }
 
     /// A keyword is a whole word, a string is a string, and a number is a number.

@@ -2188,6 +2188,37 @@ is `read(write(x)) == x` over the real corpus, and for anything that leaves the
 process, over the bytes the program itself produces rather than a fixture someone
 typed.
 
+## The invariant was right and the corpus was ASCII
+
+The highlighter's first test asserts that every line is covered by its runs
+exactly once, with `is_char_boundary` on both ends of every span. It passed, and
+the window still died on a file in a home directory:
+
+```text
+panicked at highlight.rs:269: start byte index 24 is not a char boundary;
+it is inside 'Ž' (bytes 23..25 of string)
+```
+
+The scanner walked one **byte** at a time. A `Ž` is two, so the index after it
+landed inside the character and the next slice panicked. The test could not catch
+it because every line in its fixture was ASCII, where a byte and a character are
+the same thing — so the assertion about boundaries was true for a reason that had
+nothing to do with the code being right.
+
+The fix is a shape rather than a guard: the loop advances by `char_indices` and
+`len_utf8`, so every index it produces is a boundary by construction. Two things
+came out better for the same change — `'é'` is now recognised as a character
+literal, which the byte version tested the wrong index for and called a lifetime,
+and `Žlet` is one word, so the `let` inside it is no longer highlighted as a
+keyword.
+
+**The rule: an invariant test is only as strong as the ugliest input in its
+corpus.** Six lines went into that fixture — a two-byte letter in a string, in a
+comment, alone, unterminated, next to a digit, and a line where every character
+is multi-byte — and every one of them fails against the old scanner. A crash in
+the *window* is the worst class this program has, and the distance between the
+test that existed and the test that would have caught it was six strings.
+
 ## A gate catches the shape it was written for, and this was a different shape
 
 Two defects in one afternoon's scripted edits, both invisible in a diff read as an
