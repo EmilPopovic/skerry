@@ -1099,6 +1099,19 @@ fn quick_look(
         // **Fitted here, and this is the only place that fits it.** The child was
         // asked for a box and answered with what fitted inside it, so the size that
         // came back is already right — all that is left is to centre it.
+        //
+        // **Except when it is zoomed**, where the picture is larger than the
+        // panel and has to be clipped to it: a preview is a quad and a quad that
+        // hangs over the panel's edge is drawn over the list behind it.
+        if look.zoomed() {
+            let box_ = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+            let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
+            painter.list.push_clip(clip);
+            let shape = painter.rect(box_.x, box_.y, box_.width, box_.height);
+            painter.preview(key, shape, theme.palette.text);
+            painter.list.pop_clip();
+            return;
+        }
         painter.preview(key, fitted(painter, inner, size, look.coarse), theme.palette.text);
         return;
     }
@@ -1208,6 +1221,18 @@ fn quick_look_controls(
         hits.look.push((LookControl::Discard, area));
     }
 
+    // **What the zoom is, where it is not one.** A picture that is magnified and
+    // does not say so is a picture somebody will believe is the file's own size —
+    // and the same figure is what says a pinch did anything at all on a machine
+    // where the gesture is absent.
+    if look.zoomed() {
+        let label = format!("{:.0}%", look.zoom * 100.0);
+        let width = text_width(painter, &label, metrics.header_size, false) + 4.0;
+        let style = TextStyle::new(metrics.header_size, theme.palette.dim).right();
+        line(painter, &label, style, right - width, width, baseline);
+        right -= width + 8.0;
+    }
+
     // **Play and pause, only where there is an animation.** A GIF plays when it
     // opens, so this is the control that stops it — and the one that starts it
     // again after a frame arrow has stepped somewhere, which is the gesture that
@@ -1302,15 +1327,55 @@ fn grows(aspect: (u32, u32)) -> bool {
 }
 
 fn fitted(painter: &Painter<'_>, inner: Area, size: (u32, u32), standing_in: bool) -> sk_gpu::Rect {
+    let box_ = fitted_box(inner, size, standing_in, (1.0, (0.0, 0.0)));
+    painter.rect(box_.x, box_.y, box_.width, box_.height)
+}
+
+/// A pan that keeps a zoomed picture's edges no further in than the panel's.
+///
+/// **One home for it, because both the window and a capture pan.** A capture
+/// sets the pan directly to render a frame of a dragged picture, and a pan the
+/// window would have clamped away is a reference of a state the program cannot
+/// reach — which is the defect this frame was written to catch and caught, in
+/// itself, on the first render.
+pub(crate) fn clamped_pan(
+    inner: Area,
+    size: (u32, u32),
+    standing_in: bool,
+    zoom: (f32, (f32, f32)),
+) -> (f32, f32) {
+    let (magnify, pan) = zoom;
+    let drawn = fitted_box(inner, size, standing_in, (magnify, (0.0, 0.0)));
+    // Half the overhang in each direction: at that pan the picture's edge is
+    // exactly at the panel's, and a margin of window inside a panel the picture
+    // is bigger than is the thing this prevents.
+    let slack = |drawn: f32, room: f32| ((drawn - room) / 2.0).max(0.0);
+    let (across, down) = (slack(drawn.width, inner.width), slack(drawn.height, inner.height));
+    (pan.0.clamp(-across, across), pan.1.clamp(-down, down))
+}
+
+/// Where a picture goes in the panel, in logical pixels.
+///
+/// **One function for the drawing and the pointer.** A pan is clamped against
+/// the drawn rectangle and the drawn rectangle is computed from the pan, so a
+/// second copy of this arithmetic is a picture that can be dragged to somewhere
+/// it is not drawn.
+pub(crate) fn fitted_box(
+    inner: Area,
+    size: (u32, u32),
+    standing_in: bool,
+    zoom: (f32, (f32, f32)),
+) -> Area {
+    let (magnify, pan) = zoom;
     let fit = (inner.width / size.0.max(1) as f32).min(inner.height / size.1.max(1) as f32);
     let scale = if standing_in { fit } else { fit.min(1.0) };
-    let (width, height) = (size.0 as f32 * scale, size.1 as f32 * scale);
-    painter.rect(
-        inner.x + (inner.width - width) / 2.0,
-        inner.y + (inner.height - height) / 2.0,
+    let (width, height) = (size.0 as f32 * scale * magnify, size.1 as f32 * scale * magnify);
+    Area {
+        x: inner.x + (inner.width - width) / 2.0 + pan.0,
+        y: inner.y + (inner.height - height) / 2.0 + pan.1,
         width,
         height,
-    )
+    }
 }
 
 /// The inset between the text and the panel's edges.
@@ -2801,7 +2866,13 @@ fn place_row(
     }
 
     let ink = if current { theme.palette.selected_text } else { theme.palette.text };
-    let baseline = painter.baseline(box_.y, box_.height, metrics.text_size);
+    // **A volume's label rides higher, because its gauge is underneath it.**
+    // Three pixels of the row's twenty-six: the bar is two and the third is the
+    // air above it. Every other row keeps the middle of its own height, so the
+    // list's rhythm is unchanged and only the rows that have something to say
+    // are two lines.
+    let lift = if row.free.is_some() { GAUGE_SPACE } else { 0.0 };
+    let baseline = painter.baseline(box_.y - lift, box_.height, metrics.text_size);
     let text_at = mark_at + mark + 7.0;
     // **The room left, at the right end of a volume's row.** It is the number a
     // person opens a file manager to find out, and the only place it fits is
@@ -2810,52 +2881,41 @@ fn place_row(
     // space rather than overlapping it.
     let mut room = (box_.right() - 10.0 - text_at).max(0.0);
     if let Some((free, total)) = row.free {
+        let text = i18n::format("sidebar.free", &[&format::size(free)]);
         let ink = if current { theme.palette.selected_text } else { theme.palette.dim };
-        let size = format::size(free);
-        // Measured, not a floor. The old rule kept 44 pixels for the name, which
-        // was a guess that fitted `Home` and elided `Filesystem`; what the name
-        // needs is what the name measures, and a volume called `Backup` can then
-        // keep everything a volume called `Filesystem` cannot.
+        // **All of it or none of it.** `104 GiB fre…` is a number that has stopped
+        // being one, so where the row is too narrow for both the figure goes and
+        // the name keeps the width — a name can lose its tail and still be read.
+        // A pixel of slack on every box: the measure and the draw agree to within
+        // rounding at a fractional scale, and a box exactly as wide as the text
+        // ellipsizes it — `104 GiB fre…`, which is what this looked like first.
         //
-        // **A pixel of slack on every box**: the measure and the draw agree to
-        // within rounding at a fractional scale, and a box exactly as wide as the
-        // text ellipsizes it — `104 GiB fre…`, which is what this looked like
-        // first.
+        // **Measured against the name, not against a floor.** The rule was 44
+        // pixels for the label, which is a guess that fitted `Home` and elided
+        // `Filesystem`; what a name needs is what it measures.
+        let width = text_width(painter, &text, metrics.header_size, false) + 3.0;
         let name = text_width(painter, &row.label, metrics.text_size, false) + 3.0;
-        let gauge = GAUGE_WIDTH + 6.0;
-        // **The figure gives up its word before the name gives up its tail, and
-        // the gauge outlasts both.** All three do not fit a sidebar at its
-        // default width, and of the three the gauge is the one that answers the
-        // question a person is actually asking — whether the disk is about to run
-        // out — in twenty-six pixels. `104 GiB` beside a bar three-quarters full
-        // still reads as what is left, because the empty part of the bar is what
-        // the number is naming.
-        let figure = [i18n::format("sidebar.free", &[&size]), size]
-            .into_iter()
-            .map(|text| (text_width(painter, &text, metrics.header_size, false) + 3.0, text))
-            .find(|(width, _)| name + gauge + width <= room);
-        let mut right = box_.right() - 10.0;
-        if let Some((width, text)) = figure {
+        if name + width <= room {
+            let at = box_.right() - 10.0 - width;
             let style = TextStyle::new(metrics.header_size, ink).right();
-            line(painter, &text, style, right - width, width, baseline);
-            right -= width + 6.0;
+            line(painter, &text, style, at, width, baseline);
             room = (room - width - 6.0).max(0.0);
         }
-        if gauge <= room {
-            fullness(painter, (free, total), right - GAUGE_WIDTH, box_, current);
-            room = (room - gauge).max(0.0);
-        }
+        // **The gauge spans the row under both of them**, which is the width the
+        // figure and the name were competing with it for: a bar is a proportion
+        // and a proportion is easier to read the longer it is.
+        fullness(painter, (free, total), (text_at, box_.right() - 10.0), box_, current);
     }
     let box_rect = painter.rect(text_at, 0.0, room, 0.0);
     painter.label(&row.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
 }
 
-/// How wide the fullness gauge is.
+/// How much of a row's height the gauge and its air take from the label.
 ///
-/// **Fixed, not a fraction of the row.** The sidebar's width is dragged, and a
-/// gauge that grew with it would make two volumes read as different amounts on
-/// two different days; a bar is a comparison, and a comparison needs one scale.
-const GAUGE_WIDTH: f32 = 26.0;
+/// **Three of the twenty-six.** The bar is two pixels and the third is the gap
+/// above it; the label moves up by the same amount, so the two share the row
+/// instead of overlapping.
+const GAUGE_SPACE: f32 = 3.0;
 
 /// How full a volume is, as a bar beside the figure.
 ///
@@ -2867,18 +2927,28 @@ const GAUGE_WIDTH: f32 = 26.0;
 /// **Red past nine tenths.** A disk with a tenth left is the state worth
 /// noticing, and it is the same `danger` the panel that deletes for good uses:
 /// one colour in this program means "this is the one to read twice".
-fn fullness(painter: &mut Painter<'_>, room: (u64, u64), at: f32, box_: Area, current: bool) {
+fn fullness(
+    painter: &mut Painter<'_>,
+    room: (u64, u64),
+    across: (f32, f32),
+    box_: Area,
+    current: bool,
+) {
     let (free, total) = room;
-    if total == 0 {
+    let (from, to) = across;
+    let width = to - from;
+    if total == 0 || width < 8.0 {
         return;
     }
     let theme = *painter.theme;
-    let height = 6.0;
-    let top = box_.y + (box_.height - height) / 2.0;
+    let height = 2.0;
+    // Along the row's bottom edge, inside the pill a hover or the current row
+    // draws: a bar on the edge itself would be cut in half by the rounding.
+    let top = box_.bottom() - height - 3.0;
     let radius = painter.px(height / 2.0);
     let track = if current { theme.palette.selected_text } else { theme.palette.text };
     painter.list.rect(
-        painter.rect(at, top, GAUGE_WIDTH, height),
+        painter.rect(from, top, width, height),
         track.with_alpha(if theme.dark { 48 } else { 40 }),
         radius,
     );
@@ -2886,11 +2956,11 @@ fn fullness(painter: &mut Painter<'_>, room: (u64, u64), at: f32, box_: Area, cu
     // than it reports in total — a reserve that is not ours to reason about, and
     // a bar past its own track is a bar that says nothing.
     let used = total.saturating_sub(free.min(total));
-    #[expect(clippy::cast_precision_loss, reason = "a disk's size in a 32-pixel bar")]
+    #[expect(clippy::cast_precision_loss, reason = "a disk's size along a row")]
     let part = (used as f64 / total as f64) as f32;
-    let filled = (GAUGE_WIDTH * part.clamp(0.0, 1.0)).max(2.0);
+    let filled = (width * part.clamp(0.0, 1.0)).max(2.0);
     let ink = if part > 0.9 { theme.palette.danger } else { theme.palette.accent };
-    painter.list.rect(painter.rect(at, top, filled, height), ink, radius);
+    painter.list.rect(painter.rect(from, top, filled, height), ink, radius);
 }
 
 /// Back, forward, parent and reload, drawn from triangles and rectangles.

@@ -214,6 +214,15 @@ fn still_there(sprung_at: Option<Point>, position: Point) -> bool {
 /// gesture already in flight, and the drop then lands somewhere nobody chose.
 const SPRING: Duration = Duration::from_millis(900);
 
+/// How much one step of zoom magnifies a picture.
+///
+/// **A ratio rather than a table.** The list's zoom is seven chosen sizes —
+/// stepping out and back has to land exactly where it started — and a picture's
+/// is continuous, because a pinch is continuous and a person zooming a photograph
+/// is looking for a size rather than a step. 1.15 is `sk_plat`'s own pinch step,
+/// so one notch of the wheel and one step of a pinch cover the same distance.
+const PINCH_STEP: f32 = 1.15;
+
 /// How far the pointer must travel before a press becomes a rubber band.
 ///
 /// Without it, every click in empty space flickers a one-pixel band.
@@ -1000,6 +1009,8 @@ pub struct App {
     /// not exist until the read lands, so the request outlives the navigation by
     /// exactly one listing.
     properties_owed: bool,
+    /// Where a pan of a zoomed picture last had the pointer.
+    look_pan: Option<Point>,
     /// Whether the display server has already reported this gesture's drop.
     ///
     /// **A drag ends twice.** The pointer's button comes up and the data device
@@ -1307,6 +1318,7 @@ impl App {
             band: None,
             files_drag: None,
             dropped: false,
+            look_pan: None,
             properties_owed: false,
             on_the_bus: String::new(),
             thumb_grab: None,
@@ -1838,7 +1850,14 @@ impl App {
                 }
             }
             Event::Pinched { out } => {
-                self.zoom_by(if *out { 1 } else { -1 });
+                // **The picture first, and the list only when there is none.** A
+                // pinch is about the thing being looked at, and with a panel open
+                // over the window that is the panel — zooming the rows behind it
+                // would be zooming something nobody can see.
+                let stepped = self.zoom_the_look(if *out { PINCH_STEP } else { 1.0 / PINCH_STEP });
+                if !stepped && self.quick_look.is_none() {
+                    self.zoom_by(if *out { 1 } else { -1 });
+                }
             }
             Event::Swiped { .. } | Event::KeyUp(_) | Event::Woken => {}
         }
@@ -2973,7 +2992,7 @@ impl App {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
                 if inside.contains(position.x, position.y)
-                    && self.start_choosing_text(position, shift)
+                    && (self.start_choosing_text(position, shift) || self.start_panning(position))
                 {
                     self.dirty = true;
                     return true;
@@ -2992,6 +3011,31 @@ impl App {
             }
         }
         self.dirty = true;
+        true
+    }
+
+    /// A press inside a zoomed picture: the start of a pan. Whether it took.
+    ///
+    /// **Only while it is zoomed.** A press on a picture that fits is not the
+    /// start of anything — there is nowhere to drag it — and a gesture that
+    /// quietly armed itself would make the panel feel like it had a mode.
+    fn start_panning(&mut self, position: Point) -> bool {
+        let taken = self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomed);
+        if taken {
+            self.look_pan = Some(position);
+        }
+        taken
+    }
+
+    /// Drags a zoomed picture with the pointer.
+    fn pan_the_look(&mut self, position: Point) -> bool {
+        let Some(from) = self.look_pan else { return false };
+        self.look_pan = Some(position);
+        let by = (position.x - from.x, position.y - from.y);
+        if !self.quick_look.as_mut().is_some_and(|look| look.pan_by(by)) {
+            return false;
+        }
+        self.settle_the_zoom();
         true
     }
 
@@ -3151,9 +3195,15 @@ impl App {
         next >= 0 && usize::try_from(next).is_ok_and(|next| next < ZOOM.len())
     }
 
-    /// Whether the list is at anything other than its default size.
+    /// Whether there is a zoom to put back — the list's, or a picture's.
+    ///
+    /// **Both, because one chord resets whichever is in front of the person.**
+    /// `Ctrl 0` with a photograph magnified in the panel was dimmed on the
+    /// grounds that the *list* was at its default size, which is a row of the
+    /// palette saying no about the wrong zoom.
     pub(crate) fn zoomed(&self) -> bool {
         self.zoom != ZOOM_DEFAULT
+            || self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomed)
     }
 
     /// Makes the list bigger or smaller by one step. Whether it moved.
@@ -3169,15 +3219,27 @@ impl App {
         true
     }
 
+    /// **The picture when there is one, and the list otherwise.** All three of
+    /// these are one command each in the registry — rule 2 — and what they act on
+    /// is what is in front of the person: `Ctrl +` with a photograph filling the
+    /// window means the photograph, and it is the same argument the wheel and the
+    /// pinch make one layer down.
     pub(crate) fn zoom_in(&mut self) {
-        self.zoom_by(1);
+        if !self.zoom_the_look(PINCH_STEP) {
+            self.zoom_by(1);
+        }
     }
 
     pub(crate) fn zoom_out(&mut self) {
-        self.zoom_by(-1);
+        if !self.zoom_the_look(1.0 / PINCH_STEP) {
+            self.zoom_by(-1);
+        }
     }
 
     pub(crate) fn zoom_reset(&mut self) {
+        if self.unzoom_the_look() {
+            return;
+        }
         if self.zoom != ZOOM_DEFAULT {
             self.zoom = ZOOM_DEFAULT;
             self.apply_zoom();
@@ -4037,9 +4099,14 @@ impl App {
         // The palette takes the wheel while it is open. Without this the twelfth
         // result of fifty is unreachable by pointer alone, and the listing
         // scrolls behind a panel covering it.
-        if mods.ctrl && self.palette.is_none() && self.menu.is_none() {
+        if mods.ctrl && self.palette.is_none() && self.menu.is_none() && self.quick_look.is_none() {
             // What `Ctrl` and a wheel do in every list and every browser, and
             // the pointer's half of what a pinch does.
+            //
+            // **Unless a panel is open**, where the same gesture means the
+            // picture in it — the branch below — or nothing at all: zooming the
+            // rows behind a panel covering them is zooming something nobody can
+            // see, which is the rule every other overlay here follows.
             self.zoom_by(if delta.y < 0.0 { 1 } else { -1 });
         } else if let Some(palette) = self.palette.as_mut() {
             palette.wheel(delta.y);
@@ -4050,6 +4117,16 @@ impl App {
             if let Some(menu) = self.menu.as_mut() {
                 menu.wheel(delta.y, room);
             }
+        } else if mods.ctrl
+            && self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomable)
+        {
+            // **`Ctrl` and the wheel, which is the gesture every image viewer
+            // has.** It is also the only one that works on X11, where there are
+            // no touchpad gestures at all: `zwp_pointer_gestures_v1` is Wayland's
+            // and the X11 half reports the capability absent
+            // ([06-portability.md](../../../docs/06-portability.md)).
+            let steps = if delta.y > 0.0 { 1.0 / PINCH_STEP } else { PINCH_STEP };
+            self.zoom_the_look(steps);
         } else if let Some(look) = self.quick_look.as_mut() {
             // The panel is over everything, so the wheel is its own — the same
             // rule the palette and a tall menu follow.
@@ -5186,6 +5263,18 @@ impl App {
         }
     }
 
+    /// Keeps a zoomed picture inside the panel as the panel changes size.
+    ///
+    /// **Beside the wrap, and for the same reason.** A window resized while a
+    /// picture is zoomed and panned to a corner leaves a pan that was clamped
+    /// against the old panel — which draws the picture with a margin of window
+    /// inside a panel it is bigger than.
+    fn fit_the_zoom(&mut self) {
+        if self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomed) {
+            self.settle_the_zoom();
+        }
+    }
+
     /// Scrolls the caret's line into view.
     fn reveal_the_caret(&mut self) {
         let inner = crate::view::quick_look_area(&self.layout);
@@ -6087,6 +6176,48 @@ scope_aim={scope_aim:?}",
         }
     }
 
+    /// Zooms the open picture about the pointer. Whether there was one.
+    ///
+    /// **The pointer where it is over the panel, and the centre otherwise.** A
+    /// pinch has a centre of its own that the protocol reports and this does not
+    /// carry, so the pointer is the best answer available — and on a touchpad the
+    /// pointer is where the hand was last, which is what a person is looking at.
+    pub(crate) fn zoom_the_look(&mut self, factor: f32) -> bool {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let middle = (inner.x + inner.width / 2.0, inner.y + inner.height / 2.0);
+        let holding = if inner.contains(self.pointer.x, self.pointer.y) {
+            (self.pointer.x - middle.0, self.pointer.y - middle.1)
+        } else {
+            (0.0, 0.0)
+        };
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        if !look.zoomable() || !look.zoom_by(factor, holding) {
+            return false;
+        }
+        self.settle_the_zoom();
+        self.dirty = true;
+        true
+    }
+
+    /// Puts the open picture back to the panel's fit. Whether there was one.
+    pub(crate) fn unzoom_the_look(&mut self) -> bool {
+        let taken = self.quick_look.as_mut().is_some_and(crate::quicklook::QuickLook::unzoom);
+        self.dirty |= taken;
+        taken
+    }
+
+    /// Keeps a zoomed picture from being dragged off the panel.
+    ///
+    /// **Clamped against what is drawn**, which is why this is here and not in
+    /// the panel: the drawn rectangle is the panel, the image's own size and the
+    /// zoom together, and only the window knows the first of those.
+    fn settle_the_zoom(&mut self) {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let Some(look) = self.quick_look.as_mut() else { return };
+        let Some((_, size)) = look.image else { return };
+        look.pan = crate::view::clamped_pan(inner, size, look.coarse, (look.zoom, look.pan));
+    }
+
     /// Whether the panel is showing something with frames that play.
     #[must_use]
     pub(crate) fn looking_at_an_animation(&self) -> bool {
@@ -6787,6 +6918,13 @@ scope_aim={scope_aim:?}",
             .and_then(|look| look.text.as_ref())
             .map_or(0, |text| text.rows().len());
         let look_unsaved = self.look_is_unsaved();
+        // The magnification and where the picture has been dragged to, which is
+        // the whole of what a pinch and a pan change: a scenario asserting on
+        // pixels would be asserting on the machine's filtering.
+        let (look_zoom, look_pan) = self.quick_look.as_ref().map_or_else(
+            || ("1.00".to_owned(), "0:0".to_owned()),
+            |look| (format!("{:.2}", look.zoom), format!("{:.0}:{:.0}", look.pan.0, look.pan.1)),
+        );
         // Whether an animation is running, which is the one thing on screen that
         // changes while the hands are still.
         let look_playing = self.looking_at_an_animation()
@@ -6810,7 +6948,7 @@ scope_aim={scope_aim:?}",
             "looking={looking} look_page={look_page} look_aim={look_aim:?} \
 look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
 look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
-look_playing={look_playing}"
+look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan}"
         )
     }
 
@@ -8265,6 +8403,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
         let chose = self.quick_look.as_mut().is_some_and(|look| std::mem::take(&mut look.dragging));
+        let panned = self.look_pan.take().is_some();
         let divided = self.placement.dragging.take().is_some();
         // A width is part of the layout, so letting go of one is a thing to save.
         // The session is compared rather than tracked, so this only has to make
@@ -8276,7 +8415,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // and a title bar holds nothing to click: the path moved into the panes,
         // so there is nothing here for a press to be about.
         self.title_press = None;
-        if ended || released || dragged || divided || sized || chose || widened || ordered {
+        if ended || released || dragged || divided || sized || chose || widened || ordered || panned
+        {
             self.dirty = true;
         }
     }
@@ -9189,15 +9329,21 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             // the selection, which is what dragging past an edge means in every
             // text view — and this branch is now the only place a motion event
             // reaches while a look is open.
-            if self.extend_the_text_choice(position) {
+            if self.extend_the_text_choice(position) || self.pan_the_look(position) {
                 self.dirty = true;
             }
-            let over_text = self.looking_at_text()
-                && crate::view::quick_look_area(&self.layout).contains(position.x, position.y);
-            self.point(match (control.is_some(), over_text) {
-                (true, _) => sk_plat::Cursor::Hand,
-                (false, true) => sk_plat::Cursor::Text,
-                (false, false) => sk_plat::Cursor::Arrow,
+            let inside =
+                crate::view::quick_look_area(&self.layout).contains(position.x, position.y);
+            let over_text = self.looking_at_text() && inside;
+            // A zoomed picture can be dragged, and a pointer that says so is the
+            // only thing that tells somebody it can.
+            let grabbable =
+                inside && self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomed);
+            self.point(match (control.is_some(), over_text, grabbable) {
+                (true, _, _) => sk_plat::Cursor::Hand,
+                (false, true, _) => sk_plat::Cursor::Text,
+                (false, false, true) => sk_plat::Cursor::Grabbing,
+                (false, false, false) => sk_plat::Cursor::Arrow,
             });
             return true;
         }
@@ -9484,6 +9630,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // not changed costs a comparison; one that has costs a pass over four
         // hundred lines, which is what a resize is.
         self.fit_the_look();
+        self.fit_the_zoom();
         let (physical, scale) = self.before_frame(commands);
         self.list.begin(physical);
         // Two answers taken before the borrow is split, because both ask `self`

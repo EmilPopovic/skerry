@@ -142,6 +142,8 @@ struct Shape {
     aside: Option<f32>,
     /// Which page or frame `--look-page` asked for, or zero for the first.
     look_page: u32,
+    /// How much `--look-zoom` magnified the picture, or one.
+    look_zoom: f32,
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
@@ -198,6 +200,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         sidebar: shape.sidebar,
         aside: shape.aside,
         look_page: shape.look_page,
+        look_zoom: shape.look_zoom,
         pinned: overlays.pinned,
         tree: overlays.tree,
         coloured: overlays.coloured,
@@ -232,6 +235,7 @@ fn main() -> std::process::ExitCode {
     let mut no_sidebar = false;
     let mut aside = None;
     let mut look_page = 0;
+    let mut look_zoom = 1.0;
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
@@ -261,6 +265,12 @@ fn main() -> std::process::ExitCode {
                 Some(size) => logical = size,
                 None => return usage_error("--size needs WIDTHxHEIGHT"),
             },
+            "--look-zoom" => {
+                match arguments.next().as_deref().and_then(|it| it.parse::<f32>().ok()) {
+                    Some(zoom) if zoom >= 1.0 => look_zoom = zoom,
+                    _ => return usage_error("--look-zoom needs a factor of one or more"),
+                }
+            }
             "--look-page" => {
                 match arguments.next().as_deref().and_then(|it| it.parse::<u32>().ok()) {
                     Some(page) if page > 0 => look_page = page,
@@ -317,6 +327,7 @@ fn main() -> std::process::ExitCode {
                 sidebar: !no_sidebar,
                 aside,
                 look_page,
+                look_zoom,
                 at,
                 looking,
             },
@@ -415,6 +426,7 @@ skerry [OPTIONS] [PATH]
   --look-selected  select all of a text preview's text, for a frame of it
   --look-editing   put a text preview into edit mode, for a frame of the caret
   --look-page <n>  which page or animation frame the quick look is on
+  --look-zoom <f>  how much the quick look's picture is magnified
   --aside <px>     how wide the sidebar is, which decides what a volume's row fits
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree

@@ -278,6 +278,20 @@ FRAMES = [
     ("quick-look-chosen",
      ["--size", "900x600", "--scale", "125", "--look", "readme.txt", "--look-selected"],
      "pictures"),
+    # **A picture zoomed and dragged off centre.** A pinch — `Ctrl` and the wheel
+    # where there are no touchpad gestures — magnifies past the panel's fit, which
+    # is two things at once: the child is asked for a *bigger* picture, since a
+    # photograph fitted to a thousand pixels has its detail in the file rather
+    # than on the screen, and what comes back is clipped to the panel. Panned as
+    # well as zoomed, because a zoom about the middle would look the same whether
+    # the pan arithmetic worked or not.
+    # A *page*, because the fixture's pictures are all smaller than the panel and
+    # a picture that fits has nothing to clip and nowhere to pan: what fills the
+    # panel here is a rendered page, and a page re-rendered at two and a half
+    # times is the case where asking the child again is the whole point.
+    ("quick-look-zoomed",
+     ["--size", "900x600", "--scale", "125", "--look", "paper.pdf", "--look-zoom", "2.5"],
+     "pictures"),
     # **A refusal, said out loud.** Three refusals mean "nothing to say", which is
     # right when they decide whether the panel opens and wrong once it is open: an
     # empty panel cannot be told apart from a program that has stopped. This is the

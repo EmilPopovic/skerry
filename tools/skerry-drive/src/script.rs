@@ -57,9 +57,13 @@ pub enum Action {
     },
     Scroll {
         notches: i32,
-        /// Whether Shift is held across it, which is how a program is asked to
-        /// scroll sideways.
-        shift: bool,
+        /// Which modifier is held across it, if any.
+        ///
+        /// **Two of them mean something to a wheel and no others do.** `Shift`
+        /// is how a program is asked to scroll sideways, and `Ctrl` is how every
+        /// image viewer is asked to zoom — including this one, where it is the
+        /// only zoom gesture X11 can deliver at all.
+        held: Held,
     },
     /// A two-finger touchpad gesture that ends with the fingers leaving the pad.
     ///
@@ -140,12 +144,13 @@ fn step(verb: &str, rest: &[&str]) -> Result<Vec<Action>, String> {
         "scroll" => {
             let amount = rest.first().ok_or("scroll needs a number")?;
             let notches: i32 = amount.parse().map_err(|_| format!("`{amount}` is not a number"))?;
-            let shift = match rest.get(1) {
-                None => false,
-                Some(&"shift") => true,
-                Some(other) => return Err(format!("`{other}` is not `shift`")),
+            let held = match rest.get(1) {
+                None => Held::Nothing,
+                Some(&"shift") => Held::Shift,
+                Some(&"ctrl") => Held::Ctrl,
+                Some(other) => return Err(format!("`{other}` is not `shift` or `ctrl`")),
             };
-            Ok(vec![Action::Scroll { notches, shift }])
+            Ok(vec![Action::Scroll { notches, held }])
         }
         "flick" => {
             if rest.len() < 2 || rest.len() > 3 {
@@ -176,6 +181,25 @@ fn two<'a>(rest: &[&'a str]) -> Result<(&'a str, &'a str), String> {
 }
 
 /// A position as a percentage of the output, in the protocol's units.
+/// What is held down while the wheel turns.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Held {
+    Nothing,
+    Shift,
+    Ctrl,
+}
+
+impl Held {
+    /// The key to press and the mask to report, or nothing.
+    pub(crate) const fn key(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Nothing => None,
+            Self::Shift => Some((EV_LEFTSHIFT, MOD_SHIFT)),
+            Self::Ctrl => Some((EV_LEFTCTRL, MOD_CONTROL)),
+        }
+    }
+}
+
 fn percent(text: &str) -> Result<u32, String> {
     let value: f64 = text.parse().map_err(|_| format!("`{text}` is not a number"))?;
     if !(0.0..=100.0).contains(&value) {
@@ -269,11 +293,11 @@ fn character_action(character: char) -> Result<Action, String> {
 /// The modifier bits of a standard evdev keymap, in the order xkb assigns them:
 /// Shift, Lock, Control, Mod1 through Mod5.
 pub(crate) const MOD_SHIFT: u32 = 1 << 0;
-const MOD_CONTROL: u32 = 1 << 2;
+pub(crate) const MOD_CONTROL: u32 = 1 << 2;
 const MOD_ALT: u32 = 1 << 3;
 const MOD_SUPER: u32 = 1 << 6;
 
-const EV_LEFTCTRL: u32 = 29;
+pub(crate) const EV_LEFTCTRL: u32 = 29;
 pub(crate) const EV_LEFTSHIFT: u32 = 42;
 const EV_LEFTALT: u32 = 56;
 const EV_LEFTMETA: u32 = 125;
@@ -456,13 +480,20 @@ mod tests {
             sleep 250\n";
         let actions = parse(script).expect("parsed");
         assert!(actions.iter().any(|action| matches!(action, Action::Drag { .. })));
-        assert!(actions.contains(&Action::Scroll { notches: -3, shift: false }));
+        assert!(actions.contains(&Action::Scroll { notches: -3, held: super::Held::Nothing }));
         assert_eq!(
             parse("scroll 4 shift").as_deref(),
-            Ok([Action::Scroll { notches: 4, shift: true }].as_slice()),
+            Ok([Action::Scroll { notches: 4, held: super::Held::Shift }].as_slice()),
             "Shift is held across the notches, not sent as a chord beside them"
         );
-        assert!(parse("scroll 4 ctrl").is_err(), "only Shift, because only Shift means an axis");
+        // **And `Ctrl`, which zooms a picture.** It was refused here on the
+        // grounds that only Shift means anything to a wheel, which stopped being
+        // true when the preview learned to magnify.
+        assert_eq!(
+            parse("scroll -2 ctrl").as_deref(),
+            Ok([Action::Scroll { notches: -2, held: super::Held::Ctrl }].as_slice())
+        );
+        assert!(parse("scroll 4 alt").is_err(), "and nothing else means anything to a wheel");
         assert_eq!(
             parse("flick 16 20").as_deref(),
             Ok([Action::Flick { pixels: 16, events: 20, hold: 0 }].as_slice()),

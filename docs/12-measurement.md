@@ -2097,6 +2097,65 @@ fixture's own text said "elided rather than wrapped", which is the tell I should
 have read first: a fixture that describes the behaviour is a comment that goes
 stale, and this one had.
 
+## The gap a gate's own docstring predicted, measured after it bit
+
+`check-invariants.py`'s doc-comment rule catches two splice shapes and says which
+one it cannot catch:
+
+> **What neither catches** is a comment spliced onto the *end* of a paragraph
+> rather than after a summary — the block then reads as one comment with an odd
+> last paragraph, and the item below is left with none.
+
+That happened, to `QuickLook::turn`: a block of new methods went in above it, its
+doc comment ended up over the first of them, and `turn` was left bare. Nothing
+complained — `missing_docs` is rustc's and only covers public items, and `turn`
+is `pub(crate)`.
+
+Three candidate rules, each measured against the whole tree before being
+considered, which is the only way to tell a gate from a nuisance:
+
+| Rule | Hits | Verdict |
+| --- | --- | --- |
+| A one-line sentence last in a block, after a line ending in `.` | 10 | All honest prose. A paragraph's final sentence often fits one line |
+| The same, but only where a body paragraph led with `**` | 4 | Still all honest. Narrower, not sharper |
+| Per file, flag bare `fn`s where ≥90% of the file's are documented | 50 items across 13 files | The precise one, and it is a cleanup rather than a gate today |
+
+So the gap stays open, and this is the number for whoever closes it: fifty
+functions, most of them a `Default::default` or a `const fn code(self)` where the
+name is the whole documentation. The lint that subsumes it,
+`clippy::missing_docs_in_private_items`, reported three hundred when the gate was
+written and reports them still.
+
+**What this says about gates in general:** a rule that fires on prose nobody
+would change is worse than no rule, because the suppressions teach everybody to
+reach for a suppression. The two shapes that *are* caught were both measured at
+zero false positives before they were added, and that is why they are still
+there.
+
+## Fourteen failures, one cause, and the sweep's own fixture
+
+A Wayland sweep came back 117 passed, 14 failed. The first failure was `grim`
+timing out — the screenshot tool the size-cell scenario uses, killed at twenty
+seconds. The next thirteen were nothing to do with each other: a rename that
+found the undo stack already full, a trash that counted eight rows where the
+fixture has nine, a menu open where none should be.
+
+The X11 sweep of the same commit passed 128 of 128, and a re-run of the Wayland
+one passed 130 of 131. So the thirteen were a cascade, and the mechanism is the
+harness's: **scenarios that are not `fresh` share one fixture directory**, and one
+that dies between its mutation and its undo — which is what a `grim` timeout
+does — leaves that directory one file short for every scenario after it.
+
+The fix is one line in the sweep's `finally`: rebuild the shared fixture after a
+failure. It costs a few milliseconds, only on the way out of a failure, and it
+turns a report of fourteen into a report of one.
+
+**The rule: a sweep's failures have to be independent, or the first one hides the
+question.** Nothing in the fourteen said "the compositor stopped answering", and
+the thirteen that followed each looked like a real defect in a different feature.
+I spent the first minutes of reading that output believing the change under test
+had broken four unrelated things.
+
 ## A gate catches the shape it was written for, and this was a different shape
 
 Two defects in one afternoon's scripted edits, both invisible in a diff read as an

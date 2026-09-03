@@ -47,6 +47,14 @@ const AHEAD: u32 = 2;
 /// the rest is what an editor is for.
 const LINES: usize = 400;
 
+/// How far a picture can be magnified past the panel's fit.
+///
+/// **Eight**, which is the point at which a photograph on this panel is showing
+/// individual pixels of the original and there is nothing further to see. It is
+/// also the bound that keeps the requested box's arithmetic away from the wire's
+/// sixty-four-megabyte ceiling.
+const MOST_ZOOM: f32 = 8.0;
+
 /// What a tab is drawn as.
 ///
 /// **Because the shaper gives `\t` no advance at all**, and a preview that drew
@@ -552,6 +560,15 @@ pub(crate) struct QuickLook {
     /// `Ctrl+Z` takes back a save nobody meant — which is the whole reason
     /// `Change::Edited` carries both sides.
     pub(crate) unsaved: bool,
+    /// How much the picture is magnified past the size it was fitted to.
+    ///
+    /// **One is fitted, not one hundred percent.** What a person zooms *from* is
+    /// what they can see, which is the picture at the panel's size — a photograph
+    /// six thousand pixels wide has never been at 100% in this panel and starting
+    /// there would open every holiday snap magnified eight times.
+    pub(crate) zoom: f32,
+    /// Where the picture is dragged to, in logical pixels from centred.
+    pub(crate) pan: (f32, f32),
     /// Whether an animation is playing.
     ///
     /// **On, for a file that has frames.** A GIF that sat on its first frame
@@ -595,6 +612,8 @@ impl QuickLook {
             dragging: false,
             editing: false,
             unsaved: false,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
             playing: true,
             delay_ms: 0,
             shown_at: None,
@@ -645,6 +664,24 @@ impl QuickLook {
     /// The coarse pass asks for a third of the long edge, which is where the
     /// three-fold difference in [`Self::coarse`] comes from.
     pub(crate) fn shot(&self, within: (u32, u32)) -> Shot {
+        // **A zoom asks for a bigger picture, not a bigger drawing.** A
+        // photograph six thousand pixels wide was fitted to a thousand, so
+        // magnifying what came back is magnifying a downscale — the detail is in
+        // the file and the child has to be asked for it. Bounded twice: eight
+        // megapixels, which is a third of ADR 0020's budget for the one picture
+        // on screen, and four thousand a side, which is the wire's own ceiling.
+        //
+        // **Not for an animation.** Composing every frame of a GIF at eight
+        // megapixels is a decode the panel cannot keep up with at ten frames a
+        // second, so a zoomed animation is an upscale and says so by being soft.
+        if self.zoomed() && !self.animated() && !self.coarse {
+            let bigger = |it: u32, zoom: f32| ((it as f32 * zoom) as u32).clamp(1, 4096);
+            let mut wanted = (bigger(within.0, self.zoom), bigger(within.1, self.zoom));
+            while u64::from(wanted.0) * u64::from(wanted.1) > 8 * 1024 * 1024 {
+                wanted = (wanted.0 * 3 / 4, wanted.1 * 3 / 4);
+            }
+            return Shot { within: wanted, page: self.page };
+        }
         if self.coarse {
             let long = within.0.max(within.1).max(1);
             let side = (long / 3).clamp(64, 512);
@@ -676,6 +713,90 @@ impl QuickLook {
     /// without `pdfinfo` previews the document and cannot say how long it is —
     /// ADR 0019 — so `↓` there is allowed to ask for a page that may not exist,
     /// and `NoSuchPage` is how it finds out.
+    pub(crate) fn turn(&mut self, delta: i32) -> bool {
+        if !self.paged() {
+            return false;
+        }
+        let wanted = self.page.saturating_add_signed(delta).max(1);
+        // **An animation wraps and a document stops.** Coming off the end of a
+        // GIF is its next loop; coming off the end of a PDF is the end of the PDF.
+        let wanted = match (self.animated(), self.pages) {
+            (true, pages) if pages > 0 && wanted > pages => 1,
+            (true, pages) if pages > 0 && delta < 0 && self.page == 1 => pages,
+            (_, pages) if pages > 0 => wanted.min(pages),
+            _ => wanted,
+        };
+        let moved = wanted != self.page;
+        self.page = wanted;
+        // **A turn is a draft first, for the same reason opening one is.** `↓`
+        // twice in a row is a person looking for something, and two 65 ms drafts
+        // answer that better than one 150 ms page.
+        //
+        // **Not for an animation**, whose frames are already the panel's size and
+        // whose next two are on the GPU: a draft would be a third-size frame in
+        // the middle of a loop.
+        self.coarse |= moved && self.shows == Shows::Page;
+        moved
+    }
+
+    /// Whether there is a picture that a zoom would mean anything to.
+    pub(crate) fn zoomable(&self) -> bool {
+        self.shows != Shows::Text && self.image.is_some()
+    }
+
+    /// Whether it is drawn larger than the panel it is in.
+    pub(crate) fn zoomed(&self) -> bool {
+        self.zoom > 1.001
+    }
+
+    /// Multiplies the zoom, keeping `holding` — a fraction of the panel from its
+    /// centre — under the same part of the picture. Whether anything moved.
+    ///
+    /// **About the pointer, not about the centre.** A zoom that always grows from
+    /// the middle makes a person chase the thing they were looking at across the
+    /// panel with a pan, and the arithmetic that avoids it is two lines: the pan
+    /// scales with the picture, so the offset from the held point scales too.
+    pub(crate) fn zoom_by(&mut self, factor: f32, holding: (f32, f32)) -> bool {
+        if !self.zoomable() {
+            return false;
+        }
+        let was = self.zoom;
+        let zoom = (was * factor).clamp(1.0, MOST_ZOOM);
+        if (zoom - was).abs() < 0.001 {
+            return false;
+        }
+        let growth = zoom / was;
+        self.zoom = zoom;
+        // The point under the pointer stays where it is: everything else moves
+        // away from it by however much the picture grew.
+        self.pan.0 = (self.pan.0 - holding.0) * growth + holding.0;
+        self.pan.1 = (self.pan.1 - holding.1) * growth + holding.1;
+        if !self.zoomed() {
+            self.pan = (0.0, 0.0);
+        }
+        true
+    }
+
+    /// Puts the picture back to the size the panel fits it at.
+    pub(crate) fn unzoom(&mut self) -> bool {
+        if !self.zoomable() || (!self.zoomed() && self.pan == (0.0, 0.0)) {
+            return false;
+        }
+        self.zoom = 1.0;
+        self.pan = (0.0, 0.0);
+        true
+    }
+
+    /// Drags the picture, where it is larger than the panel.
+    pub(crate) fn pan_by(&mut self, by: (f32, f32)) -> bool {
+        if !self.zoomed() {
+            return false;
+        }
+        self.pan.0 += by.0;
+        self.pan.1 += by.1;
+        true
+    }
+
     /// Whether this look has more than one image in it.
     ///
     /// **A document, or an animation.** Both are a stack of pictures the panel
@@ -715,32 +836,6 @@ impl QuickLook {
         // per frame of the window, which is a spin rather than an animation.
         self.shown_at = Some(std::time::Instant::now());
         self.turn(1)
-    }
-
-    pub(crate) fn turn(&mut self, delta: i32) -> bool {
-        if !self.paged() {
-            return false;
-        }
-        let wanted = self.page.saturating_add_signed(delta).max(1);
-        // **An animation wraps and a document stops.** Coming off the end of a
-        // GIF is its next loop; coming off the end of a PDF is the end of the PDF.
-        let wanted = match (self.animated(), self.pages) {
-            (true, pages) if pages > 0 && wanted > pages => 1,
-            (true, pages) if pages > 0 && delta < 0 && self.page == 1 => pages,
-            (_, pages) if pages > 0 => wanted.min(pages),
-            _ => wanted,
-        };
-        let moved = wanted != self.page;
-        self.page = wanted;
-        // **A turn is a draft first, for the same reason opening one is.** `↓`
-        // twice in a row is a person looking for something, and two 65 ms drafts
-        // answer that better than one 150 ms page.
-        //
-        // **Not for an animation**, whose frames are already the panel's size and
-        // whose next two are on the GPU: a draft would be a third-size frame in
-        // the middle of a loop.
-        self.coarse |= moved && self.shows == Shows::Page;
-        moved
     }
 
     /// Takes a picture, and stops the coarse pass standing in for it.
@@ -1330,6 +1425,8 @@ mod tests {
             dragging: false,
             editing: false,
             unsaved: false,
+            zoom: 1.0,
+            pan: (0.0, 0.0),
             playing: true,
             delay_ms: 0,
             shown_at: None,

@@ -166,6 +166,16 @@ fn sample_quick_look(
     if request.look_page > 0 {
         look.page = request.look_page;
     }
+    if request.look_zoom > 1.0 {
+        // Panned as well as zoomed, and off centre on purpose: a frame of a
+        // picture zoomed about its own middle would look the same whether the pan
+        // arithmetic worked or not. **Clamped by the same function the window
+        // clamps with**, once the picture has arrived and its size is known — the
+        // first render of this frame panned a picture that fitted the panel, which
+        // is a state the window does not have.
+        look.zoom = request.look_zoom;
+        look.pan = (inner.width / 4.0, -inner.height / 6.0);
+    }
     let mut previews = sk_preview::Previews::new();
     let helper = match shows {
         crate::previews::Shows::Page => sk_preview::Kind::Document,
@@ -221,6 +231,12 @@ fn sample_quick_look(
                 let key = sk_gpu::ImageKey(minted);
                 session.renderer.hold_preview(key, answer.size, &answer.pixels);
                 look.took(key, answer.size, answer.key.page);
+                look.pan = crate::view::clamped_pan(
+                    inner,
+                    answer.size,
+                    look.coarse,
+                    (look.zoom, look.pan),
+                );
                 served = Some(crate::quicklook::Shot {
                     within: answer.key.within,
                     page: answer.key.page,
@@ -403,6 +419,13 @@ pub struct Capture {
     pub pinned: bool,
     /// Whether one of its places is open, with what is under it.
     pub tree: bool,
+    /// How much the quick look's picture is magnified, where a frame wants it
+    /// zoomed.
+    ///
+    /// **Because a zoom is not only a bigger drawing.** It asks the child for a
+    /// bigger picture and clips what comes back to the panel, and a capture that
+    /// could only render the fitted case would render neither half.
+    pub look_zoom: f32,
     /// Which page or frame the quick look is on, where a frame wants one other
     /// than the first.
     ///

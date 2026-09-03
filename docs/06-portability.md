@@ -32,6 +32,7 @@ portability contract, and each row has a test that forces the fallback path.
 | xdg-desktop-portal | D-Bus name | Direct filesystem paths; no portal-mediated open; the desktop's light-or-dark is unknown and the theme is what the flag, the session file or the default says |
 | `wp_fractional_scale_v1` | Wayland registry | Integer scaling with supersampled glyph rasterization |
 | `xdg_activation_v1`, `cursor_shape_v1`, `text_input_v3` | Wayland registry | Documented feature loss per protocol; never a crash |
+| `zwp_pointer_gestures_v1` | Wayland registry; **X11 has none** — XInput 2.4's gestures need a server, a driver and a version this does not require | No pinch. Every zoom is still reachable: `Ctrl` and the wheel over the picture, `Ctrl +` / `Ctrl -` / `Ctrl 0` from the keyboard, and a drag to pan |
 | Vulkan | Loader present and a device enumerates | GL backend; then llvmpipe |
 | `FICLONE` | Attempt, `EOPNOTSUPP` → next | `copy_file_range`, then read/write |
 | `copy_file_range` | Attempt, `EXDEV`/`ENOSYS` → next | read/write loop |

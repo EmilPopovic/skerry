@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 130
+FEWEST_SCENARIOS = 131
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5905,6 +5905,83 @@ def edit_a_text_preview(run: Run, fixture: Path) -> None:
         raise Failure(f"the undo left {note.read_text()!r}")
 
 
+@scenario("a-picture-zooms-under-the-pointer-and-drags", fresh=True)
+def zoom_a_picture(run: Run, fixture: Path) -> None:
+    """`Ctrl` and the wheel magnify the picture; a drag pans it; `Ctrl 0` undoes it.
+
+    **A pinch takes the same path.** `sk-plat` turns `zwp_pointer_gestures_v1`
+    into `Event::Pinched` steps and the window sends a step to the picture before
+    it sends one to the list; X11 has no touchpad gestures at all, which is why
+    `Ctrl` and the wheel exists and is what a scenario can drive on both servers.
+
+    What it asserts beyond the number: a zoom about the pointer *moves* the
+    picture, because the point under the pointer has to stay where it is, and a
+    pan is clamped so the picture's edge never comes inside the panel.
+    """
+    picture = fixture / "wide.png"
+    # A picture bigger than the panel, so there is something to clip and somewhere
+    # to pan — written by hand, because Pillow is the golden tool's dependency and
+    # not this one's, and a checkerboard is four lines of arithmetic.
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    rows = b"".join(
+        b"\x00" + bytes(
+            value
+            for x in range(900)
+            for value in ((240, 90, 40) if (x // 60 + y // 60) % 2 == 0 else (30, 40, 90))
+        )
+        for y in range(700)
+    )
+    picture.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 900, 700, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+    listed(run)
+    until(run, rows="10")
+    run.drive("text wide\nsleep 300\nkey f12\nsleep 150\n")
+    until(run, cursor="wide.png")
+    run.drive("key space\nsleep 900\nkey f12\nsleep 250\n")
+    opened = holds(run, lambda it: it["looking"].endswith(":picture"), "a picture preview")
+    expect(opened, look_zoom="1.00", look_pan="0:0")
+
+    # **The pointer above and left of the window's middle**, which is inside the
+    # panel and off its centre — so a zoom about that point has to move the
+    # picture, and an assertion about the number alone would pass either way.
+    across, down = (float(value) for value in opened["logical"].split("x"))
+    corner = aim(run, opened, across * 0.35, down * 0.35)
+    middle = aim(run, opened, across / 2.0, down / 2.0)
+    run.drive(f"move {corner[0]:.2f} {corner[1]:.2f}\nsleep 200\n")
+    run.drive("scroll -1 ctrl\nsleep 250\nscroll -1 ctrl\nsleep 300\nkey f12\nsleep 200\n")
+    zoomed = holds(run, lambda it: float(it["look_zoom"]) > 1.2, "a magnified picture")
+    if zoomed["look_pan"] == "0:0":
+        raise Failure("the zoom grew from the middle rather than from under the pointer")
+
+    # A drag pans it, and the pan is clamped: the picture's edge cannot be
+    # dragged inside the panel however far the gesture goes.
+    before = zoomed["look_pan"]
+    run.drive(
+        f"drag {middle[0]:.2f} {middle[1]:.2f} {corner[0]:.2f} {corner[1]:.2f}\n"
+        "sleep 400\nkey f12\nsleep 200\n"
+    )
+    dragged = holds(run, lambda it: it["look_pan"] != before, "the picture to have been dragged")
+    panned = [float(value) for value in dragged["look_pan"].split(":")]
+    if abs(panned[0]) > across or abs(panned[1]) > down:
+        raise Failure(f"the pan was not clamped: {dragged['look_pan']}")
+
+    # And `Ctrl 0` — the chord that resets the *list's* zoom when no picture is up
+    # — puts it back, which is rule 2: one command, and what it acts on is what is
+    # in front of the person.
+    run.drive("key ctrl+0\nsleep 300\nkey f12\nsleep 200\n")
+    until(run, look_zoom="1.00", look_pan="0:0")
+
+
 @scenario("an-animation-plays-in-the-preview-and-can-be-stepped", fresh=True)
 def animated_gif(run: Run, fixture: Path) -> None:
     """A GIF plays on its own, pauses on a step, and starts again on the button.
@@ -8196,6 +8273,14 @@ def main(argv: list[str]) -> int:
                 if bus is not None:
                     bus.stop()
                     bus = None
+                # **A failure rebuilds the shared fixture.** A scenario that dies
+                # between its mutation and its undo leaves the directory every
+                # later scenario counts rows in one file short, and the sweep then
+                # reports a dozen failures for one cause: a `grim` that timed out
+                # once produced fourteen, of which one was real. Rebuilding costs
+                # a few milliseconds and only on the way out of a failure.
+                if name in failed and not own:
+                    fixture = make_fixture(work)
     except Failure as problem:
         print(f"fixture: {problem}")
         return 1

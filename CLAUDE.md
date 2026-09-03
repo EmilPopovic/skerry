@@ -7,16 +7,17 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 756 tests, 130 GUI scenarios **on both Wayland and X11**,
-sixty-five golden frames, every gate green: a Details view
+sandboxed helpers, 756 tests, 131 GUI scenarios **on both Wayland and X11**,
+sixty-six golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
 ([ADR 0021](docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)) — so a
 folder pinned here is pinned in Nautilus, the well-known directories cannot be
 unpinned, the rows drag into an order, and a volume carries **the label somebody
-gave the disk and the room left on it** — `/dev/disk/by-label` and `statvfs`,
-neither of which needs udisks2 — **tabs and a
+gave the disk, the room left on it and a bar under both saying how full it is** —
+`/dev/disk/by-label` and `statvfs`, neither of which needs udisks2, and the bar
+is red past nine tenths because a figure is not a proportion — **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
 where a tab dragged to a pane's edge splits it, **each pane carrying its own
 tab strip and, under it, its own Back / Forward / Parent / Reload and its own
@@ -105,7 +106,12 @@ a request names a page and the child holds nothing, because page 400 of 1200 cos
 what page 1 costs) — and the **two pages ahead are already on the GPU**, a few
 whole textures bounded by 24 MiB rather than by a count
 ([ADR 0020](docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md)),
-so a turn onto one is a field assignment;
+so a turn onto one is a field assignment; **a picture zooms under the pointer** —
+a pinch where the compositor sends one, `Ctrl` and the wheel where it does not,
+and the point under the pointer stays where it is — and the zoom **asks the child
+for a bigger picture** rather than magnifying a downscale, because a photograph
+fitted to a thousand pixels has its detail in the file; a drag pans it, clamped
+so its edge never comes inside the panel;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and
