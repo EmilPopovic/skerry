@@ -119,7 +119,10 @@ fn png(bytes: &[u8]) -> Result<Raster, Refusal> {
 }
 
 fn jpeg(bytes: &[u8]) -> Result<Raster, Refusal> {
-    let mut decoder = zune_jpeg::JpegDecoder::new(bytes);
+    // **A cursor, not a slice.** 0.5 reads through `ZByteReaderTrait`, which
+    // wants `Seek` — the version that matches the one `resvg` brings, so the
+    // helper holds one JPEG decoder rather than two.
+    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(bytes));
     decoder.decode_headers().map_err(|_| Refusal::Undecodable)?;
     // `zune-jpeg` answers in `usize`, which on this target is wider than the
     // `u32` the wire carries — so both conversions are checked rather than cast.
@@ -139,8 +142,20 @@ fn jpeg(bytes: &[u8]) -> Result<Raster, Refusal> {
 }
 
 fn svg(bytes: &[u8], within: (u32, u32)) -> Result<Raster, Refusal> {
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    // **The machine's fonts, loaded once and with its generics resolved** —
+    // [`crate::fonts`], which is where the reason an SVG's text used to render as
+    // nothing at all is written down.
+    let fonts = crate::fonts::shared();
+    let mut options = resvg::usvg::Options {
+        font_family: fonts.default.clone(),
+        fontdb: std::sync::Arc::clone(&fonts.db),
+        ..resvg::usvg::Options::default()
+    };
+    // The document's own directory, so an `<image xlink:href="logo.png">` beside
+    // it resolves — a relative link is relative to the file and the child is
+    // given bytes, so without this the only images that render are the embedded
+    // ones. Left empty here, because what this helper is handed is the bytes.
+    options.resources_dir = None;
     let tree = resvg::usvg::Tree::from_data(bytes, &options).map_err(|_| Refusal::Undecodable)?;
     // **A vector fills its box, up as well as down**, which is the whole point of
     // a vector: an icon whose document says `width="10"` asked for at 128 is asked
@@ -408,6 +423,69 @@ mod tests {
 
     /// **Premultiplication, which is the bug this catches.** A half-transparent
     /// white square read as straight RGBA would come back grey.
+    /// **An SVG's text is drawn**, which for a year it was not.
+    ///
+    /// `usvg`'s defaults name Microsoft's fonts — *Arial* for `sans-serif`,
+    /// *Times New Roman* for everything unresolved — and a Linux box has neither,
+    /// so every SVG with words in it rendered as its shapes alone. This asserts
+    /// the shape of the fix rather than a font's name: the same document with and
+    /// without its text, and the one with it has more ink.
+    #[test]
+    fn the_text_in_an_svg_reaches_the_pixels() {
+        if crate::fonts::shared().db.is_empty() {
+            return; // A machine with no fonts cannot draw text, and says so.
+        }
+        let ground = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60">
+            <rect width="120" height="60" fill="#000000"/></svg>"##;
+        let inked = |extra: &str| {
+            let source = format!(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"60\">\
+                 <rect width=\"120\" height=\"60\" fill=\"#000000\"/>{extra}</svg>"
+            );
+            let raster = raster_of(source.as_bytes(), (120, 60), 1).expect("an SVG");
+            raster
+                .pixels
+                .chunks_exact(4)
+                .filter(|pixel| pixel[0] > 40 || pixel[1] > 40 || pixel[2] > 40)
+                .count()
+        };
+        let bare = inked("");
+        assert_eq!(bare, 0, "the ground is black, so nothing is lit");
+        let _ = raster_of(ground, (120, 60), 1).expect("the ground alone renders");
+
+        // Three ways a document names a font, and every one of them used to draw
+        // nothing: a generic family, a named family nobody has, and none at all.
+        for named in [
+            r##"<text x="4" y="40" font-size="30" font-family="sans-serif" fill="#fff">Hi</text>"##,
+            r##"<text x="4" y="40" font-size="30" font-family="Helvetica" fill="#fff">Hi</text>"##,
+            r##"<text x="4" y="40" font-size="30" fill="#fff">Hi</text>"##,
+        ] {
+            assert!(inked(named) > 20, "no glyphs for {named}");
+        }
+    }
+
+    /// **A raster inside an SVG is drawn too**, which needs a build feature and
+    /// did not have it.
+    ///
+    /// Every diagrams.net export puts its labels in a `<foreignObject>` for
+    /// browsers and a rasterised PNG in a `<switch>` beside it for everything
+    /// else — so those files rendered as boxes and arrows with no words in them,
+    /// and `resvg` said so in a `log::warn!` nothing reads.
+    #[test]
+    fn an_image_inside_an_svg_is_drawn() {
+        // A 1×1 white PNG, base64, so the assertion is about the `<image>` being
+        // decoded at all rather than about what is in it.
+        let white = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVR4nGP4DwUMMAYAj4IP8TylVlEAAAAASUVORK5CYII=";
+        let source = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+             width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"#000000\"/>\
+             <image x=\"4\" y=\"4\" width=\"12\" height=\"12\" xlink:href=\"data:image/png;base64,{white}\"/></svg>"
+        );
+        let raster = raster_of(source.as_bytes(), (20, 20), 1).expect("an SVG");
+        let lit = raster.pixels.chunks_exact(4).filter(|pixel| pixel[0] > 200).count();
+        assert!(lit > 50, "the embedded image drew {lit} white pixels");
+    }
+
     #[test]
     fn a_transparent_svg_comes_back_straight_and_not_premultiplied() {
         let source = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">

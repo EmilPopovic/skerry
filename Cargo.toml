@@ -75,8 +75,22 @@ wgpu = { version = "27", default-features = false, features = ["vulkan", "gles",
 # `skerry` graph `tools/dep-budget.py` measures. That is ADR 0006's dependency
 # argument made mechanical rather than aspirational.
 png = { version = "0.18", default-features = false }
-zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
-resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
+# **0.5, which is the version `resvg` wants.** At 0.4 the helper built two JPEG
+# decoders and two `zune-core`s — `raster-images` brought resvg's own — and a
+# sandboxed child with a decoder in it twice is two attack surfaces for one
+# format.
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+resvg = { version = "0.48", default-features = false, features = [
+    "text",
+    "system-fonts",
+    # **`raster-images`, or an `<image>` inside an SVG draws nothing** — resvg
+    # logs "Images decoding was disabled by a build feature" and carries on. Every
+    # diagrams.net export puts its labels in a `<foreignObject>` for browsers and
+    # a rasterised PNG in `<switch>` beside it for everything else, so those files
+    # rendered as boxes and arrows with no words in them. It costs `gif` and
+    # `image-webp`; PNG and JPEG come from crates already here.
+    "raster-images",
+] }
 
 # One lint set for the workspace, so a rule is argued once. The per-crate
 # `deny(unwrap_used, expect_used)` stays in each lib.rs because

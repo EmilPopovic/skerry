@@ -252,6 +252,15 @@ FRAMES = [
     ("quick-look-gif",
      ["--size", "900x600", "--scale", "125", "--look", "spinner.gif", "--look-page", "3"],
      "pictures"),
+    # **An SVG's text, and a raster inside an SVG.** Each is a thing `resvg` draws
+    # only when it is configured to: the generic families resolved from what the
+    # machine has, and the `raster-images` feature. Both used to be silent — a
+    # `log::warn!` in a sandboxed child nobody reads — and both are a picture with
+    # something missing, which is what a frame catches and a size does not.
+    ("quick-look-svg-text",
+     ["--size", "900x600", "--scale", "125", "--look", "label.svg"], "pictures"),
+    ("quick-look-svg-image",
+     ["--size", "900x600", "--scale", "125", "--look", "embedded.svg"], "pictures"),
     # **A quick look at each of the three things one can be of.** A picture through
     # `skerry-thumbnailer`, a page through whatever renderer is on `PATH`, and text
     # read in this process because reading a file is not decoding.
@@ -568,6 +577,41 @@ def build_pictures() -> None:
             f'<rect x="1" y="1" width="{side - 2}" height="{side * 2 // 3 - 2}" rx="{side // 6}"'
             f' fill="{colour}"/></svg>'
         )
+    # **An SVG with words in it, and one with a picture in it.** Both are shapes
+    # plus something `resvg` has to be *configured* to draw: text needs the four
+    # generic families resolved to fonts a Linux box has — its defaults are
+    # Microsoft's names — and an `<image>` needs the `raster-images` feature,
+    # without which every diagrams.net export drew as boxes with no labels. Two
+    # frames rather than two assertions, because "the text is missing" is
+    # invisible to every number a decoder can report about its own answer.
+    (directory / "label.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="128" height="96" '
+        'viewBox="0 0 128 96">'
+        '<rect width="128" height="96" rx="8" fill="#2d3550"/>'
+        '<text x="12" y="34" font-family="sans-serif" font-size="20" fill="#e8ecf8">Sans</text>'
+        '<text x="12" y="60" font-family="Helvetica" font-size="20" fill="#ffcc55">Named</text>'
+        '<text x="12" y="86" font-size="20" fill="#88ddaa">Default</text>'
+        "</svg>"
+    )
+    # A 2×2 white PNG, embedded — the same shape a diagrams.net label takes: a
+    # `<switch>` whose `<foreignObject>` no renderer outside a browser draws, and
+    # a raster beside it that every renderer with images enabled does.
+    white = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADklEQVR4nGP4DwUMMAYAj4IP"
+        "8TylVlEAAAAASUVORK5CYII="
+    )
+    (directory / "embedded.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+        'width="128" height="96" viewBox="0 0 128 96">'
+        '<rect width="128" height="96" fill="#1d2b1d"/>'
+        "<switch>"
+        '<foreignObject width="100%" height="100%" '
+        'requiredFeatures="http://www.w3.org/TR/SVG11/feature#Extensibility">'
+        '<div xmlns="http://www.w3.org/1999/xhtml">a browser draws this</div></foreignObject>'
+        f'<image x="24" y="16" width="80" height="64" xlink:href="data:image/png;base64,{white}"/>'
+        "</switch></svg>"
+    )
+
     # One file that is not a picture, so a frame shows the fallback mark beside
     # the thumbnails rather than only in another frame — and real lines, because it
     # is also what the text quick look draws.

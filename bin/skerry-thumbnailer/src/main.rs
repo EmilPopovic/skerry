@@ -20,6 +20,7 @@
 
 mod cache;
 mod decode;
+mod fonts;
 mod gif;
 mod md5;
 
@@ -30,6 +31,28 @@ use sk_preview::wire::{Ask, Refusal, Reply, Request};
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(at) = arguments.iter().position(|it| it == "--write") {
+        let (from, into) = (arguments.first().map(PathBuf::from), arguments.get(at + 1));
+        match (from, into) {
+            (Some(from), Some(into)) => {
+                let into = Path::new(into);
+                // **Confined, with the output's own directory as the one thing
+                // writable.** The served process may write only the thumbnail
+                // cache, and a diagnostic that could write only there is one
+                // nobody can find the output of — but a decode outside the
+                // sandbox would be the one path in this program where an
+                // untrusted file is parsed unconfined, which is the whole of what
+                // ADR 0006 is about.
+                let out = into.parent().filter(|it| !it.as_os_str().is_empty());
+                let writable: Vec<&Path> = out.into_iter().collect();
+                let report = sk_preview::sandbox::confine(&[Path::new("/")], &[], &writable);
+                println!("skerry-thumbnailer: sandbox: {}", report.line());
+                write_out(&from, into, cache::SIDE);
+            }
+            _ => println!("skerry-thumbnailer: usage: skerry-thumbnailer <file> --write <out.png>"),
+        }
+        return;
+    }
     if let Some(at) = arguments.iter().position(|it| it == "--probe") {
         probe(arguments.get(at + 1).map(PathBuf::from).as_deref());
         return;
@@ -158,6 +181,7 @@ fn probe(path: Option<&Path>) {
         );
         return;
     };
+    println!("skerry-thumbnailer: fonts: {}", fonts::shared().report);
     match std::fs::read(path) {
         Err(why) => println!("skerry-thumbnailer: unreadable: {why}"),
         Ok(bytes) => match decode::decode(&bytes, (cache::SIDE, cache::SIDE), 1) {
@@ -171,5 +195,36 @@ fn probe(path: Option<&Path>) {
             ),
             Err(refusal) => println!("skerry-thumbnailer: refused: {refusal:?}"),
         },
+    }
+}
+
+/// Writes what a decode produced, for a person who wants to look at it.
+///
+/// **Because four of M0's six defects were found by looking at a PNG.** A
+/// thumbnail that is wrong in a way a size cannot express — an SVG whose text
+/// vanished, a premultiplied fringe, a picture fitted to the wrong edge — is
+/// invisible to every assertion this helper can make about its own answer.
+fn write_out(path: &Path, into: &Path, side: u32) {
+    let Ok(bytes) = std::fs::read(path) else {
+        println!("skerry-thumbnailer: unreadable: {}", path.display());
+        return;
+    };
+    match decode::decode(&bytes, (side, side), 1) {
+        Err(refusal) => println!("skerry-thumbnailer: refused: {refusal:?}"),
+        Ok(decoded) => {
+            let (width, height) = decoded.raster.size;
+            let written = std::fs::File::create(into).map_err(|_| ()).and_then(|file| {
+                let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writing = encoder.write_header().map_err(|_| ())?;
+                writing.write_image_data(&decoded.raster.pixels).map_err(|_| ())
+            });
+            let said = match written {
+                Ok(()) => format!("wrote {width}×{height} to {}", into.display()),
+                Err(()) => format!("could not write {}", into.display()),
+            };
+            println!("skerry-thumbnailer: {said}");
+        }
     }
 }

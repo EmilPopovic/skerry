@@ -79,7 +79,10 @@ of what is behind it and the status line saying `9 of 12 items`; **a check box o
 an entry's mark** selects with the pointer alone, the same `Selection::toggle`
 `Ctrl`-click has always had and `Ctrl+Space` now has too;
 **a picture is its own mark** — PNG, JPEG, SVG and **GIF** decoded in
-`skerry-thumbnailer`, a process with no execute right anywhere and nothing writable
+`skerry-thumbnailer`, where an SVG's **text and its embedded rasters** draw too:
+the generic font families are resolved against the machine's own database rather
+than `fontdb`'s Microsoft names, and `resvg`'s `raster-images` is on, without
+which every diagrams.net export was boxes and arrows with no labels, a process with no execute right anywhere and nothing writable
 but the XDG cache it shares with every other file manager on the machine, drawn
 from a grid of equal slots ([ADR 0018](docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md))
 that is one texel until the first thumbnail exists — and **a GIF plays**: its
