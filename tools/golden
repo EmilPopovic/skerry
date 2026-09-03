@@ -252,6 +252,14 @@ FRAMES = [
     ("quick-look-gif",
      ["--size", "900x600", "--scale", "125", "--look", "spinner.gif", "--look-page", "3"],
      "pictures"),
+    # **Code, highlighted, on both grounds.** The tones are roles and the theme
+    # gives them their hues, so the light frame is the assertion that the second
+    # table exists and is not the first one: a pastel keyword that reads on
+    # near-black is highlighter pen on white.
+    ("quick-look-code",
+     ["--size", "900x600", "--scale", "125", "--look", "sample.rs"], "pictures"),
+    ("quick-look-code-light",
+     ["--size", "900x600", "--scale", "125", "--look", "sample.rs", "--light"], "pictures"),
     # **An SVG's text, and a raster inside an SVG.** Each is a thing `resvg` draws
     # only when it is configured to: the generic families resolved from what the
     # machine has, and the `raster-images` feature. Both used to be silent — a
@@ -678,6 +686,26 @@ def build_pictures() -> None:
         append_images=frames[1:],
         duration=120,
         loop=0,
+    )
+
+    # **A file of code, for the highlighter.** Four roles — a comment, a keyword,
+    # a literal and a number — and the shapes that catch a scanner: a comment
+    # marker inside a string, a lifetime that is not a string, a block comment
+    # crossing lines, and a word that merely starts with a keyword.
+    (directory / "sample.rs").write_text(
+        "// What the four roles look like.\n"
+        "use std::io::Read;\n"
+        "\n"
+        "/* a block comment\n"
+        "   that crosses lines */\n"
+        "pub fn main(count: usize) -> char {\n"
+        '    let path = "a // b";  // not a comment in there\n'
+        "    let letter = 'x';\n"
+        "    let lifetimes: &'static str = path;\n"
+        "    let numbers = [42, 0x1f, 1_000, 2.5e3];\n"
+        "    let_go(count, numbers, lifetimes);\n"
+        "    letter\n"
+        "}\n"
     )
 
     # **A page turned a quarter, which is where poppler disagrees with itself**:

@@ -69,16 +69,24 @@ const TAB: &str = "    ";
 
 /// What a run of characters is drawn as.
 ///
-/// **One variant, and the rest of this enum is the seam.** Syntax highlighting is
-/// not written; what is written is everything around it, so adding it is a real
-/// [`highlight`] and more variants here — not a change to how text is stored,
-/// drawn, or scrolled. Each variant will name a *role* rather than a colour, so a
-/// theme decides what a keyword looks like and a light theme is not a second
-/// table of hexadecimal.
+/// **A role, never a colour**, so the theme decides what a keyword looks like and
+/// a light theme is not a second table of hexadecimal — [`sk_ui::Code`] is where
+/// the four hues live. The highlighter that produces these is
+/// [`crate::highlight`], and it is the only thing that has to change to add a
+/// language: text is stored, drawn, scrolled, selected and edited the same way
+/// whatever the tones are.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Tone {
-    /// Ordinary text, in the body colour.
+    /// Ordinary text, in the body colour — most of every file.
     Plain,
+    /// A line or block comment.
+    Comment,
+    /// A word the language reserves.
+    Keyword,
+    /// A string or character literal.
+    Literal,
+    /// A number.
+    Number,
 }
 
 /// One run of characters in one tone.
@@ -187,20 +195,17 @@ pub(crate) struct Text {
     rows: Vec<Row>,
     /// How many characters wide the rows were wrapped to. Zero is unwrapped.
     cells: usize,
+    /// Whose rules the tones follow, from the file's own name.
+    language: crate::highlight::Language,
 }
 
-/// Cuts each line into tones.
+/// Cuts each line into tones, by the rules of whatever language this is.
 ///
-/// **One span per line today, and that is the whole of the highlighter.** It runs
-/// once, when the text lands, rather than per frame — highlighting is a pass over a
-/// file and not a property of drawing it, and a version that ran while drawing
-/// would be a syntax parser inside the 8 ms budget.
-///
-/// What a real one replaces is this function and this function only. The drawing
-/// already asks for runs and colours each by its tone, so a highlighter that
-/// returns three spans where this returns one needs no other change.
-fn highlight(lines: &[String]) -> Vec<Vec<Span>> {
-    lines.iter().map(|line| vec![Span { from: 0, to: line.len(), tone: Tone::Plain }]).collect()
+/// **A pass over the file, not a property of drawing it.** It runs when the text
+/// lands and after an edit, never per frame: a scanner inside the 8 ms budget is
+/// a scanner that runs sixty times a second over a file nobody is changing.
+fn highlight(lines: &[String], language: crate::highlight::Language) -> Vec<Vec<Span>> {
+    crate::highlight::all(lines, language)
 }
 
 impl Text {
@@ -303,25 +308,19 @@ impl Text {
         Spot { line, byte: spot.byte.min(self.lines[line].len()) }
     }
 
-    /// Re-tones the lines an edit touched.
+    /// Re-tones after an edit — the whole file, and it has to be.
     ///
-    /// **Only those lines.** Highlighting the whole file per keystroke is a pass
-    /// over a megabyte for one character, and the tones of a line an edit did not
-    /// reach cannot have changed — which stays true for a real highlighter as long
-    /// as it is line-local, and is the assumption to revisit when it is not.
-    fn retone(&mut self, lines: std::ops::RangeInclusive<usize>) {
-        for line in lines {
-            let Some(text) = self.lines.get(line) else { continue };
-            let span = vec![Span { from: 0, to: text.len(), tone: Tone::Plain }];
-            match self.spans.get_mut(line) {
-                Some(slot) => *slot = span,
-                None => self.spans.push(span),
-            }
-        }
+    /// **The assumption this replaces was that highlighting is line-local.** It
+    /// is not: a `*/` typed on line 12 changes the colour of every line after it,
+    /// and a `/*` deleted does the same. What makes the whole file affordable is
+    /// the cap a preview already has — [`LINES`], four hundred — so this is tens
+    /// of microseconds per keystroke over text that cannot grow.
+    fn retone(&mut self, _lines: std::ops::RangeInclusive<usize>) {
+        self.spans = highlight(&self.lines, self.language);
     }
 
     /// Cuts `body` into lines and tones.
-    fn of(body: &str) -> Self {
+    fn of(body: &str, language: crate::highlight::Language) -> Self {
         let mut lines: Vec<String> =
             body.lines().take(LINES).map(|line| line.replace('\t', TAB)).collect();
         let truncated = body.lines().nth(LINES).is_some() || body.len() >= TEXT_LIMIT;
@@ -330,8 +329,8 @@ impl Text {
         if lines.is_empty() && !body.is_empty() {
             lines.push(body.replace('\t', TAB));
         }
-        let spans = highlight(&lines);
-        let mut text = Self { lines, spans, truncated, rows: Vec::new(), cells: 0 };
+        let spans = highlight(&lines, language);
+        let mut text = Self { lines, spans, truncated, rows: Vec::new(), cells: 0, language };
         text.rewrap();
         text
     }
@@ -662,7 +661,10 @@ impl QuickLook {
         let Ok(body) = waiting.try_recv() else { return false };
         self.reading = None;
         match body {
-            Some(body) => self.text = Some(Text::of(&body)),
+            Some(body) => {
+                let language = crate::highlight::Language::of(&self.title());
+                self.text = Some(Text::of(&body, language));
+            }
             None => self.refusal = Some(Refusal::Unreadable),
         }
         true
@@ -1131,7 +1133,7 @@ impl QuickLook {
             return false;
         }
         let cells = text.cells();
-        let mut fresh = Text::of(&body);
+        let mut fresh = Text::of(&body, text.language);
         fresh.wrap(cells);
         self.text = Some(fresh);
         self.unsaved = false;
@@ -1290,7 +1292,7 @@ mod tests {
     /// nobody sees — which is what a real highlighter has to keep true.
     #[test]
     fn every_line_is_covered_by_its_spans_exactly_once() {
-        let text = Text::of("one\ntwo words\n\nlast");
+        let text = Text::of("one\ntwo words\n\nlast", crate::highlight::Language::Plain);
         assert_eq!(text.lines, ["one", "two words", "", "last"]);
         assert_eq!(text.spans.len(), text.lines.len());
         for (line, spans) in text.lines.iter().zip(&text.spans) {
@@ -1308,14 +1310,14 @@ mod tests {
     /// Today every run is plain, which is the highlighter that is not written.
     #[test]
     fn the_only_tone_is_plain_until_there_is_a_highlighter() {
-        let text = Text::of("fn main() {}\n");
+        let text = Text::of("fn main() {}\n", crate::highlight::Language::Plain);
         assert!(text.spans.iter().flatten().all(|span| span.tone == Tone::Plain));
     }
 
     /// A tab is an indent, because the shaper gives it no advance of its own.
     #[test]
     fn a_tab_is_drawn_as_spaces_and_the_spans_still_cover_the_line() {
-        let text = Text::of("\tindented\n\t\ttwice\n");
+        let text = Text::of("\tindented\n\t\ttwice\n", crate::highlight::Language::Plain);
         assert_eq!(text.lines, ["    indented", "        twice"]);
         for (line, spans) in text.lines.iter().zip(&text.spans) {
             assert_eq!(spans.last().map(|span| span.to), Some(line.len()));
@@ -1324,9 +1326,12 @@ mod tests {
 
     #[test]
     fn a_file_with_no_newline_is_one_line_and_an_empty_one_is_none() {
-        assert_eq!(Text::of("no terminator").lines, ["no terminator"]);
-        assert!(Text::of("").lines.is_empty());
-        assert!(!Text::of("").truncated);
+        assert_eq!(
+            Text::of("no terminator", crate::highlight::Language::Plain).lines,
+            ["no terminator"]
+        );
+        assert!(Text::of("", crate::highlight::Language::Plain).lines.is_empty());
+        assert!(!Text::of("", crate::highlight::Language::Plain).truncated);
     }
 
     /// **The stand-in stops being drawn the moment the real one lands.**
@@ -1531,7 +1536,7 @@ mod tests {
     fn texted(body: &str) -> QuickLook {
         let mut look = paged(0);
         look.shows = Shows::Text;
-        look.text = Some(Text::of(body));
+        look.text = Some(Text::of(body, crate::highlight::Language::Plain));
         look
     }
 
@@ -1714,11 +1719,11 @@ mod tests {
     #[test]
     fn a_long_file_is_cut_and_says_so() {
         let body = "line\n".repeat(LINES + 50);
-        let text = Text::of(&body);
+        let text = Text::of(&body, crate::highlight::Language::Plain);
         assert_eq!(text.lines.len(), LINES);
         assert!(text.truncated, "a file that was cut did not say so");
         // And one that fits does not claim to have been.
-        assert!(!Text::of("short\n").truncated);
+        assert!(!Text::of("short\n", crate::highlight::Language::Plain).truncated);
     }
 
     /// Typing, deleting and the caret's arithmetic, over the text a preview
@@ -1729,7 +1734,7 @@ mod tests {
     /// start of one, and a selection replaced by a character.
     #[test]
     fn the_editor_types_deletes_and_joins_lines() {
-        let mut text = super::Text::of("one\ntwo\nthree\n");
+        let mut text = super::Text::of("one\ntwo\nthree\n", crate::highlight::Language::Plain);
         assert_eq!(text.lines, ["one", "two", "three"]);
 
         // A character in the middle of a line.
@@ -1769,7 +1774,7 @@ mod tests {
     /// that is no longer UTF-8 and panic the next time anything sliced it.
     #[test]
     fn the_caret_walks_characters_and_not_bytes() {
-        let mut text = super::Text::of("café\n");
+        let mut text = super::Text::of("café\n", crate::highlight::Language::Plain);
         let end = Spot { line: 0, byte: text.lines[0].len() };
         let back = text.before(end);
         assert_eq!(back.byte, end.byte - 2, "é is two bytes");
@@ -1788,7 +1793,7 @@ mod tests {
     /// put a character on.
     #[test]
     fn an_empty_file_takes_the_first_character() {
-        let mut text = super::Text::of("");
+        let mut text = super::Text::of("", crate::highlight::Language::Plain);
         assert!(text.lines.is_empty());
         let at = text.insert(Spot { line: 0, byte: 0 }, "hello");
         assert_eq!(at, Spot { line: 0, byte: 5 });
@@ -1807,6 +1812,7 @@ mod tests {
             "the quick brown fox jumps
 short
 ",
+            crate::highlight::Language::Plain,
         );
         text.wrap(10);
         let rows: Vec<&str> =
@@ -1829,6 +1835,7 @@ short
         let mut long = Text::of(
             "abcdefghijklmno
 ",
+            crate::highlight::Language::Plain,
         );
         long.wrap(6);
         let cut: Vec<&str> =

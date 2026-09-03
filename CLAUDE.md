@@ -97,8 +97,10 @@ parsed in the sandboxed child into flat records ([ADR
 selects and a press on the paper moves the page — or the file's own text — **mono, numbered, and selectable**, where a drag and
 `Ctrl+C` put it on the clipboard through
 [`Scope::Look`](crates/sk-cmd/src/registry.rs), the third scope the resolver was
-written to expect — drawn as runs carrying a tone so a highlighter replaces one
-function and nothing else, and **an editor when `Ctrl+E` asks**: characters, both
+written to expect — drawn as runs carrying a tone, and **a highlighter behind that seam**: four
+roles — comment, keyword, literal, number — over Rust, the C-likes, Python and
+the shells, a scanner rather than a grammar, with the theme deciding the hues so
+the light frame is a second table and not the first one, and **an editor when `Ctrl+E` asks**: characters, both
 deletes, a caret, words under `Ctrl` and selected under `Ctrl+Shift`, a
 shift-click that extends what is chosen, and a save on the way out that `Ctrl+Z`
 takes back — which is what makes not asking safe, and `Escape` is the way out

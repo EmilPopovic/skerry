@@ -717,8 +717,8 @@ and undoes it back there; watched failing against a `path_of` that used the
 pane's own path, which removed neither file.
 
 Then the **rest of** quick look and the inspector (M5 — the two helpers, the
-atlas, the cache and the three previews are in; syntax highlighting, EXIF, zoom
-and the docked form are not), then **desktop citizenship** (M7)
+atlas, the cache, the three previews, **syntax highlighting**, **the zoom** and a
+**PDF page's selectable words** are in; EXIF and the docked form are not), then **desktop citizenship** (M7)
 — FileManager1, udisks2, portals, the GoTo popup — then **M8**, whose first job is the
 performance regression gate that CI deliberately does not have yet.
 

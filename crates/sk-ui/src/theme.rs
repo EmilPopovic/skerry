@@ -68,6 +68,8 @@ pub struct Palette {
     pub kinds: Kinds,
     /// The six colours a folder can be given.
     pub folders: Folders,
+    /// What a run of code is drawn in, by the role the run plays.
+    pub code: Code,
 }
 
 /// The colours somebody can mark a folder with.
@@ -102,6 +104,26 @@ pub struct Kinds {
     pub document: Color,
     pub executable: Color,
     pub unknown: Color,
+}
+
+/// The colours a preview draws code in.
+///
+/// **Four roles and not a theme's worth.** A comment, a keyword, a literal and a
+/// number are what a reader picks out of forty lines at thirteen pixels;
+/// everything else — a type, a macro, an attribute — is one more hue in a panel
+/// that is trying to be read rather than admired, and each is a lexer's worth of
+/// work for a distinction the eye stops making. Ordinary code is
+/// [`Palette::text`], which is the majority of every file.
+#[derive(Clone, Copy, Debug)]
+pub struct Code {
+    /// A line or block comment.
+    pub comment: Color,
+    /// A word the language reserves.
+    pub keyword: Color,
+    /// A string or character literal.
+    pub literal: Color,
+    /// A number.
+    pub number: Color,
 }
 
 /// Sizes, in logical pixels.
@@ -263,6 +285,17 @@ impl Theme {
                     blue: Color::hex(0x5b9cf0),
                     purple: Color::hex(0xb07fe8),
                 },
+                // **A comment is dimmer than the code and the rest are not
+                // brighter than it.** What a reader wants from a highlighted file
+                // is the shape of the code, which means comments receding and
+                // three hues that separate at a glance without any of them
+                // pulling the eye off the identifiers between them.
+                code: Code {
+                    comment: Color::hex(0x6b7280),
+                    keyword: Color::hex(0xa78bfa),
+                    literal: Color::hex(0x7fc98a),
+                    number: Color::hex(0xe0b16a),
+                },
             },
             metrics: Metrics::default(),
             dark: true,
@@ -307,6 +340,14 @@ impl Theme {
                     green: Color::hex(0x2f8c37),
                     blue: Color::hex(0x2f6fd0),
                     purple: Color::hex(0x8149c4),
+                },
+                // Darkened against the light ground rather than the same hues:
+                // the pastels above read as highlighter pen on white.
+                code: Code {
+                    comment: Color::hex(0x8a9099),
+                    keyword: Color::hex(0x7c3aed),
+                    literal: Color::hex(0x18794e),
+                    number: Color::hex(0xa06010),
                 },
             },
             metrics: Metrics::default(),

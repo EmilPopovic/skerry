@@ -1556,8 +1556,16 @@ fn quick_look_text(
             // line, and a row is a window onto it.
             let (from, to) = (span.from.max(row.from), span.to.min(row.to));
             let Some(run) = whole.get(from..to).filter(|it| !it.is_empty()) else { continue };
+            // **The theme decides what a role looks like**, which is the whole
+            // reason a `Tone` is a role: a light theme is not a second table of
+            // hexadecimal in the highlighter.
+            let code = theme.palette.code;
             let colour = match span.tone {
                 crate::quicklook::Tone::Plain => theme.palette.text,
+                crate::quicklook::Tone::Comment => code.comment,
+                crate::quicklook::Tone::Keyword => code.keyword,
+                crate::quicklook::Tone::Literal => code.literal,
+                crate::quicklook::Tone::Number => code.number,
             };
             let style = mono(TextStyle::new(metrics.text_size, colour));
             let room = (inner.right() - TEXT_PAD - x).max(1.0);
