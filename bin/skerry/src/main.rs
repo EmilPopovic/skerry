@@ -16,7 +16,7 @@ use sk_app::{App, Bench, Capture, Options};
 /// Separate from `main` because the other two modes are one expression each and
 /// this one is not: a display server going away is not the user closing the
 /// window, and the difference is worth a line on the way out.
-fn window(options: &Options) -> Result<bool, sk_app::Problem> {
+fn window(options: Options) -> Result<bool, sk_app::Problem> {
     App::new(options).map(|mut app| {
         if let Some(failure) = app.run() {
             eprintln!("skerry: the display server went away — {failure}");
@@ -198,6 +198,21 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
     })
 }
 
+/// The path an argument names.
+///
+/// **A `file://` URI is one of them.** A desktop launching a file manager from
+/// its `.desktop` file passes `%U`, and every one of those is a URI — a
+/// `PathBuf` of `file:///home/…` names a directory called `file:` in the working
+/// directory, which is a listing that fails for a reason nobody can read.
+fn named(argument: &str) -> PathBuf {
+    sk_plat::decode_uri(argument).unwrap_or_else(|| PathBuf::from(argument))
+}
+
+// One arm per flag, and every one of them is two lines: the flag and what it
+// sets. Splitting the parse in half would put half the flags somewhere a person
+// looking for a flag does not look, which is the opposite of what this file is
+// for.
+#[expect(clippy::too_many_lines, reason = "one arm per flag, and the flags belong together")]
 fn main() -> std::process::ExitCode {
     // Taken first, so the cold-start figure includes argument parsing, the
     // allocator waking up, and every dynamic library the loader pulls in.
@@ -259,7 +274,7 @@ fn main() -> std::process::ExitCode {
             other if other.starts_with('-') => {
                 return usage_error(&format!("unknown option `{other}`"));
             }
-            other => path = Some(PathBuf::from(other)),
+            other => path = Some(named(other)),
         }
     }
 
@@ -293,7 +308,13 @@ fn main() -> std::process::ExitCode {
             sk_app::bench(&Bench { path, logical, scale_120, frames, grouping }).map(|()| true)
         }
         (None, None) => {
-            window(&Options {
+            // Before the window, which is the only place it can be: ADR 0023.
+            let (standing, bus) = sk_app::take_the_name(named_path.as_deref());
+            if standing == sk_app::Standing::Second {
+                return std::process::ExitCode::SUCCESS;
+            }
+            window(Options {
+                bus,
                 // A named directory is an explicit request for one directory,
                 // so the saved layout stays saved and is not opened over it.
                 restore: named_path.is_none(),

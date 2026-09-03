@@ -66,9 +66,16 @@ default. A machine with neither tool gets `Refusal::NoRenderer` and says so.
 
 | Crate | Why now | Exit |
 | --- | --- | --- |
-| `zbus` | D-Bus for FileManager1, udisks2 and portals. Correct SASL, marshalling and name handling for free. | It brings an async executor, which sits uneasily with [ADR 0005](adr/0005-no-async-runtime.md). It is confined to `sk-desktop` on its own thread. If it turns out to be the largest single chunk of the dependency tree, replace it with an in-house client — the protocol is a Unix socket, `EXTERNAL` auth and a marshaller, roughly 1,500 lines. |
 | `accesskit` | AT-SPI without becoming an AT-SPI expert. | None expected; the alternative is no accessibility, which is not an option. |
 | `wayland-client`, `wayland-protocols`, `x11rb` | Protocol plumbing and code generation. The *policy* above them — DnD, clipboard, IME, scaling — is ours, which is the point of [ADR 0002](adr/0002-own-platform-layer.md). `wayland-client` is taken with `system` and `dlopen`: the first gives a real `wl_display` pointer for the GPU surface, the second loads `libwayland-client` at run time so an X11-only machine still starts. That second feature is rule 9 as a build decision and it costs three crates — see the table below. | None expected. |
+
+**`zbus` was in this table and was declined when the code arrived.** The exit
+condition written against it — "it brings an async executor, which sits uneasily
+with [ADR 0005](adr/0005-no-async-runtime.md)" — was met on the day it would have
+been added rather than later, and the in-house client this row priced at "roughly
+1,500 lines" came in at 1,197 in `sk-desktop` including its tests, and 311 more in `sk-app` for what the messages mean:
+[ADR 0023](adr/0023-d-bus-is-a-socket-we-speak-ourselves.md). A dependency whose
+exit condition is already true on arrival is a dependency taken by inertia.
 
 ## What we write ourselves, on purpose
 
@@ -83,7 +90,9 @@ and generality costs latency or control:
 - **shared-mime-info, `.desktop`, `index.theme`, `mimeapps.list`, `.trashinfo` parsing.**
   All small, all well-specified, all otherwise reachable only through GIO. Fuzzed in CI.
 - **The thumbnail cache and its XDG metadata.**
-- **The D-Bus service side of FileManager1.**
+- **D-Bus itself** — the socket, `EXTERNAL` authentication, the marshaller and
+  the service side of `FileManager1`. `sk_desktop::bus`,
+  [ADR 0023](adr/0023-d-bus-is-a-socket-we-speak-ourselves.md).
 - **Natural-order collation and sort-key derivation.** Tightly coupled to the store layout.
 - **Localization.** A `t!` macro over an embedded catalogue is a hundred lines; a
   localization framework is a dependency and a build step.

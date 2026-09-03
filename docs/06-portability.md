@@ -27,7 +27,9 @@ portability contract, and each row has a test that forces the fallback path.
 | --- | --- | --- |
 | systemd (user session) | `sd_booted` equivalent: `/run/systemd/system` exists | Launch children via double-fork + `setsid` instead of a transient scope |
 | udisks2 | D-Bus name activation | Devices listed read-only from `/proc/self/mountinfo`; no mount/eject buttons |
-| xdg-desktop-portal | D-Bus name | Direct filesystem paths; no portal-mediated open |
+| A session bus | `DBUS_SESSION_BUS_ADDRESS`, then a connect and `EXTERNAL` | No `FileManager1` and no single instance: a second `skerry` opens a second window instead of handing over. Everything else is unchanged, because nothing else needs one |
+| `org.freedesktop.FileManager1` unowned | `RequestName` without `REPLACE_EXISTING` | Another file manager answers *show me this file* and we do not. Never taken from a running owner — [ADR 0023](adr/0023-d-bus-is-a-socket-we-speak-ourselves.md) |
+| xdg-desktop-portal | D-Bus name | Direct filesystem paths; no portal-mediated open; the desktop's light-or-dark is unknown and the theme is what the flag, the session file or the default says |
 | `wp_fractional_scale_v1` | Wayland registry | Integer scaling with supersampled glyph rasterization |
 | `xdg_activation_v1`, `cursor_shape_v1`, `text_input_v3` | Wayland registry | Documented feature loss per protocol; never a crash |
 | Vulkan | Loader present and a device enumerates | GL backend; then llvmpipe |

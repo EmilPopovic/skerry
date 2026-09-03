@@ -321,6 +321,15 @@ fn expand(value: &str, home: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+/// A path as a `file://` URI, which is how every desktop protocol names one.
+///
+/// Public because the bus speaks in URIs — `FileManager1` takes an array of them
+/// — and a second encoder would be a second set of escaping rules.
+#[must_use]
+pub fn file_uri(path: &Path) -> String {
+    format!("file://{}", percent_encode(path))
+}
+
 /// A path as the file's URI syntax wants it.
 ///
 /// Everything outside RFC 3986's unreserved set is escaped, with `/` left alone

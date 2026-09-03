@@ -696,6 +696,49 @@ def build_binaries() -> str:
     return "" if done.returncode == 0 else done.stderr.strip()[-2000:]
 
 
+class PrivateBus:
+    """A `dbus-daemon` of this scenario's own, and the address it answers on.
+
+    One per scenario that asks, so a window that takes `dev.skerry.Skerry` takes
+    it on a bus nobody else is on: the name is the single-instance mechanism, and
+    two scenarios sharing a bus would make the second window hand its arguments
+    to the first and exit.
+    """
+
+    def __init__(self, work: Path) -> None:
+        self.socket = work / "bus"
+        self.process = subprocess.Popen(
+            [
+                "dbus-daemon",
+                "--session",
+                "--nofork",
+                "--nopidfile",
+                f"--address=unix:path={self.socket}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if self.socket.exists():
+                return
+            if self.process.poll() is not None:
+                raise Failure("dbus-daemon exited before it listened")
+            time.sleep(0.02)
+        raise Failure("dbus-daemon never listened")
+
+    @property
+    def address(self) -> str:
+        return f"unix:path={self.socket}"
+
+    def stop(self) -> None:
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+
+
 def with_server(extra: dict | None = None) -> dict:
     """The environment for a child, with the current server's variables in it.
 
@@ -704,7 +747,13 @@ def with_server(extra: dict | None = None) -> dict:
     X11 is how a test passes because of a variable's precedence rather than
     because the code works.
     """
-    ours = {}
+    # **No session bus unless a scenario asks for one.** The suite's windows
+    # would otherwise connect to the bus of the person running it and request
+    # `org.freedesktop.FileManager1` — which, on a desktop where nothing holds
+    # it, they would get, and every "show in folder" on that machine would then
+    # open a fixture window that is about to be killed. An empty value is an
+    # unset here, and `bus=True` puts a private one back.
+    ours = {"DBUS_SESSION_BUS_ADDRESS": ""}
     if STATE:
         ours["XDG_STATE_HOME"] = STATE
     if CACHE:
@@ -735,7 +784,11 @@ class Run:
         self.owed = 0
         self.log = work / "app.log"
         self.err = work / "app.err"
-        environment = with_server(environment or {})
+        # Kept, because a scenario that starts a second process — or calls the
+        # window over a bus — needs the *same* environment this window has, and
+        # rebuilding it from `with_server` loses whatever the scenario added.
+        self.environment = with_server(environment or {})
+        environment = self.environment
         # **No path means the saved session decides**, which is the only way to
         # reach that half of the program: a named directory is an explicit
         # request for one directory and turns restoring off.
@@ -1257,10 +1310,10 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 125
+FEWEST_SCENARIOS = 127
 
 
-def scenario(name, fresh: bool = False):
+def scenario(name, fresh: bool = False, bus: bool = False):
     """Registers a scenario.
 
     `fresh` gives it a fixture of its own and an `XDG_DATA_HOME` of its own —
@@ -1276,10 +1329,16 @@ def scenario(name, fresh: bool = False):
     shared fixture gave `alpha` and `beta` a heading, and the three scenarios that
     click a row by arithmetic over `row_h` clicked one row too far. A fresh fixture
     fixes it because the record is keyed by a path nobody else opens.
+
+    `bus` gives it a session bus of its own — a `dbus-daemon` started for that
+    scenario and killed with it — which is what a scenario about
+    `org.freedesktop.FileManager1` or about a second instance handing over needs,
+    and what nothing else may have: see `with_server`.
     """
 
     def register(function):
         function.fresh = fresh
+        function.bus = bus
         SCENARIOS[name] = function
         return function
 
@@ -7214,6 +7273,133 @@ def properties(run: Run, fixture: Path) -> None:
     expect(after, cursor=before)
 
 
+def until_the_panel(run: Run) -> dict[str, str]:
+    """Waits for the Properties panel to be up, and returns that state."""
+    deadline = time.time() + WAITING
+    while time.time() < deadline:
+        state = run.answered()
+        if state and state.get("properties"):
+            return state
+    raise Failure("the panel never opened")
+
+
+def on_the_bus(run: Run, arguments: list[str]) -> str:
+    """Runs `dbus-send` against this scenario's own bus. Its reply, or a failure.
+
+    A real client's marshaller against ours, which is the half of
+    [ADR 0023](../docs/adr/0023-d-bus-is-a-socket-we-speak-ourselves.md) a unit
+    test cannot reach: our own reader parsing bytes our own writer produced would
+    agree with itself about a padding rule we had got wrong.
+    """
+    # **`--session`, never `--address`.** With `--address` libdbus opens the
+    # socket and sends the call *without* `Hello`, and `dbus-daemon` disconnects
+    # any client that speaks before it registers — which surfaces as an instant
+    # `NoReply` naming four causes, none of them this one. Half an hour was spent
+    # reading a reply path that was already correct.
+    done = subprocess.run(
+        [
+            "dbus-send",
+            "--session",
+            "--print-reply",
+            "--dest=dev.skerry.Skerry",
+            "/org/freedesktop/FileManager1",
+            *arguments,
+        ],
+        env=run.environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if done.returncode != 0 or "Error" in done.stdout:
+        raise Failure(f"dbus-send failed: {(done.stderr + done.stdout).strip()[:300]}")
+    return done.stdout
+
+
+@scenario("the-desktop-asks-for-a-file-and-the-window-shows-it", fresh=True, bus=True)
+def file_manager_one(run: Run, fixture: Path) -> None:
+    """`org.freedesktop.FileManager1`, called by `dbus-send` as a desktop calls it.
+
+    Three methods, one window. `ShowItems` is what a browser's *Open containing
+    folder* sends and it has to land on the file, not merely in the folder;
+    `ShowFolders` is a navigation; `ShowItemProperties` opens a panel about a row
+    that does not exist yet when the call is answered — the reply says the request
+    arrived, and the panel waits for the read.
+    """
+    listed(run)
+    inner = fixture / "alpha"
+    target = inner / "inner.txt"
+    if not target.is_file():
+        raise Failure(f"the fixture has no {target}")
+
+    # Introspection first: it is how a desktop finds out we answer at all, and a
+    # reply that is not well-formed XML is one every caller gives up on.
+    xml = on_the_bus(run, ["org.freedesktop.DBus.Introspectable.Introspect"])
+    for member in ("ShowFolders", "ShowItems", "ShowItemProperties"):
+        if member not in xml:
+            raise Failure(f"the introspection does not name {member}")
+
+    on_the_bus(run, [
+        "org.freedesktop.FileManager1.ShowItems",
+        f"array:string:file://{target}",
+        "string:",
+    ])
+    until(run, path=str(inner), cursor="inner.txt")
+
+    on_the_bus(run, [
+        "org.freedesktop.FileManager1.ShowFolders",
+        f"array:string:file://{fixture}",
+        "string:",
+    ])
+    until(run, path=str(fixture))
+
+    on_the_bus(run, [
+        "org.freedesktop.FileManager1.ShowItemProperties",
+        f"array:string:file://{target}",
+        "string:",
+    ])
+    # **Not `run.state()` straight after the navigation.** The panel is opened on
+    # the pass that takes delivery of the listing, which is at least one after the
+    # one the cursor lands on — asserting on the state that first reported the
+    # cursor is asserting a frame too early, and it failed exactly that way.
+    panel = until_the_panel(run)
+    facts = dict(pair.split("=", 1) for pair in panel["facts"].split("|") if "=" in pair)
+    if facts.get("Where") != str(inner):
+        raise Failure(f"the panel is about something in {facts.get('Where')!r}")
+
+
+@scenario("a-second-skerry-hands-its-folder-over-and-exits", fresh=True, bus=True)
+def one_instance(run: Run, fixture: Path) -> None:
+    """Rule 4's *one window* half: a second `skerry` is a request, not a window.
+
+    Our own client against our own service, and the other direction from the
+    `dbus-send` scenario above. The second process must exit **without drawing**
+    — a window opened and closed again flashes one — so this asserts on its exit
+    code and on the first window having moved, not on any state of its own.
+    """
+    listed(run)
+    inner = fixture / "alpha"
+    started = time.time()
+    done = subprocess.run(
+        [str(SKERRY), str(inner)],
+        env=run.environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise Failure(f"the second instance exited {done.returncode}: {done.stderr[:300]}")
+    if "first frame" in done.stderr:
+        raise Failure("the second instance drew a window before handing over")
+    # Half a millisecond of bus, measured in ADR 0023, against a cold start of
+    # ninety: a second instance that took as long as a window would have opened
+    # one somewhere.
+    if (elapsed := time.time() - started) > 2.0:
+        raise Failure(f"handing over took {elapsed:.1f}s")
+    until(run, path=str(inner))
+
+
 @scenario("an-input-method-composes-into-a-field")
 def input_method(run: Run, fixture: Path) -> None:
     """A real input method types into the rename field.
@@ -7757,7 +7943,7 @@ def main(argv: list[str]) -> int:
                 print(f"  over  {name}: the sweep ran out of its {SUITE_BUDGET:.0f}s budget")
                 failed.append(name)
                 continue
-            run = None
+            run, bus = None, None
             began = time.time()
             announce(name)
             try:
@@ -7765,6 +7951,13 @@ def main(argv: list[str]) -> int:
                 path = make_fixture(work, f"fixture-{name}") if own else fixture
                 data = work / "data" / name
                 environment = {"XDG_DATA_HOME": str(data)} if own else None
+                if getattr(function, "bus", False):
+                    if not shutil.which("dbus-daemon"):
+                        raise Skipped("no dbus-daemon on this machine")
+                    home = work / f"bus-{name}"
+                    home.mkdir(parents=True, exist_ok=True)
+                    bus = PrivateBus(home)
+                    environment = {**(environment or {}), "DBUS_SESSION_BUS_ADDRESS": bus.address}
                 with a_budget(min(SCENARIO_BUDGET, left)):
                     run = Run(display, work, path, [], instance, environment)
                     function(run, path)
@@ -7797,6 +7990,9 @@ def main(argv: list[str]) -> int:
             finally:
                 if run is not None:
                     run.close()
+                if bus is not None:
+                    bus.stop()
+                    bus = None
     except Failure as problem:
         print(f"fixture: {problem}")
         return 1

@@ -7,14 +7,16 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 729 tests, 125 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 746 tests, 127 GUI scenarios **on both Wayland and X11**,
 sixty-three golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
 ([ADR 0021](docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)) — so a
 folder pinned here is pinned in Nautilus, the well-known directories cannot be
-unpinned, and the rows drag into an order — **tabs and a
+unpinned, the rows drag into an order, and a volume carries **the label somebody
+gave the disk and the room left on it** — `/dev/disk/by-label` and `statvfs`,
+neither of which needs udisks2 — **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
 where a tab dragged to a pane's edge splits it, **each pane carrying its own
 tab strip and, under it, its own Back / Forward / Parent / Reload and its own
@@ -96,9 +98,16 @@ so a turn onto one is a field assignment;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and
-never on its own; and the window **comes back the way it was
+never on its own; the window **comes back the way it was
 left** after `kill -9`
-([ADR 0011](docs/adr/0011-one-plain-text-state-file-written-atomically.md)).
+([ADR 0011](docs/adr/0011-one-plain-text-state-file-written-atomically.md));
+and it **answers the desktop on D-Bus, which is a socket this program speaks
+itself** in 1,197 lines rather than `zbus`'s twenty crates and an async executor
+([ADR 0023](docs/adr/0023-d-bus-is-a-socket-we-speak-ourselves.md)) — one thread
+blocking on a read to serve, a short-lived connection per call, so a browser's
+*Open containing folder* lands on the file, a second `skerry` hands its argument
+to the first and exits **before opening a window**, and a fresh install on a dark
+desktop opens dark because the settings portal was asked, once, in 0.15 ms.
 Every command is reachable by keyboard
 alone and by pointer alone, and a test fails the build for one that is not. What
 is done and what is owed:

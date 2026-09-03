@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Name=Skerry
+GenericName=File Manager
+Comment=Browse the filesystem
+# `%U`, not `%f`: a desktop hands a file manager URIs, and `skerry` decodes a
+# `file://` one into the path it names.
+Exec=skerry %U
+# A stock name from the icon-name specification rather than one we ship, because
+# we ship no icon theme and a missing icon draws as nothing at all.
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileTools;FileManager;
+MimeType=inode/directory;
+Keywords=files;folders;filesystem;browse;manager;
+StartupNotify=true
+# One identity in three places — the window's `app_id`, the bus name and this
+# file's basename — because a desktop matches them to each other by string
+# equality, and a mismatch is a window with no icon in the switcher.
+StartupWMClass=dev.skerry.Skerry
+Implements=org.freedesktop.FileManager1

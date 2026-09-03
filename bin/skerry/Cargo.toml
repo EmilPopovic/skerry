@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 sk-app = { workspace = true }
+sk-plat = { workspace = true }
 sk-util = { workspace = true }
 
 [lints]

@@ -230,6 +230,13 @@ pub(crate) const ZOOM_DEFAULT: usize = 2;
 
 /// How to start.
 pub struct Options {
+    /// The bus this process took its name on, where there was one.
+    ///
+    /// **Taken before the window** — `sk_app::take_the_name` — because a second
+    /// instance has to hand over and exit without opening one. What arrives here
+    /// is the connection that owns the name, which the service thread then
+    /// answers on.
+    pub bus: Option<sk_desktop::bus::Bus>,
     /// The directory to open.
     pub path: PathBuf,
     /// Whether the saved session may decide the window's shape.
@@ -613,6 +620,9 @@ struct Replies {
     /// What a job loading or building an index has to say.
     index_tx: std::sync::mpsc::Sender<crate::indexing::Note>,
     index_rx: Receiver<crate::indexing::Note>,
+    /// What somebody on the bus asked this window to show.
+    asked_tx: std::sync::mpsc::Sender<crate::service::Ask>,
+    asked_rx: Receiver<crate::service::Ask>,
     /// What a write to the list of places did, and whether it worked.
     places_tx: std::sync::mpsc::Sender<(crate::sidebar::Edit, PathBuf, bool)>,
     places_rx: Receiver<(crate::sidebar::Edit, PathBuf, bool)>,
@@ -646,6 +656,7 @@ impl Replies {
         let (openers_tx, openers_rx) = mpsc::channel();
         let (places_tx, places_rx) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::channel();
+        let (asked_tx, asked_rx) = mpsc::channel();
         Self {
             paste_tx,
             paste_rx,
@@ -663,6 +674,8 @@ impl Replies {
             found_rx,
             index_tx,
             index_rx,
+            asked_tx,
+            asked_rx,
             places_tx,
             places_rx,
             opened_tx,
@@ -975,6 +988,18 @@ pub struct App {
     band: Option<(Point, Point)>,
     /// A press on an already-selected row that may become a drag of files.
     files_drag: Option<FilesDrag>,
+    /// The well-known names this process holds, for the startup line.
+    ///
+    /// Empty is a session with no bus, or one where another file manager already
+    /// answers — both of which are ordinary, and neither of which is visible
+    /// anywhere else: ADR 0023 and ADR 0007.
+    on_the_bus: String,
+    /// Whether a `ShowItemProperties` is still waiting for its listing.
+    ///
+    /// The panel is about the selection and the selection is about rows that do
+    /// not exist until the read lands, so the request outlives the navigation by
+    /// exactly one listing.
+    properties_owed: bool,
     /// Whether the display server has already reported this gesture's drop.
     ///
     /// **A drag ends twice.** The pointer's button comes up and the data device
@@ -1006,7 +1031,11 @@ pub struct App {
 
 impl App {
     /// Opens a window, a device and a directory.
-    pub fn new(options: &Options) -> Result<Self, Problem> {
+    pub fn new(mut options: Options) -> Result<Self, Problem> {
+        // Taken out because a connection cannot be copied, and because the field
+        // exists to carry it exactly this far.
+        let mut bus = options.bus.take();
+        let options = &options;
         // **Read before the window is opened**, because the size it asks for is
         // in the file. One `openat` and one read of a few hundred bytes, before
         // there is a frame loop for it to be a rule 1 violation of.
@@ -1026,8 +1055,28 @@ impl App {
         let background = Background::start(options.path.clone())?;
         let drawing = open_drawing(&window)?;
         let mut app = Self::assemble(options, window, window_us, background, drawing);
+        let restored = session.is_some();
         if let Some(session) = session {
             app.restore_session(&session, options);
+        }
+        // **The desktop's own light-or-dark, and only when nothing else has
+        // said.** A flag is an instruction for this run and the session file is
+        // what this window was last left as; both are about *this* program, and
+        // either outranks a preference about the desktop. What is left is a fresh
+        // install, which is the case the M7 bar is written about.
+        let asked = (!restored && options.dark.is_none())
+            .then(|| bus.as_mut().and_then(crate::service::desktop_prefers_dark))
+            .flatten();
+        if asked.is_some_and(|dark| dark != app.theme.dark) {
+            app.theme = if asked == Some(true) { Theme::dark() } else { Theme::light() };
+        }
+        // **The name was taken before the window existed** — a second instance has
+        // to hand over and exit without flashing one — so what arrives here is the
+        // connection that already owns it, and the service thread answers on it
+        // from here until the process ends.
+        if let Some(bus) = bus {
+            app.on_the_bus = bus.names().join(" ");
+            crate::service::serve(bus, app.replies.asked_tx.clone(), app.waker.handle());
         }
         Ok(app)
     }
@@ -1258,6 +1307,8 @@ impl App {
             band: None,
             files_drag: None,
             dropped: false,
+            properties_owed: false,
+            on_the_bus: String::new(),
             thumb_grab: None,
             text_drag: None,
             title_press: None,
@@ -1319,6 +1370,8 @@ impl App {
             self.drain_index();
             self.drain_places();
             self.drain_opened();
+            self.drain_the_bus();
+            self.settle_the_owed_panel();
             if self.edits.drain_progress() {
                 self.dirty = true;
             }
@@ -3392,6 +3445,86 @@ impl App {
                 wake.wake();
             }
         });
+    }
+
+    /// Takes delivery of what somebody on the bus asked for.
+    ///
+    /// **The window's half of `FileManager1`.** The thread answered the call
+    /// already — a caller must not wait for a directory read — so what arrives
+    /// here is the navigation, and it is the same navigation a person makes:
+    /// through the pane, so the history, the watcher and the per-folder record
+    /// all behave as they do for any other way of getting there.
+    fn drain_the_bus(&mut self) {
+        while let Ok(ask) = self.replies.asked_rx.try_recv() {
+            let paths = ask.paths().to_vec();
+            match ask {
+                crate::service::Ask::Folders(_) => {
+                    // **Not checked for being directories**, which would be a
+                    // `stat` on the frame loop — rule 1 — for a question the
+                    // caller has already answered by choosing this method. A
+                    // path that is not one fails its read on a job and the pane
+                    // says so, which is what a directory deleted a moment ago
+                    // does too.
+                    let mut folders = paths.into_iter();
+                    let Some(first) = folders.next() else { continue };
+                    self.panes.focused_mut().open(first, &self.jobs);
+                    // The rest behind it, which is what a caller naming four
+                    // folders means and what every tab in this window is for.
+                    let rest: Vec<PathBuf> = folders.collect();
+                    if !rest.is_empty() {
+                        self.panes.open_tabs_behind(rest, &self.jobs);
+                    }
+                    self.settle_panes();
+                }
+                crate::service::Ask::Items(_) => {
+                    let Some(first) = paths.first() else { continue };
+                    let Some(folder) = first.parent().map(std::path::Path::to_path_buf) else {
+                        continue;
+                    };
+                    // **The folder, then the name.** The row does not exist until
+                    // the read lands, so the name is remembered and the cursor
+                    // goes to it when it does — the same path an operation's
+                    // subject takes.
+                    self.panes.focused_mut().open(folder, &self.jobs);
+                    if let Some(name) = first.file_name() {
+                        let name = name.to_string_lossy().into_owned();
+                        self.panes.focused_mut().select_after(name);
+                    }
+                    self.settle_panes();
+                }
+                crate::service::Ask::Properties(_) => {
+                    let Some(first) = paths.first() else { continue };
+                    let Some(folder) = first.parent().map(std::path::Path::to_path_buf) else {
+                        continue;
+                    };
+                    self.panes.focused_mut().open(folder, &self.jobs);
+                    if let Some(name) = first.file_name() {
+                        let name = name.to_string_lossy().into_owned();
+                        self.panes.focused_mut().select_after(name);
+                    }
+                    self.settle_panes();
+                    // The panel reads the selection, which the listing has not
+                    // landed for yet — so it is opened when the read does.
+                    self.properties_owed = true;
+                }
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// Opens the Properties panel a caller asked for, once there is a row for it.
+    ///
+    /// The panel is about the selection, and the selection is about a row the
+    /// listing does not contain until it lands — so the request outlives the
+    /// navigation by exactly one read, and this is where the two meet.
+    fn settle_the_owed_panel(&mut self) {
+        if !self.properties_owed || self.panes.focused().loading {
+            return;
+        }
+        self.properties_owed = false;
+        if self.properties.is_none() {
+            self.toggle_properties();
+        }
     }
 
     /// Takes delivery of one place's contents.
@@ -9296,7 +9429,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let (window_us, gpu_us, font_us) = self.open_time;
         eprintln!(
             "skerry: first frame in {:.1} ms — window {:.1}, gpu {:.1}, fonts {:.1}, \
-             frame {:.1}; {} on {}, surface {}×{} at {}%; platform: {}",
+             frame {:.1}; {} on {}, surface {}×{} at {}%; platform: {}; bus: {}",
             self.started.elapsed().as_secs_f64() * 1000.0,
             window_us as f64 / 1000.0,
             gpu_us as f64 / 1000.0,
@@ -9308,6 +9441,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             physical.1,
             self.scale_120 * 100 / 120,
             self.capabilities,
+            if self.on_the_bus.is_empty() { "none" } else { &self.on_the_bus },
         );
     }
 }

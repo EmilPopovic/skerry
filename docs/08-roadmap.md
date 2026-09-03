@@ -491,6 +491,31 @@ integration, the settings surface, theming and DPI, localization catalogues.
 > **Bar:** a fresh install feels native on GNOME, on KDE, and in a bare Sway session with no
 > systemd.
 
+**Started, and the protocol under all of it is ours.**
+[ADR 0023](adr/0023-d-bus-is-a-socket-we-speak-ourselves.md) declined `zbus` — its
+stated exit condition, an async executor against
+[ADR 0005](adr/0005-no-async-runtime.md), was true on the day it would have been
+added — and `sk_desktop::bus` speaks the protocol on its socket in 1,197 lines:
+`EXTERNAL` authentication, the eight types we send, **one thread blocking on a
+read to serve and a short-lived connection per call**, measured at 0.45 ms to
+connect and 0.09 ms for a call.
+
+| Done | What it is |
+| --- | --- |
+| `org.freedesktop.FileManager1` | `ShowFolders`, `ShowItems` and `ShowItemProperties`, answered on the service thread and acted on by the frame loop one channel away. A browser's *Open containing folder* lands on the file, not merely in its directory. Requested **without** replacing an owner: Nautilus may hold it |
+| Single instance | `dev.skerry.Skerry` is the window's `app_id`, this process's bus name and the `.desktop` file's basename, because a desktop matches them by string equality. A second `skerry` hands its argument to the first and exits **before opening a window** — measured under 2 s end to end in the scenario, against a cold start of 90 ms that would have flashed one |
+| The desktop's light-or-dark | The settings portal's `org.freedesktop.appearance`, read once at startup on the connection already open: 0.15 ms p50 over fifty reads, worst 0.99. Only where neither a flag nor a saved session has said, because both of those are about *this* program |
+| A volume's label and its free space | Both without udisks2: the label from `/dev/disk/by-label`, the room left from `statvfs`. Drawn small and dim at the right of the row, and dropped rather than ellipsized where the row is too narrow — `104 GiB fre…` is a number that has stopped being one |
+| The desktop entry | [`packaging/dev.skerry.Skerry.desktop`](../packaging/dev.skerry.Skerry.desktop), `desktop-file-validate`-clean, declaring `Implements=org.freedesktop.FileManager1` and `MimeType=inode/directory`. `skerry` decodes a `file://` argument, because `%U` is what a desktop passes a file manager |
+
+| Owed | Why it is not here |
+| --- | --- |
+| udisks2 mount and eject | The system bus, `GetManagedObjects` over a nest of `a{oa{sa{sv}}}`, and — for a disk plugged in — `InterfacesAdded`, which is a **signal**. ADR 0023's revisit trigger names exactly that: a subscribing connection is a different decision, and it gets its own record before its code |
+| Following the appearance as it changes | The same signal problem, one namespace smaller. Read once is honest; a desktop that switches to dark mid-session leaves this window light, and `Ctrl+Shift+D` is one press |
+| Default-handler registration from inside the app | It is a line in `mimeapps.list`, and it wants the settings surface — M7's other unbuilt half — rather than a command with no pointer surface, which rule 5 would fail |
+| Raising the window on a call | `FileManager1` says *show me this*, and a window that navigates without coming forward has half-answered. It needs `xdg_activation_v1` in `sk-plat`, which is a platform capability rather than a bus one |
+| The GoTo popup, notifications, network mounts | Untouched |
+
 ### M8 · 4 wk — Hardening and 1.0
 Performance regression CI with the budgets as failing tests, fuzzing of every parser, the
 full filesystem matrix nightly, the forced-degradation matrix from

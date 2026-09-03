@@ -1,0 +1,691 @@
+//! D-Bus, spoken on its own socket.
+//!
+//! [ADR 0023](../../../../docs/adr/0023-d-bus-is-a-socket-we-speak-ourselves.md)
+//! settles why this is ours rather than a crate's, and the shape it takes:
+//! **serving is one thread that blocks on a read; calling is a short-lived
+//! connection on a job.** What is here is a connection, the four steps that open
+//! one, and messages; [`wire`] is the type system.
+//!
+//! Nothing here knows what a file manager is. What the messages *mean* —
+//! `ShowFolders` is a navigation, a name already owned is a second instance — is
+//! `sk-app`'s, because that is where the window is.
+
+pub mod wire;
+
+use std::io::{Read as _, Write as _};
+use std::os::unix::net::UnixStream;
+
+pub use wire::Value;
+
+/// What a message is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Somebody is asking for something.
+    Call,
+    /// An answer to a call.
+    Reply,
+    /// A refusal, with a name and usually a sentence.
+    Error,
+    /// A broadcast nobody replied to.
+    Signal,
+}
+
+impl Kind {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Call => 1,
+            Self::Reply => 2,
+            Self::Error => 3,
+            Self::Signal => 4,
+        }
+    }
+
+    const fn of(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Call),
+            2 => Some(Self::Reply),
+            3 => Some(Self::Error),
+            4 => Some(Self::Signal),
+            _ => None,
+        }
+    }
+}
+
+/// One message, in or out.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Message {
+    /// Call, reply, error or signal.
+    pub kind: Kind,
+    /// Its own serial, which a reply quotes.
+    pub serial: u32,
+    /// The serial this answers, for a reply or an error.
+    pub answers: Option<u32>,
+    /// Where it is going, or where it came from.
+    pub peer: Option<String>,
+    /// The object, for a call or a signal.
+    pub path: Option<String>,
+    /// The interface it belongs to.
+    pub interface: Option<String>,
+    /// The method or the signal.
+    pub member: Option<String>,
+    /// The error's name, for an error.
+    pub error: Option<String>,
+    /// The arguments.
+    pub body: Vec<Value>,
+}
+
+impl Message {
+    /// A method call.
+    #[must_use]
+    pub fn call(to: &str, path: &str, interface: &str, member: &str, body: Vec<Value>) -> Self {
+        Self {
+            kind: Kind::Call,
+            serial: 0,
+            answers: None,
+            peer: Some(to.to_owned()),
+            path: Some(path.to_owned()),
+            interface: Some(interface.to_owned()),
+            member: Some(member.to_owned()),
+            error: None,
+            body,
+        }
+    }
+
+    /// The first argument as text, which most answers are.
+    #[must_use]
+    pub fn text(&self) -> Option<&str> {
+        self.body.first().and_then(Value::text)
+    }
+
+    /// The signature of the body, as the header spells it.
+    fn signature(&self) -> String {
+        self.body.iter().map(Value::signature).collect()
+    }
+}
+
+/// The header field codes, from the specification's table.
+const PATH: u8 = 1;
+const INTERFACE: u8 = 2;
+const MEMBER: u8 = 3;
+const ERROR_NAME: u8 = 4;
+const REPLY_SERIAL: u8 = 5;
+const DESTINATION: u8 = 6;
+const SENDER: u8 = 7;
+const SIGNATURE: u8 = 8;
+
+/// The bus's own object, interface and name.
+const BUS: (&str, &str, &str) =
+    ("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus");
+
+/// A connection to a bus.
+pub struct Bus {
+    socket: UnixStream,
+    serial: u32,
+    /// The name the bus gave us, which is this connection's identity.
+    unique: String,
+    /// Bytes read but not yet parsed, because a read can land mid-message.
+    held: Vec<u8>,
+    /// The well-known names this connection owns, in the order they were taken.
+    names: Vec<String>,
+}
+
+impl Bus {
+    /// Connects to the session bus, authenticates and says hello.
+    ///
+    /// `None` where there is no bus, which is a session without one rather than
+    /// an error — [06-portability.md](../../../../docs/06-portability.md)'s bare
+    /// Sway case, where every feature that needs a bus is absent and says so.
+    ///
+    /// **Runs on a job**: a `connect` and four round trips.
+    #[must_use]
+    pub fn session() -> Option<Self> {
+        let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()?;
+        Self::connect(&address)
+    }
+
+    /// Connects to the system bus, where udisks2 and the like live.
+    #[must_use]
+    pub fn system() -> Option<Self> {
+        let address = std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
+            .unwrap_or_else(|_| "unix:path=/var/run/dbus/system_bus_socket".to_owned());
+        Self::connect(&address)
+    }
+
+    /// Opens one connection to the address a `DBUS_*_BUS_ADDRESS` names.
+    ///
+    /// Only `unix:path=` and `unix:abstract=`. A `tcp:` bus is a thing the
+    /// specification allows and nothing on a desktop uses, and a transport nobody
+    /// has is a transport whose bugs nobody finds.
+    #[must_use]
+    pub fn connect(address: &str) -> Option<Self> {
+        let socket = address.split(';').find_map(open)?;
+        let mut bus =
+            Self { socket, serial: 0, unique: String::new(), held: Vec::new(), names: Vec::new() };
+        bus.authenticate()?;
+        let hello = bus.call(Message::call(BUS.0, BUS.1, BUS.2, "Hello", Vec::new()))?;
+        hello.text()?.clone_into(&mut bus.unique);
+        Some(bus)
+    }
+
+    /// The name the bus gave this connection.
+    #[must_use]
+    pub fn unique(&self) -> &str {
+        &self.unique
+    }
+
+    /// `EXTERNAL`, which is the uid in hexadecimal and nothing else.
+    ///
+    /// **No `NEGOTIATE_UNIX_FD`.** Nothing here passes a descriptor, and asking
+    /// for a capability we would not honour is a lie told at connect time.
+    fn authenticate(&mut self) -> Option<()> {
+        let uid = rustix::process::getuid().as_raw();
+        let mut hex = String::new();
+        for byte in uid.to_string().bytes() {
+            // The uid's *digits* in hexadecimal, not the number: `EXTERNAL`
+            // authenticates with the decimal text of the uid, hex-encoded.
+            const DIGITS: &[u8; 16] = b"0123456789abcdef";
+            hex.push(char::from(DIGITS[usize::from(byte >> 4)]));
+            hex.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+        }
+        // The leading NUL is the protocol's, not a string terminator: the server
+        // reads one byte before the SASL conversation starts.
+        self.socket.write_all(&[0]).ok()?;
+        self.socket.write_all(format!("AUTH EXTERNAL {hex}\r\n").as_bytes()).ok()?;
+        let reply = self.read_line()?;
+        if !reply.starts_with("OK") {
+            return None;
+        }
+        self.socket.write_all(b"BEGIN\r\n").ok()?;
+        Some(())
+    }
+
+    /// One `\r\n`-terminated line of the SASL conversation.
+    fn read_line(&mut self) -> Option<String> {
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        while line.len() < 512 {
+            self.socket.read_exact(&mut byte).ok()?;
+            if byte[0] == b'\n' {
+                break;
+            }
+            if byte[0] != b'\r' {
+                line.push(byte[0]);
+            }
+        }
+        String::from_utf8(line).ok()
+    }
+
+    /// Sends a message and waits for its reply.
+    ///
+    /// **Runs on a job.** `None` for an error reply as well as for a broken
+    /// connection: a caller that needs the difference reads
+    /// [`Bus::call_for`].
+    pub fn call(&mut self, message: Message) -> Option<Message> {
+        self.call_for(message).ok()
+    }
+
+    /// As [`Bus::call`], with the error's name where there was one.
+    ///
+    /// # Errors
+    ///
+    /// The error's name, or a sentence about the connection.
+    pub fn call_for(&mut self, message: Message) -> Result<Message, String> {
+        let serial = self.send(message)?;
+        loop {
+            let answer = self.receive().ok_or_else(|| "the bus stopped answering".to_owned())?;
+            if answer.answers != Some(serial) {
+                // Something else arriving between the call and its answer: a
+                // signal, or a call to us on a connection that also serves. The
+                // serving thread reads its own; this one is a call's own
+                // connection and has nobody to hand it to.
+                continue;
+            }
+            if answer.kind == Kind::Error {
+                let name = answer.error.clone().unwrap_or_else(|| "unknown".to_owned());
+                let detail = answer.text().unwrap_or_default().to_owned();
+                return Err(if detail.is_empty() { name } else { format!("{name}: {detail}") });
+            }
+            return Ok(answer);
+        }
+    }
+
+    /// Sends a message and returns the serial it went out with.
+    ///
+    /// # Errors
+    ///
+    /// A sentence, where the socket would not take it.
+    pub fn send(&mut self, mut message: Message) -> Result<u32, String> {
+        self.serial = self.serial.wrapping_add(1).max(1);
+        message.serial = self.serial;
+        let bytes = marshal(&message);
+        self.socket.write_all(&bytes).map_err(|error| format!("d-bus write: {error}"))?;
+        Ok(message.serial)
+    }
+
+    /// Reads the next whole message, blocking until one arrives.
+    ///
+    /// `None` when the connection has gone, which is the bus going away.
+    pub fn receive(&mut self) -> Option<Message> {
+        loop {
+            if let Some((message, used)) = unmarshal(&self.held) {
+                self.held.drain(..used);
+                return Some(message);
+            }
+            let mut chunk = [0u8; 4096];
+            let read = self.socket.read(&mut chunk).ok()?;
+            if read == 0 {
+                return None;
+            }
+            self.held.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// Answers a call.
+    ///
+    /// # Errors
+    ///
+    /// A sentence, where the socket would not take it.
+    pub fn reply(&mut self, to: &Message, body: Vec<Value>) -> Result<(), String> {
+        self.send(Message {
+            kind: Kind::Reply,
+            serial: 0,
+            answers: Some(to.serial),
+            peer: to.peer.clone(),
+            path: None,
+            interface: None,
+            member: None,
+            error: None,
+            body,
+        })
+        .map(|_| ())
+    }
+
+    /// Refuses one.
+    ///
+    /// # Errors
+    ///
+    /// A sentence, where the socket would not take it.
+    pub fn refuse(&mut self, to: &Message, name: &str, text: &str) -> Result<(), String> {
+        self.send(Message {
+            kind: Kind::Error,
+            serial: 0,
+            answers: Some(to.serial),
+            peer: to.peer.clone(),
+            path: None,
+            interface: None,
+            member: None,
+            error: Some(name.to_owned()),
+            body: vec![Value::Str(text.to_owned())],
+        })
+        .map(|_| ())
+    }
+
+    /// Asks for a well-known name. What the bus said.
+    ///
+    /// **Never `REPLACE_EXISTING`.** Nautilus may hold `FileManager1`, and taking
+    /// it from a running file manager because we started is not ours to do —
+    /// ADR 0023.
+    pub fn request_name(&mut self, name: &str) -> Named {
+        // `DO_NOT_QUEUE`: a name we are queued for is a name we do not have, and
+        // acquiring it later — when the other file manager exits — would make us
+        // the handler for calls nobody meant to send us.
+        let flags = Value::U32(4);
+        let call = Message::call(
+            BUS.0,
+            BUS.1,
+            BUS.2,
+            "RequestName",
+            vec![Value::Str(name.to_owned()), flags],
+        );
+        match self.call(call).and_then(|reply| reply.body.first().and_then(Value::number)) {
+            Some(1 | 4) => {
+                self.names.push(name.to_owned());
+                Named::Ours
+            }
+            Some(3) => Named::Already,
+            _ => Named::Refused,
+        }
+    }
+
+    /// The well-known names this connection holds.
+    ///
+    /// A capability, in [ADR 0007](../../../../docs/adr/0007-runtime-capability-detection.md)'s
+    /// sense: whether the desktop's `FileManager1` is ours is something only the
+    /// bus can say, and the startup line says it back.
+    #[must_use]
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+}
+
+/// What asking for a name got.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Named {
+    /// It is ours, and calls to it arrive here.
+    Ours,
+    /// Somebody else has it — another file manager, or another instance of this
+    /// one, which is what single instance is built on.
+    Already,
+    /// The bus said no, or said nothing this build understands.
+    Refused,
+}
+
+/// Opens the socket one address names.
+fn open(address: &str) -> Option<UnixStream> {
+    for part in address.split(',') {
+        if let Some(path) = part.strip_prefix("unix:path=").or_else(|| part.strip_prefix("path=")) {
+            return UnixStream::connect(path).ok();
+        }
+        if let Some(name) =
+            part.strip_prefix("unix:abstract=").or_else(|| part.strip_prefix("abstract="))
+        {
+            // An abstract socket's name starts with a NUL, which `UnixStream`
+            // cannot express through a path — `SocketAddrExt` is where the
+            // standard library puts it.
+            use std::os::linux::net::SocketAddrExt as _;
+            let address = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes());
+            return address.and_then(|it| UnixStream::connect_addr(&it)).ok();
+        }
+    }
+    None
+}
+
+/// A message as bytes.
+fn marshal(message: &Message) -> Vec<u8> {
+    let signature = message.signature();
+    let mut fields: Vec<(u8, Value)> = Vec::new();
+    if let Some(path) = &message.path {
+        fields.push((PATH, Value::Path(path.clone())));
+    }
+    if let Some(interface) = &message.interface {
+        fields.push((INTERFACE, Value::Str(interface.clone())));
+    }
+    if let Some(member) = &message.member {
+        fields.push((MEMBER, Value::Str(member.clone())));
+    }
+    if let Some(error) = &message.error {
+        fields.push((ERROR_NAME, Value::Str(error.clone())));
+    }
+    if let Some(answers) = message.answers {
+        fields.push((REPLY_SERIAL, Value::U32(answers)));
+    }
+    if let Some(peer) = &message.peer {
+        fields.push((DESTINATION, Value::Str(peer.clone())));
+    }
+    if !signature.is_empty() {
+        fields.push((SIGNATURE, Value::Signature(signature)));
+    }
+
+    // The body first, marshalled at the offset it will sit at — which is not
+    // known until the header is, so it is marshalled twice: once to measure the
+    // header and once at the real offset. Cheap, and the alternative is an
+    // offset threaded through every write.
+    let header_length = header_bytes(message, &fields, 0).len();
+    let body_at = header_length + (8 - header_length % 8) % 8;
+    let mut writer = wire::Writer::at(body_at);
+    for value in &message.body {
+        writer.write(value);
+    }
+    let body = writer.body(body_at);
+    let mut out = header_bytes(message, &fields, body.len());
+    out.resize(body_at, 0);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// The fixed header and its field array.
+fn header_bytes(message: &Message, fields: &[(u8, Value)], body: usize) -> Vec<u8> {
+    let mut writer = wire::Writer::at(0);
+    writer.write(&Value::Byte(b'l'));
+    writer.write(&Value::Byte(message.kind.code()));
+    writer.write(&Value::Byte(0));
+    writer.write(&Value::Byte(1));
+    writer.write(&Value::U32(u32::try_from(body).unwrap_or(0)));
+    writer.write(&Value::U32(message.serial));
+    // `a(yv)`: an array of structs, which is the one struct this program writes —
+    // so it is written by hand rather than given a `Value` variant nothing else
+    // would use.
+    let mut inner = wire::Writer::at(writer.so_far() + 4);
+    for (code, value) in fields {
+        // A struct aligns to eight.
+        let pad = (8 - inner.so_far() % 8) % 8;
+        for _ in 0..pad {
+            inner.write(&Value::Byte(0));
+        }
+        inner.write(&Value::Byte(*code));
+        inner.write(&Value::Variant(Box::new(value.clone())));
+    }
+    let array = inner.body(writer.so_far() + 4);
+    writer.write(&Value::U32(u32::try_from(array.len()).unwrap_or(0)));
+    let mut out = writer.into_bytes();
+    out.extend_from_slice(&array);
+    out
+}
+
+/// One message out of a buffer, and how many bytes it took.
+///
+/// `None` where the buffer does not hold a whole one yet, which is every read
+/// that lands mid-message.
+fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
+    if bytes.len() < 16 {
+        return None;
+    }
+    let little = bytes[0] == b'l';
+    let kind = Kind::of(bytes[1])?;
+    let number = |at: usize| -> u32 {
+        let raw: [u8; 4] = bytes[at..at + 4].try_into().unwrap_or([0; 4]);
+        if little { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) }
+    };
+    let body_length = number(4) as usize;
+    let serial = number(8);
+    let fields_length = number(12) as usize;
+    let fields_end = 16usize.checked_add(fields_length)?;
+    let body_at = fields_end + (8 - fields_end % 8) % 8;
+    let end = body_at.checked_add(body_length)?;
+    if bytes.len() < end {
+        return None;
+    }
+
+    let mut message = Message {
+        kind,
+        serial,
+        answers: None,
+        peer: None,
+        path: None,
+        interface: None,
+        member: None,
+        error: None,
+        body: Vec::new(),
+    };
+    let mut signature = String::new();
+    let mut reader = wire::Reader::new(&bytes[..fields_end], 16, little);
+    while !reader.done() {
+        // Each field is a struct, aligned to eight.
+        let padding = (8 - reader.at() % 8) % 8;
+        for _ in 0..padding {
+            reader.read("y")?;
+        }
+        if reader.done() {
+            break;
+        }
+        let Value::Byte(code) = reader.read("y")? else { return None };
+        let value = reader.read("v")?;
+        let text = value.text().unwrap_or_default().to_owned();
+        match code {
+            PATH => message.path = Some(text),
+            INTERFACE => message.interface = Some(text),
+            MEMBER => message.member = Some(text),
+            ERROR_NAME => message.error = Some(text),
+            REPLY_SERIAL => message.answers = value.number().and_then(|it| u32::try_from(it).ok()),
+            DESTINATION | SENDER => {
+                if code == SENDER {
+                    message.peer = Some(text);
+                }
+            }
+            SIGNATURE => signature = text,
+            _ => {}
+        }
+    }
+
+    let mut reader = wire::Reader::new(&bytes[..end], body_at, little);
+    for kind in wire::split(&signature) {
+        message.body.push(reader.read(&kind)?);
+    }
+    Some((message, end))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Kind, Message, Value, marshal, unmarshal};
+
+    /// A call goes out and comes back as itself.
+    ///
+    /// The round trip is over `marshal` and `unmarshal` rather than over a bus,
+    /// because the bus is not this test's subject: what is, is that the header's
+    /// field array, its padding to eight and the body's offset agree.
+    #[test]
+    fn a_call_marshals_and_unmarshals_as_itself() {
+        let call = Message::call(
+            "org.freedesktop.FileManager1",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1",
+            "ShowItems",
+            vec![
+                Value::Array(vec![Value::Str("file:///home/emil/a file.txt".to_owned())]),
+                Value::Str(String::new()),
+            ],
+        );
+        let mut sent = call.clone();
+        sent.serial = 7;
+        let bytes = marshal(&sent);
+        assert_eq!(bytes[0], b'l');
+        assert_eq!(bytes[1], Kind::Call.code());
+        assert_eq!(bytes[3], 1, "the protocol version");
+        // The *header* is padded to eight before the body; the message ends where
+        // the body does, which is not the same claim and was the first thing this
+        // test got wrong.
+        assert_eq!(bytes.len() % 8, 5, "the body's own length is not a multiple of eight");
+
+        let (read, used) = unmarshal(&bytes).expect("it would not read back");
+        assert_eq!(used, bytes.len());
+        assert_eq!(read.member.as_deref(), Some("ShowItems"));
+        assert_eq!(read.interface.as_deref(), Some("org.freedesktop.FileManager1"));
+        assert_eq!(read.path.as_deref(), Some("/org/freedesktop/FileManager1"));
+        assert_eq!(read.serial, 7);
+        assert_eq!(read.body, sent.body);
+    }
+
+    /// A reply quotes the serial it answers and carries no member.
+    #[test]
+    fn a_reply_quotes_the_serial_it_answers() {
+        let reply = Message {
+            kind: Kind::Reply,
+            serial: 3,
+            answers: Some(9),
+            peer: Some(":1.42".to_owned()),
+            path: None,
+            interface: None,
+            member: None,
+            error: None,
+            body: vec![Value::Str(":1.7".to_owned())],
+        };
+        let (read, _) = unmarshal(&marshal(&reply)).expect("it would not read back");
+        assert_eq!(read.kind, Kind::Reply);
+        assert_eq!(read.answers, Some(9));
+        assert_eq!(read.text(), Some(":1.7"));
+        assert_eq!(read.member, None);
+    }
+
+    /// A buffer with half a message in it yields nothing, and yields it again
+    /// when the rest arrives.
+    ///
+    /// **The case a socket produces constantly**: a `read` lands where the kernel
+    /// had bytes, not where a message ends.
+    #[test]
+    fn half_a_message_is_not_a_message() {
+        let mut call = Message::call("a.b", "/a", "a.b", "C", vec![Value::Str("x".to_owned())]);
+        call.serial = 1;
+        let bytes = marshal(&call);
+        for cut in 1..bytes.len() {
+            assert!(unmarshal(&bytes[..cut]).is_none(), "{cut} bytes parsed as a whole message");
+        }
+        assert!(unmarshal(&bytes).is_some());
+
+        // And two messages in one buffer are two messages.
+        let mut both = bytes.clone();
+        both.extend_from_slice(&bytes);
+        let (_, used) = unmarshal(&both).expect("the first");
+        assert_eq!(used, bytes.len());
+        assert!(unmarshal(&both[used..]).is_some(), "the second");
+    }
+
+    /// Rubbish is rubbish, not a panic.
+    #[test]
+    fn a_message_that_makes_no_sense_is_refused() {
+        assert!(unmarshal(&[0; 16]).is_none(), "message type zero");
+        let mut bytes = vec![b'l', 1, 0, 1];
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(unmarshal(&bytes).is_none(), "lengths that overflow the buffer");
+    }
+
+    /// A real connection to whatever bus this machine has.
+    ///
+    /// **Ignored by default**, because a machine with no session bus is a machine
+    /// where this can only fail — and that machine is a supported one, which is
+    /// the whole of ADR 0023's degradation clause. Run it deliberately:
+    ///
+    /// ```text
+    /// cargo test -p sk-desktop --release talks_to_a_real_bus -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a session bus; run it deliberately"]
+    fn talks_to_a_real_bus() {
+        #![allow(clippy::print_stdout)]
+        let at = std::time::Instant::now();
+        let Some(mut bus) = super::Bus::session() else {
+            println!("skerry-bus no session bus");
+            return;
+        };
+        let connected = at.elapsed();
+        assert!(bus.unique().starts_with(':'), "the bus gave us {:?}", bus.unique());
+
+        // `ListNames` is the one call every bus answers, and its reply is an
+        // array of strings — which is the shape most of this marshaller exists
+        // for.
+        let at = std::time::Instant::now();
+        let names = bus
+            .call(Message::call(
+                "org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "ListNames",
+                Vec::new(),
+            ))
+            .expect("ListNames went unanswered");
+        let called = at.elapsed();
+        let listed = names.body.first().map(Value::items).unwrap_or_default();
+        assert!(listed.len() > 1, "a bus with one name on it");
+        assert!(
+            listed.iter().any(|name| name.text() == Some("org.freedesktop.DBus")),
+            "the bus does not list itself"
+        );
+
+        // An error is an error and not a reply, and it says which.
+        let refused = bus.call_for(Message::call(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "NoSuchMethod",
+            Vec::new(),
+        ));
+        assert!(refused.is_err(), "a method that does not exist was answered");
+
+        println!("skerry-bus connect {:.2} ms", connected.as_secs_f64() * 1000.0);
+        println!("skerry-bus call {:.2} ms", called.as_secs_f64() * 1000.0);
+        println!("skerry-bus names {}", listed.len());
+    }
+}

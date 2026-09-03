@@ -46,6 +46,7 @@ mod previews;
 mod properties;
 mod quicklook;
 mod search;
+mod service;
 mod session;
 mod sidebar;
 mod sizes;
@@ -56,6 +57,7 @@ mod views;
 pub use app::{App, Options};
 pub use bench::{Bench, run as bench};
 pub use capture::{Capture, run as capture};
+pub use service::{Standing, desktop_prefers_dark, take_the_name};
 // Named by a trace, which measures what banding by kind costs a sort.
 pub use groups::Grouping;
 // Re-exported because every entry point above returns one, and a binary that
