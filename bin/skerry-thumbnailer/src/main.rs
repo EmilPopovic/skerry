@@ -21,6 +21,7 @@
 
 mod cache;
 mod decode;
+mod exif;
 mod fonts;
 mod gif;
 mod md5;

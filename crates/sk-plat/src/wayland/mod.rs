@@ -51,6 +51,7 @@ use wayland_protocols::wp::pointer_gestures::zv1::client::zwp_pointer_gestures_v
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_device_manager_v1;
 use wayland_protocols::wp::text_input::zv3::client::zwp_text_input_manager_v3;
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
+use wayland_protocols::xdg::activation::v1::client::xdg_activation_v1;
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
 };
@@ -208,6 +209,9 @@ struct State {
     /// client that enabled it at start-up would put a Japanese candidate window
     /// over a file list nobody is typing into.
     text_input: Option<TextInput>,
+    /// How this window asks to be brought forward, where the compositor offers
+    /// the protocol. See [`Window::raise`].
+    activation: Option<xdg_activation_v1::XdgActivationV1>,
     /// The compositor's touchpad gesture manager, where it has one.
     ///
     /// Held rather than consumed at open, because a seat can gain a pointer
@@ -298,6 +302,10 @@ struct Globals {
     cursor_shapes: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
     text_inputs: Option<zwp_text_input_manager_v3::ZwpTextInputManagerV3>,
+    /// How a window asks to be brought forward, given a token from whoever
+    /// asked for it. Absent on a compositor that does not offer it, and then
+    /// there is no way to raise at all — see [`Window::raise`].
+    activation: Option<xdg_activation_v1::XdgActivationV1>,
 }
 
 impl Globals {
@@ -315,6 +323,7 @@ impl Globals {
             cursor_shapes: bind(globals, handle, 1..=2),
             gestures: bind(globals, handle, 1..=3),
             text_inputs: bind(globals, handle, 1..=1),
+            activation: bind(globals, handle, 1..=1),
         })
     }
 }
@@ -350,6 +359,7 @@ impl Window {
             cursor_shapes,
             gestures,
             text_inputs,
+            activation,
         } = Globals::bind(&globals, &handle)?;
         let clipboard =
             clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
@@ -396,6 +406,7 @@ impl Window {
             clipboard,
             cursor: None,
             text_input: text_inputs.map(|manager| TextInput::new(&manager, &wl_seat, &handle)),
+            activation,
             gestures,
             shape: Cursor::Arrow,
             transfers: Vec::new(),
@@ -1104,6 +1115,7 @@ ignore_events!(
     wp_viewport::WpViewport,
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
     zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+    xdg_activation_v1::XdgActivationV1,
 );
 
 impl Drop for State {

@@ -44,6 +44,19 @@ pub enum Ask {
     Properties(Vec<PathBuf>),
 }
 
+/// One request, with the token that says who asked.
+///
+/// **The startup id is an activation token.** `FileManager1` passes one as its
+/// second argument and a desktop fills it in from whatever the person clicked;
+/// on Wayland it is the only thing that lets this window come forward, because
+/// `xdg_activation_v1` exists so that a client cannot raise itself.
+pub struct Asked {
+    /// What to do.
+    pub ask: Ask,
+    /// The token, where the caller passed one.
+    pub token: Option<String>,
+}
+
 impl Ask {
     /// The paths it names.
     #[must_use]
@@ -174,7 +187,7 @@ fn hand_over(bus: &mut Bus, paths: &[PathBuf]) -> bool {
 /// caller waiting on a reply must not wait for a frame — and what the window has
 /// to do about it goes down the channel with a wake-up, which is the same eventfd
 /// every job uses.
-pub fn serve(mut bus: Bus, asked: Sender<Ask>, wake: WakeHandle) {
+pub fn serve(mut bus: Bus, asked: Sender<Asked>, wake: WakeHandle) {
     let _ = std::thread::Builder::new().name("skerry-bus".to_owned()).spawn(move || {
         while let Some(message) = bus.receive() {
             if message.kind != Kind::Call {
@@ -194,6 +207,14 @@ pub fn serve(mut bus: Bus, asked: Sender<Ask>, wake: WakeHandle) {
                 "ShowItemProperties" => Some(Ask::Properties(paths)),
                 _ => None,
             };
+            // The second argument of all three methods, and empty is the value
+            // the specification tells a caller with nothing to pass.
+            let token = message
+                .body
+                .get(1)
+                .and_then(Value::text)
+                .filter(|it| !it.is_empty())
+                .map(str::to_owned);
             let Some(ask) = ask else {
                 let _ = bus.refuse(
                     &message,
@@ -207,7 +228,7 @@ pub fn serve(mut bus: Bus, asked: Sender<Ask>, wake: WakeHandle) {
             // that waited for the folder to be on screen would be waiting for a
             // read of a directory it does not know the size of.
             let _ = bus.reply(&message, Vec::new());
-            if asked.send(ask).is_err() {
+            if asked.send(Asked { ask, token }).is_err() {
                 return;
             }
             wake.wake();

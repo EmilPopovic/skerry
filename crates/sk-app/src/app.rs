@@ -631,8 +631,8 @@ struct Replies {
     index_tx: std::sync::mpsc::Sender<crate::indexing::Note>,
     index_rx: Receiver<crate::indexing::Note>,
     /// What somebody on the bus asked this window to show.
-    asked_tx: std::sync::mpsc::Sender<crate::service::Ask>,
-    asked_rx: Receiver<crate::service::Ask>,
+    asked_tx: std::sync::mpsc::Sender<crate::service::Asked>,
+    asked_rx: Receiver<crate::service::Asked>,
     /// What a write to the list of places did, and whether it worked.
     places_tx: std::sync::mpsc::Sender<(crate::sidebar::Edit, PathBuf, bool)>,
     places_rx: Receiver<(crate::sidebar::Edit, PathBuf, bool)>,
@@ -1027,6 +1027,13 @@ pub struct App {
     /// gesture. Whichever arrives first does the work; this is how the other one
     /// knows not to do it again.
     dropped: bool,
+    /// Raises asked for, and raises there was a way to ask for.
+    ///
+    /// **Two numbers because they differ by display server.** X11 always has a
+    /// way — `_NET_ACTIVE_WINDOW` — and Wayland has one only with a token from
+    /// whoever asked, so the second number is the capability and the first is the
+    /// request. Neither says the window came forward: that is the compositor's.
+    raises: (u32, u32),
     /// The accessibility tree's publisher, where a desktop has an accessibility
     /// bus. `None` is the common case and costs one method call at startup.
     a11y: Option<sk_desktop::atspi::Accessibility>,
@@ -1357,6 +1364,7 @@ impl App {
             band: None,
             files_drag: None,
             dropped: false,
+            raises: (0, 0),
             a11y: None,
             drops_started: 0,
             drops_delivered: std::sync::Arc::default(),
@@ -3714,8 +3722,16 @@ impl App {
     /// through the pane, so the history, the watcher and the per-folder record
     /// all behave as they do for any other way of getting there.
     fn drain_the_bus(&mut self) {
-        while let Ok(ask) = self.replies.asked_rx.try_recv() {
+        while let Ok(asked) = self.replies.asked_rx.try_recv() {
+            let crate::service::Asked { ask, token } = asked;
             let paths = ask.paths().to_vec();
+            // **Forward, as well as there.** `FileManager1` says *show me this*,
+            // and a window that navigated behind three others has half-answered.
+            // The token is the caller's: a Wayland compositor grants a raise on
+            // one and refuses a client that asks for itself, which is the whole
+            // reason the argument travels this far.
+            self.raises.0 += 1;
+            self.raises.1 += u32::from(self.window.raise(token.as_deref()));
             match ask {
                 crate::service::Ask::Folders(_) => {
                     // **Not checked for being directories**, which would be a
@@ -7553,6 +7569,7 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
         let queues = self.queue_state();
         let transfers = self.transfer_state();
         let a11y = self.a11y_report();
+        let raises = format!("{}/{}", self.raises.0, self.raises.1);
         format!(
             "{shape} \
 path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
@@ -7567,7 +7584,7 @@ asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
 for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
 theme={theme} zoom={zoom} sidebar_open={sidebar_open} {search} \
 filtering={} filter={:?} {drag} \
-{transfers} a11y={a11y} \
+{transfers} a11y={a11y} raises={raises} \
 offered={offered:?} typed={typed:?} \
 refused={refused:?} last_key={last_key:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",

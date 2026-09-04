@@ -174,8 +174,8 @@ the first bug report on one of them.
   rather than widened: cold start, the 1M sort, one scroll run in five at a million
   entries, and the resident floor. See
   [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
-- **No archive, media or hex previews, and no EXIF orientation.** Pictures, PDFs and
-  text are what a quick look shows.
+- **No archive, media or hex previews.** Pictures — the right way up, from the
+  EXIF tag — PDFs and text are what a quick look shows.
 
 ## Working on it
 

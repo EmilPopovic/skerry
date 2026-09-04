@@ -521,6 +521,28 @@ impl Window {
     /// a capability that works on one window manager is not a capability.
     pub fn show_window_menu(&self, _at: Point) {}
 
+    /// Asks the window manager to bring this window forward.
+    ///
+    /// **`_NET_ACTIVE_WINDOW`, with source indication 2.** Two means *a pager*,
+    /// which is the EWMH's way of saying "a user asked for this through another
+    /// program" — window managers honour it where they would refuse an
+    /// application raising itself, and that distinction is exactly the one a
+    /// `FileManager1` call sits on.
+    ///
+    /// The token is ignored here: X11's startup notification is a different
+    /// mechanism from Wayland's activation token, and the timestamp below is what
+    /// this protocol wants in its place. The argument exists because nothing above
+    /// `sk-plat` may know which display server it has — ADR 0009.
+    pub fn raise(&mut self, _token: Option<&str>) -> bool {
+        let _ = self.connection.configure_window(
+            self.id,
+            &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::ABOVE),
+        );
+        self.client_message(self.root, self.atoms._NET_ACTIVE_WINDOW, [2, self.time, 0, 0, 0]);
+        let _ = self.connection.flush();
+        true
+    }
+
     /// A `ClientMessage` to the root or to ourselves, in the EWMH's shape.
     fn client_message(&self, target: xproto::Window, kind: xproto::Atom, data: [u32; 5]) {
         let event = xproto::ClientMessageEvent::new(32, self.id, kind, data);

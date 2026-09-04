@@ -302,6 +302,17 @@ impl Window {
         forward!(self, dragging)
     }
 
+    /// Asks to be brought forward, with a token from whoever asked.
+    ///
+    /// **Whether it worked, which is not whether it was granted.** A compositor
+    /// decides; this reports whether there was a way to ask at all. Wayland needs
+    /// the token — `xdg_activation_v1` exists precisely so a client cannot raise
+    /// itself — and X11 needs none, which is why the argument is optional and why
+    /// the answer differs between two machines running the same build.
+    pub fn raise(&mut self, token: Option<&str>) -> bool {
+        forward!(self, raise, token)
+    }
+
     /// What the selection machinery is holding, for a diagnostic report.
     ///
     /// Both backends answer, and the numbers mean the same thing on each: a read

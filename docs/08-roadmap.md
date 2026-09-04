@@ -523,7 +523,7 @@ connect and 0.09 ms for a call.
 | udisks2 mount and eject | The system bus, `GetManagedObjects` over a nest of `a{oa{sa{sv}}}`, and — for a disk plugged in — `InterfacesAdded`, which is a **signal**. ADR 0023's revisit trigger names exactly that: a subscribing connection is a different decision, and it gets its own record before its code |
 | Following the appearance as it changes | The same signal problem, one namespace smaller. Read once is honest; a desktop that switches to dark mid-session leaves this window light, and `Ctrl+Shift+D` is one press |
 | Default-handler registration from inside the app | It is a line in `mimeapps.list`, and it wants the settings surface — M7's other unbuilt half — rather than a command with no pointer surface, which rule 5 would fail |
-| Raising the window on a call | `FileManager1` says *show me this*, and a window that navigates without coming forward has half-answered. It needs `xdg_activation_v1` in `sk-plat`, which is a platform capability rather than a bus one |
+| ~~Raising the window on a call~~ | **Done.** `xdg_activation_v1` on Wayland with the token the caller passed in `StartupId` — a compositor grants a raise on one and refuses a client asking for itself, which is what the protocol is for — and `_NET_ACTIVE_WINDOW` with source indication *pager* on X11, where the same distinction is made by the source field |
 | The GoTo popup, notifications, network mounts | Untouched |
 
 ### M8 · 4 wk — Hardening and 1.0

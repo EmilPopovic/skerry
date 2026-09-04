@@ -8308,6 +8308,25 @@ def file_manager_one(run: Run, fixture: Path) -> None:
     ])
     until(run, path=str(inner), cursor="inner.txt")
 
+    # **And the window asks to come forward.** *Show me this* is half-answered by
+    # a window that navigates behind three others. The token is the caller's —
+    # a desktop puts an activation token in `StartupId`, and on Wayland it is the
+    # only thing that lets a client be raised at all. What is asserted is that the
+    # window asked, and on this display server that it had a way to: whether the
+    # compositor grants it is the compositor's business and not a claim this suite
+    # can make.
+    on_the_bus(run, [
+        "org.freedesktop.FileManager1.ShowItems",
+        f"array:string:file://{target}",
+        "string:skerry-test-token",
+    ])
+    asked = holds(run, lambda it: it["raises"].split("/")[0] != "0", "a raise")
+    tried, answered = (int(it) for it in asked["raises"].split("/"))
+    if tried < 1:
+        raise Failure("the window never asked to be raised")
+    if isinstance(SERVER, X11Server) and answered < 1:
+        raise Failure("X11 has _NET_ACTIVE_WINDOW and the window did not send it")
+
     on_the_bus(run, [
         "org.freedesktop.FileManager1.ShowFolders",
         f"array:string:file://{fixture}",

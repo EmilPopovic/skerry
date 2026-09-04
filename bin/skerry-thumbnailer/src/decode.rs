@@ -139,7 +139,13 @@ fn jpeg(bytes: &[u8]) -> Result<Raster, Refusal> {
     );
     let raw = decoder.decode().map_err(|_| Refusal::Undecodable)?;
     let pixels = widen(&raw, png::ColorType::Rgb)?;
-    Ok(Raster { pixels, size: (width, height) })
+    // **Turned before it is fitted**, because a quarter turn swaps width and
+    // height: fitting first would fit the box to the sideways picture and then
+    // rotate it out of that box. A photograph from a phone is stored sideways
+    // with a tag saying so — see [`crate::exif`].
+    let how = crate::exif::orientation(bytes);
+    let (pixels, size) = crate::exif::turn(&pixels, (width, height), how);
+    Ok(Raster { pixels, size })
 }
 
 fn svg(bytes: &[u8], within: (u32, u32)) -> Result<Raster, Refusal> {

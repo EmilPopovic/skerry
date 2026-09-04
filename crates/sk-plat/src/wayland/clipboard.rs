@@ -185,6 +185,30 @@ impl super::Window {
         self.state.drags.over.as_ref()
     }
 
+    /// Asks the compositor to bring this window forward.
+    ///
+    /// **Only with a token, and the token comes from whoever asked.** A Wayland
+    /// compositor will not let a client raise itself — that is the whole point of
+    /// the protocol — so `xdg_activation_v1` takes a token minted by the
+    /// application that wants us shown. `FileManager1` carries one in its
+    /// `StartupId` argument, which is exactly what a desktop passes for this.
+    ///
+    /// Without a token, or on a compositor with no activation protocol, this does
+    /// nothing and says so: a window that navigated somewhere without coming
+    /// forward has half-answered *show me this*, and a window that stole focus
+    /// would be the other, worse failure.
+    pub fn raise(&mut self, token: Option<&str>) -> bool {
+        let (Some(activation), Some(token)) = (&self.state.activation, token) else {
+            return false;
+        };
+        if token.is_empty() {
+            return false;
+        }
+        activation.activate(token.to_owned(), &self.state.surface);
+        let _ = self.connection.flush();
+        true
+    }
+
     /// What the selection machinery is holding. See [`crate::Selections`].
     ///
     /// **`awaiting` is always zero here, and that is the protocol rather than a
