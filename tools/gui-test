@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 134
+FEWEST_SCENARIOS = 136
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -1966,6 +1966,64 @@ def a_text_preview_selects_and_copies(run: Run, fixture: Path) -> None:
         raise Failure("the menu's Copy copied the whole file rather than the drag")
 
 
+@scenario("a-double-click-in-a-preview-takes-a-word", fresh=True)
+def double_click_in_a_preview(run: Run, fixture: Path) -> None:
+    """**In a text preview too, and the third click takes the whole line.**
+
+    The same two gestures a page's words already answered — so the claim here is
+    that a file's own text answers them as well, and with the same rule: a word
+    is the run of letters, digits and underscores under the pointer.
+
+    **The line is one long word and a short one**, so the assertion is exact
+    without measuring a font: wherever inside the first twenty characters the
+    pointer landed, the run under it is the same word, and the line is longer
+    than the word — which is what tells a double click from a triple.
+    """
+    lines = ["first line", "supercalifragilistic tail", "third and last"]
+    (fixture / "notes.txt").write_text("\n".join(lines) + "\n")
+
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text notes\nsleep 400\n")
+    until(run, cursor="notes.txt")
+    run.drive("key space\nsleep 600\n")
+    state = until_looking(run, "notes.txt", "text")
+
+    # The middle of the second drawn line, left of its twentieth character at any
+    # size this draws at — the same arithmetic the drag scenario aims by.
+    inner = [float(v) for v in state["panel_area"].split(":")]
+    row = float(state["row_h"])
+    at = aim(run, state, inner[0] + 90.0, inner[1] + 34.0 + row * 1.5)
+
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 250\ndouble\nsleep 400\nkey f12\nsleep 150\n")
+    took = holds(run, lambda it: it["look_chosen"] != "none", "a selection")
+    if took["look_chosen"] != "1:0-1:20":
+        raise Failure(
+            f"a double click on {lines[1]!r} selected {took['look_chosen']!r}, "
+            "where the word ends at the space"
+        )
+
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 300\ntriple\nsleep 400\nkey f12\nsleep 150\n")
+    # A selection that is not the double click's, and *then* the exact one — a
+    # wait for the answer itself reports "it never happened" where an assertion
+    # reports what happened instead, and the second is the useful failure.
+    whole = holds(
+        run,
+        lambda it: it["look_chosen"] not in ("none", took["look_chosen"]),
+        "a third selection",
+    )
+    if whole["look_chosen"] != f"1:0-1:{len(lines[1])}":
+        raise Failure(f"a triple click selected {whole['look_chosen']!r}, where the line is 0-25")
+
+    # And it is a real selection: `Ctrl+C` copies the line and nothing else.
+    run.drive("key ctrl+c\nsleep 400\n")
+    held = clipboard(run)
+    if held != lines[1]:
+        raise Failure(f"the clipboard holds {held!r} rather than the line")
+
+
 def look_aim(run: Run, control: str) -> tuple[float, float]:
     """Where to click one of the quick look's controls, by name.
 
@@ -2075,7 +2133,15 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
             if alive is None:
                 raise Failure(f"the window stopped answering keys over a hung mount ({attempt})")
             if int(alive["frame_p99_us"]) > 8000:
-                raise Failure(f"a frame took {alive['frame_p99_us']}us over a hung mount")
+                # **The frame count with it**, because this window has drawn far
+                # fewer than the 480 `sk_app::frames` keeps: a nearest-rank p99
+                # over a window that has not filled is the *worst* frame since
+                # startup, and reading the failure without that is how a slow
+                # first frame reads as a rule 1 violation.
+                raise Failure(
+                    f"a frame took {alive['frame_p99_us']}us over a hung mount, "
+                    f"of {alive['frames']} drawn"
+                )
 
         # And out again, to a directory that answers. This is the pool's per-device
         # queue: the blocked read still holds a thread and this one has to land.
@@ -7329,6 +7395,51 @@ def drag_in_the_path_field(run: Run, fixture: Path) -> None:
     if not reopened["path_entry"].startswith(part):
         raise Failure(f"the selection is not the start of the path: {part!r}")
 
+    run.drive("key escape\nsleep 250\nkey f12\nsleep 150\n")
+    expect(run.state(), path=opened["path"])
+
+
+@scenario("a-double-click-in-a-field-takes-a-word")
+def double_click_in_a_field(run: Run, fixture: Path) -> None:
+    """A double click takes the word under it; a third takes the whole line.
+
+    The path bar, like the drag before it, stands in for every field: the rename
+    field is the same `Field` and the same `chose_a_run`, and this is the one
+    whose box the window reports.
+
+    **Aimed at the very start of the text**, which is the only x whose character
+    is known without measuring the font: the caret cannot land before offset
+    zero, so whatever the metrics are, the run under it is the first word. The
+    text is typed in for the same reason — a fixture's own path is whatever the
+    temporary directory was called that morning.
+    """
+    run.drive("sleep 700\nkey ctrl+l\nsleep 400\nkey f12\nsleep 150\n")
+    opened = run.state()
+    if not opened["path_entry"]:
+        raise Failure("Ctrl+L opened no path field")
+    run.drive("key ctrl+a\nsleep 200\ntext alphabetagamma/delta\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="alphabetagamma/delta")
+
+    left, top, width, height = (float(value) for value in opened["path_field"].split(","))
+    at = aim(run, opened, left + 4.0, top + height / 2.0)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\ndouble\nsleep 400\nkey f12\nsleep 150\n")
+    took = run.state()
+    if took["path_selected"] != "alphabetagamma":
+        raise Failure(
+            f"a double click on the first word selected {took['path_selected']!r} — "
+            "the run under the pointer is the letters, up to the separator"
+        )
+
+    # And a third click takes all of it, because one line of text is one
+    # paragraph and there is nothing else for it to mean.
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 300\ntriple\nsleep 400\nkey f12\nsleep 150\n")
+    whole = run.state()
+    if whole["path_selected"] != "alphabetagamma/delta":
+        raise Failure(f"a triple click selected {whole['path_selected']!r} of the line")
+
+    # What a selection is for: one keystroke replaces it.
+    run.drive("text Q\nsleep 300\nkey f12\nsleep 150\n")
+    expect(run.state(), path_entry="Q")
     run.drive("key escape\nsleep 250\nkey f12\nsleep 150\n")
     expect(run.state(), path=opened["path"])
 

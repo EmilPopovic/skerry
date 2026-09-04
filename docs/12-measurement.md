@@ -2628,3 +2628,55 @@ The rule: **a failure message that describes a cause is a hypothesis, and it
 should be written as one.** "Nothing landed" was a fact and cost nothing; the
 sentence after it cost a wrong diagnosis that survived three commits, because
 every reader after it trusted the explanation instead of the observation.
+
+## A p99 over twelve frames is a maximum
+
+`a-hung-mount-never-blocks-the-frame-loop` failed twice in three full X11 sweeps
+with `a frame took 26910us over a hung mount`, against an 8,000 µs bar. It is
+rule 1's canonical gate, so the failure is the expensive kind to wave away — and
+the cheap kind to misattribute, because it appeared in the sweep of a change that
+touched no per-frame code.
+
+What the discriminator two sections up asks is whether the failure is *late* or
+*wrong*. It measured as late, everywhere:
+
+| where | result |
+| --- | --- |
+| alone, X11 | 4 runs, all pass |
+| under twelve spinning processes on 24 cores | 2 runs on each build, all pass |
+| the first twelve scenarios in file order, ending on it | pass |
+| three full sweeps of the change | fail, fail, pass |
+| one full sweep of the build before it | pass — a *different* scenario flaked |
+
+Then the mechanism, which is the part worth keeping. The scenario asserts
+`frame_p99_us ≤ 8000`, and [`sk_app::frames`](../crates/sk-app/src/frames.rs)
+keeps a **480-frame window** with a nearest-rank percentile. Printing the count at
+the moment of the assertion:
+
+```
+PROBE frames=12 p50=1200us p99=2944us
+PROBE frames=14 p50=1172us p99=2944us
+PROBE frames=16 p50=1172us p99=2944us
+```
+
+**Twelve to sixteen frames.** Nearest rank of 0.99 over twelve samples is the
+twelfth — so this "p99" is the maximum, and the gate does not read *p99 under
+8 ms* the way [09](09-performance-budgets.md) states the budget. It reads *no
+frame has ever exceeded 8 ms in this window's life*, first-frame pipeline
+creation, atlas upload and first glyph raster included. On a quiet machine the
+worst frame is already 2.4× the median with 2.7× of room to the bar; one stall
+inside a sweep spends all of it.
+
+The lesson is not "the machine was busy". It is that **a percentile is a claim
+about a distribution, and twelve samples are not one** — the same shape as the
+per-frame budget that counted the wrong quantity, one file and several sections
+back. A gate that names p99 and computes a maximum will fail on the machine's
+worst day and pass on a reviewer's, which is indistinguishable from flakiness
+until somebody prints the sample count.
+
+Left as it is, deliberately: the fix is either to wait for the window to fill or
+to assert `Frames::worst` with a stated startup allowance, and both change what
+rule 1's canonical gate promises. That is a decision to take on its own, not a
+side effect of a change about double clicks — and the failure now prints how many
+frames it had, so the next person reads the sample count in the message rather
+than discovering it in an afternoon.

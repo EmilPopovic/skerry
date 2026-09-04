@@ -426,6 +426,16 @@ preview selects text, and the registry is the only place that difference can liv
 if a keymap is to be rebindable. The pointer reaches both through the preview's own
 context menu.
 
+**A double click takes the word under it and a third takes the line**, in the text
+preview, in a page's words and in every field the window opens — one rule in
+[`sk_app::word`](../crates/sk-app/src/word.rs), which is a run of letters, digits
+and `_`, or of whitespace, or of everything else. The run is deliberately *not*
+the one `Ctrl ←` follows inside a name, where `holiday-2024` is two words to save
+a press: that question is how many presses cross a filename, and this one is what
+the pointer is on. A wrapped line is still one paragraph, so the third click takes
+the line the file has rather than the row the panel drew — otherwise the gesture
+would take a different amount of text in a narrow window than in a wide one.
+
 **And the time to a first pixel is a third to a half of what it was**, from three
 changes that came out of one measurement — the thumbnail already on the GPU stands
 in for a picture (**0 ms**, was 67–155), a page is drafted at a third size first

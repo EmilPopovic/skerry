@@ -119,6 +119,11 @@ fn step(verb: &str, rest: &[&str]) -> Result<Vec<Action>, String> {
             Ok(vec![Action::Click { button, times: 1 }])
         }
         "double" => Ok(vec![Action::Click { button: Button::Left, times: 2 }]),
+        // Three presses inside one double-click window, because a triple click is
+        // what selects a line and a scenario cannot spell it any other way: three
+        // `click` lines are three separate presses as far as the counter is
+        // concerned, and it is the counter under test.
+        "triple" => Ok(vec![Action::Click { button: Button::Left, times: 3 }]),
         // Press and release apart, so a drag can be paced. `drag` sends its
         // whole gesture at once, which is right for a rubber band inside one
         // window and wrong for a drag between two applications: the peer answers
@@ -475,6 +480,7 @@ mod tests {
             click\n\
             click right\n\
             double\n\
+            triple\n\
             drag 10 20 80 90\n\
             scroll -3\n\
             sleep 250\n";
@@ -505,6 +511,7 @@ mod tests {
         );
         assert!(parse("flick 16").is_err(), "pixels alone is not a gesture");
         assert!(actions.contains(&Action::Click { button: Button::Right, times: 1 }));
+        assert!(actions.contains(&Action::Click { button: Button::Left, times: 3 }));
         assert!(actions.contains(&Action::Sleep { milliseconds: 250 }));
     }
 }

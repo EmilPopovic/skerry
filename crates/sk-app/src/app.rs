@@ -2210,8 +2210,8 @@ impl App {
     /// click halfway along `étude` is not halfway along its bytes. The text
     /// starts six logical pixels inside the box, which is where
     /// `view::name_field_at` draws it — the one number the two share.
-    fn place_caret(&mut self, x: f32) {
-        let Some(row) = self.edits.naming.as_ref().map(|naming| naming.row) else { return };
+    fn place_caret(&mut self, x: f32) -> Option<usize> {
+        let row = self.edits.naming.as_ref().map(|naming| naming.row)?;
         let area = crate::view::name_field(
             &self.placement.here,
             &self.theme.metrics,
@@ -2219,7 +2219,7 @@ impl App {
             self.panes.focused().scroll.offset(),
         );
         let size = self.theme.metrics.text_size;
-        self.place_caret_in(Claim::Naming, area, size, crate::view::NAME_INSET, x);
+        self.place_caret_in(Claim::Naming, area, size, crate::view::NAME_INSET, x)
     }
 
     /// Keeps every visible pane's trail equal to the ancestors of its path.
@@ -2306,10 +2306,10 @@ impl App {
     }
 
     /// Puts the caret where a click in the path field landed.
-    fn place_path_caret(&mut self, x: f32) {
+    fn place_path_caret(&mut self, x: f32) -> Option<usize> {
         let area = crate::view::path_field(&self.placement.here, &self.theme.metrics);
         let size = self.theme.metrics.path_size;
-        self.place_caret_in(Claim::Path, area, size, crate::view::PATH_INSET, x);
+        self.place_caret_in(Claim::Path, area, size, crate::view::PATH_INSET, x)
     }
 
     /// A press on the strip the window draws for itself. Whether it was one.
@@ -2414,11 +2414,16 @@ impl App {
     /// Returns whether the press belonged to a field. **A press outside the name
     /// field commits it**, which is what every other text field on the desktop
     /// does — and the press then carries on to whatever it landed on.
-    fn press_in_a_field(&mut self, position: Point) -> bool {
+    fn press_in_a_field(&mut self, position: Point, clicks: u8) -> bool {
         if self.edits.naming.is_some() {
             if self.naming_field().contains(position.x, position.y) {
-                self.place_caret(position.x);
-                self.text_drag = Some(Claim::Naming);
+                let at = self.place_caret(position.x);
+                // **Cleared rather than left alone when a run was taken.** The
+                // first press of a double click armed the drag, and a pointer
+                // that moved one pixel before the button came up would extend
+                // from the caret — collapsing the word that was just chosen.
+                let took = self.chose_a_run(Claim::Naming, clicks, at);
+                self.text_drag = (!took).then_some(Claim::Naming);
                 return true;
             }
             self.commit_name();
@@ -2427,8 +2432,9 @@ impl App {
             && crate::view::path_field(&self.placement.here, &self.theme.metrics)
                 .contains(position.x, position.y)
         {
-            self.place_path_caret(position.x);
-            self.text_drag = Some(Claim::Path);
+            let at = self.place_path_caret(position.x);
+            let took = self.chose_a_run(Claim::Path, clicks, at);
+            self.text_drag = (!took).then_some(Claim::Path);
             return true;
         }
         false
@@ -2514,16 +2520,28 @@ impl App {
     /// The text is scrolled by however much the frame the person is looking at
     /// scrolled it, so the click has to be read in the same coordinates the draw
     /// used — the arithmetic is `view::field_scroll`, once, for both.
-    fn place_caret_in(&mut self, which: Claim, area: Area, size: f32, inset: f32, x: f32) {
-        let Some(field) = (match which {
+    ///
+    /// **Where it landed**, so the press that follows a second and a third click
+    /// can take the run there without measuring the same pixel twice.
+    fn place_caret_in(
+        &mut self,
+        which: Claim,
+        area: Area,
+        size: f32,
+        inset: f32,
+        x: f32,
+    ) -> Option<usize> {
+        // Written out rather than `self.field_for(which)?`, which borrows the
+        // whole of `self` and would take the fonts and the cache below with it:
+        // the arms name four different fields, so what is borrowed here is those
+        // four and not the window.
+        let field = (match which {
             Claim::Path => self.typing_path.as_mut(),
             Claim::Naming => self.edits.naming.as_mut().map(|naming| &mut naming.field),
             Claim::Palette => self.palette.as_mut().map(|palette| &mut palette.query),
             Claim::Search => self.search.as_mut().map(|search| &mut search.query),
             Claim::Filter => None,
-        }) else {
-            return;
-        };
+        })?;
         let scale = self.window.scale();
         let style = sk_ui::TextStyle::new(size, self.theme.palette.text);
         let px_size = size * scale;
@@ -2539,7 +2557,26 @@ impl App {
             px_size,
             (x - area.x - inset + scroll) * scale,
         );
+        let offset = field.caret;
         self.dirty = true;
+        Some(offset)
+    }
+
+    /// A second and a third click in a field: the word under it, or all of it.
+    ///
+    /// Whether it took one, which is also whether the press should arm a drag —
+    /// a click that has already chosen a run is not the start of one, and a
+    /// pointer that wandered a pixel afterwards would collapse the word it just
+    /// took back to a caret.
+    fn chose_a_run(&mut self, which: Claim, clicks: u8, at: Option<usize>) -> bool {
+        if clicks < 2 {
+            return false;
+        }
+        let Some(offset) = at else { return false };
+        let Some(field) = self.field_for(which) else { return false };
+        field.select_run(offset, clicks > 2);
+        self.dirty = true;
+        true
     }
 
     /// Feeds one key to the name being typed. Returns whether it was consumed.
@@ -3010,7 +3047,7 @@ impl App {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
                 if inside.contains(position.x, position.y)
-                    && (self.start_choosing_text(position, shift)
+                    && (self.start_choosing_text(position, shift, clicks)
                         || self.start_choosing_a_page(position, shift, clicks)
                         || self.start_panning(position))
                 {
@@ -3121,9 +3158,18 @@ impl App {
     /// **Only for text.** A press on a picture or a page is not the start of
     /// anything — there is nothing there to select — and a click that quietly
     /// armed a drag would make the panel feel like it had a mode.
-    fn start_choosing_text(&mut self, position: Point, shift: bool) -> bool {
+    fn start_choosing_text(&mut self, position: Point, shift: bool, clicks: u8) -> bool {
         let Some(spot) = self.text_spot_at(position) else { return false };
         let Some(look) = self.quick_look.as_mut() else { return false };
+        // **Two clicks take the word and three the line**, the same two sentences
+        // a page's words and a field answer to — and neither arms the drag, so
+        // the run survives a pointer that moved a pixel before the button came
+        // up.
+        if clicks >= 2 {
+            look.select_run(spot, clicks > 2);
+            look.dragging = false;
+            return true;
+        }
         // **`Shift` keeps the anchor**, which is what a shift-click means in
         // every text there is: select from where the last click left off to here.
         // Without it the only way to select a paragraph was to hold the button
@@ -6114,7 +6160,7 @@ scope_aim={scope_aim:?}",
     }
 
     /// A press while the search is open. Whether it was taken.
-    fn press_in_the_search(&mut self, position: Point) -> bool {
+    fn press_in_the_search(&mut self, position: Point, clicks: u8) -> bool {
         if self.search.is_none() {
             return false;
         }
@@ -6152,7 +6198,14 @@ scope_aim={scope_aim:?}",
             }
             return true;
         }
-        if self.hits.search_field.is_some_and(|a| a.contains(position.x, position.y)) {
+        if let Some(area) = self.hits.search_field.filter(|a| a.contains(position.x, position.y)) {
+            // The same field the palette draws, so the same two numbers measure
+            // it — a caret placed against a different inset than the one the text
+            // was drawn at lands one character out at the right-hand end.
+            let size = self.theme.metrics.path_size;
+            let at =
+                self.place_caret_in(Claim::Search, area, size, crate::palette::INSET, position.x);
+            self.chose_a_run(Claim::Search, clicks, at);
             return true;
         }
         // A press outside it closes it and does nothing else, which is the rule
@@ -8093,7 +8146,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.press_in_an_overlay(position, (shift, clicks), commands) {
             return;
         }
-        if self.press_in_a_field(position) {
+        if self.press_in_a_field(position, clicks) {
             return;
         }
         // The frame comes first, and the resize border before the buttons: the
@@ -8608,10 +8661,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             return true;
         }
         if self.palette.is_some() {
-            self.palette_press(position, commands);
+            self.palette_press(position, clicks, commands);
             return true;
         }
-        if self.press_in_the_search(position) {
+        if self.press_in_the_search(position, clicks) {
             return true;
         }
         if self.properties.take().is_some() {
@@ -9378,14 +9431,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
     /// **A dismissing press does nothing else**, for the reason a menu's does
     /// not: the click that closes a modal surface must not also land on the row
     /// underneath it.
-    fn palette_press(&mut self, position: Point, commands: &Registry<Self>) {
+    fn palette_press(&mut self, position: Point, clicks: u8, commands: &Registry<Self>) {
         if let Some(offset) = self.palette_at(position) {
             self.run_palette_row(offset, commands);
             return;
         }
         if let Some(area) = self.hits.palette_field.filter(|a| a.contains(position.x, position.y)) {
             let size = self.theme.metrics.path_size;
-            self.place_caret_in(Claim::Palette, area, size, crate::palette::INSET, position.x);
+            let at =
+                self.place_caret_in(Claim::Palette, area, size, crate::palette::INSET, position.x);
+            self.chose_a_run(Claim::Palette, clicks, at);
             return;
         }
         self.palette = None;

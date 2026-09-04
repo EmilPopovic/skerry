@@ -237,6 +237,7 @@ display — and can be said outright.
   click                 press and release the left button
   click right           any of left, right, middle
   double                two clicks inside the double-click window
+  triple                three of them, which is what selects a line
   drag 10 20 80 90      press at the first point, move to the second, release
   scroll -3 [shift|ctrl] wheel notches, negative is up; the modifier held across them
   flick 16 20 [HOLD]    a touchpad gesture of EVENTS deltas of PIXELS, then the

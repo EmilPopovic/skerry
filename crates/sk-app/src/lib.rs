@@ -56,6 +56,7 @@ mod sizes;
 mod trail;
 mod view;
 mod views;
+mod word;
 
 pub use app::{App, Options};
 pub use bench::{Bench, run as bench};

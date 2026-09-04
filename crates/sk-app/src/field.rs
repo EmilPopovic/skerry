@@ -150,6 +150,25 @@ impl Field {
         self.caret = self.text.len();
     }
 
+    /// Selects the run at `offset` — a double click — or all of it, for a triple.
+    ///
+    /// **A triple click takes the whole field**, because one line of text is one
+    /// paragraph: there is nothing else for the third click to mean, and taking
+    /// the line is what it takes everywhere text is selected.
+    ///
+    /// The run is [`crate::word::around`]'s and not [`is_separator`]'s: a double
+    /// click on `holiday_2024.jpeg` takes `holiday_2024`, where `Ctrl ←` stops at
+    /// the `_`. The two answer different questions, and the module says which.
+    pub fn select_run(&mut self, offset: usize, whole: bool) {
+        if whole {
+            self.select_all();
+            return;
+        }
+        let (from, to) = crate::word::around(&self.text, offset);
+        self.anchor = Some(from);
+        self.caret = to;
+    }
+
     /// Moves the caret one character, keeping or starting a selection.
     ///
     /// The anchor stays where the caret was when the first `Shift` arrow arrived,
@@ -619,6 +638,41 @@ mod tests {
         assert_eq!(field.selected(), "abcdef");
         field.insert("x");
         assert_eq!(field.text, "x");
+    }
+
+    /// A double click takes the run under it; a triple takes the whole line,
+    /// because one line of text is one paragraph.
+    #[test]
+    fn a_double_click_takes_a_word_and_a_triple_takes_the_field() {
+        let mut field = Field::new("holiday-2024.jpeg".to_owned());
+        field.select_run(3, false);
+        assert_eq!(field.selected(), "holiday");
+        field.select_run(9, false);
+        assert_eq!(field.selected(), "2024");
+        field.select_run(9, true);
+        assert_eq!(field.selected(), "holiday-2024.jpeg");
+    }
+
+    /// **`_` is part of a word to a double click, and a separator to `Ctrl ←`.**
+    /// The two are different questions and the difference is deliberate: one is
+    /// what the pointer is on, the other is how many presses cross a name.
+    #[test]
+    fn a_double_click_takes_a_whole_underscored_name() {
+        let mut field = Field::new("my_file_name.txt".to_owned());
+        field.select_run(4, false);
+        assert_eq!(field.selected(), "my_file_name");
+        field.caret = 12;
+        field.step_word(false);
+        assert_eq!(field.caret, 8, "Ctrl+Left still stops at the underscore");
+    }
+
+    /// Typing replaces what a double click took, which is the point of taking it.
+    #[test]
+    fn typing_replaces_what_a_double_click_took() {
+        let mut field = Field::new("one two three".to_owned());
+        field.select_run(5, false);
+        field.insert("2");
+        assert_eq!(field.text, "one 2 three");
     }
 
     /// A filename's parts are its words, so a word operation stops at each of

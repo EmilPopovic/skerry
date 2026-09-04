@@ -1046,6 +1046,28 @@ impl QuickLook {
         });
     }
 
+    /// Selects the word at `at`, or the whole line it is on.
+    ///
+    /// **What a double and a triple click mean**, and the third copy of that
+    /// sentence: [`crate::pagetext::Page::select_run`] says it for a page's
+    /// words and [`crate::field::Field::select_run`] for one line of a field.
+    /// The run is [`crate::word::around`]'s in all three, so a double click on
+    /// `holiday_2024` takes all of it whichever surface it is on.
+    ///
+    /// **The whole *line*, not the drawn row.** A line that wrapped is still one
+    /// paragraph, and a third click that took a third of one because the panel is
+    /// narrow would make the gesture a function of the window's width.
+    pub(crate) fn select_run(&mut self, at: Spot, whole_line: bool) {
+        let Some(text) = self.text.as_ref() else { return };
+        let Some(body) = text.lines.get(at.line) else { return };
+        let (from, to) =
+            if whole_line { (0, body.len()) } else { crate::word::around(body, at.byte) };
+        self.chosen = Some(Chosen {
+            anchor: Spot { line: at.line, byte: from },
+            caret: Spot { line: at.line, byte: to },
+        });
+    }
+
     /// Whether there is a selection with anything in it.
     ///
     /// **Either kind of text**, because the command above this does not care
@@ -1589,6 +1611,45 @@ mod tests {
         let mut empty = texted("");
         empty.select_all();
         assert!(!empty.has_selection());
+    }
+
+    /// A double click takes the word under it and a triple takes the line.
+    #[test]
+    fn a_double_click_takes_a_word_and_a_triple_takes_the_line() {
+        let mut look = texted("let holiday_2024 = 7;\nsecond line here\n");
+
+        look.select_run(Spot { line: 0, byte: 8 }, false);
+        assert_eq!(look.chosen_text().as_deref(), Some("holiday_2024"));
+
+        // The whole line, from wherever on it the third click landed.
+        look.select_run(Spot { line: 0, byte: 8 }, true);
+        assert_eq!(look.chosen_text().as_deref(), Some("let holiday_2024 = 7;"));
+        look.select_run(Spot { line: 1, byte: 0 }, true);
+        assert_eq!(look.chosen_text().as_deref(), Some("second line here"));
+    }
+
+    /// **A wrapped line is one paragraph.** The third click takes the line the
+    /// file has, not the row the panel drew — otherwise the gesture would take a
+    /// different amount of text in a narrow window than in a wide one.
+    #[test]
+    fn a_triple_click_takes_the_whole_line_a_wrap_notwithstanding() {
+        let mut look = texted("a much longer line than the panel is wide\nnext\n");
+        look.text.as_mut().expect("text").wrap(10);
+        assert!(look.text.as_ref().expect("text").rows().len() > 1, "the line did wrap");
+        look.select_run(Spot { line: 0, byte: 30 }, true);
+        assert_eq!(
+            look.chosen_text().as_deref(),
+            Some("a much longer line than the panel is wide")
+        );
+    }
+
+    /// A click on a line that is not there selects nothing rather than panicking
+    /// — the case a page turn produces, one line below.
+    #[test]
+    fn a_run_on_a_line_that_is_gone_is_no_selection() {
+        let mut look = texted("one\n");
+        look.select_run(Spot { line: 9, byte: 0 }, false);
+        assert!(!look.has_selection());
     }
 
     /// A selection that outlives the text it was made in copies nothing rather

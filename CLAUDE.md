@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 785 tests, 134 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 801 tests, 136 GUI scenarios **on both Wayland and X11**,
 seventy-four golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
@@ -97,7 +97,10 @@ parsed in the sandboxed child into flat records ([ADR
 selects and a press on the paper moves the page — or the file's own text — **mono, numbered, and selectable**, where a drag and
 `Ctrl+C` put it on the clipboard through
 [`Scope::Look`](crates/sk-cmd/src/registry.rs), the third scope the resolver was
-written to expect — drawn as runs carrying a tone, and **a highlighter behind that seam**: four
+written to expect — and **a double click takes the word under it, a third the
+line**, over one rule in [`sk_app::word`](crates/sk-app/src/word.rs) that a page's
+words and every field the window opens answer to as well — drawn as runs carrying
+a tone, and **a highlighter behind that seam**: four
 roles — comment, keyword, literal, number — over Rust, the C-likes, Python and
 the shells, a scanner rather than a grammar, with the theme deciding the hues so
 the light frame is a second table and not the first one, and **an editor when `Ctrl+E` asks**: characters, both
