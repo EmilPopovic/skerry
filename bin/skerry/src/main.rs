@@ -300,6 +300,15 @@ fn main() -> std::process::ExitCode {
                 Some(name) => at = Some(name),
                 None => return usage_error("--at and --look each need a name"),
             },
+            "--version" | "-V" => {
+                // **What a bug report has to be able to say.** The crate's
+                // version and the commit it was built from, because a version
+                // alone cannot tell two builds of an alpha apart — and the
+                // commit is stamped at build time by `build.rs`, which reads it
+                // from git and falls back to the version when there is no git.
+                println!("{}", version()); // skerry-allow: log-prefix — this is the answer
+                return std::process::ExitCode::SUCCESS;
+            }
             "--help" | "-h" => {
                 // The answer to `--help`, which is the program's output rather
                 // than a line of its log.
@@ -409,6 +418,15 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// The version and the commit, for `--version` and for a bug report.
+///
+/// `SKERRY_COMMIT` is stamped by `build.rs` at compile time; a build from a
+/// tarball with no git history gets `unknown`, which is honest and still tells
+/// a reader that the version beside it is the whole of what is known.
+fn version() -> String {
+    format!("skerry {} ({})", env!("CARGO_PKG_VERSION"), env!("SKERRY_COMMIT"))
+}
+
 const USAGE: &str = "\
 skerry [OPTIONS] [PATH]
 
@@ -446,6 +464,7 @@ skerry [OPTIONS] [PATH]
                    to. Always on where the compositor offers no decorations,
                    which is GNOME.
   -h, --help       this
+  -V, --version    the version and the commit it was built from
 
 With no PATH, the window comes back the way it was left — the tabs, the
 splits, the sort orders and the scroll offsets — from

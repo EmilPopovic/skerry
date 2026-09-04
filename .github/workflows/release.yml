@@ -1,0 +1,93 @@
+# What a tag produces: one tarball per architecture, and nothing else.
+#
+# `06-portability.md` names the primary artifact as *one relocatable binary plus
+# a small data directory*, for both architectures. This builds exactly that, on
+# the two images `check.yml` already uses, so a release is built by the same
+# toolchain that gated it.
+#
+# **No AppImage yet, and no auto-updater.** Both are named in the portability
+# document as later work; a tarball with a `Makefile` in it is what a person and
+# a packager can both use today, and shipping the smaller thing first is how the
+# larger one gets designed against a real complaint.
+#
+# The tarball is not reproducible byte-for-byte yet — `SOURCE_DATE_EPOCH` and a
+# sorted, ownership-stripped archive get most of the way, and the binary itself
+# is whatever the runner's linker produced. That is stated rather than claimed
+# the other way round.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RUST: "1.96.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tarball:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          # The whole history, because `build.rs` stamps the commit into
+          # `--version` and a shallow checkout of a tag still has one.
+          fetch-depth: 0
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+      - name: Build
+        run: cargo build --release --workspace --locked
+      - name: What it says it is
+        # A binary that cannot name its own version is a binary no bug report can
+        # identify, and this is the cheapest possible test of `build.rs`.
+        run: ./target/release/skerry --version
+      - name: Stage
+        id: stage
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="skerry-${version}-${{ matrix.arch }}-linux"
+          make install DESTDIR="stage/${name}" PREFIX=/usr
+          cp README.md LICENSE-MIT LICENSE-APACHE Makefile "stage/${name}/"
+          # Sorted, with one timestamp and no ownership, so two builds of the
+          # same commit differ only by what the compiler emitted.
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@${SOURCE_DATE_EPOCH:-0}" \
+              -czf "${name}.tar.gz" -C stage "${name}"
+          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+        env:
+          SOURCE_DATE_EPOCH: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            ${{ steps.stage.outputs.name }}.tar.gz
+            ${{ steps.stage.outputs.name }}.tar.gz.sha256
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "${{ steps.stage.outputs.name }}.tar.gz" \
+            "${{ steps.stage.outputs.name }}.tar.gz.sha256" \
+            --clobber

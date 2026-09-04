@@ -20,9 +20,13 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+# **A pre-release version, and the first one that is public.** `0.1.0-alpha.1`
+# rather than `0.1.0`: the milestones this has not reached are listed in
+# `docs/08-roadmap.md`, and a version that claims otherwise is the first thing a
+# reader would have to discount. `skerry --version` prints this and the commit.
+version = "0.1.0-alpha.1"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 rust-version = "1.90"
 # **Not libraries for anybody else.** These twelve are one application divided
 # into levels, and the division is `docs/04-architecture.md`'s rather than an

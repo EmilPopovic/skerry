@@ -3,17 +3,43 @@
 A file manager for Linux, written in Rust, built on the premise that a file manager
 is a **latency product and an interaction-design product** — not a feature checklist.
 
-Status: **M0, in progress.** Phase 0's six spikes are resolved and there is a window
-on screen: twelve crates, a Wayland platform layer, a GPU renderer, real text shaping,
-and a Details view over a real directory that stays live under inotify, shows folder
-totals as they are computed, filters as you type, navigates by breadcrumb and by typed
-path, makes and renames and trashes things with one undo stack over all of it, opens
-files in whatever the desktop says owns them, copies files, paths and the text
-inside a text file to the clipboard, lists the
-volumes as they are mounted, and draws its own window frame where the compositor
-declines to. **Every action is reachable with the keyboard alone and with the pointer
-alone**, and a test fails the build for one that is not. What is done and what is owed
-is in [docs/08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer).
+Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
+helpers, 801 tests, 137 GUI scenarios on both Wayland and X11, seventy-five golden
+frames. It is a file manager you can use for a day: a Details view, a grid and a
+column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
+live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
+rename, new folder and Move to Trash with **one undo stack over all of it** and a
+visible history; a sidebar whose pins are lines in GTK's `bookmarks` file, so a
+folder pinned here is pinned in Nautilus; search under a folder or over every local
+filesystem, first result at **0.7 ms over 817,288 entries**; quick look at pictures,
+PDFs — with selectable text — and source, with a highlighter and an editor; drag and
+drop to and from GTK applications; a command palette and a context menu over one
+registry; and a keymap that is a file you own. **Every action is reachable with the
+keyboard alone and with the pointer alone**, and a test fails the build for one that
+is not.
+
+What is done and what is owed is in
+[08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). What an alpha does not
+have yet is [below](#what-this-alpha-does-not-do).
+
+![Skerry](captures/dark.png)
+
+## Installing
+
+```
+make                                   # cargo build --release --workspace
+sudo make install                      # PREFIX=/usr/local, honours DESTDIR
+make install PREFIX=$HOME/.local       # or into your own prefix
+```
+
+Three binaries and one desktop entry, and nothing else: no post-install script and
+nothing written outside `DESTDIR` and `PREFIX`. The two helpers install beside the
+binary because that is where it looks for them first. Tagged builds also produce a
+tarball per architecture — see [release.yml](.github/workflows/release.yml).
+
+Building needs a Rust toolchain at or above the `rust-version` in
+[Cargo.toml](Cargo.toml) and `libxkbcommon`'s development package for the linker
+symlink. Nothing else: no GLib, no GTK, no Qt.
 
 ```
 cargo run --release -- ~/Downloads      # a window; F1 lists the keyboard
@@ -24,17 +50,18 @@ cargo run --release -- --capture frame.png --scale 125 /usr/lib
 The last two need no display server, which is the point of them: the renderer is
 inspectable and measurable in CI. At 200,000 entries the frame p99 is **0.34 ms**
 against an 8 ms budget, and an idle window uses **no CPU at all** — the numbers, the
-method, and the three budget rows that are currently missed are in
+method, and the four budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares fourteen rendered frames to committed
-references on lavapipe, `tools/gui-test` presses keys and moves a pointer through
-sixty scenarios in a nested compositor — one of which mounts a filesystem in a
+defect nothing else could: `tools/golden` compares seventy-five rendered frames to
+committed references on lavapipe, `tools/gui-test` presses keys and moves a pointer
+through 137 scenarios on two display servers — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
-filesystem torture matrix that is a CI job rather than thrown-away spike code.
-Two of the three run on every push; the scenarios need a compositor that will hand out
-the virtual-input protocols, which a runner has no seat to do.
+filesystem torture matrix that is a CI job rather than thrown-away spike code. All
+three run on every push, the scenarios under `Xvfb`; the Wayland half of them stays
+local, because a compositor that hands out the virtual-input protocols needs a seat
+and a runner has none.
 
 ## The thesis in one paragraph
 
@@ -124,10 +151,28 @@ Dependencies point strictly downward by level. A CI check parses the workspace m
 and fails the build on any upward or sideways edge — see
 [04-architecture.md](docs/04-architecture.md#layering-is-enforced-not-encouraged).
 
+## What this alpha does not do
+
+Stated here rather than discovered, because a pre-release that hides its gaps wastes
+the first bug report on one of them.
+
+- **No input method or touchpad gestures on X11.** Both work on Wayland;
+  `text-input-v3` has no X11 equivalent this program implements, and the capability
+  is reported absent rather than pretended.
+- **No mounting.** A volume's label and its free space are drawn without `udisks2`,
+  but mounting and ejecting one are not written yet.
+- **Settings are keys.** `Ctrl ,` writes the whole keymap to a file you own; anything
+  else is a chord or a drag, and there is no preferences surface yet.
+- **Four performance budget rows are missed**, and each is recorded with its number
+  rather than widened: cold start, the 1M sort, one scroll run in five at a million
+  entries, and the resident floor. See
+  [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
+- **No archive, media or hex previews, and no EXIF orientation.** Pictures, PDFs and
+  text are what a quick look shows.
+
 ## Working on it
 
-All six Phase 0 spikes are resolved and M0 is in progress: eleven crates, 452 tests, a
-window on screen over a real directory. What is done and what is owed is the table in
+All six Phase 0 spikes are resolved. What is done and what is owed is the table in
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). [CLAUDE.md](CLAUDE.md) is
 the working brief — the craft bar, the invariants that are expensive to undo, and which
 document settles which question.
@@ -140,6 +185,13 @@ One script, run by a person before proposing a change and by
 [check.yml](.github/workflows/check.yml) on every push — CI adds nothing of its own.
 Each gate abstains where it has nothing to check, and says so rather than passing
 quietly. See [tools/README.md](tools/README.md).
+
+## Licence
+
+MIT or Apache-2.0, at your option: [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE). Every source file carries an
+`SPDX-License-Identifier` line saying the same thing, and `tools/check` fails a build
+for one that does not.
 
 ## Name
 
