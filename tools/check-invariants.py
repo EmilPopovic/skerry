@@ -126,9 +126,11 @@ def source_check(report: Report) -> None:
 # survived nineteen commits and fired on every scroll event.
 PRINT = re.compile(r'\bdbg!\(|\be?println!\(\s*"(?!skerry)')
 
-# The three files whose *output* is the point: a benchmark's table, a capture's
-# summary, and the state a scenario reads.
-REPORTS = {"bench.rs", "headless.rs"}
+# The files whose *output* is the point: a benchmark's table, a capture's summary,
+# the state a scenario reads — and a build script, whose stdout is cargo's own
+# protocol. `cargo:rustc-env=` is a directive and not a log line, and a build
+# script that prefixed it would be talking to nobody.
+REPORTS = {"bench.rs", "headless.rs", "build.rs"}
 
 # The names of the two backends, as they appear in code rather than in prose: a
 # path, a variant, or the crate itself. Deliberately not the bare words — a
