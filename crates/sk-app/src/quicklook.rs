@@ -1028,6 +1028,22 @@ impl QuickLook {
         Some(refusal.message().unwrap_or("preview.unavailable"))
     }
 
+    /// What a screen reader is given to read, or nothing.
+    ///
+    /// **The text and not the picture.** A preview of a photograph has nothing
+    /// to say that its filename has not said already; a preview of a file's text
+    /// or of a page's words is the content itself, and the whole of what was read
+    /// is what a reader moves through.
+    pub(crate) fn spoken_text(&self) -> Option<String> {
+        if let Some(page) = self.page_text.as_ref()
+            && page.count() > 0
+        {
+            return Some(page.every_word());
+        }
+        let text = self.text.as_ref()?;
+        Some(text.lines.join("\n"))
+    }
+
     /// Selects the whole file — `Ctrl+A`.
     ///
     /// The whole of what was *read*, which is a screenful and not a file: the

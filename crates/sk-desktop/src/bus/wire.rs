@@ -21,6 +21,8 @@ pub enum Value {
     Bool(bool),
     /// `u`
     U32(u32),
+    /// `i`, which AT-SPI's coordinates and indices are.
+    I32(i32),
     /// `x`, which udisks2 uses for sizes.
     I64(i64),
     /// `s`
@@ -35,6 +37,21 @@ pub enum Value {
     Dict(Vec<(String, Value)>),
     /// `v`
     Variant(Box<Value>),
+    /// An array with nothing in it, of the element type named.
+    ///
+    /// **Because an empty array still has a signature.** `Array(vec![])` cannot
+    /// say what it is empty *of*, and AT-SPI asks for an empty `a{ss}` and an
+    /// empty `a(ua(so))` by name — a reply whose header says `as` is a reply some
+    /// clients refuse.
+    Empty(String),
+    /// `(...)`, a fixed sequence of types.
+    ///
+    /// **AT-SPI is made of these.** Every reference to an accessible object is a
+    /// `(so)` — the bus name of the application and the object's path — and every
+    /// event carries one. `FileManager1` needed none, which is why the type
+    /// arrived with [ADR 0026](../../../../docs/adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md)
+    /// rather than with 0023.
+    Struct(Vec<Value>),
 }
 
 impl Value {
@@ -50,6 +67,7 @@ impl Value {
             Self::Byte(_) => "y".to_owned(),
             Self::Bool(_) => "b".to_owned(),
             Self::U32(_) => "u".to_owned(),
+            Self::I32(_) => "i".to_owned(),
             Self::I64(_) => "x".to_owned(),
             Self::Str(_) => "s".to_owned(),
             Self::Path(_) => "o".to_owned(),
@@ -59,6 +77,11 @@ impl Value {
             }
             Self::Dict(_) => "a{sv}".to_owned(),
             Self::Variant(_) => "v".to_owned(),
+            Self::Empty(element) => format!("a{element}"),
+            Self::Struct(fields) => {
+                let inner: String = fields.iter().map(Self::signature).collect();
+                format!("({inner})")
+            }
         }
     }
 
@@ -66,8 +89,16 @@ impl Value {
     const fn alignment(&self) -> usize {
         match self {
             Self::Byte(_) | Self::Signature(_) | Self::Variant(_) => 1,
-            Self::Bool(_) | Self::U32(_) | Self::Str(_) | Self::Path(_) => 4,
-            Self::I64(_) | Self::Array(_) | Self::Dict(_) => 8,
+            // **An array aligns to four and not to eight.** Its length is a
+            // `u32`; the padding to an eight-aligned *element* happens after that
+            // length, inside `write_array`. Declaring eight here inserted four
+            // bytes whenever an array followed an odd number of words — which
+            // every array this program sent for a year did not, because they were
+            // all the first value in a body and a body starts eight-aligned. The
+            // first one that did not was an AT-SPI event's `a{sv}`, and the bus
+            // disconnected us over it without a word.
+            Self::I64(_) | Self::Struct(_) => 8,
+            _ => 4,
         }
     }
 
@@ -103,6 +134,7 @@ impl Value {
         match self {
             Self::Byte(byte) => Some(i64::from(*byte)),
             Self::U32(value) => Some(i64::from(*value)),
+            Self::I32(value) => Some(i64::from(*value)),
             Self::I64(value) => Some(*value),
             Self::Variant(inner) => inner.number(),
             _ => None,
@@ -120,7 +152,9 @@ fn alignment_of(signature: &str) -> usize {
     match signature.as_bytes().first() {
         Some(b'y' | b'g' | b'v') => 1,
         Some(b'n' | b'q') => 2,
-        Some(b'x' | b't' | b'd' | b'a' | b'(' | b'{') => 8,
+        // `a` falls to the four below for the same reason: the length comes
+        // first, and the elements pad after it.
+        Some(b'x' | b't' | b'd' | b'(' | b'{') => 8,
         _ => 4,
     }
 }
@@ -176,6 +210,7 @@ impl Writer {
             Value::Byte(byte) => self.bytes.push(*byte),
             Value::Bool(yes) => self.bytes.extend_from_slice(&u32::from(*yes).to_le_bytes()),
             Value::U32(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
+            Value::I32(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
             Value::I64(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
             Value::Str(text) | Value::Path(text) => self.write_string(text),
             Value::Signature(text) => {
@@ -201,9 +236,21 @@ impl Writer {
                     }
                 });
             }
+            Value::Empty(element) => {
+                let alignment = alignment_of(element);
+                self.write_array(alignment, |_| {});
+            }
             Value::Variant(inner) => {
                 self.write(&Value::Signature(inner.signature()));
                 self.write(inner);
+            }
+            // Padded to eight before the first field and not after the last: a
+            // struct's own alignment is the padding, and a trailing one would put
+            // the next value four bytes late.
+            Value::Struct(fields) => {
+                for field in fields {
+                    self.write(field);
+                }
             }
         }
     }
@@ -285,6 +332,7 @@ impl<'a> Reader<'a> {
             }
             'b' => Some(Value::Bool(self.u32()? != 0)),
             'u' => Some(Value::U32(self.u32()?)),
+            'i' => Some(Value::I32(self.u32()?.cast_signed())),
             'x' | 't' => {
                 self.pad(8);
                 let bytes: [u8; 8] = self.take(8)?.try_into().ok()?;
@@ -309,6 +357,15 @@ impl<'a> Reader<'a> {
                 Some(Value::Variant(Box::new(self.read(&inner)?)))
             }
             'a' => self.read_array(&signature[1..]),
+            '(' => {
+                self.pad(8);
+                let inner = signature.get(1..signature.len().saturating_sub(1))?;
+                let mut fields = Vec::new();
+                for kind in split(inner) {
+                    fields.push(self.read(&kind)?);
+                }
+                Some(Value::Struct(fields))
+            }
             _ => None,
         }
     }
@@ -396,6 +453,113 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Reader, Value, Writer, split};
+
+    /// **An array after an odd number of words is aligned to four, not eight.**
+    ///
+    /// The bug this catches shipped for a year and was invisible: every array
+    /// the program sent was the first value in a body, and a body starts
+    /// eight-aligned, so a four-aligned array and an eight-aligned one land in
+    /// the same place. The first array that followed something — an AT-SPI
+    /// event's `a{sv}` after `siiv` — got four bytes of padding it should not
+    /// have had, and `dbus-daemon` disconnected the client without a word.
+    ///
+    /// Written against the specification: `s` is 4 + 2 + a NUL = 7, padded to 4
+    /// for the first `i` = 8, two `i` is 8 more = 16, the variant's signature is
+    /// 1 + 1 + 1 = 19, its empty string pads to 4 and takes 5 = 25 — and the
+    /// array's length begins at the next multiple of **four**, which is 28.
+    #[test]
+    fn an_array_that_follows_something_aligns_to_four() {
+        let mut writer = Writer::at(0);
+        writer.write(&Value::Str("ab".to_owned()));
+        writer.write(&Value::I32(1));
+        writer.write(&Value::I32(2));
+        writer.write(&Value::Variant(Box::new(Value::Str(String::new()))));
+        assert_eq!(writer.so_far(), 25, "the four values before the array");
+        writer.write(&Value::Dict(Vec::new()));
+        let bytes = writer.into_bytes();
+        // Four bytes of length and nothing else: an empty array is its length.
+        assert_eq!(bytes.len(), 32, "an array that padded to eight would be 36");
+        assert_eq!(&bytes[28..32], &0u32.to_le_bytes(), "and the length is zero");
+
+        let mut reader = Reader::new(&bytes, 0, true);
+        assert_eq!(reader.read("s"), Some(Value::Str("ab".to_owned())));
+        assert_eq!(reader.read("i"), Some(Value::I32(1)));
+        assert_eq!(reader.read("i"), Some(Value::I32(2)));
+        assert_eq!(reader.read("v"), Some(Value::Variant(Box::new(Value::Str(String::new())))));
+        assert_eq!(reader.read("a{sv}"), Some(Value::Dict(Vec::new())));
+    }
+
+    /// The same for a plain array, which is the same rule and a different type.
+    #[test]
+    fn a_plain_array_after_a_word_aligns_to_four_too() {
+        let mut writer = Writer::at(0);
+        writer.write(&Value::U32(7));
+        writer.write(&Value::Array(vec![Value::Str("x".to_owned())]));
+        let bytes = writer.into_bytes();
+        // 4 for the `u`, 4 for the length, then the string at 8.
+        assert_eq!(&bytes[4..8], &6u32.to_le_bytes(), "the array's byte count");
+        let mut reader = Reader::new(&bytes, 0, true);
+        assert_eq!(reader.read("u"), Some(Value::U32(7)));
+        assert_eq!(reader.read("as"), Some(Value::Array(vec![Value::Str("x".to_owned())])));
+    }
+
+    /// `(so)`, byte for byte, because AT-SPI's every reference is one.
+    ///
+    /// A struct aligns to eight and its fields to their own widths, with **no**
+    /// padding after the last one — written out by hand rather than round-tripped,
+    /// because a marshaller checked against its own reader agrees with itself and
+    /// with nobody else.
+    #[test]
+    fn a_struct_aligns_to_eight_and_pads_before_its_fields_only() {
+        let mut writer = Writer::at(0);
+        writer.write(&Value::Byte(1));
+        let reference =
+            Value::Struct(vec![Value::Str("x".to_owned()), Value::Path("/a".to_owned())]);
+        writer.write(&reference);
+        let bytes = writer.into_bytes();
+        assert_eq!(bytes[0], 1, "the byte before it");
+        assert_eq!(&bytes[1..8], &[0; 7], "padded to eight before the struct");
+        assert_eq!(&bytes[8..12], &1u32.to_le_bytes(), "the string's length");
+        assert_eq!(&bytes[12..14], b"x\0");
+        // The object path aligns to four, so two bytes of padding follow the NUL.
+        assert_eq!(&bytes[14..16], &[0, 0]);
+        assert_eq!(&bytes[16..20], &2u32.to_le_bytes());
+        assert_eq!(&bytes[20..23], b"/a\0");
+        assert_eq!(bytes.len(), 23, "and nothing after the last field");
+        assert_eq!(reference.signature(), "(so)");
+
+        let mut reader = Reader::new(&bytes, 0, true);
+        assert_eq!(reader.read("y"), Some(Value::Byte(1)));
+        assert_eq!(reader.read("(so)"), Some(reference));
+    }
+
+    /// `i` is signed, and the sign survives the trip.
+    #[test]
+    fn an_i32_is_signed_both_ways() {
+        for number in [0, 1, -1, i32::MIN, i32::MAX] {
+            let mut writer = Writer::at(0);
+            writer.write(&Value::I32(number));
+            let bytes = writer.into_bytes();
+            assert_eq!(bytes.len(), 4);
+            let mut reader = Reader::new(&bytes, 0, true);
+            assert_eq!(reader.read("i"), Some(Value::I32(number)), "{number}");
+        }
+    }
+
+    /// An array of structs — `a(so)`, which is what `GetChildren` answers with.
+    #[test]
+    fn an_array_of_structs_round_trips() {
+        let children = Value::Array(vec![
+            Value::Struct(vec![Value::Str(":1.5".to_owned()), Value::Path("/a/1".to_owned())]),
+            Value::Struct(vec![Value::Str(":1.5".to_owned()), Value::Path("/a/2".to_owned())]),
+        ]);
+        assert_eq!(children.signature(), "a(so)");
+        let mut writer = Writer::at(0);
+        writer.write(&children);
+        let bytes = writer.into_bytes();
+        let mut reader = Reader::new(&bytes, 0, true);
+        assert_eq!(reader.read("a(so)"), Some(children));
+    }
 
     /// A string, byte for byte, against the specification.
     ///

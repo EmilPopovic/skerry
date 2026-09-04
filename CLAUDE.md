@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 801 tests, 137 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 817 tests, 138 GUI scenarios **on both Wayland and X11**,
 seventy-five golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
@@ -136,7 +136,13 @@ blocking on a read to serve, a short-lived connection per call, so a browser's
 *Open containing folder* lands on the file, a second `skerry` hands its argument
 to the first and exits **before opening a window**, and a fresh install on a dark
 desktop opens dark because the settings portal was asked, once, in 0.15 ms.
-Every command is reachable by keyboard
+**A screen reader can read it**: an AT-SPI tree derived once a frame
+from the rectangles the frame recorded, published over the same hand-written
+D-Bus ([ADR 0026](docs/adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md))
+rather than through `accesskit`, whose Unix adapter is `zbus` and an executor —
+and a scenario walks that tree with `gdbus`, which found an array aligned to eight
+bytes where the specification says four, in a marshaller a year old that no
+foreign client had ever read. Every command is reachable by keyboard
 alone and by pointer alone, and a test fails the build for one that is not — and
 **the keymap is a file**: `Ctrl ,` writes every command and its chords to
 `$XDG_CONFIG_HOME/skerry/config`, a line rebinds one, an empty right-hand side

@@ -124,6 +124,8 @@ pub(super) struct Selections {
     /// A selection that is neither the clipboard nor primary. `XdndSelection` is
     /// the only one today, and it is owned for the length of one drag.
     extra: Option<(xproto::Atom, Published)>,
+    /// Answers that matched nothing outstanding. See [`crate::Selections`].
+    unmatched: u32,
 }
 
 impl Selections {
@@ -338,6 +340,16 @@ impl Selections {
         true
     }
 
+    /// Conversions asked for and not yet answered.
+    pub(super) fn awaiting(&self) -> usize {
+        self.incoming.len()
+    }
+
+    /// How many answers have arrived matching nothing outstanding.
+    pub(super) const fn unmatched(&self) -> u32 {
+        self.unmatched
+    }
+
     /// Asks a peer for `mime`, and hands back the end to read it from.
     pub(super) fn request(
         &mut self,
@@ -412,10 +424,18 @@ impl Selections {
         event: &xproto::SelectionNotifyEvent,
     ) -> Option<Offered> {
         let Ask { connection, atoms, types, window, .. } = *ask;
-        let index = if event.property == 0 {
-            self.incoming.iter().position(|(_, it)| it.target == event.target)?
+        let found = if event.property == 0 {
+            self.incoming.iter().position(|(_, it)| it.target == event.target)
         } else {
-            self.incoming.iter().position(|(atom, _)| *atom == event.property)?
+            self.incoming.iter().position(|(atom, _)| *atom == event.property)
+        };
+        let Some(index) = found else {
+            // **Counted rather than ignored.** An answer that matches nothing is
+            // a conversion this process asked for and then lost track of, and the
+            // pipe behind it is one somebody is blocked reading — see
+            // [`crate::Selections`].
+            self.unmatched = self.unmatched.saturating_add(1);
+            return None;
         };
         if event.property == 0 {
             // The owner refused. Dropping the entry drops the pipe's write end,

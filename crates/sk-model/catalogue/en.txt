@@ -533,3 +533,13 @@ stats.value.milliseconds3 = {0} / {1} / {2} ms
 stats.value.of = {0} of {1}
 stats.value.surface = {0}×{1} at {2}%
 action.dump = Print a diagnostic report
+
+# What a screen reader is told a thing is, where the thing has no name of its
+# own — ADR 0026. Said out loud rather than drawn, so they are sentences a
+# person hears rather than labels a person reads.
+a11y.places = Places
+a11y.menu = Menu
+field.name = Name
+field.path = Location
+field.palette = Command
+field.search = Search

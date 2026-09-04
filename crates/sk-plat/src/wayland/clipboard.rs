@@ -184,6 +184,17 @@ impl super::Window {
         self.state.drags.over.as_ref()
     }
 
+    /// What the selection machinery is holding. See [`crate::Selections`].
+    ///
+    /// **`awaiting` is always zero here, and that is the protocol rather than a
+    /// gap.** A Wayland read is a descriptor the compositor hands over directly:
+    /// there is no reply to match against a request, so there is no way to lose
+    /// one. `unmatched` cannot happen for the same reason.
+    #[must_use]
+    pub fn selections(&self) -> crate::Selections {
+        crate::Selections { awaiting: 0, sending: self.state.transfers.len(), unmatched: 0 }
+    }
+
     /// Which actions this display server can express at all.
     #[must_use]
     pub fn drag_actions(&self) -> &'static [crate::DragAction] {

@@ -1,0 +1,17 @@
+[package]
+name = "a11y-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Read by tools/check-layering.py. A tool may depend on anything below it.
+[package.metadata.skerry]
+level = 5
+
+[dependencies]
+sk-desktop = { workspace = true }
+
+[lints]
+workspace = true

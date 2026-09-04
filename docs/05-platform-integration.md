@@ -180,9 +180,12 @@ acceptable, which is rule 1's canonical test.
 A custom renderer bypasses every toolkit's accessibility layer and every toolkit's input
 method plumbing, so both are built deliberately:
 
-- **AT-SPI via `accesskit`**, wired in at M1 rather than M7. The accessibility tree is
-  produced by the same immediate-mode pass that produces draw commands, so it cannot fall
-  out of sync — but only if it is there from the start.
+- **AT-SPI, written here rather than taken from `accesskit`** —
+  [ADR 0026](adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md), because
+  that crate's Unix adapter brings `zbus` and an executor with it. The tree is derived
+  once a frame from what the frame recorded — the rectangles a press is tested against —
+  so it cannot fall out of sync with what is on screen, and it is published over the
+  D-Bus this program already speaks.
 - **`text-input-v3`** on Wayland and XIM/ibus on X11, so CJK input works in the rename
   field and the search box. Retrofitting IME into a text widget is a rewrite.
 - Keyboard navigation for every action follows from rule 5; a visible focus ring is a

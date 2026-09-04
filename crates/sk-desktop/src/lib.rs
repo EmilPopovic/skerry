@@ -26,6 +26,7 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod apps;
+pub mod atspi;
 pub mod bus;
 pub mod entry;
 pub mod launch;

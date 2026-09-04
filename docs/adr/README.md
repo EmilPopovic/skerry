@@ -33,6 +33,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0023](0023-d-bus-is-a-socket-we-speak-ourselves.md) | D-Bus is a socket we speak ourselves: a thread to serve, a connection per call | Accepted |
 | [0024](0024-a-page-arrives-with-its-words.md) | A page arrives with its words: the renderer's own text layer, in word boxes, beside the pixels | Accepted |
 | [0025](0025-the-config-file-is-the-keymap-written-out.md) | The config file is the keymap written out, and the program never writes it behind you | Accepted |
+| [0026](0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md) | AT-SPI is a tree derived from the frame, published on the bus we already speak | Accepted |
 
 ## Triggers that have been answered
 

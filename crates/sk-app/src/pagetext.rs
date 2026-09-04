@@ -62,6 +62,25 @@ impl Page {
         self.layer.words.len()
     }
 
+    /// Every word on the page, lines joined by newlines.
+    ///
+    /// For a reader rather than for the clipboard: the clipboard gets what was
+    /// selected, and this is what there is to read when nothing has been.
+    pub(crate) fn every_word(&self) -> String {
+        let mut out = String::new();
+        let mut line = None;
+        for word in &self.layer.words {
+            if line.is_some_and(|it| it != word.line) {
+                out.push('\n');
+            } else if line.is_some() {
+                out.push(' ');
+            }
+            out.push_str(&word.text);
+            line = Some(word.line);
+        }
+        out
+    }
+
     /// Starts a selection at `at`, or extends the one there is.
     pub(crate) fn choose(&mut self, at: Place, extend: bool) {
         let anchor = match self.chosen.filter(|_| extend) {

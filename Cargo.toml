@@ -17,6 +17,7 @@ members = [
     "bin/skerry-thumbnailer",
     "bin/skerry-preview-doc",
     "tools/skerry-drive",
+    "tools/a11y-registry",
 ]
 
 [workspace.package]

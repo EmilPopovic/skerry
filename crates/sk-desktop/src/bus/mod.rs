@@ -91,6 +91,22 @@ impl Message {
         }
     }
 
+    /// A broadcast.
+    #[must_use]
+    pub fn signal(path: &str, interface: &str, member: &str, body: Vec<Value>) -> Self {
+        Self {
+            kind: Kind::Signal,
+            serial: 0,
+            answers: None,
+            peer: None,
+            path: Some(path.to_owned()),
+            interface: Some(interface.to_owned()),
+            member: Some(member.to_owned()),
+            error: None,
+            body,
+        }
+    }
+
     /// The first argument as text, which most answers are.
     #[must_use]
     pub fn text(&self) -> Option<&str> {
@@ -171,6 +187,18 @@ impl Bus {
     #[must_use]
     pub fn unique(&self) -> &str {
         &self.unique
+    }
+
+    /// The socket, to wait on beside something else.
+    ///
+    /// **For a connection that outlives a call.** The accessibility bus is served
+    /// and *emitted to* by one thread, so that thread has to wait on the socket
+    /// and on its own eventfd at once rather than blocking in
+    /// [`Self::receive`] — see [`crate::atspi`].
+    #[must_use]
+    pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd as _;
+        self.socket.as_fd()
     }
 
     /// `EXTERNAL`, which is the uid in hexadecimal and nothing else.

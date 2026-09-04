@@ -2740,3 +2740,49 @@ The rule this leaves behind, and it is mechanical:
 
 The golden frame beside it is `rename-columns`, because the column view's field
 had no picture and a rectangle with no picture is how this started.
+
+## A marshaller nobody else had ever read
+
+The accessibility work needed one new thing on the wire: an AT-SPI event, whose
+body is `siiva{sv}`. It went out, the bus accepted the write, and the next read
+returned end of file — `dbus-daemon` had disconnected the client without a word
+in any log.
+
+Bisecting it took five messages, sent by a tool built for the purpose
+(`a11y-registry --emit-probe`) with a `Peer.Ping` after each one, because a
+daemon that has dropped you answers nothing:
+
+```
+sent empty ()            still connected
+sent string (s)          still connected
+sent two ints (sii)      still connected
+sent with a variant (siiv)      still connected
+sent with an empty dict (siiva{sv})   ^ the bus dropped us
+```
+
+**An array aligns to four bytes, not eight.** Its length is a `u32`; the padding
+to an eight-aligned *element* happens after that length. `Value::alignment`
+declared eight for `Array` and `Dict`, so an array that followed an odd number of
+words got four bytes of padding the specification does not allow.
+
+The bug was a year old. It had never fired because **every array this program had
+ever written was the first value in a body**, and a body starts eight-aligned —
+where a four-aligned array and an eight-aligned one land in the same byte.
+`FileManager1` sends `as` first; udisks2's dictionaries are only ever *read*. The
+first array that followed something was this one.
+
+Two things are worth taking from it beyond the fix.
+
+**A round trip is not a check of a wire format.** The existing test was
+`every_value_this_program_writes_reads_back_as_itself`, and it passed throughout:
+the reader had the same wrong alignment as the writer, so the two agreed with each
+other and with nobody else. It is the same shape as the reference a test computes
+itself and the press aimed at its own hit box, three sections above — and the
+answer is the same one: the check has to come from outside. The scenario now reads
+the tree with **`gdbus`**, glib's client, for exactly the reason the clipboard
+scenarios read the selection with `wl-paste`.
+
+**A protocol that only ever sends one shape has only ever tested one shape.** The
+new test writes an array after `siiv` and asserts the byte offset against the
+specification's arithmetic rather than against the reader; the offsets are in the
+test's own doc comment so the next person can check them by hand.

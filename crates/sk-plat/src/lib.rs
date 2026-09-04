@@ -47,7 +47,9 @@ use std::time::Duration;
 use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 
-pub use clipboard::{Clipboard, Content, Intent, Selection, decode_copied_files, decode_uri};
+pub use clipboard::{
+    Clipboard, Content, Intent, Selection, Selections, decode_copied_files, decode_uri,
+};
 pub use drag::{Drag, DragAction};
 pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size, Swipe, TextChange};
 pub use wayland::TextArea;
@@ -297,6 +299,16 @@ impl Window {
     #[must_use]
     pub fn dragging(&self) -> Option<&Drag> {
         forward!(self, dragging)
+    }
+
+    /// What the selection machinery is holding, for a diagnostic report.
+    ///
+    /// Both backends answer, and the numbers mean the same thing on each: a read
+    /// asked for and unanswered, a write parked for room, and an answer that
+    /// matched nothing. See [`Selections`].
+    #[must_use]
+    pub fn selections(&self) -> Selections {
+        forward!(self, selections)
     }
 
     /// Which drag actions this display server can express at all.

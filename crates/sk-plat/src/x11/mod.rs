@@ -632,6 +632,16 @@ impl Window {
         self.xdnd.outgoing()
     }
 
+    /// What the selection machinery is holding. See [`crate::Selections`].
+    #[must_use]
+    pub fn selections(&self) -> crate::Selections {
+        crate::Selections {
+            awaiting: self.selections.awaiting(),
+            sending: self.transfers.len(),
+            unmatched: self.selections.unmatched(),
+        }
+    }
+
     /// Which actions this display server can express.
     ///
     /// All five: XDND is the vocabulary the union was taken from.

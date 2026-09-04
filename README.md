@@ -156,6 +156,13 @@ and fails the build on any upward or sideways edge — see
 Stated here rather than discovered, because a pre-release that hides its gaps wastes
 the first bug report on one of them.
 
+- **Accessibility is new.** A screen reader can walk the window — the
+  application, its frame, the listing and its rows with names, roles, states and
+  extents, the sidebar, the status line, the open field and the open menu — over
+  AT-SPI, and it is told when focus moves. What has *not* happened is a pass with
+  Orca over a real task, which is
+  [ADR 0026](docs/adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md)'s
+  own revisit trigger. Tables, selections and actions are not implemented yet.
 - **No input method or touchpad gestures on X11.** Both work on Wayland;
   `text-input-v3` has no X11 equivalent this program implements, and the capability
   is reported absent rather than pretended.

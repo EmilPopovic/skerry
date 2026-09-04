@@ -1026,6 +1026,25 @@ pub struct App {
     /// gesture. Whichever arrives first does the work; this is how the other one
     /// knows not to do it again.
     dropped: bool,
+    /// The accessibility tree's publisher, where a desktop has an accessibility
+    /// bus. `None` is the common case and costs one method call at startup.
+    a11y: Option<sk_desktop::atspi::Accessibility>,
+    /// Drops whose read was started, whose bytes came back, and which were acted
+    /// on — the three counts in the diagnostic report's `drops`.
+    ///
+    /// **Because the three failures look identical from outside.** A drag in from
+    /// another application that leaves nothing behind is a read that never
+    /// finished, a message that never got drained, or an operation that was
+    /// refused; `1/0/0`, `1/1/0` and `1/1/1` say which, and none of them costs a
+    /// syscall to record.
+    drops_started: u32,
+    drops_delivered: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    drops_drained: u32,
+    /// When the last drop's read began, and how long it took to come back —
+    /// which is what separates a read that is slow from a message that was never
+    /// drained. Both counts can read `1/1/0` for either.
+    drops_asked: Option<Instant>,
+    drops_took: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// The offset within the scrollbar thumb where a drag began.
     thumb_grab: Option<f32>,
     /// The field a press landed in, while the button is still down.
@@ -1099,6 +1118,11 @@ impl App {
         // to hand over and exit without flashing one — so what arrives here is the
         // connection that already owns it, and the service thread answers on it
         // from here until the process ends.
+        // **Accessibility, before the first frame.** The registry asks its
+        // questions the moment `Embed` returns, so the thread has to exist before
+        // there is anything to describe — it answers from an application with a
+        // name and no children until the first frame publishes. ADR 0026.
+        app.a11y = sk_desktop::atspi::Accessibility::start("Skerry");
         if let Some(bus) = bus {
             app.on_the_bus = bus.names().join(" ");
             crate::service::serve(bus, app.replies.asked_tx.clone(), app.waker.handle());
@@ -1332,6 +1356,12 @@ impl App {
             band: None,
             files_drag: None,
             dropped: false,
+            a11y: None,
+            drops_started: 0,
+            drops_delivered: std::sync::Arc::default(),
+            drops_drained: 0,
+            drops_asked: None,
+            drops_took: std::sync::Arc::default(),
             keymap: crate::config::Config::of(""),
             look_pan: None,
             page_drag: false,
@@ -1419,6 +1449,14 @@ impl App {
                 }
                 self.render(&commands, turn);
                 self.dirty = false;
+                // **After the frame, from what the frame recorded.** The tree is
+                // `Hits` and the cell geometry with names on it, so it can only
+                // be built once both exist — and only where an assistive
+                // technology is listening, which is what `Accessibility::start`
+                // answering `None` means. ADR 0026.
+                if let Some(a11y) = self.a11y.as_ref() {
+                    a11y.publish(crate::a11y::tree_of(self));
+                }
             }
             // **After the frame, never before it.** Rendering the file is
             // cheap and comparing it is cheaper, but neither belongs between
@@ -1615,6 +1653,7 @@ impl App {
                 self.said_it_is_busy(took);
             }
             Pasted::Dropped(paths, into) => {
+                self.drops_drained = self.drops_drained.saturating_add(1);
                 // The bytes are in hand, so the drag is over: `wl_data_offer`
                 // wants `finish` *after* the read, and a source told earlier
                 // stops serving before it has served.
@@ -7511,8 +7550,8 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
         let queues = self.queue_state();
-        let drag_in = self.window.dragging().is_some();
-        let drag_out = self.window.dragging_out();
+        let transfers = self.transfer_state();
+        let a11y = self.a11y_report();
         format!(
             "{shape} \
 path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
@@ -7527,7 +7566,8 @@ asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
 for_the_rest={for_the_rest} paused={paused} total={total} total_done={total_done} \
 theme={theme} zoom={zoom} sidebar_open={sidebar_open} {search} \
 filtering={} filter={:?} {drag} \
-drag_in={drag_in} drag_out={drag_out} offered={offered:?} typed={typed:?} \
+{transfers} a11y={a11y} \
+offered={offered:?} typed={typed:?} \
 refused={refused:?} last_key={last_key:?} \
 sizes={known}/{running} jobs={jobs}/{panics}",
             self.panes.focused().path,
@@ -8558,6 +8598,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let Some(fd) = self.window.take_drop("text/uri-list") else { return };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
+        self.drops_started = self.drops_started.saturating_add(1);
+        self.drops_asked = Some(Instant::now());
+        let asked = Instant::now();
+        let took = std::sync::Arc::clone(&self.drops_took);
+        let delivered = std::sync::Arc::clone(&self.drops_delivered);
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
             let mut bytes = Vec::new();
             let mut file = std::fs::File::from(fd);
@@ -8580,10 +8625,209 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             } else {
                 Pasted::Dropped(paths, into)
             };
+            let spent = u32::try_from(asked.elapsed().as_millis()).unwrap_or(u32::MAX);
+            took.store(spent, std::sync::atomic::Ordering::Relaxed);
+            delivered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if sender.send(reply).is_ok() {
                 wake.wake();
             }
         });
+    }
+
+    // ---- What the accessibility tree reads. ----
+    //
+    // **Accessors and not public fields**, because `crate::a11y` is a sibling
+    // module: everything it needs is named here, so the tree cannot reach into
+    // state nobody meant it to have — and the list of names below is the whole
+    // of what a screen reader is told, which is a thing to be able to read in
+    // one place. ADR 0026.
+
+    /// What is in flight between this window and another application.
+    ///
+    /// **Three numbers and a stopwatch, because a drop that leaves nothing
+    /// behind has three possible causes.** `selections` is what the display
+    /// server's machinery holds — a conversion asked for and unanswered, a write
+    /// parked for room, an answer that matched nothing. `drops` is the read this
+    /// program started, the bytes that came back, and the message it acted on,
+    /// with how long the read took and how long ago it began. A `1/1/0` is a
+    /// message delivered and not drained; a `1/0/0` is a read that never came
+    /// back; and the milliseconds tell a slow transfer from a stuck one.
+    fn transfer_state(&self) -> String {
+        let held = self.window.selections();
+        format!(
+            "drag_in={} drag_out={} selections={}/{}/{} drops={}/{}/{}@{}ms-of-{}ms",
+            self.window.dragging().is_some(),
+            self.window.dragging_out(),
+            held.awaiting,
+            held.sending,
+            held.unmatched,
+            self.drops_started,
+            self.drops_delivered.load(std::sync::atomic::Ordering::Relaxed),
+            self.drops_drained,
+            self.drops_took.load(std::sync::atomic::Ordering::Relaxed),
+            self.drops_asked.map_or(0, |at| at.elapsed().as_millis())
+        )
+    }
+
+    /// How many nodes the accessibility tree last published, or `off` where this
+    /// desktop has no accessibility bus.
+    fn a11y_report(&self) -> String {
+        self.a11y.as_ref().map_or_else(|| "off".to_owned(), |it| it.nodes().to_string())
+    }
+
+    /// How many device pixels a logical one is.
+    pub(crate) fn a11y_scale(&self) -> f32 {
+        self.window.scale()
+    }
+
+    /// The window, as a rectangle.
+    pub(crate) fn a11y_window(&self) -> Area {
+        Area { x: 0.0, y: 0.0, width: self.layout.window.width, height: self.layout.window.height }
+    }
+
+    /// The status line's rectangle.
+    pub(crate) fn a11y_status_area(&self) -> Area {
+        self.layout.status
+    }
+
+    /// The focused pane's list body.
+    pub(crate) fn a11y_body(&self) -> Area {
+        self.placement.here.body
+    }
+
+    /// The quick look's panel.
+    pub(crate) fn a11y_look_area(&self) -> Area {
+        crate::view::quick_look_area(&self.layout)
+    }
+
+    /// What the window is called: the folder being shown.
+    pub(crate) fn a11y_title(&self) -> String {
+        crate::panes::title_of(&self.panes.focused().path).to_owned()
+    }
+
+    /// Whether this window has the keyboard.
+    pub(crate) fn a11y_active(&self) -> bool {
+        self.window.state().activated
+    }
+
+    /// The sentence the status line is showing, which is what it counts.
+    pub(crate) fn a11y_status(&self) -> String {
+        let pane = self.panes.focused();
+        let rows = pane.listing.rows();
+        let selected = pane.selection.count();
+        if selected > 0 {
+            sk_model::i18n::plural(
+                "status.counts",
+                rows as u64,
+                &[&sk_ui::format::grouped(rows), &sk_ui::format::grouped(selected)],
+            )
+        } else {
+            sk_model::i18n::plural(
+                "status.counts.none",
+                rows as u64,
+                &[&sk_ui::format::grouped(rows)],
+            )
+        }
+    }
+
+    /// What the listing is called, which is the folder it is of.
+    pub(crate) fn a11y_listing_name(&self) -> String {
+        self.a11y_title()
+    }
+
+    /// Whether the rows are what the keyboard is acting on.
+    ///
+    /// A field, a menu or a palette takes it away, and a row that claimed focus
+    /// while a rename was open would have a screen reader announcing the row a
+    /// person is typing over rather than the name they are typing.
+    pub(crate) fn a11y_list_focused(&self) -> bool {
+        self.menu.is_none()
+            && self.palette.is_none()
+            && self.search.is_none()
+            && self.edits.naming.is_none()
+            && self.typing_path.is_none()
+            && self.quick_look.is_none()
+    }
+
+    /// What a row is, beyond its name: a folder, or a file with a size.
+    pub(crate) fn a11y_row_description(&self, id: sk_model::EntryId) -> String {
+        let pane = self.panes.focused();
+        let flags = pane.listing.flags(id);
+        if flags.has(sk_model::Flags::DIR) {
+            return sk_model::i18n::lookup("kind.folder").to_owned();
+        }
+        sk_ui::format::size(pane.listing.size(id))
+    }
+
+    /// The sidebar's rectangles, which the frame recorded.
+    pub(crate) fn a11y_places(&self) -> &[Area] {
+        &self.hits.places
+    }
+
+    /// What the sidebar's row at `at` is called.
+    pub(crate) fn a11y_place_name(&self, at: usize) -> String {
+        self.sidebar.rows().get(at).map(|row| row.label.clone()).unwrap_or_default()
+    }
+
+    /// The one field being typed into: what it is, its text, and where it is.
+    pub(crate) fn a11y_field(&self) -> Option<(String, &crate::field::Field, Area)> {
+        if let Some(naming) = self.edits.naming.as_ref() {
+            let area = self.hits.name_field?;
+            return Some((sk_model::i18n::lookup("field.name").to_owned(), &naming.field, area));
+        }
+        if let Some(path) = self.typing_path.as_ref() {
+            let area = crate::view::path_field(&self.placement.here, &self.theme.metrics);
+            return Some((sk_model::i18n::lookup("field.path").to_owned(), path, area));
+        }
+        if let Some(palette) = self.palette.as_ref() {
+            let area = self.hits.palette_field?;
+            return Some((
+                sk_model::i18n::lookup("field.palette").to_owned(),
+                &palette.query,
+                area,
+            ));
+        }
+        if let Some(search) = self.search.as_ref() {
+            let area = self.hits.search_field?;
+            return Some((sk_model::i18n::lookup("field.search").to_owned(), &search.query, area));
+        }
+        None
+    }
+
+    /// The open menu's rows: what each says, where it is, and which is on.
+    pub(crate) fn a11y_menu(&self) -> Vec<(String, Area, bool)> {
+        if let Some(menu) = self.menu.as_ref() {
+            return menu
+                .items
+                .iter()
+                .zip(&self.hits.menu)
+                .enumerate()
+                .map(|(at, (item, area))| (item.name.clone(), *area, menu.active == Some(at)))
+                .collect();
+        }
+        if let Some(palette) = self.palette.as_ref() {
+            // The palette draws a window of its results, so the rectangles start
+            // at `scroll` and the names have to start there too — zipping from
+            // zero would name the first result over the rectangle of whichever
+            // one is drawn first.
+            return self
+                .hits
+                .palette
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, area)| {
+                    let at = palette.scroll + offset;
+                    let row = palette.row(at)?;
+                    Some((row.name.clone(), *area, palette.active == at))
+                })
+                .collect();
+        }
+        Vec::new()
+    }
+
+    /// The quick look, for the text it is showing.
+    pub(crate) fn a11y_look(&self) -> Option<&crate::quicklook::QuickLook> {
+        self.quick_look.as_ref()
     }
 
     /// Which pane's row a drag of files would land on, for the highlight.

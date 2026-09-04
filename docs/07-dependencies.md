@@ -83,7 +83,6 @@ default. A machine with neither tool gets `Refusal::NoRenderer` and says so.
 
 | Crate | Why now | Exit |
 | --- | --- | --- |
-| `accesskit` | AT-SPI without becoming an AT-SPI expert. | None expected; the alternative is no accessibility, which is not an option. |
 | `wayland-client`, `wayland-protocols`, `x11rb` | Protocol plumbing and code generation. The *policy* above them — DnD, clipboard, IME, scaling — is ours, which is the point of [ADR 0002](adr/0002-own-platform-layer.md). `wayland-client` is taken with `system` and `dlopen`: the first gives a real `wl_display` pointer for the GPU surface, the second loads `libwayland-client` at run time so an X11-only machine still starts. That second feature is rule 9 as a build decision and it costs three crates — see the table below. | None expected. |
 
 **`zbus` was in this table and was declined when the code arrived.** The exit

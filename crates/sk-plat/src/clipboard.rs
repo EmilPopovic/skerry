@@ -313,6 +313,26 @@ pub(crate) fn send_to(pending: &mut Vec<Transfer>, fd: OwnedFd, bytes: std::sync
     }
 }
 
+/// What the selection machinery is holding, for a diagnostic report.
+///
+/// **Because a read that never lands looks exactly like a drop that never
+/// happened.** A drag in from another application hands a pipe to a job and the
+/// job blocks on it; if the answer is mismatched or never arrives, the only
+/// visible difference is that nothing appears — and the numbers below are what
+/// separate the three ways that can happen without touching the frame loop to
+/// find out.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Selections {
+    /// Conversions asked for and not yet answered. Each holds a pipe's write
+    /// end, and somebody is blocked reading the other one.
+    pub awaiting: usize,
+    /// Writes parked for room in a peer's pipe.
+    pub sending: usize,
+    /// Answers that arrived and matched nothing outstanding, ever. Any value but
+    /// zero is a reply this process threw away.
+    pub unmatched: u32,
+}
+
 /// How many unfinished selection writes to keep at once.
 ///
 /// A peer that asks for the selection and reads it takes microseconds. One that

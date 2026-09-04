@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 137
+FEWEST_SCENARIOS = 138
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -4822,7 +4822,9 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
             said = run.state()
             raise Failure(
                 f"nothing landed in 8s: {held}; "
-                f"drag_in={said['drag_in']} busy={said['busy']} queue={said['queue']} "
+                f"drag_in={said['drag_in']} selections={said['selections']} "
+                f"drops={said['drops']} "
+                f"busy={said['busy']} queue={said['queue']} "
                 f"undo={said['undo']} jobs={said['jobs']} notice={said['notice']!r}; "
                 f"it is there now: {(fixture / carried.name).exists()}"
             )
@@ -5349,6 +5351,146 @@ def place_logical(state: dict[str, str], index: int) -> tuple[float, float]:
 def place_point(run: Run, state: dict[str, str], index: int) -> tuple[float, float]:
     """Where to click the sidebar row at `index`, as the driver's percentages."""
     return aim(run, state, *place_logical(state, index))
+
+
+@scenario("a-screen-reader-can-read-the-window", fresh=True)
+def a_screen_reader_can_read_the_window(run: Run, fixture: Path) -> None:
+    """**The accessibility tree, read by somebody else's D-Bus client.**
+
+    [ADR 0026](../docs/adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md)
+    publishes an AT-SPI tree, and a tree nothing has read is a claim. So: a bus
+    of this scenario's own, `tools/a11y-registry` standing in for
+    `at-spi2-registryd` — an application that cannot `Embed` does not start its
+    thread, and the machine's own registry is the desktop's, which a test may not
+    disturb — and then **`gdbus`** asks the questions.
+
+    `gdbus` and not our own client, for the reason the clipboard scenarios use
+    `wl-paste`: a tree checked with the marshaller that wrote it agrees with
+    itself and with nobody else. This is the only test that has ever read one of
+    this program's D-Bus replies with a foreign implementation, and the first
+    thing it found was an array aligned to eight bytes where the specification
+    says four — a bug a year old that every previous message had hidden by
+    starting at offset zero.
+    """
+    if not shutil.which("dbus-daemon"):
+        raise Skipped("no dbus-daemon on this machine")
+    if not shutil.which("gdbus"):
+        raise Skipped("no gdbus to read the tree with — glib's own client")
+    registry = ROOT / "target" / "release" / "a11y-registry"
+    if not registry.is_file():
+        raise Skipped("tools/a11y-registry is not built")
+
+    home = run.log.parent / "a11y"
+    home.mkdir(parents=True, exist_ok=True)
+    bus = PrivateBus(home)
+    started = subprocess.Popen(
+        [str(registry), "--address", bus.address, "--for", "120"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert started.stdout is not None
+        if started.stdout.readline().strip() != "registry ready":
+            raise Failure("the stand-in registry did not take its name")
+
+        place = {
+            "AT_SPI_BUS_ADDRESS": bus.address,
+            "DBUS_SESSION_BUS_ADDRESS": bus.address,
+            "XDG_STATE_HOME": str(home / "state"),
+            "XDG_CONFIG_HOME": str(home / "config"),
+        }
+        window = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+        try:
+            window.drive("sleep 900\nkey f12\nsleep 200\n")
+            said = window.state()
+            if said["a11y"] == "off":
+                raise Failure("the window found no accessibility bus to publish on")
+            if int(said["a11y"]) < 4:
+                raise Failure(f"the tree has {said['a11y']} nodes, which is not a window")
+
+            # Which connection the window is: the registry printed it when the
+            # window embedded itself, which is the registration under test.
+            embedded = started.stdout.readline().split()
+            if len(embedded) != 3 or embedded[0] != "embedded":
+                raise Failure(f"the window never registered: {embedded!r}")
+            peer = embedded[1]
+
+            def ask(path: str, method: str, *arguments: str) -> str:
+                answer = subprocess.run(
+                    ["gdbus", "call", "--address", bus.address, "--dest", peer,
+                     "--object-path", path, "--method", method, *arguments],
+                    capture_output=True, text=True, timeout=20,
+                )
+                if answer.returncode != 0:
+                    raise Failure(f"{method} on {path}: {answer.stderr.strip()}")
+                return answer.stdout.strip()
+
+            root = "/org/a11y/atspi/accessible/root"
+            name = ask(root, "org.freedesktop.DBus.Properties.Get",
+                       "org.a11y.atspi.Accessible", "Name")
+            if "Skerry" not in name:
+                raise Failure(f"the application is called {name}")
+            if "application" not in ask(root, "org.a11y.atspi.Accessible.GetRoleName"):
+                raise Failure("the root is not an application")
+
+            # Down to a row, by walking rather than by guessing a path: what is
+            # under test is that the tree *joins up*, which a fixed path would
+            # not notice losing.
+            frame = paths_in(ask(root, "org.a11y.atspi.Accessible.GetChildren"))
+            if len(frame) != 1:
+                raise Failure(f"the application has {len(frame)} children, wanted one frame")
+            inside = paths_in(ask(frame[0], "org.a11y.atspi.Accessible.GetChildren"))
+            rows: list[str] = []
+            for child in inside:
+                if "list" == ask(child, "org.a11y.atspi.Accessible.GetRoleName").strip("(),' "):
+                    found = paths_in(ask(child, "org.a11y.atspi.Accessible.GetChildren"))
+                    if any("file-1.txt" in ask(it, "org.freedesktop.DBus.Properties.Get",
+                                               "org.a11y.atspi.Accessible", "Name")
+                           for it in found):
+                        rows = found
+                        break
+            if not rows:
+                raise Failure("no list in the window holds the fixture's rows")
+
+            named = [ask(it, "org.freedesktop.DBus.Properties.Get",
+                         "org.a11y.atspi.Accessible", "Name") for it in rows]
+            if not any("file-1.txt" in it for it in named):
+                raise Failure(f"the rows are {named}")
+            for row in rows:
+                if "list item" not in ask(row, "org.a11y.atspi.Accessible.GetRoleName"):
+                    raise Failure(f"{row} is not a list item")
+                extents = ask(row, "org.a11y.atspi.Component.GetExtents", "0")
+                numbers = [int(it) for it in re.findall(r"-?\d+", extents)]
+                if len(numbers) != 4 or numbers[2] <= 0 or numbers[3] <= 0:
+                    raise Failure(f"{row} has no extents: {extents}")
+
+            # **And the tree follows the keyboard.** A row that is announced once
+            # and never again is a tree; being told is what makes it usable.
+            before = focused_row(ask, rows)
+            window.drive("key down\nsleep 400\n")
+            after = focused_row(ask, rows)
+            if before == after:
+                raise Failure(f"the focused row is still {after} after Down")
+        finally:
+            window.close()
+    finally:
+        started.terminate()
+        bus.stop()
+
+
+def paths_in(answer: str) -> list[str]:
+    """Every object path in a `gdbus` answer, in the order it printed them."""
+    return re.findall(r"'(/org/a11y/atspi/accessible/[^']+)'", answer)
+
+
+def focused_row(ask, rows: list[str]) -> str | None:
+    """Which of `rows` reports the `focused` state bit — position 12."""
+    for row in rows:
+        state = ask(row, "org.a11y.atspi.Accessible.GetState")
+        low = re.search(r"uint32 (\d+)", state)
+        if low and int(low.group(1)) & (1 << 12):
+            return row
+    return None
 
 
 def own_config(run: Run, label: str) -> dict:
@@ -8738,7 +8880,16 @@ def main(argv: list[str]) -> int:
                     home = work / f"bus-{name}"
                     home.mkdir(parents=True, exist_ok=True)
                     bus = PrivateBus(home)
-                    environment = {**(environment or {}), "DBUS_SESSION_BUS_ADDRESS": bus.address}
+                    # **And the accessibility bus is the same one.** A real
+                    # desktop has two daemons and the window finds the second
+                    # through the first; a scenario has one, and the window takes
+                    # `AT_SPI_BUS_ADDRESS` over asking — which is the variable
+                    # at-spi itself defines for exactly this. ADR 0026.
+                    environment = {
+                        **(environment or {}),
+                        "DBUS_SESSION_BUS_ADDRESS": bus.address,
+                        "AT_SPI_BUS_ADDRESS": bus.address,
+                    }
                 with a_budget(min(SCENARIO_BUDGET, left)):
                     run = Run(display, work, path, [], instance, environment)
                     function(run, path)
