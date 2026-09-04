@@ -281,6 +281,15 @@ pub struct Hits {
     pub pick_up: Option<Area>,
     /// The palette's query field, so a click into it can place the caret.
     pub palette_field: Option<Area>,
+    /// The name field's box, while a rename or a new folder is being typed.
+    ///
+    /// **Recorded by the frame that drew it**, because only the frame knows where
+    /// the row ended up: a heading above it, a grid cell, a scroll. A press used
+    /// to be tested against `name_field(layout, metrics, row, offset)` instead —
+    /// `body.y + row * row_height`, which agrees with the drawn box in an
+    /// ungrouped details list and nowhere else, so a double click on a grouped
+    /// list's name committed the rename and opened the file behind it.
+    pub name_field: Option<Area>,
     /// The two buttons of the delete-for-good question, while it is up.
     pub erase_cancel: Option<Area>,
     pub erase_delete: Option<Area>,
@@ -362,13 +371,17 @@ pub fn draw(
     // click has to find a crumb in whichever bar it landed in.
     hits.crumbs.clear();
     hits.separators.clear();
+    // Cleared for the same reason the look's controls are: a rectangle that
+    // outlived the field would be a box the pointer could still find with a
+    // committed rename behind it.
+    hits.name_field = None;
     for leaf in chrome.leaves {
         let Some(tabs) = panes.leaf(leaf.id) else { continue };
         let has_keyboard = leaf.id == focus;
         tab_strip(painter, tabs, leaf, chrome, has_keyboard);
         nav_bar(painter, tabs.showing(), leaf, chrome, hits, has_keyboard);
         header(painter, tabs.showing(), leaf);
-        body(painter, tabs.showing(), leaf, now, chrome, has_keyboard);
+        body(painter, tabs.showing(), leaf, now, chrome, has_keyboard, hits);
     }
     // **Over the pane, and after every pane is drawn.** A drop that lands in the
     // directory a pane is showing has no row to point at, so what is marked is
@@ -2663,17 +2676,17 @@ const FIND_MARGIN: f32 = 10.0;
 /// The name being typed, drawn over the row it belongs to.
 fn name_field_at(
     painter: &mut Painter<'_>,
-    layout: &PaneLayout,
+    area: Area,
     naming: &Naming,
-    top: f32,
     baseline: f32,
+    hits: &mut Hits,
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
-    // `name_field` derives the row's top from an index and a scroll offset; here
-    // the top is already in hand, so the one rectangle is taken from it and only
-    // its `y` replaced. Both callers still read the same width and inset.
-    let area = Area { y: top + 2.0, ..name_field(layout, &metrics, naming.row, 0.0) };
+    // **The box a press is tested against is this one.** See `Hits::name_field`.
+    // The caller decides it, because the three views put a row in three different
+    // places — and this is the only place it is written down.
+    hits.name_field = Some(area);
     let box_rect = painter.rect(area.x, area.y, area.width, area.height);
     painter.list.rect(box_rect, theme.palette.background, painter.px(metrics.radius));
     painter.list.stroke(
@@ -2685,6 +2698,20 @@ fn name_field_at(
 
     let style = TextStyle::new(metrics.text_size, theme.palette.text);
     field_text(painter, area, (&naming.field).into(), style, NAME_INSET, baseline);
+}
+
+/// The name field's box inside a column view's column.
+///
+/// **Not [`name_field`]'s.** That box spans the details list's name column and
+/// half of its size column, and a column view has neither — so the field belongs
+/// inside the column the row was drawn in, which is the rectangle it is given.
+fn name_field_in(cell: Area, metrics: &sk_ui::Metrics) -> Area {
+    Area {
+        x: cell.x + metrics.gutter * 0.5,
+        y: cell.y + 2.0,
+        width: (cell.width - metrics.gutter).max(1.0),
+        height: metrics.row_height - 4.0,
+    }
 }
 
 /// The text and the caret inside a field's box.
@@ -2825,8 +2852,7 @@ pub const NAME_INSET: f32 = 6.0;
 /// rectangles computed separately are two rectangles that agree until one of
 /// them is edited.
 #[must_use]
-pub fn name_field(layout: &PaneLayout, metrics: &sk_ui::Metrics, row: usize, offset: f32) -> Area {
-    let top = layout.body.y + row as f32 * metrics.row_height - offset;
+pub fn name_field(layout: &PaneLayout, metrics: &sk_ui::Metrics, top: f32) -> Area {
     Area {
         x: layout.name.x - 4.0,
         y: top + 2.0,
@@ -3930,6 +3956,7 @@ fn body(
     now: i64,
     chrome: &Chrome<'_>,
     has_keyboard: bool,
+    hits: &mut Hits,
 ) {
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -3965,8 +3992,8 @@ fn body(
             drop_row: chrome.drop_row.filter(|(id, _)| *id == layout.id).map(|(_, row)| row),
         };
         match pane.mode {
-            Mode::Details => row_at(painter, pane, layout, now, row, context),
-            Mode::Grid => cell_at(painter, pane, layout, &cells, row, context),
+            Mode::Details => row_at(painter, pane, layout, now, row, context, hits),
+            Mode::Grid => cell_at(painter, pane, layout, &cells, row, context, hits),
             Mode::Columns => {
                 let area = table_of(layout, pane);
                 let top = cells.at(row, pane.scroll.offset()).y;
@@ -3979,6 +4006,14 @@ fn body(
                 };
                 let cell = Area { y: top, height: metrics.row_height, ..area };
                 column_row(painter, &pane.listing, id, layout, cell, state, chrome.types);
+                // **The field, after the row it replaces.** A column view had
+                // none: `F2` opened a rename that drew nothing, so the name was
+                // typed blind — and a press had no box to land in, which is the
+                // other half of the defect this records in `Hits::name_field`.
+                if let Some(naming) = context.naming.filter(|naming| naming.row == row) {
+                    let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
+                    name_field_at(painter, name_field_in(cell, &metrics), naming, baseline, hits);
+                }
             }
         }
         // **The check box, in one place for all three modes.** It is drawn after
@@ -4144,6 +4179,7 @@ fn cell_at(
     cells: &crate::groups::Bands,
     row: usize,
     context: RowContext<'_>,
+    hits: &mut Hits,
 ) {
     let RowContext { types, naming, drop_row } = context;
     let theme = *painter.theme;
@@ -4182,7 +4218,7 @@ fn cell_at(
     let label = grid_label(box_, &metrics);
     let baseline = painter.baseline(label.y, label.height, metrics.text_size);
     if let Some(naming) = naming.filter(|naming| naming.row == row) {
-        name_field_at(painter, layout, naming, label.y, baseline);
+        name_field_at(painter, name_field(layout, &metrics, label.y), naming, baseline, hits);
         return;
     }
     let name_box = painter.rect(label.x, 0.0, label.width, 0.0);
@@ -4313,6 +4349,7 @@ fn row_at(
     now: i64,
     row: usize,
     context: RowContext<'_>,
+    hits: &mut Hits,
 ) {
     let RowContext { types, naming, drop_row } = context;
     let theme = *painter.theme;
@@ -4385,7 +4422,7 @@ fn row_at(
             // describe the file this row *was*, and a size beside a name being
             // changed is a fact about something that is about to stop existing
             // under that name.
-            name_field_at(painter, layout, naming, top, baseline);
+            name_field_at(painter, name_field(layout, &metrics, top), naming, baseline, hits);
             return;
         }
         let name_box = painter.rect(layout.name.x, 0.0, layout.name.width - 10.0, 0.0);

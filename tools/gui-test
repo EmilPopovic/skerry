@@ -1310,7 +1310,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 136
+FEWEST_SCENARIOS = 137
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -7168,6 +7168,82 @@ def rename_keeps_the_extension(run: Run, fixture: Path) -> None:
         raise Failure("the renamed file is not on disk")
     if (fixture / "file-1.txt").exists():
         raise Failure("the original is still there")
+
+
+@scenario("a-double-click-in-the-rename-field-takes-a-word", fresh=True)
+def double_click_in_the_rename_field(run: Run, fixture: Path) -> None:
+    """**The reported defect: a double click during a rename opened the file.**
+
+    A press was tested against a rectangle derived from `body.y + row *
+    row_height`, while the frame *draws* the field at the top of the cell
+    [`groups::Bands`] hands out — and in the column view drew no field at all. The two agree in an ungrouped details list at
+    scroll zero and nowhere else — so with one heading above the row the press
+    landed outside the box, the rename committed, and the press fell through to
+    the row, where a second click is Open.
+
+    The path field's scenario said it "stands in for every field: the rename field
+    is the same `Field`". The `Field` was never the problem. **The rectangle is
+    not shared, and the rectangle is what a press is tested against** — so this
+    aims at the box the window itself reports, and clicks in all three modes that
+    compute the row's top differently.
+    """
+    def rename_and_click(what: str, gesture: str) -> dict[str, str]:
+        # Escape first, so a second call is a fresh rename rather than more text
+        # typed into the field the previous one left open.
+        run.drive("key escape\nsleep 250\n")
+        run.drive(f"text {what}\nsleep 400\nkey f2\nsleep 300\nkey f12\nsleep 150\n")
+        opened = run.state()
+        if opened["naming"] != what:
+            raise Failure(f"F2 opened {opened['naming']!r} rather than {what!r}")
+        if not opened["name_field"]:
+            raise Failure("the window reported no name field while one was open")
+        left, top, width, height = (float(v) for v in opened["name_field"].split(","))
+        # Six pixels in, which is inside the inset and therefore at offset zero
+        # whatever the font measures — the first word, or the whole line.
+        at = aim(run, opened, left + 6.0, top + height / 2.0)
+        run.drive(
+            f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\n{gesture}\nsleep 400\nkey f12\nsleep 150\n"
+        )
+        after = run.state()
+        # **The rename is still open**, which is the whole defect: a press that
+        # missed the box committed the name and then landed on the row.
+        if after["naming"] != what:
+            raise Failure(
+                f"a {gesture} in the name field left naming={after['naming']!r} — the press "
+                f"fell outside the box the frame drew and landed on the row behind it"
+            )
+        return after
+
+    run.drive("sleep 700\nkey f12\nsleep 150\n")
+    took = rename_and_click("file-1.txt", "double")
+    if took["naming_selected"] != "file":
+        raise Failure(f"a double click on the name selected {took['naming_selected']!r}")
+    whole = rename_and_click("file-1.txt", "triple")
+    if whole["naming_selected"] != "file-1.txt":
+        raise Failure(f"a triple click selected {whole['naming_selected']!r} of the name")
+    run.drive("key escape\nsleep 250\n")
+
+    # **Then the two modes whose rows are not `row * row_height`.** A grouped
+    # list puts a heading above the first row, and a grid puts the field inside a
+    # cell — each is a different top, and each used to be the same wrong one.
+    run.drive("key ctrl+7\nsleep 500\nkey f12\nsleep 150\n")
+    if run.state()["bands"] == "0":
+        raise Failure("Ctrl+7 grouped nothing, so this half tests nothing")
+    rename_and_click("file-2.txt", "double")
+    run.drive("key escape\nsleep 250\nkey ctrl+6\nsleep 400\n")
+
+    run.drive("key ctrl+2\nsleep 500\nkey f12\nsleep 150\n")
+    expect(run.state(), mode="grid")
+    rename_and_click("file-3.txt", "double")
+    run.drive("key escape\nsleep 250\nkey ctrl+1\nsleep 400\n")
+
+    # **And the column view, which drew no field at all.** `F2` there opened a
+    # rename that showed nothing: the name was typed blind and a press had no box
+    # to land in, so it committed and fell through like every other miss.
+    run.drive("key ctrl+3\nsleep 500\nkey f12\nsleep 150\n")
+    expect(run.state(), mode="columns")
+    rename_and_click("file-4.txt", "double")
+    run.drive("key escape\nsleep 250\nkey ctrl+1\nsleep 400\n")
 
 
 @scenario("a-field-selects-text-and-ctrl-a-does-not-select-files", fresh=True)

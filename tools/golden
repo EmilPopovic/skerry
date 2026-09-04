@@ -211,6 +211,14 @@ FRAMES = [
     # it belongs to.
     ("no-listing-columns", ["--size", "1100x520", "--scale", "100", "--columns",
                             "--at", "documents/not-here"]),
+    # **A rename in the column view**, which drew no field there at all until the
+    # box a press is tested against became the box the frame draws: `F2` opened a
+    # rename that showed nothing, so the name was typed blind. Its box is the
+    # column's own and not the details list's name column — the two have nothing
+    # to do with each other, and drawing one inside the other would put the field
+    # across three ancestors.
+    ("rename-columns", ["--size", "1100x520", "--scale", "100", "--columns",
+                        "--at", "documents/deeper", "--rename"]),
     # **A check box that is ticked.** `pose` hovers row seven and selects rows two
     # to four, so the box under the pointer is empty in all thirty-three frames that
     # draw one and the ticked state was in none of them — which is a premise nobody

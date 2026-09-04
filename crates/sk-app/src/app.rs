@@ -2192,16 +2192,19 @@ impl App {
 
     /// Where the name field is, so a press inside it is not a press outside it.
     ///
-    /// The same rectangle `view::name_field` draws, from the same numbers — the
-    /// alternative is two rectangles that agree until one of them is edited.
+    /// **The rectangle the last frame drew**, recorded in
+    /// [`crate::view::Hits::name_field`] — which is how the palette's field and
+    /// the search's already answer this question.
+    ///
+    /// It used to be recomputed here as `body.y + row * row_height`, and that is
+    /// the drawn box only in an ungrouped details list at scroll zero. A heading
+    /// above the row, a grid cell or a scroll moved the field and the press went
+    /// on testing the arithmetic: the press missed, the rename committed, and it
+    /// fell through to the row — where a second click is Open. The doc comment
+    /// this replaces said the alternative was "two rectangles that agree until
+    /// one of them is edited", and then one of them was.
     fn naming_field(&self) -> Area {
-        let Some(naming) = self.edits.naming.as_ref() else { return Area::default() };
-        crate::view::name_field(
-            &self.placement.here,
-            &self.theme.metrics,
-            naming.row,
-            self.panes.focused().scroll.offset(),
-        )
+        self.hits.name_field.filter(|_| self.edits.naming.is_some()).unwrap_or_default()
     }
 
     /// Puts the caret where a click inside the name field landed.
@@ -2211,13 +2214,7 @@ impl App {
     /// starts six logical pixels inside the box, which is where
     /// `view::name_field_at` draws it — the one number the two share.
     fn place_caret(&mut self, x: f32) -> Option<usize> {
-        let row = self.edits.naming.as_ref().map(|naming| naming.row)?;
-        let area = crate::view::name_field(
-            &self.placement.here,
-            &self.theme.metrics,
-            row,
-            self.panes.focused().scroll.offset(),
-        );
+        let area = self.hits.name_field.filter(|_| self.edits.naming.is_some())?;
         let size = self.theme.metrics.text_size;
         self.place_caret_in(Claim::Naming, area, size, crate::view::NAME_INSET, x)
     }
@@ -2447,13 +2444,10 @@ impl App {
     fn drag_text(&mut self, which: Claim, x: f32) {
         let (area, size, inset) = match which {
             Claim::Naming => {
-                let Some(row) = self.edits.naming.as_ref().map(|naming| naming.row) else { return };
-                let area = crate::view::name_field(
-                    &self.placement.here,
-                    &self.theme.metrics,
-                    row,
-                    self.panes.focused().scroll.offset(),
-                );
+                let Some(area) = self.hits.name_field.filter(|_| self.edits.naming.is_some())
+                else {
+                    return;
+                };
                 (area, self.theme.metrics.text_size, crate::view::NAME_INSET)
             }
             Claim::Path => (
@@ -7958,6 +7952,18 @@ aside_grabbed={}",
         let box_of = crate::view::path_field(&self.placement.here, &self.theme.metrics);
         let path_field =
             format!("{:.1},{:.1},{:.1},{:.1}", box_of.x, box_of.y, box_of.width, box_of.height);
+        // And the name field's, when one is open — the box the *frame drew*, which
+        // is now also the box a press is tested against. Reporting the hit test's
+        // own arithmetic instead would give a scenario a rectangle that agrees
+        // with the bug: it clicked where the window believed the field was, which
+        // is exactly what was wrong.
+        // `""` and not the empty string, because the harness reads this line with
+        // a regular expression that needs either quotes or a character: a bare
+        // `name_field=` is a key that vanishes rather than a key with no value.
+        let name_field = self.hits.name_field.map_or_else(
+            || "\"\"".to_owned(),
+            |it| format!("{:.1},{:.1},{:.1},{:.1}", it.x, it.y, it.width, it.height),
+        );
         // What an input method is composing, if anything. The field it is in is
         // whichever has the keyboard, so one value answers for all three.
         let composing = self.field_preedit().map(|(text, _)| text.clone()).unwrap_or_default();
@@ -7988,7 +7994,7 @@ crumb_menu_aim={crumb_menu_aim:?} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
 composing={composing:?} pointer={cursor_shape} \
 {places_report} \
-path_field={path_field} \
+path_field={path_field} name_field={name_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
 frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.placement.here.body.y,

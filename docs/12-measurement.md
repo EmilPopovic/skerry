@@ -2674,9 +2674,69 @@ back. A gate that names p99 and computes a maximum will fail on the machine's
 worst day and pass on a reviewer's, which is indistinguishable from flakiness
 until somebody prints the sample count.
 
+**And then the message it now prints said it in one line.** With the sample count
+in the failure, the next sweep — on Wayland, where this gate had passed twice that
+day — reported `a frame took 8889us over a hung mount, of 11 drawn`. Eleven
+frames, and 11% over the bar. Run alone on Wayland it then failed three times out
+of three on the *unmodified* build as well:
+
+```
+13265us of 10 drawn      9298us of 11 drawn
+10199us of 11 drawn     10311us of 11 drawn
+                         9772us of 10 drawn
+```
+
+Left column this working tree, right column `HEAD` — so the gate is a coin flip
+on a nested compositor sharing a GPU with the session running it, and the two
+passing sweeps earlier the same day were the luck, not the baseline. On Xvfb the
+same window's worst frame is 2.9 ms.
+
 Left as it is, deliberately: the fix is either to wait for the window to fill or
 to assert `Frames::worst` with a stated startup allowance, and both change what
 rule 1's canonical gate promises. That is a decision to take on its own, not a
 side effect of a change about double clicks — and the failure now prints how many
 frames it had, so the next person reads the sample count in the message rather
 than discovering it in an afternoon.
+
+## A test that aims at the hit box agrees with the bug
+
+The reported defect: a double click during a rename opened the file. The cause is
+worth two sentences. A press was tested against a rectangle recomputed as
+`body.y + row * row_height`, while the frame *drew* the field at the top of the
+cell [`groups::Bands`](../crates/sk-app/src/groups.rs) hands out — the same
+number only in an ungrouped details list at scroll zero. One band heading above
+the row and the press missed the box, so the rename committed and the press fell
+through to the row, where a second click is Open. The column view was worse: it
+drew no field at all, so `F2` there was a rename typed blind.
+
+The interesting part is the scenario I wrote to catch it, which **passed against
+the broken build**.
+
+It aimed at the box the window reported, and the box the window reported was
+`naming_field()` — the hit test's own arithmetic. So the click landed exactly
+where the window believed the field was, the press was taken, and the assertion
+was satisfied. The test agreed with the defect because it asked the defect for
+its coordinates. It is the same shape as the reference a test computes itself,
+several sections above, and it took a second look to see it: the run was green,
+the feature was broken, and nothing in the output said so.
+
+What made it a real test was reporting the rectangle **the draw recorded** —
+`Hits::name_field`, set inside `name_field_at` — and then aiming at that. Against
+the old hit test the scenario fails on the grouped half with `naming=''`, which is
+the user's symptom in one field of the state dump.
+
+The rule this leaves behind, and it is mechanical:
+
+- **A press must be tested against a rectangle the draw recorded, not one the
+  press recomputes.** `Hits` already held `palette_field` and `search_field` for
+  exactly this reason; the name field was the one that did its own arithmetic,
+  and its doc comment claimed the opposite — *"the same rectangle
+  `view::name_field` draws, from the same numbers"* — which had been true when it
+  was written and stopped being true when the draw moved to the cell geometry.
+- **A scenario that needs a coordinate must get it from the drawing side.** If
+  the only source is the code under test, ask what the *frame* put there, not
+  what the handler thinks is there. When both come from one rectangle the
+  question stops existing, which is the fix rather than the workaround.
+
+The golden frame beside it is `rename-columns`, because the column view's field
+had no picture and a rectangle with no picture is how this started.
