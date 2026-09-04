@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The command registry and keymap resolution.
 //!
 //! Does not own: any command's implementation.

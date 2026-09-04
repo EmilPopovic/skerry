@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! D-Bus's type system, as much of it as this program sends and receives.
 //!
 //! **Four rules and six types.** Everything in a D-Bus body is aligned to its own

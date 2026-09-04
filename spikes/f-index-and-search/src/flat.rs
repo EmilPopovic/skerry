@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The flattened view: one arena of names, one parallel array of metadata.
 //!
 //! This is [04-architecture.md](../../../docs/04-architecture.md#data-layout)'s

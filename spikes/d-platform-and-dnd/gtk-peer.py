@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """A GTK clipboard peer, used the way Nautilus is used: as somebody else's
 implementation to test against.
 

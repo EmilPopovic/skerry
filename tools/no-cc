@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT OR Apache-2.0
 # "C toolchain required for `skerry`: no" — the gate behind that row of
 # docs/07-dependencies.md, and question 6 of the six every dependency answers.
 #

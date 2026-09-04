@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Shaping, the fallback chain and the layout cache — the `sk-text` half of
 //! ADR 0004, at spike fidelity.
 //!

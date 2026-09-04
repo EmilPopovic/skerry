@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Spike B's winning arm, carried over: directories are jobs, `statx` goes
 //! through the directory's own file descriptor, and each job builds its own
 //! chunk so the store's locked region is a `Vec::push`.

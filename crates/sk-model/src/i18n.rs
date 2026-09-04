@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Every user-visible string, resolved by key from an embedded catalogue.
 //!
 //! A hundred lines instead of a localization framework, for the reason

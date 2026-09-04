@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `EntryId`, the columnar listing every view reads, selection, sort order, the
 //! string catalogue, and the problem type that carries a message a human can act
 //! on.

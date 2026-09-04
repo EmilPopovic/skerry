@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Which application opens a type.
 //!
 //! Three sources, in the order the association specification gives them: the

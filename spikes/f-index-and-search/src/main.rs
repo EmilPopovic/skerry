@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Spike F — the index, flattened search, and the shapes that break a walk.
 //! The question, the bar and the method are in README.md next to this file.
 

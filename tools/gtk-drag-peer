@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """A GTK drag-and-drop peer, for testing interop against somebody else's toolkit.
 
 **A separate process on purpose.** GTK is a banned dependency (rule 9) and stays
@@ -76,6 +77,15 @@ def source_window(uris: list[str]) -> Gtk.Window:
     def provide(_widget, _context, data, _info, _time):
         say("asked for", data.get_target().name())
         data.set_uris(uris)
+        # **One more turn of the loop, to push the answer out.** GTK queues the
+        # `SelectionNotify` while this handler runs and GDK writes it when the
+        # main loop next comes round — and with no window manager and no further
+        # input, there is no next time. Measured: about one drag in eight left
+        # the reply unwritten, with `ss -x` showing zero bytes queued on either
+        # side and the window correctly asleep waiting for something nobody had
+        # sent. An idle source is a guaranteed iteration, and the flush in it is
+        # what actually reaches the wire. See docs/12-measurement.md.
+        GLib.idle_add(lambda: Gdk.Display.get_default().flush() or False)
 
     button.connect("drag-data-get", provide)
     button.connect("drag-begin", lambda *_: say("drag begun"))

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Headings, and the entries laid out under them.
 //!
 //! **This is [ADR

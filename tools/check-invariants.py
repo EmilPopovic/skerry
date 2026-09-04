@@ -282,6 +282,31 @@ def adr_immutability_check(report: Report) -> None:
             report.fail(path, "ADRs are immutable — supersede it with a new ADR instead")
 
 
+# The one line every source file carries, and what a comment looks like in each
+# kind of file. `Cargo.toml` says `MIT OR Apache-2.0` and the two texts are in
+# the repository root; this is the third place that has to agree with them, and
+# the only one a machine can check per file.
+SPDX = "SPDX-License-Identifier: MIT OR Apache-2.0"
+
+
+def spdx_check(report: Report) -> None:
+    """Every source file names its licence, in its own comment syntax.
+
+    **Per file, not per repository.** A file copied out of this tree — into a bug
+    report, a patch, another project — carries its licence with it only if the
+    line is in the file. That is what SPDX headers are for, and a repository that
+    has two licence texts at its root and nothing in its sources has told nobody
+    anything about the file they are actually reading.
+    """
+    for source in rust_sources("crates", "bin", "tools", "spikes"):
+        if SPDX not in source.read_text():
+            report.fail(rel(source), "no SPDX-License-Identifier line")
+    for pattern in ("tools/*.py", "tools/check", "tools/gui-test", "tools/*/*.py"):
+        for script in sorted(ROOT.glob(pattern)):
+            if script.is_file() and SPDX not in script.read_text():
+                report.fail(rel(script), "no SPDX-License-Identifier line")
+
+
 def run() -> int:
     report = Report("invariants")
     banned_crate_check(report)
@@ -291,11 +316,12 @@ def run() -> int:
     spliced_comment_check(report)
     catalogue_check(report)
     adr_immutability_check(report)
+    spdx_check(report)
     if not report.failures:
         report.note(
             "banned crates, capability flags, crate lints, GPU and backend seams, log "
             "prefixes, doc comments, "
-            "catalogue keys, ADR immutability"
+            "catalogue keys, ADR immutability, SPDX headers"
         )
     return report.finish()
 

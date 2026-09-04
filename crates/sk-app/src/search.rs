@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Searching everything under the folder you are in, or everything there is.
 //!
 //! **Not the find popup.** `Ctrl+F` narrows the listing that is already on

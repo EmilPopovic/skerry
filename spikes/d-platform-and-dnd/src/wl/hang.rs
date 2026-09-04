@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A peer that offers data and never delivers it, so that rule 1's clipboard case
 //! can be measured rather than argued.
 //!

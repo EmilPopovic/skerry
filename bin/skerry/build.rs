@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Stamps the commit into the binary, so `--version` can name the build.
 //!
 //! **Not a dependency and not a network call.** `git rev-parse` if there is a

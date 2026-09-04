@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The sink every arm writes into, so the arms are compared on producing the
 //! same thing rather than on doing different amounts of work.
 //!

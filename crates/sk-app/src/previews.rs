@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What a file can be shown as, and what its thumbnail is called.
 //!
 //! **Kind detection lives here and not in `sk-preview`.** Both are level 2, so the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The X11 keyboard: a keymap from the server's own RMLVO names.
 //!
 //! **Not `libxkbcommon-x11`.** The textbook route is

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The pane tree: splits, and the tabs inside each leaf.
 //!
 //! [ADR 0010](../../../docs/adr/0010-a-split-tree-of-tab-strips.md) decides the

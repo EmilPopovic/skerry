@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What a frame is: a list of quads, grouped by clip region.
 //!
 //! `sk-ui` fills this and `sk-gpu` submits it. Nothing in here knows what a row

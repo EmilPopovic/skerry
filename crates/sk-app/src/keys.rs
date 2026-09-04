@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What a bare keystroke means when no command claims it.
 //!
 //! The bindings themselves moved to `crate::commands` and `sk-cmd` when the

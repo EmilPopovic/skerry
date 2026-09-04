@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! X11 checks. Everything here also passes through Xwayland and the compositor's
 //! X11 window manager, so a failure has three possible owners and each check says
 //! which one it can rule out.

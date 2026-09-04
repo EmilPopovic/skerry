@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A filesystem that fails on purpose, at an exact offset.
 //!
 //! The bar says `ENOSPC` handled cleanly mid-copy with no partial file left

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Establishing and holding inotify watches.
 //!
 //! The interesting property is not latency, it is arithmetic: `max_user_watches`

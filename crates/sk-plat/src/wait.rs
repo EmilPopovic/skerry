@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! How long the frame loop is allowed to sleep.
 //!
 //! Both backends block in one `poll` and neither has a timer. A timeout exists

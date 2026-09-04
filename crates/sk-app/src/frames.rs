@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A ring buffer of recent frame times.
 //!
 //! [docs/04-architecture.md](../../../docs/04-architecture.md#observability)

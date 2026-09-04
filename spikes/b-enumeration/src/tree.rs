@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Generates the tree the spike walks.
 //!
 //! Seeded, so the workload is the same between runs and between machines. The

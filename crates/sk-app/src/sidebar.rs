@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The list of places down the left, and where each row of it is.
 //!
 //! Three sections, in the order Windows and every Linux file manager put them:

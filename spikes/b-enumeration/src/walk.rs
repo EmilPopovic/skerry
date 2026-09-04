@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The four arms.
 //!
 //! All four produce the same columnar store from the same tree, so the

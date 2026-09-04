@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! One directory's worth of entries, stored as parallel arrays.
 //!
 //! A directory entry is not a struct in a `Vec`. This layout is what makes

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What order a listing is in.
 
 /// Which column the order is derived from.

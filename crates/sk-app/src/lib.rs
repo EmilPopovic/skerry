@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The pane, the views, and the frame loop.
 //!
 //! Does not own: anything reusable.

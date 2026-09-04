@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A dense bitset.
 //!
 //! Selection is a bitset rather than a `HashSet<EntryId>` because the operations

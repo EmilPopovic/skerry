@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What a screen reader is told about: nodes, roles, states, and the text in
 //! them.
 //!

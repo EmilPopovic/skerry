@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The colour somebody gave a folder.
 //!
 //! **A choice about one folder, and only that one.** The per-folder view records

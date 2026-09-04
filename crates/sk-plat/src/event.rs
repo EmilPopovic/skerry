@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What the platform layer reports upward, in logical pixels.
 //!
 //! Every position here is logical and fractional. The renderer multiplies by the

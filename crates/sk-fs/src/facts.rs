@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Everything `statx` knows about one path, for the Properties panel.
 //!
 //! Separate from [`crate::scan`], which reads a directory's worth of entries and

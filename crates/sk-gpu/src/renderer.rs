@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The device, the target, and the one draw call per clip region.
 
 use sk_model::{Problem, ProblemKind};

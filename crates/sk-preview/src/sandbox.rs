@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What a preview child does to itself before it reads a byte.
 //!
 //! **[ADR 0006](../../../docs/adr/0006-out-of-process-decoders.md)'s second half.**

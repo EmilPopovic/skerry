@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A key plus its modifiers, parsed from text and rendered back to it.
 //!
 //! Both directions matter and for the same reason. Parsing is how a binding gets

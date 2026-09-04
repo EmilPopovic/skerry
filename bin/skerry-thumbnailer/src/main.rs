@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The image helper: PNG, JPEG, GIF and SVG, in a process of its own.
 //!
 //! **[ADR 0006](../../../docs/adr/0006-out-of-process-decoders.md).** A decoder is

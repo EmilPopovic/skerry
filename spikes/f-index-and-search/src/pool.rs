@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! One job pool, owned rather than imported.
 //!
 //! [ADR 0005](../../../docs/adr/0005-no-async-runtime.md) allows one pool for

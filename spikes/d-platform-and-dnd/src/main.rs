@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Spike D — platform layer and drag-and-drop.
 //!
 //! Question, bar and method are in [README.md](README.md). This binary is the

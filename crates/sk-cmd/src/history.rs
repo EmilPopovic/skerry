@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! One undo stack, and the redo branch behind it.
 //!
 //! [Rule 3](../../../docs/03-principles.md) is that every mutation is undoable

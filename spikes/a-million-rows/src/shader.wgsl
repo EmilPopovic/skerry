@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // One pipeline, one draw call. Every quad in the frame — row backgrounds,
 // selection, icons, glyph masks and colour glyphs — is an instance here, which
 // is what makes the GPU side of this workload trivial and the CPU side the

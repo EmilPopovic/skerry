@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The Wayland arm: `wayland-client` and nothing above it. Every policy decision
 //! — which scale to use, which MIME types to offer, which drag action to accept —
 //! is in this directory, which is the whole argument of

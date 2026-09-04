@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """Dependency edges between workspace crates must point strictly downward.
 
 Each crate declares its level in its own manifest, so this check and the level

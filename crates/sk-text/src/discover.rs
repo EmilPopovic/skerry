@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Where the fonts are, without fontconfig.
 //!
 //! fontconfig is a C library with an XML configuration language, a cache format

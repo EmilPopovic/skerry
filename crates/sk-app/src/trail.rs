@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A column view: one path decomposed, deepest last.
 //!
 //! [ADR 0015](../../../docs/adr/0015-a-column-is-a-directory-and-a-choice.md)

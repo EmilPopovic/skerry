@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Sizes and dates, as a person reads them.
 //!
 //! Both of these are written thousands of times per session and glanced at

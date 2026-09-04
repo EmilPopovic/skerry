@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """End-to-end tests that drive the real window with real input.
 
 Every other test in this repository stops at the edge of `sk-plat`. These press
@@ -4779,14 +4780,18 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
         # budget. Measured: **two failures in eight runs** before this, on this
         # commit and on the one before it — so the sweeps had been passing on luck.
         #
-        # **What is left fails about one run in eight, and the cause is not
-        # known.** Everything up to `Edits::paste_all` completes in microseconds —
-        # traced — and then the copy does not start until the window is touched;
-        # the evidence and the three hypotheses it killed are in
-        # [12-measurement.md](../docs/12-measurement.md). So the message below
-        # states what was observed and nothing about why: the sentence that used
-        # to be here blamed XTEST pacing, and that was a guess three later readers
-        # believed.
+        # **What used to fail about one run in eight was the peer.** GTK queues
+        # the `SelectionNotify` while `drag-data-get` runs and writes it when its
+        # main loop next comes round; with no window manager and no further input
+        # there was no next time, so the window slept — correctly — waiting for
+        # bytes nobody had sent. `ss -x` on both processes showed zero queued in
+        # either direction, which is the reading that finally said so;
+        # `gtk-drag-peer` now flushes on an idle source, which reduced nothing
+        # measurable and is kept because it is right anyway. Three rounds of
+        # hypotheses about *this* program are in
+        # [12-measurement.md](../docs/12-measurement.md), and every one of them
+        # was about the wrong process. The dump below stays, because it is what
+        # made the difference visible.
         peer.wait_for("asked for text/uri-list")
         landed = False
         deadline = time.time() + 8.0
@@ -4809,6 +4814,15 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
             # perturbation at all, which matters here: an `eprintln!` in the frame
             # loop hides this defect, so anything that touches the process is a
             # measurement of something else.
+            # **And what is waiting on the display socket.** If the peer's
+            # answer is sitting in this process's receive queue while its main
+            # thread sleeps in `poll`, the bug is ours; if the queue is empty,
+            # nothing has been sent to us and the wait is correct. Read out of
+            # `/proc`, which costs the process under test nothing.
+            print(f"        window sockets {socket_queue(run.process.pid)}", flush=True)
+            # **And the peer's**, because an empty queue on both sides means the
+            # answer was never written by the application that owes it.
+            print(f"        peer sockets   {socket_queue(peer.process.pid)}", flush=True)
             for task in sorted(Path(f"/proc/{run.process.pid}/task").iterdir()):
                 try:
                     name = (task / "comm").read_text().strip()
@@ -5476,6 +5490,31 @@ def a_screen_reader_can_read_the_window(run: Run, fixture: Path) -> None:
     finally:
         started.terminate()
         bus.stop()
+
+
+def socket_queue(pid: int) -> str:
+    """Unread bytes on every unix socket this process holds, as `fd:bytes`.
+
+    **The whole question, when a window appears to be ignoring something sent to
+    it.** The display connection is one of these sockets: bytes waiting in its
+    receive queue while the main thread sleeps in `poll` would mean the wake-up
+    is ours to explain, and an empty queue means nothing has been sent and the
+    sleep is correct. `ss` reads it out of the kernel; `/proc/net/unix` does not
+    carry the queue lengths.
+    """
+    if not shutil.which("ss"):
+        return "no ss on this machine"
+    listed = subprocess.run(["ss", "-x", "-H", "-p"], capture_output=True, text=True)
+    found = []
+    for line in listed.stdout.splitlines():
+        if f"pid={pid}," not in line:
+            continue
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        for fd in re.findall(rf"pid={pid},fd=(\d+)", line):
+            found.append(f"fd{fd}:recv={fields[2]},send={fields[3]}")
+    return " ".join(found) or "no sockets found"
 
 
 def paths_in(answer: str) -> list[str]:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What kind of file this is.
 //!
 //! By name, from shared-mime-info's `globs2`, plus a short table of signatures

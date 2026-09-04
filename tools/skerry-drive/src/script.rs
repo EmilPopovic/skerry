@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The replay script: a line-oriented format with no cleverness in it.
 
 /// Which pointer button.

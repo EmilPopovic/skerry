@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What a file is: the panel behind `Ctrl+I`.
 //!
 //! **Every value is read on a job.** A `statx`, a `readlink` and a `statfs` are

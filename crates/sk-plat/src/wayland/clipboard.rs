@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The clipboard and the primary selection, as a source and as a target.
 //!
 //! Four things [Spike D](../../../../spikes/d-platform-and-dnd/README.md) learned

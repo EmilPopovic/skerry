@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! How big a directory is, counting everything under it.
 //!
 //! # What the number means

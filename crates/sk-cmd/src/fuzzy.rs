@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Subsequence matching with a score, for the palette over the registry.
 //!
 //! Rule 4 is that a feature nobody can find has no users. The registry has been

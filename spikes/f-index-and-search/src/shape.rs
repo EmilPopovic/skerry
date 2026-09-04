@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The tree shapes this spike measures.
 //!
 //! Spike B's tree is realistic — mostly small directories, a few large ones —

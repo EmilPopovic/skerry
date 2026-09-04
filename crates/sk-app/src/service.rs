@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What this window answers on the bus, and what a second instance does instead.
 //!
 //! Two halves of one name.

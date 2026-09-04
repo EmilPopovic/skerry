@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT OR Apache-2.0
 """Rule 10: every dependency has a row in docs/07-dependencies.md, and the
 transitive graph stays inside the budgets in docs/09-performance-budgets.md.
 

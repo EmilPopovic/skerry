@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A scripted scroll, rendered offscreen, timed.
 //!
 //! This exists because of the rule in

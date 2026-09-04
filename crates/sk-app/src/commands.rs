@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Every command the program has, registered once.
 //!
 //! Rule 2: the keyboard overlay, and later the palette, the menus and the config

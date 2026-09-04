@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Drag-and-drop, in terms neither display server owns.
 //!
 //! The two halves are not symmetric and neither is the vocabulary.

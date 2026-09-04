@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! What the machine can actually do, so "memory-bandwidth bound" stops being an
 //! assertion.
 //!

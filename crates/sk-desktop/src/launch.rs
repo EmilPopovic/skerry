@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Starting an application, and not becoming its parent.
 //!
 //! Two things here are more subtle than they look. **`Exec` is a format**, with

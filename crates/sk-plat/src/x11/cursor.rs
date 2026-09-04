@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Pointer images, from the theme the session already chose.
 //!
 //! Wayland names a shape and the compositor owns the theme, the size and the

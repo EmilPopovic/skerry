@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The faces we found, and rasterization at exactly the size text will be drawn.
 //!
 //! Crispness is a property of one function here: [`Fonts::rasterize`] renders a

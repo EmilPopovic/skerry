@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The two selections, in terms neither display server owns.
 //!
 //! `Selection` and `Content` are the same idea on both: a peer asks for a MIME

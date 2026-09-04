@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Percentiles, process footprint and idle CPU.
 //!
 //! The rule this file exists to enforce: a number is reported with its sample

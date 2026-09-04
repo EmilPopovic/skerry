@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `wl_data_device`: clipboard, primary selection, and drag-and-drop as source
 //! *and* target. This file is the reason ADR 0002 exists — there is no policy
 //! here that a general-purpose windowing crate would have made for us, and every

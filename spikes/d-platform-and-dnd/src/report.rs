@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A check is a name, an outcome and the evidence for it. Nothing here decides
 //! anything; it exists so that a run of this spike prints a matrix that can be
 //! pasted into the README without being retyped, and so that a check which was

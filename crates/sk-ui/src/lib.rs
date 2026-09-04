@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The immediate-mode pass: layout primitives, text painting, virtualized lists,
 //! scrolling and hit-testing.
 //!

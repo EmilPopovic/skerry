@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Spike C — watching at scale. Question, bar and method are in README.md.
 
 #![allow(dead_code)]

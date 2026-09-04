@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Copying a *tree*, which is where the decisions live that a single-file copy
 //! does not have to make: what a symlink means, and what a second name for an
 //! inode means.

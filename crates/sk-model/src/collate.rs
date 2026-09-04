@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Natural-order collation.
 //!
 //! `img2.png` before `img10.png`, because every other order is one a person has

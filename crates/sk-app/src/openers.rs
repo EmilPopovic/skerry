@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Open With: the list of applications that say they handle a file.
 //!
 //! **Not a menu of commands.** The context menu and the palette are views of the

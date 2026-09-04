@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The font database an SVG's text is shaped with, and the families it maps.
 //!
 //! # Loaded once, which is the measured half

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Device and surface setup, the glyph atlas, instanced quad batching, and
 //! present pacing.
 //!

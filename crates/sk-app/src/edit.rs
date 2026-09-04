@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Mutations, from the frame loop's side: which one is in flight, and the name
 //! being typed for the ones that need one.
 //!

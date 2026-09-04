@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Verification is always a comparison against the source. Nothing here asks the
 //! copy engine what it did; a copy that reports success and lost a hole, an
 //! xattr or a nanosecond has to be caught by looking at both files.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The persistent index, in the dullest format that can work.
 //!
 //! [ADR 0008](../../../docs/adr/0008-persistent-index-is-required.md) decided

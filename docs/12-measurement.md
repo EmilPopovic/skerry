@@ -2786,3 +2786,85 @@ scenarios read the selection with `wl-paste`.
 new test writes an array after `siiv` and asserts the byte offset against the
 specification's arithmetic rather than against the reader; the offsets are in the
 test's own doc comment so the next person can check them by hand.
+
+## Measuring the thing that is *not* there
+
+`a-drag-in-from-another-application-lands` failed about one run in eight, and
+[the section above](#the-failure-that-was-not-the-failure-it-said-it-was) left it
+with three hypotheses dead and one alive: *`paste_all` is reached and the copy
+does not start*, timing-sensitive enough that an `eprintln!` hid it.
+
+That was wrong too, and the way it was proved wrong is the point.
+
+**Counters instead of prints.** Three of them, costing nothing when nobody asks:
+the reads a drop started, the bytes that came back, and the messages the frame
+loop acted on — `drops=started/delivered/drained`, with how long the read took.
+Reproducing the failure sixteen times gave:
+
+```
+drops=1/1/0@9537ms-of-9537ms      selections=0/0/0
+```
+
+The read took **9.5 seconds** and completed at the instant the scenario pressed
+a key to ask for the report. So the copy did not fail to start: the *bytes* had
+not arrived, and the window was correctly asleep waiting for them. Everything the
+previous section concluded was about a message that had not been sent.
+
+**Then the queue nobody had looked at.** `ss -x -p` reads the receive queue of a
+process's sockets out of the kernel, which costs the process under test nothing —
+and at the moment of failure, with the main thread parked in `poll`:
+
+```
+window sockets fd3:recv=0,send=0
+```
+
+**Zero bytes waiting, and zero unsent.** The display connection had nothing on it
+in either direction: the peer's answer to our `ConvertSelection` was not in our
+queue, not in flight, and not refused. There was nothing to wake up *for*, which
+is the one shape none of the four hypotheses had.
+
+**And then the peer's queue, which settled it.** The same `ss` reading, taken of
+the GTK peer at the same instant:
+
+```
+window sockets fd3:recv=0,send=0
+peer sockets   fd3:recv=0,send=0 fd11:… fd13:… fd15:… fd16:…  (all zero)
+```
+
+The peer had logged *asked for text/uri-list* — its `drag-data-get` handler ran
+and set the URIs — and then wrote nothing to any socket. GTK queues the
+`SelectionNotify` while the handler runs and GDK writes it when the main loop
+next comes round; with no window manager and no further input to that window,
+there is no next time. The key press that "unstuck" the window every time was
+XTEST input landing on the *peer*, waking its loop and flushing the reply.
+
+**So the defect is in the test peer, and it is not yet fixed.** An idle source in
+`tools/gtk-drag-peer` that flushes the display after the data is set was the
+obvious answer and is not the answer: twenty runs with it still failed twice,
+with the same two empty queues. An idle that does not fire means the peer's main
+loop is not merely idle but not iterating, which is a different diagnosis than
+the one this paragraph first claimed — and the next experiment is a timeout
+source rather than an idle, to tell a starved loop from a blocked one.
+
+What *is* settled is which process to look in. The product's behaviour — a window
+asleep because nothing has been sent to it — is correct, and three rounds of
+instrumenting it were three rounds spent in the wrong process. The flush stays
+because it is right regardless; the scenario stays honest about failing.
+
+Two general things came out of it.
+
+- **A wake-up bug and an empty queue are distinguishable from outside the
+  process, for free.** Nothing here needed a debugger, a trace or a rebuild of
+  the program under test: `/proc` and `ss` say what a process is waiting on and
+  whether anything is waiting for it. Reach for that before instrumenting the
+  code, because instrumenting the code is what hid this defect for three
+  sections.
+- **Measure both ends before you instrument either.** Every hypothesis in three
+  sections of this file was about the process under test, because that is the
+  process whose code was to hand. The failing half was a hundred lines of Python
+  in `tools/`, and one reading of its socket queue would have said so at any
+  point.
+- **A diagnostic that costs nothing when unread can live in the product.** The
+  drop counters and the selection counters are in the state dump for good. The
+  previous round of this hunt was expensive because every question needed a new
+  build; this round asked four questions of one build.

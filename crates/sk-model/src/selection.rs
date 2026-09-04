@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! One selection, with the same semantics in every view — rule 8.
 //!
 //! Selection is over [`EntryId`], not over display rows, so re-sorting or

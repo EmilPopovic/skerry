@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! XDND version 5, as a source and as a target.
 //!
 //! The protocol is a conversation in `ClientMessage`s with the data itself moving

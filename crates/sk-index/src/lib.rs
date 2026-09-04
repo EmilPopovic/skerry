@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Recursive walks and the aggregation over them.
 //!
 //! Does not own: rendering results, or the query UI.

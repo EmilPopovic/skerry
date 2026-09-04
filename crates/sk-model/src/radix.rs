@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! An MSD radix sort over collation keys, which never compares two names.
 //!
 //! [Spike F](../../../spikes/f-index-and-search/README.md#sorting-chased-down-from-948-ms-to-191-ms)

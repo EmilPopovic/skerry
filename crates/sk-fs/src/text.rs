@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Reading a file's bytes as text, bounded.
 //!
 //! One function, for the one thing that wants a file's *contents* rather than

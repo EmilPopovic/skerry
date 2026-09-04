@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `getdents64` enumeration, batched `statx`, and the device probe that decides
 //! which pool lane a directory reads on.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The `sk-gpu` half of ADR 0003 at spike fidelity: one pipeline, one draw call,
 //! instanced quads and two atlas textures.
 //!

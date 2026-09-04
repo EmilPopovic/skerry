@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Drawing text, hairlines and the two icon shapes, in device pixels.
 
 use sk_gpu::{Color, Direction, DrawList, Rect};

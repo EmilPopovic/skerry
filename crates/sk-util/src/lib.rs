@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The one job pool for the process, its cancellation tokens, and the eventfd a
 //! finished job wakes the frame loop with.
 //!

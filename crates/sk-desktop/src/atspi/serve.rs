@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The AT-SPI interfaces, answered from the published tree.
 //!
 //! One thread, one connection, and a `poll` over two descriptors: the socket an

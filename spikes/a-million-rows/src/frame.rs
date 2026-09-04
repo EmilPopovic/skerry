@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The immediate-mode pass: scroll offset in, quads out.
 //!
 //! Step 3 of the frame loop in docs/04-architecture.md — "over *visible* rows

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Scheduling folder totals, and putting them on the rows.
 //!
 //! The cache is `sk_index::Sizes` and is keyed by path; this is the part that

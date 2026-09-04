@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! XDND: drag-and-drop on X11, in client messages.
 //!
 //! X11 has no drag protocol. XDND is a convention built out of properties and
