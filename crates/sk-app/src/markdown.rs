@@ -476,8 +476,11 @@ fn alignment(line: &str) -> Option<Vec<Align>> {
     let mut out = Vec::with_capacity(cells.len());
     for cell in cells {
         let bare = cell.trim();
+        // **One dash is a column.** GFM asks for at least one, and `| - | - |`
+        // is what a person writes for a narrow table — demanding three made that
+        // table a paragraph of pipes.
         let body = bare.trim_start_matches(':').trim_end_matches(':');
-        if body.len() < 3 || !body.chars().all(|it| it == '-') {
+        if body.is_empty() || !body.chars().all(|it| it == '-') {
             return None;
         }
         out.push(match (bare.starts_with(':'), bare.ends_with(':')) {
@@ -857,6 +860,19 @@ mod tests {
         assert_eq!(cells.len(), 2);
         assert_eq!(words(&blocks[2]), "b.txt|3");
         assert_eq!(blocks.len(), 3, "a header and two rows");
+    }
+
+    /// **One dash is a column**, which is what GFM says and what people write.
+    #[test]
+    fn a_delimiter_row_needs_only_one_dash() {
+        for delimiter in ["| - | - |", "|---|---|", "| :- | -: |", "| :---: | --- |"] {
+            let text = format!("| A | B |\n{delimiter}\n| 1 | 2 |\n");
+            let blocks = parse(&text);
+            assert!(
+                matches!(blocks[0].kind, Kind::Row { header: true, .. }),
+                "{delimiter:?} gave {blocks:?}"
+            );
+        }
     }
 
     /// A line with pipes and no alignment row under it is a paragraph.

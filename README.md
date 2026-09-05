@@ -4,7 +4,7 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 861 tests, 141 GUI scenarios on both Wayland and X11, seventy-nine golden
+helpers, 865 tests, 141 GUI scenarios on both Wayland and X11, eighty golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -54,7 +54,7 @@ method, and the four budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares seventy-nine rendered frames to
+defect nothing else could: `tools/golden` compares eighty rendered frames to
 committed references on lavapipe, `tools/gui-test` presses keys and moves a pointer
 through 141 scenarios on two display servers — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a

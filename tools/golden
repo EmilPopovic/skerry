@@ -287,6 +287,10 @@ FRAMES = [
     # picture of its output is a parser whose headings could all be the same size.
     ("markdown", ["--size", "900x620", "--scale", "125", "--look", "README.md"],
      "markdown"),
+    # The reported table, four columns wide with two that have to wrap.
+    ("markdown-table",
+     ["--size", "1100x520", "--scale", "125", "--look", "table.md"],
+     "markdown"),
     # And the same file as its source, which is the other half of the toggle and
     # the state `Ctrl+E` edits.
     ("markdown-source",
@@ -646,6 +650,23 @@ def build_markdown() -> None:
         "And ~~struck~~ text, plus ***both at once***.\n"
     )
 
+    # **The table that was reported**, in a file of its own so it is the first
+    # thing on screen. Four columns of very different widths, two of which have to
+    # wrap: laid out a row at a time, every column got the same share, the long
+    # one ran over the next, and the last left the panel.
+    (directory / "table.md").write_text(
+        "# Build variables\n"
+        "\n"
+        "| Variable | Default | Values | Notes |\n"
+        "| -------- | ------- | ------ | ----- |\n"
+        "| ARCH | x86_64 | x86_64, x86_32, riscv_64, riscv_32 | target architecture |\n"
+        "| TOOLCHAIN | gnu | gnu, llvm | compiler/toolchain family |\n"
+        "| IMAGE_FORMAT | img | img, iso | iso is for x86 images |\n"
+        "| PROFILE | fast | fast, normal, small, debug, debug_extra | optimization and debug level |\n"
+        "| RISCV_FRISC | false | true, false | build a FRISC FPGA image |\n"
+        "| USERLAND | default | default, all, core, or names such as mbrose | select userland programs |\n"
+        "| DOCKER_IMAGE | apheleia:latest | image tag | Docker image name |\n"
+    )
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
 

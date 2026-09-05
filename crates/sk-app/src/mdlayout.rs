@@ -226,7 +226,10 @@ pub(crate) fn lay_out(
 ) -> Laid {
     let mut out = Laid { lines: Vec::new(), height: 0.0, against: key(width, size, scale) };
     let mut y = 0.0f32;
-    for block in blocks {
+    let mut at = 0;
+    while at < blocks.len() {
+        let block = &blocks[at];
+        at += 1;
         let left = f32::from(block.indent) * STEP * size + f32::from(block.quoted) * QUOTE * size;
         let room = (width - left).max(size * 4.0);
         match &block.kind {
@@ -290,8 +293,17 @@ pub(crate) fn lay_out(
                 }
                 y += GAP * size * 0.6;
             }
-            Kind::Row { cells, header, align } => {
-                y = row(&mut out, cells, (*header, align), (left, room, size), y, measure, block);
+            Kind::Row { .. } => {
+                // **The whole table at once.** A column's width is the widest
+                // cell *in that column*, which cannot be known from one row — and
+                // laying rows out one at a time is what made every column the
+                // same width and pushed the last one off the panel.
+                let mut rows = at - 1;
+                while blocks.get(rows).is_some_and(|it| matches!(it.kind, Kind::Row { .. })) {
+                    rows += 1;
+                }
+                y = table(&mut out, &blocks[at - 1..rows], (left, room, size), y, measure);
+                at = rows;
             }
         }
     }
@@ -412,6 +424,36 @@ fn flow(
                 // A space at the start of a wrapped line is not drawn.
                 continue;
             }
+            // **A word wider than the column is cut.** A URL, a hash, a column of
+            // dashes: without this it runs past the panel's edge and is clipped,
+            // which reads as text that has gone missing.
+            if !blank && advance > room {
+                for part in cut(&piece, room, (weight, size), measure) {
+                    let advance = measure.width_of(&part, weight, size);
+                    if x > left {
+                        out.lines.push(std::mem::replace(
+                            &mut line,
+                            fresh(y + height, height, size, block),
+                        ));
+                        y += height;
+                        x = left;
+                    }
+                    let from = line.text.len();
+                    line.text.push_str(&part);
+                    line.runs.push(Placed {
+                        text: part,
+                        x,
+                        width: advance,
+                        weight,
+                        size,
+                        ink,
+                        struck: run.style.struck,
+                        from,
+                    });
+                    x += advance;
+                }
+                continue;
+            }
             let from = line.text.len();
             line.text.push_str(&piece);
             line.runs.push(Placed {
@@ -488,55 +530,217 @@ fn pieces(text: &str) -> Vec<String> {
     out
 }
 
-/// One table row, as one line with its cells at column stops.
-fn row(
+/// A whole table: its columns measured together, its cells wrapped inside them.
+///
+/// **Measured as a group, because a column's width is a fact about the column.**
+/// One row at a time gives every column the same share, which is what put a
+/// `Values` cell over the top of the `Notes` beside it and the last column off
+/// the panel entirely. The natural width of a column is its widest cell; where
+/// they all fit, that is what they get, and where they do not, every column is
+/// shrunk in proportion with a floor of about six characters — and what no longer
+/// fits **wraps inside its cell** rather than running into the next one.
+fn table(
     out: &mut Laid,
-    cells: &[Vec<Run>],
-    head: (bool, &[Align]),
+    rows: &[Block],
     place: (f32, f32, f32),
-    y: f32,
+    mut y: f32,
+    measure: &mut impl Measure,
+) -> f32 {
+    let (left, room, size) = place;
+    let gap = size * 0.8;
+    let columns = rows
+        .iter()
+        .filter_map(|block| match &block.kind {
+            Kind::Row { cells, .. } => Some(cells.len()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    if columns == 0 {
+        return y;
+    }
+    let widths = share(rows, columns, (room, gap, size), measure);
+    let mut stops = Vec::with_capacity(columns);
+    let mut x = left;
+    for width in &widths {
+        stops.push(x);
+        x += width + gap;
+    }
+    for block in rows {
+        let Kind::Row { cells, header, align } = &block.kind else { continue };
+        y = one_row(out, (cells, *header, align), (&stops, &widths, size), y, measure, block);
+    }
+    y + GAP * size * 0.5
+}
+
+/// How wide each column may be.
+fn share(
+    rows: &[Block],
+    columns: usize,
+    place: (f32, f32, f32),
+    measure: &mut impl Measure,
+) -> Vec<f32> {
+    let (room, gap, size) = place;
+    let mut natural = vec![0.0f32; columns];
+    for block in rows {
+        let Kind::Row { cells, header, .. } = &block.kind else { continue };
+        let weight = if *header { Weight::Bold } else { Weight::Regular };
+        for (index, cell) in cells.iter().enumerate().take(columns) {
+            let text: String = cell.iter().map(|run| run.text.as_str()).collect();
+            natural[index] = natural[index].max(measure.width_of(&text, weight, size));
+        }
+    }
+    let available = (room - gap * (columns as f32 - 1.0)).max(size);
+    let total: f32 = natural.iter().sum();
+    if total <= available {
+        return natural;
+    }
+    // Proportional, with a floor so a narrow column does not vanish, and a second
+    // pass so the floors do not push the total back over the room.
+    let floor = (size * 3.0).min(available / columns as f32);
+    let mut widths: Vec<f32> =
+        natural.iter().map(|it| (it * available / total).max(floor)).collect();
+    let over: f32 = widths.iter().sum::<f32>() - available;
+    if over > 0.0 {
+        let slack: f32 = widths.iter().map(|it| (it - floor).max(0.0)).sum();
+        if slack > 0.0 {
+            for width in &mut widths {
+                *width -= (*width - floor).max(0.0) * over / slack;
+            }
+        }
+    }
+    widths
+}
+
+/// One table row, wrapped inside its columns.
+fn one_row(
+    out: &mut Laid,
+    what: (&[Vec<Run>], bool, &[Align]),
+    place: (&[f32], &[f32], f32),
+    mut y: f32,
     measure: &mut impl Measure,
     block: &Block,
 ) -> f32 {
-    let (header, align) = head;
-    let (left, room, size) = place;
-    let columns = cells.len().max(1);
-    // Equal columns, because measuring the widest cell needs the whole table and
-    // a row is laid out on its own. A README's tables are short and this keeps
-    // one row one line — which is what makes the whole document scrollable
-    // without laying all of it out.
-    let column = room / columns as f32;
+    let (cells, header, align) = what;
+    let (stops, widths, size) = place;
+    let weight = if header { Weight::Bold } else { Weight::Regular };
     let height = size * 1.55;
-    let mut line = fresh(y, height, size, block);
-    line.rule = if header { Rule::Under } else { Rule::None };
+
+    // Each cell wrapped inside its own column, and the row is as tall as the
+    // deepest of them — which is the whole of what "a table lays out" means.
+    let mut wrapped: Vec<Vec<Vec<(String, f32)>>> = Vec::with_capacity(cells.len());
     for (index, cell) in cells.iter().enumerate() {
-        let stop = left + column * index as f32;
+        let width = widths.get(index).copied().unwrap_or(size * 4.0);
         let text: String = cell.iter().map(|run| run.text.as_str()).collect();
-        let weight = if header { Weight::Bold } else { Weight::Regular };
-        let advance = measure.width_of(&text, weight, size).min(column - size * 0.5);
-        let x = match align.get(index).copied().unwrap_or_default() {
-            Align::Left => stop,
-            Align::Centre => stop + (column - advance) / 2.0,
-            Align::Right => stop + column - advance - size * 0.5,
-        };
-        if !line.text.is_empty() {
-            line.text.push('\t');
-        }
-        let from = line.text.len();
-        line.text.push_str(&text);
-        line.runs.push(Placed {
-            text,
-            x,
-            width: advance,
-            weight,
-            size,
-            ink: Ink::Body,
-            struck: false,
-            from,
-        });
+        wrapped.push(wrap_cell(&text, width, (weight, size), measure));
     }
-    out.lines.push(line);
-    y + height
+    let deep = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+
+    for row in 0..deep {
+        let mut line = fresh(y, height, size, block);
+        // The rule goes under the *last* line of a header that wrapped.
+        line.rule = if header && row + 1 == deep { Rule::Under } else { Rule::None };
+        for (index, cell) in wrapped.iter().enumerate() {
+            let Some(pieces) = cell.get(row) else { continue };
+            let stop = stops.get(index).copied().unwrap_or(0.0);
+            let width = widths.get(index).copied().unwrap_or(size * 4.0);
+            let taken: f32 = pieces.iter().map(|(_, advance)| advance).sum();
+            let offset = match align.get(index).copied().unwrap_or_default() {
+                Align::Left => 0.0,
+                Align::Centre => (width - taken).max(0.0) / 2.0,
+                Align::Right => (width - taken).max(0.0),
+            };
+            if !line.text.is_empty() {
+                line.text.push('\t');
+            }
+            let mut x = stop + offset;
+            for (text, advance) in pieces {
+                let from = line.text.len();
+                line.text.push_str(text);
+                line.runs.push(Placed {
+                    text: text.clone(),
+                    x,
+                    width: *advance,
+                    weight,
+                    size,
+                    ink: Ink::Body,
+                    struck: false,
+                    from,
+                });
+                x += advance;
+            }
+        }
+        out.lines.push(line);
+        y += height;
+    }
+    y
+}
+
+/// One cell's text, cut into lines that fit `width`.
+///
+/// Returns the pieces of each line with their advances, so the caller can align
+/// the line inside the column without measuring it a second time.
+fn wrap_cell(
+    text: &str,
+    width: f32,
+    face: (Weight, f32),
+    measure: &mut impl Measure,
+) -> Vec<Vec<(String, f32)>> {
+    let (weight, size) = face;
+    let mut lines: Vec<Vec<(String, f32)>> = vec![Vec::new()];
+    let mut x = 0.0f32;
+    for piece in pieces(text) {
+        let advance = measure.width_of(&piece, weight, size);
+        let blank = piece.trim().is_empty();
+        if !blank && x > 0.0 && x + advance > width {
+            lines.push(Vec::new());
+            x = 0.0;
+        }
+        if blank && x <= 0.0 {
+            continue;
+        }
+        // A single word wider than the column is cut rather than left to run into
+        // the next one — a column of hashes or a URL is where this happens.
+        if !blank && advance > width && width > 0.0 {
+            for part in cut(&piece, width, (weight, size), measure) {
+                let advance = measure.width_of(&part, weight, size);
+                if x > 0.0 {
+                    lines.push(Vec::new());
+                }
+                x = advance;
+                let Some(last) = lines.last_mut() else { continue };
+                last.push((part, advance));
+            }
+            continue;
+        }
+        let Some(last) = lines.last_mut() else { continue };
+        last.push((piece, advance));
+        x += advance;
+    }
+    lines.retain(|line| !line.is_empty());
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+    lines
+}
+
+/// A word too wide for `width`, cut into pieces that are not.
+fn cut(word: &str, width: f32, face: (Weight, f32), measure: &mut impl Measure) -> Vec<String> {
+    let (weight, size) = face;
+    let mut out = Vec::new();
+    let mut held = String::new();
+    for letter in word.chars() {
+        held.push(letter);
+        if measure.width_of(&held, weight, size) > width && held.chars().count() > 1 {
+            held.pop();
+            out.push(std::mem::take(&mut held));
+            held.push(letter);
+        }
+    }
+    if !held.is_empty() {
+        out.push(held);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -665,6 +869,69 @@ mod tests {
         assert!(!out.fits(401.0, 16.0, 1.0));
         assert!(!out.fits(400.0, 18.0, 1.0));
         assert!(!out.fits(400.0, 16.0, 1.25));
+    }
+
+    /// **A column is as wide as its own widest cell, not a share of the panel.**
+    ///
+    /// The reported defect: every column got the same width, so a long `Values`
+    /// cell ran over the `Notes` beside it and the last column left the panel.
+    #[test]
+    fn a_columns_width_is_its_own_widest_cell() {
+        let text = concat!(
+            "| A | Values | N |\n",
+            "| - | ------ | - |\n",
+            "| x | a much longer value than the others | y |\n",
+        );
+        let out = laid(text, 600.0);
+        let header = out.lines.first().expect("a header");
+        // The stop of each column is where its first word starts, and the gap
+        // between them is that column's width — which is its own widest cell.
+        let stop = |word: &str| {
+            header.runs.iter().find(|run| run.text == word).map(|run| run.x).expect(word)
+        };
+        let (a, values, n) = (stop("A"), stop("Values"), stop("N"));
+        assert!(values - a < n - values, "the columns are still even: {a} {values} {n}");
+    }
+
+    /// A cell too wide for its column wraps inside it, and the row grows.
+    #[test]
+    fn a_long_cell_wraps_inside_its_column() {
+        let text = concat!(
+            "| Variable | Values |\n",
+            "| -------- | ------ |\n",
+            "| ARCH | x86_64, x86_32, riscv_64, riscv_32, and several more besides |\n",
+        );
+        let narrow = laid(text, 260.0);
+        // The header is one line; the body row is more than one.
+        let body: Vec<&super::Line> =
+            narrow.lines.iter().filter(|line| line.text.contains("ARCH")).collect();
+        assert_eq!(body.len(), 1, "the row's first line holds the short cell");
+        assert!(narrow.lines.len() > 2, "the long cell did not wrap: {:?}", narrow.lines.len());
+        // Nothing is drawn past the width it was laid out for.
+        for line in &narrow.lines {
+            for run in &line.runs {
+                assert!(run.x + run.width <= 262.0, "{:?} runs to {}", run.text, run.x + run.width);
+            }
+        }
+        // And every word is still there.
+        let all: String = narrow.lines.iter().map(|it| it.text.clone()).collect();
+        for word in ["ARCH", "x86_64", "riscv_32", "besides"] {
+            assert!(all.contains(word), "{word} is missing from {all:?}");
+        }
+    }
+
+    /// A word wider than the column is cut rather than left to overrun it.
+    #[test]
+    fn a_word_too_long_for_the_line_is_cut() {
+        let out = laid("https://example.com/a/very/long/path/that/never/breaks/anywhere\n", 120.0);
+        assert!(out.lines.len() > 1, "the long word did not break");
+        for line in &out.lines {
+            for run in &line.runs {
+                assert!(run.x + run.width <= 122.0, "{:?} runs to {}", run.text, run.x + run.width);
+            }
+        }
+        let all: String = out.lines.iter().map(|it| it.text.clone()).collect();
+        assert_eq!(all, "https://example.com/a/very/long/path/that/never/breaks/anywhere");
     }
 
     /// A byte and a distance are the same place, whichever way it is asked.
