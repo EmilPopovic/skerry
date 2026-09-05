@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 861 tests, 142 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 861 tests, 141 GUI scenarios **on both Wayland and X11**,
 seventy-nine golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
