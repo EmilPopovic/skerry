@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Spike D, arm 2 — the same capability list, through `winit` 0.30 and nothing
 //! else.
 //!

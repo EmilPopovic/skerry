@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The layout cache: shaped runs kept between frames, keyed by what they are for.
 
 use std::collections::HashMap;

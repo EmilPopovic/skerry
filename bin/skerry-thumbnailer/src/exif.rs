@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Which way up a JPEG is, and turning it that way.
 //!
 //! **A photograph from a phone is stored sideways.** The sensor reads out in one

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The directories a person keeps things in, and the ones they have bookmarked.
 //!
 //! Two files, both plain text, both written by other programs and read by every

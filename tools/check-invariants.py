@@ -282,11 +282,10 @@ def adr_immutability_check(report: Report) -> None:
             report.fail(path, "ADRs are immutable — supersede it with a new ADR instead")
 
 
-# The one line every source file carries, and what a comment looks like in each
-# kind of file. `Cargo.toml` says `MIT OR Apache-2.0` and the two texts are in
-# the repository root; this is the third place that has to agree with them, and
-# the only one a machine can check per file.
-SPDX = "SPDX-License-Identifier: MIT OR Apache-2.0"
+# The one line every source file carries. `Cargo.toml` says `Apache-2.0` and the
+# text is `LICENSE` in the repository root; this is the third place that has to
+# agree with them, and the only one a machine can check per file.
+SPDX = "SPDX-License-Identifier: Apache-2.0"
 
 
 def spdx_check(report: Report) -> None:

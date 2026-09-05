@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! ICCCM selections: owning `CLIPBOARD` and `PRIMARY`, answering `TARGETS`, and
 //! the `INCR` protocol for anything that will not fit in one request.
 //!

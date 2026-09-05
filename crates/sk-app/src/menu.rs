@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The context menu: the pointer's way into the command registry.
 //!
 //! **Rule 2 from the other end.** The keyboard reaches every command through the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! What is mounted, from `/proc/self/mountinfo`.
 //!
 //! For a sidebar, which needs the handful of mounts a person thinks of as a

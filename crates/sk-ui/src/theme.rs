@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Colours and metrics, in one place because a palette argued twice is a
 //! palette that drifts.
 //!

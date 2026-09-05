@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The persistent index, as this window holds it.
 //!
 //! **The window owns one per root of the search in flight.** [ADR

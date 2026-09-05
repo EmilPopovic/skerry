@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! What the window was doing last time, and the file it is kept in.
 //!
 //! [ADR 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md)

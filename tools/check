@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # Every gate that can run without a display server, in the order that fails fastest.
 # CI runs the same script. So does the /check skill.
 set -u

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The shared thumbnail cache, read and written by the child.
 //!
 //! **The specification's directory, so every file manager on the machine shares

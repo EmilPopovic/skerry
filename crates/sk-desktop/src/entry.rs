@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! `.desktop` files: the parts a launcher needs.
 //!
 //! The desktop-entry specification is a large document about a small format. What

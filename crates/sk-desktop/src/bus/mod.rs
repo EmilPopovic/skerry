@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! D-Bus, spoken on its own socket.
 //!
 //! [ADR 0023](../../../../docs/adr/0023-d-bus-is-a-socket-we-speak-ourselves.md)

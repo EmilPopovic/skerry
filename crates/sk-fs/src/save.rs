@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Writing a small file whole, so that a reader sees all of it or none of it.
 //!
 //! Three files in this program are a person's own state — the session, the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! A stand-in for `at-spi2-registryd`, so a scenario can test accessibility.
 //!
 //! **What it is for.** [ADR 0026](../../../docs/adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md)

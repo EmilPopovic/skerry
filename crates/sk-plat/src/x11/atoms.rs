@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Every atom this backend interns, in one round trip.
 //!
 //! Interning is a request per name and a reply per request. Asking for

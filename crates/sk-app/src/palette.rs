@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The command palette: the one registry, searchable.
 //!
 //! [Rule 4](../../../docs/03-principles.md) is that discoverability outranks

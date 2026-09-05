@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Font discovery, shaping, line layout, the layout cache, and glyph
 //! rasterization.
 //!

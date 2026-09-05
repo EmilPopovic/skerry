@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The columnar store from docs/04-architecture.md, at the size the budget cares
 //! about.
 //!

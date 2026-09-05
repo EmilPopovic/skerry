@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 """Relative links and heading anchors across the markdown resolve.
 
 The design documents are the product right now, and they cross-reference each

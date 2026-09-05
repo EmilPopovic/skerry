@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! xkb keysyms to [`Key`].
 //!
 //! The mapping is small on purpose: a keysym we do not name is carried through

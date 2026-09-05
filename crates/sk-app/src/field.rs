@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! One line of editable text, a caret in it, and a selection.
 //!
 //! Two things in the window need this — the name being typed over a row, and the

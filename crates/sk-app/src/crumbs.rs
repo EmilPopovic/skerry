@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The menu a breadcrumb separator opens.
 //!
 //! **What the chevron is for.** A separator sits between two components, so the

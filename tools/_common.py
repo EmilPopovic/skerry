@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 """Shared helpers for the repository checks. Standard library only, by policy."""
 
 from __future__ import annotations

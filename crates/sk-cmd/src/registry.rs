@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! One list of every action, and the keymap over it.
 //!
 //! Generic over the context a command runs against, which is the whole trick

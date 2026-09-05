@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Everything a frame needs, with no display server.
 //!
 //! Shared by `--capture` and `--bench`, which want the same thing: the real

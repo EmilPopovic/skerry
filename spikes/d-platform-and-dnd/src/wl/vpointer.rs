@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Synthetic pointer input over `zwlr_virtual_pointer_v1`. Without this, every
 //! drag-and-drop pair in the matrix is a human moving a mouse, which means the
 //! matrix cannot be re-run after an edit and therefore cannot be trusted — the

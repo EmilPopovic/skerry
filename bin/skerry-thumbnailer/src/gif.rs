@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! GIF, decoded here rather than by a crate.
 //!
 //! **Ours because it is small and frozen.** The format is a header, a palette, a

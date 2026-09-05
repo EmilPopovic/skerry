@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The X11 window: `x11rb` and our own policy above it.
 //!
 //! [ADR 0009](../../../../docs/adr/0009-x11-backend-behind-a-runtime-selected-enum.md)

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Scrolling, and which rows a viewport can see.
 //!
 //! Three decisions here are the difference between a list that feels attached to

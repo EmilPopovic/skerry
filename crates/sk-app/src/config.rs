@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The keymap, as a file a person owns.
 //!
 //! **[ADR 0025](../../../docs/adr/0025-the-config-file-is-the-keymap-written-out.md).**

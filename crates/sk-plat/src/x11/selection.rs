@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The X11 clipboard: selection ownership, `TARGETS`, and `INCR`.
 //!
 //! Wayland hands a peer a pipe and lets it read at its own pace. X11 has no

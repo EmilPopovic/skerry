@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Spike A, arm 2 — GPUI. The question, the bar and the method are in
 //! [../a-million-rows/README.md](../a-million-rows/README.md), which also
 //! records both arms' results.

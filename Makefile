@@ -35,8 +35,7 @@ install: build
 	done
 	install -Dm644 packaging/dev.skerry.Skerry.desktop \
 		$(datadir)/applications/dev.skerry.Skerry.desktop
-	install -Dm644 LICENSE-MIT $(datadir)/licenses/skerry/LICENSE-MIT
-	install -Dm644 LICENSE-APACHE $(datadir)/licenses/skerry/LICENSE-APACHE
+	install -Dm644 LICENSE $(datadir)/licenses/skerry/LICENSE
 
 uninstall:
 	for binary in $(BINARIES); do rm -f $(bindir)/$$binary; done

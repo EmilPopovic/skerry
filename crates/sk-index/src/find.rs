@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Everything under a directory whose name matches, arriving as it is found.
 //!
 //! # What this is and what it is not

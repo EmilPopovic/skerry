@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Which parts of a line are comments, keywords, literals and numbers.
 //!
 //! **The seam [`crate::quicklook::Tone`] was written for.** The panel already

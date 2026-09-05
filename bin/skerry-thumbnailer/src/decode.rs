@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Bytes on disk to straight `RGBA8`, and nothing else.
 //!
 //! Four formats, chosen because they are what a person actually has: PNG and

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! One bump arena of UTF-8 bytes, addressed by offset and length.
 //!
 //! This is the first half of the data layout in

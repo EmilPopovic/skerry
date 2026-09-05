@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The Wayland window: `wayland-client` and our own policy above it.
 //!
 //! [ADR 0002](../../../../docs/adr/0002-own-platform-layer.md) is the reason

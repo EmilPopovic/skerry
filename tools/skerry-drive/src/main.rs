@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Replays keyboard and pointer input into a compositor.
 //!
 //! The other half of an end-to-end test of the real window: `skerry` draws and

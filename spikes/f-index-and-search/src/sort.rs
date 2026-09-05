@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Sorting a million entries.
 //!
 //! [09-performance-budgets.md](../../../docs/09-performance-budgets.md) budgets

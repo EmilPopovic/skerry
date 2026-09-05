@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The scroll trace.
 //!
 //! Deterministic and identical between arms, so the two renderers are compared

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Spike A, arm 1 — `wgpu` + `swash`. The question, the bar and the method are
 //! in README.md next to this file.
 //!

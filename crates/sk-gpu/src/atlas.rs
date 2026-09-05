@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Glyph atlases and the bounded upload queue.
 //!
 //! Step 5 of the frame loop in

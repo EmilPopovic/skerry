@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Reading a frame back, and writing it out as a PNG.
 //!
 //! This is the other half of the golden-frame harness

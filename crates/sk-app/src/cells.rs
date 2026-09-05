@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Where the entries of a listing sit inside a pane's body.
 //!
 //! **One value answers every geometric question a view has**, which is [ADR

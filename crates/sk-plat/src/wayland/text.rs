@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! `text-input-v3`: the client half of an input method.
 //!
 //! **What this is for.** Compose sequences need no protocol and are handled in

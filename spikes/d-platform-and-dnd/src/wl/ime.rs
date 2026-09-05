@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! `zwp_text_input_v3` on the application side, and `zwp_input_method_v2` on the
 //! other side of the same connection, because this machine has no input method
 //! installed and the bar says CJK text composes into a field.

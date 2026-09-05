@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! An `shm` surface, painted by hand. There is no renderer here on purpose:
 //! Spike A already measured the renderer, and what is under test in this spike
 //! is the protocol. What the pixels have to do is be *verifiable* — hence the

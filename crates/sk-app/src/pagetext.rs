@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! A page's words, and what is selected out of them.
 //!
 //! **[ADR 0024](../../../docs/adr/0024-a-page-arrives-with-its-words.md).** A

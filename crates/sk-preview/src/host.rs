@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The host half: one child per kind, a batch at a time, on a job.
 //!
 //! **Nothing here decodes anything** — [ADR

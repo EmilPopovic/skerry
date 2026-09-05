@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The tree that gets copied. Every property the bar cares about is a file in
 //! here rather than a separate test, because a copy engine that handles them one
 //! at a time and not together is not a copy engine — the interesting failures are

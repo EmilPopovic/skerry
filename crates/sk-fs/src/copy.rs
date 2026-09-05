@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Copying one file: `FICLONE`, `copy_file_range` per extent, and a
 //! hole-preserving read/write floor — each probed at runtime rather than chosen
 //! by a `#[cfg]` ([ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md)).

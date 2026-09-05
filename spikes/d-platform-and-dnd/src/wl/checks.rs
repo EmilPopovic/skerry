@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The check bodies, in the order a run executes them. Every one either records
 //! a number or records why there is not one; none of them prints a verdict,
 //! because the verdict is the conjunction and belongs to the caller.

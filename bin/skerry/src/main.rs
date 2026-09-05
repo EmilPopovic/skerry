@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Skerry.
 //!
 //! Parses the little there is to parse, then hands over to `sk-app`. Everything

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Input policy that must be identical on both display servers.
 //!
 //! A wheel notch, a double-click window, and how fast a held key repeats are not

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The Details view and the window chrome.
 //!
 //! One immediate-mode pass over the **visible rows only**. At a million entries

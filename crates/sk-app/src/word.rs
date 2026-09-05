@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The run of text a double click takes, wherever text can be selected.
 //!
 //! Three surfaces need this and each of them used to have nothing: a field being

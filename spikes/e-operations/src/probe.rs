@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! What each filesystem can actually do, asked at runtime.
 //!
 //! [ADR 0007](../../docs/adr/0007-runtime-capability-detection.md) says

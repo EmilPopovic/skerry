@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The X11 arm: `x11rb`, ICCCM selections and XDND, with no toolkit above them.
 //!
 //! Under this session X11 clients are Xwayland clients, which makes every check

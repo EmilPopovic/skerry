@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! shared-mime-info, `.desktop` parsing and launch.
 //!
 //! Does not own: any policy about *when* to launch something.

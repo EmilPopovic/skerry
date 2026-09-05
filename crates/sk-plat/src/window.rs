@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! What a window is, in terms neither display server owns.
 //!
 //! These types were `wayland`'s until there was a second backend. They are here

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Subsequence matching with scoring, in the spirit of `fzf`.
 //!
 //! Written rather than imported. Rule 10 aside, the question this spike asks is

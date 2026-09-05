@@ -195,8 +195,7 @@ quietly. See [tools/README.md](tools/README.md).
 
 ## Licence
 
-MIT or Apache-2.0, at your option: [LICENSE-MIT](LICENSE-MIT) and
-[LICENSE-APACHE](LICENSE-APACHE). Every source file carries an
+Apache-2.0: [LICENSE](LICENSE). Every source file carries an
 `SPDX-License-Identifier` line saying the same thing, and `tools/check` fails a build
 for one that does not.
 

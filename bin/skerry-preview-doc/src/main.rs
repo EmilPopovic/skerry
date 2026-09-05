@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The document helper: one page of a PDF and its words, through the tools on
 //! `PATH`.
 //!

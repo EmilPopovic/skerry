@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Shaping one line, with per-cluster fallback and enough of UAX #9 to put a
 //! file extension where a reader expects it.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Spike E — operation engine correctness.
 //!
 //! Question, bar and method are in [README.md](README.md). Unlike the other five

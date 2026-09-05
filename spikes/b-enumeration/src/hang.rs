@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! A filesystem that stops responding, for rule 1's canonical test.
 //!
 //! [03-principles.md](../../../docs/03-principles.md) states the failure as "any

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Keyboard mapping through `xkbcommon`, and the pointer, which exists here for
 //! one reason: `wl_data_device.start_drag` needs the serial of a button press
 //! inside our own surface. A drag source is not something a client can fake.

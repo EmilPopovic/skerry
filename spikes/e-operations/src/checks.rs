@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The checks, in the order a run executes them. Every one compares the
 //! destination against the source; none of them asks the engine what it did.
 

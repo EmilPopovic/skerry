@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! An input method, for testing the window's `text-input-v3` half.
 //!
 //! **The only way that code can be tested at all.** A real input method is a

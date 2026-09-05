@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Mutations, and the inverse of each one.
 //!
 //! Make a directory, rename, copy in, move in, move to the trash. Each returns a

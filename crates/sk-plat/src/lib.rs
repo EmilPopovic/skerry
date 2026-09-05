@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Wayland and X11 protocol handling, keyboard mapping, pointer input, monitors
 //! and scaling, the clipboard, and window lifecycle.
 //!

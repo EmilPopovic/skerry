@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! Quick look: one file, as large as the window will allow.
 //!
 //! `Space` over a row and the file is on screen — a picture, a document's first

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! How each folder was last laid out, remembered across sessions.
 //!
 //! **A choice about a folder, not about a window.** The layout in

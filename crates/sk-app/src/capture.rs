@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! One frame, rendered with no display server and written to a PNG.
 //!
 //! Two jobs, and the second is the reason it lives in the product rather than in

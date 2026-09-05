@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 //! The seat: keyboard mapping through `xkbcommon`, key repeat, and a pointer
 //! that counts clicks and accumulates scroll.
 //!
