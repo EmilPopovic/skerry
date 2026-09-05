@@ -212,29 +212,64 @@ fn on_path(program: &str) -> bool {
 /// It ships in the same package as `pdftoppm`, so in practice it is there
 /// whenever the renderer is — and "in practice" is why the answer is an `Option`
 /// rather than a number.
-/// How far the page is turned, from the tool that already answers about pages.
+/// What one page is: how big it is in points, and how far it is turned.
 ///
-/// **`pdfinfo`, per page, because a `/Rotate 90` page is where poppler's own two
-/// answers disagree**: its text layer reports the unrotated `MediaBox` as the
-/// page's size and the boxes in the rotated space, and its renderer draws the
-/// rotated image. Zero where nothing can say, which is the same as no rotation
-/// and is what every page that is not turned reports anyway.
+/// **One `pdfinfo` call for both**, because both come off the same three lines of
+/// its output and a second spawn per render is a tenth of what the render costs.
+#[derive(Clone, Copy, Default)]
+struct Facts {
+    /// The `MediaBox`, in points, **unrotated** — which is what poppler prints.
+    size: Option<(f32, f32)>,
+    /// Degrees clockwise, 0, 90, 180 or 270.
+    rotation: u32,
+}
+
+impl Facts {
+    /// The page's size as it will be *drawn*, which is the turned one.
+    fn drawn(self) -> Option<(f32, f32)> {
+        let (width, height) = self.size?;
+        Some(if self.rotation % 180 == 90 { (height, width) } else { (width, height) })
+    }
+}
+
+/// What `pdfinfo` says about one page.
+fn facts(path: &Path, page: u32) -> Facts {
+    let page = page.max(1).to_string();
+    let Ok(done) = Command::new("pdfinfo").args(["-f", &page, "-l", &page]).arg(path).output()
+    else {
+        return Facts::default();
+    };
+    let text = String::from_utf8_lossy(&done.stdout);
+    let rotation = text
+        .lines()
+        .find_map(|line| line.split_once("rot:").map(|(_, rest)| rest.trim().to_owned()))
+        .and_then(|rest| rest.parse::<i32>().ok())
+        .map_or(0, |angle| angle.rem_euclid(360).unsigned_abs());
+    // `Page    1 size:  420 x 595 pts (A5)` — the numbers between the colon and
+    // the unit, which is the whole of the parse.
+    let size = text.lines().find_map(|line| {
+        let rest = line.split_once("size:")?.1.trim();
+        let (width, rest) = rest.split_once(" x ")?;
+        let height = rest.split_whitespace().next()?;
+        Some((width.trim().parse().ok()?, height.parse().ok()?))
+    });
+    Facts { size, rotation }
+}
+
+/// How far the page is turned, for the text layer.
+///
+/// **A `/Rotate 90` page is where poppler's own two answers disagree**: its text
+/// layer reports the unrotated `MediaBox` as the page's size and the boxes in the
+/// rotated space, and its renderer draws the rotated image. Zero where nothing
+/// can say, which is the same as no rotation and is what every page that is not
+/// turned reports anyway.
 fn rotation(tool: Tool, path: &Path, page: u32) -> u32 {
     if tool != Tool::PdfToPpm {
         // mupdf's structured text is already in the rotated space, so the angle
         // is not a question that arm has to ask.
         return 0;
     }
-    let page = page.max(1).to_string();
-    let Ok(done) = Command::new("pdfinfo").args(["-f", &page, "-l", &page]).arg(path).output()
-    else {
-        return 0;
-    };
-    String::from_utf8_lossy(&done.stdout)
-        .lines()
-        .find_map(|line| line.split_once("rot:").map(|(_, rest)| rest.trim().to_owned()))
-        .and_then(|rest| rest.parse::<i32>().ok())
-        .map_or(0, |angle| angle.rem_euclid(360).unsigned_abs())
+    facts(path, page).rotation
 }
 
 fn count(tool: Tool, path: &Path) -> Option<u32> {
@@ -273,20 +308,43 @@ fn render(
     within: (u32, u32),
     page: u32,
 ) -> Result<(Vec<u8>, (u32, u32)), Refusal> {
-    let long = within.0.max(within.1).clamp(64, 2048).to_string();
-    let page = page.to_string();
+    // **The box, not its long edge.** `-scale-to` sets the *page's* long edge, so
+    // a portrait page asked for a landscape box was rendered to the box's width —
+    // 709×1004 for a panel wanting 417×590, which is 2.9× the pixels, downscaled
+    // again on the way to the screen. Worse, the ceiling below then bit at a size
+    // the panel had not reached: the render came back smaller than the box, and a
+    // page drawn at one to one inside a panel it does not fill is the "the
+    // placeholder is bigger than the picture" this fixes.
+    //
+    // Four thousand a side is the wire's own ceiling, and no lower: a preview
+    // whose long edge is capped below the panel's is a preview that gets *worse*
+    // on a better screen.
+    let within = (within.0.clamp(64, 4096), within.1.clamp(64, 4096));
+    let page_number = page.to_string();
     let mut command = Command::new(match tool {
         Tool::PdfToPpm => "pdftoppm",
         Tool::MuTool => "mutool",
     });
     match tool {
-        // `-r` is a resolution and `-scale-to` is a long edge, which is what a box
-        // wants: a page is rendered to fit rather than at a guessed DPI.
         Tool::PdfToPpm => {
-            command.args(["-png", "-f", &page, "-l", &page, "-scale-to", &long]).arg(path);
+            // **Poppler distorts when given both axes** — `-scale-to-x 1000
+            // -scale-to-y 200` answers 1000×200 for an A5 page — so the fit is
+            // computed here from what `pdfinfo` says the page is, and one long
+            // edge is passed. Without a size to fit against, the old behaviour is
+            // the fallback: a long edge, which is never *smaller* than right.
+            let long = fitted_long_edge(path, page, within);
+            command
+                .args(["-png", "-f", &page_number, "-l", &page_number, "-scale-to", &long])
+                .arg(path);
         }
         Tool::MuTool => {
-            command.args(["draw", "-F", "png", "-o", "-", "-w", &long]).arg(path).arg(&page);
+            // mupdf fits inside both when given both — measured, 142×200 for the
+            // same box poppler stretched — so it is handed the box itself.
+            let (width, height) = (within.0.to_string(), within.1.to_string());
+            command
+                .args(["draw", "-F", "png", "-o", "-", "-w", &width, "-h", &height])
+                .arg(path)
+                .arg(&page_number);
         }
     }
     let done = command.output().map_err(|_| Refusal::NoRenderer)?;
@@ -294,6 +352,24 @@ fn render(
         return Err(Refusal::Undecodable);
     }
     decode_png(&done.stdout)
+}
+
+/// The long edge to render at, so the page lands inside `within`.
+///
+/// The page's own size decides which axis binds. Where `pdfinfo` says nothing —
+/// no poppler, an encrypted document, a page it will not describe — the box's
+/// long edge is the answer, which is what this did before and is never too small.
+fn fitted_long_edge(path: &Path, page: u32, within: (u32, u32)) -> String {
+    let fallback = within.0.max(within.1);
+    let Some((width, height)) = facts(path, page).drawn() else { return fallback.to_string() };
+    if width <= 0.0 || height <= 0.0 {
+        return fallback.to_string();
+    }
+    let scale = (within.0 as f32 / width).min(within.1 as f32 / height);
+    let long = (width.max(height) * scale).round();
+    // Clamped to the same ceiling the box is, because a page thirty times as tall
+    // as it is wide would otherwise ask for a render the wire cannot carry.
+    (long.clamp(64.0, 4096.0) as u32).to_string()
 }
 
 /// The renderer's PNG, as straight `RGBA8`.

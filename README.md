@@ -4,7 +4,7 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 822 tests, 138 GUI scenarios on both Wayland and X11, seventy-five golden
+helpers, 824 tests, 140 GUI scenarios on both Wayland and X11, seventy-five golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,

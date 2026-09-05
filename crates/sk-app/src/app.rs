@@ -1027,6 +1027,14 @@ pub struct App {
     /// gesture. Whichever arrives first does the work; this is how the other one
     /// knows not to do it again.
     dropped: bool,
+    /// Which page each document was last left on, most recent first.
+    ///
+    /// **Because reopening a manual at page one is losing somebody's place.** A
+    /// quick look records the page as it turns and reads it back when the same
+    /// file is opened again, and the list goes in the session file so it survives
+    /// the process — [rule 6](../../../docs/03-principles.md). Bounded by
+    /// [`crate::session::MOST_PAGES`], oldest dropped.
+    pages_left_at: Vec<(std::path::PathBuf, u32)>,
     /// Raises asked for, and raises there was a way to ask for.
     ///
     /// **Two numbers because they differ by display server.** X11 always has a
@@ -1154,6 +1162,7 @@ impl App {
         // are still being read on a job. Each read is started here rather than
         // when the sections land, because the answer is keyed by path and the
         // order the two arrive in does not matter.
+        self.pages_left_at.clone_from(&session.pages);
         self.sidebar.open_these(&session.expanded);
         for path in session.expanded.clone() {
             self.read_a_place(path);
@@ -1183,6 +1192,7 @@ impl App {
             window: (self.logical.width as u32, self.logical.height as u32),
             columns: self.columns,
             expanded: self.sidebar.open_places().to_vec(),
+            pages: self.pages_left_at.clone(),
             tree: self.panes.describe(),
         }
     }
@@ -1364,6 +1374,7 @@ impl App {
             band: None,
             files_drag: None,
             dropped: false,
+            pages_left_at: Vec::new(),
             raises: (0, 0),
             a11y: None,
             drops_started: 0,
@@ -6418,6 +6429,12 @@ scope_aim={scope_aim:?}",
         let Some(id) = pane.listing.at(row) else { return false };
         let (path, mtime) = (pane.path_of(id), pane.listing.mtime(id));
         let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &self.jobs);
+        // **Where this document was left.** Reopening a four-hundred-page manual
+        // at page one is losing somebody's place, and the page is as much a part
+        // of how the window was left as which folder it is in.
+        if let Some(page) = self.page_left_at(&path) {
+            look.page = page;
+        }
         // **Whatever the atlas already has, drawn while the real one is fetched.**
         // The row was on screen, so its thumbnail is on the GPU; the only thing
         // this costs is the lookup, and it is the difference between a panel that
@@ -6431,6 +6448,27 @@ scope_aim={scope_aim:?}",
         self.quick_look = Some(look);
         self.dirty = true;
         true
+    }
+
+    /// Which page a document was last left on, if this one was.
+    fn page_left_at(&self, path: &std::path::Path) -> Option<u32> {
+        self.pages_left_at.iter().find(|(kept, _)| kept == path).map(|(_, page)| *page)
+    }
+
+    /// Records the page a document is on, most recent first.
+    ///
+    /// **Called as the page turns rather than as the panel closes.** A panel can
+    /// go away with the process — `kill -9`, which rule 6 is about — and a
+    /// position written only on the way out is a position lost exactly then.
+    fn remember_the_page(&mut self) {
+        let Some(look) = self.quick_look.as_ref().filter(|look| look.paged()) else { return };
+        let (path, page) = (look.path.clone(), look.page);
+        if self.page_left_at(&path) == Some(page) {
+            return;
+        }
+        self.pages_left_at.retain(|(kept, _)| *kept != path);
+        self.pages_left_at.insert(0, (path, page));
+        self.pages_left_at.truncate(crate::session::MOST_PAGES);
     }
 
     /// Moves the look to the next file in `delta`'s direction that has one.
@@ -6545,7 +6583,7 @@ scope_aim={scope_aim:?}",
         let inner = crate::view::quick_look_area(&self.layout);
         let Some(look) = self.quick_look.as_mut() else { return };
         let Some((_, size)) = look.image else { return };
-        look.pan = crate::view::clamped_pan(inner, size, look.coarse, (look.zoom, look.pan));
+        look.pan = crate::view::clamped_pan(inner, size, look.drafted, (look.zoom, look.pan));
     }
 
     /// Whether the panel is showing something with frames that play.
@@ -6593,6 +6631,22 @@ scope_aim={scope_aim:?}",
         let renderer = &self.renderer;
         let Some(look) = &mut self.quick_look else { return };
         look.retain_held(|key| renderer.preview_size(key).is_some());
+        // **What the budget may not drop** — ADR 0028. A neighbour has never been
+        // drawn, so every eviction rule that sorts on when a picture was last on
+        // screen picks it first, and the page you are about to turn to is the one
+        // that keeps disappearing.
+        let pinned = look.pinned();
+        self.renderer.keep_previews(&pinned);
+        self.remember_the_page();
+        // **And the queue holds only the pages still wanted.** A held page key
+        // queues a render per press, and the panel then shows the page from two
+        // seconds ago while the queue drains — see `Host::only_pages`.
+        if let Some(look) = self.quick_look.as_ref().filter(|look| look.paged()) {
+            let mut wanted = look.neighbours();
+            wanted.push(look.page);
+            self.previews.only_pages(&look.path, &wanted);
+        }
+        let Some(look) = &mut self.quick_look else { return };
         // A page already on the GPU is a turn with no wait at all — ADR 0020.
         if look.show_held(within) {
             self.dirty = true;
@@ -7203,7 +7257,8 @@ scope_aim={scope_aim:?}",
             .and_then(|look| {
                 let (_, size) = look.image?;
                 let inner = crate::view::quick_look_area(&self.layout);
-                let box_ = crate::view::fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+                let box_ =
+                    crate::view::fitted_box(inner, size, look.drafted, (look.zoom, look.pan));
                 Some(format!("{:.1}:{:.1}:{:.1}:{:.1}", box_.x, box_.y, box_.width, box_.height))
             })
             .unwrap_or_default();
@@ -7324,6 +7379,25 @@ look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
             .and_then(|look| look.text.as_ref())
             .map_or(0, |text| text.rows().len());
         let look_unsaved = self.look_is_unsaved();
+        // **What was asked for, what came back, and whether it is a draft** — the
+        // three numbers behind "the picture changed size when the real one
+        // arrived". A draft is drawn scaled up to fill the panel and a full
+        // render is drawn at one to one, so the two agreeing is the whole of what
+        // makes a page turn look still.
+        let look_shot = self.quick_look.as_ref().map_or_else(
+            || "none".to_owned(),
+            |look| {
+                let asked = look.asked.map_or_else(
+                    || "none".to_owned(),
+                    |it| format!("{}x{}", it.within.0, it.within.1),
+                );
+                let got = look.image.map_or_else(
+                    || "none".to_owned(),
+                    |(_, size)| format!("{}x{}", size.0, size.1),
+                );
+                format!("asked={asked},got={got},coarse={},drafted={}", look.coarse, look.drafted)
+            },
+        );
         let page = self.page_state();
         // The magnification and where the picture has been dragged to, which is
         // the whole of what a pinch and a pan change: a scenario asserting on
@@ -7356,6 +7430,7 @@ look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
 look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
 look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
 look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan} \
+look_shot={look_shot} \
 {page}"
         )
     }

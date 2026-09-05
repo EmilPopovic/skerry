@@ -1122,7 +1122,7 @@ fn quick_look(
         // **Except when it is zoomed**, where the picture is larger than the
         // panel and has to be clipped to it: a preview is a quad and a quad that
         // hangs over the panel's edge is drawn over the list behind it.
-        let box_ = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+        let box_ = fitted_box(inner, size, look.drafted, (look.zoom, look.pan));
         if look.zoomed() {
             let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
             painter.list.push_clip(clip);
@@ -1133,7 +1133,7 @@ fn quick_look(
             page_find(painter, look, inner, hits);
             return;
         }
-        painter.preview(key, fitted(painter, inner, size, look.coarse), theme.palette.text);
+        painter.preview(key, fitted(painter, inner, size, look.drafted), theme.palette.text);
         page_selection(painter, look, box_);
         page_find(painter, look, inner, hits);
         return;
@@ -1701,7 +1701,7 @@ pub(crate) fn page_place(
     if across <= 0.0 || down <= 0.0 {
         return None;
     }
-    let page = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+    let page = fitted_box(inner, size, look.drafted, (look.zoom, look.pan));
     if page.width <= 0.0 || page.height <= 0.0 {
         return None;
     }
@@ -1723,7 +1723,7 @@ pub(crate) fn page_word_at(
     let Some(text) = look.page_text.as_ref() else { return false };
     let Some((_, size)) = look.image else { return false };
     let (across, down) = text.size();
-    let page = fitted_box(inner, size, look.coarse, (look.zoom, look.pan));
+    let page = fitted_box(inner, size, look.drafted, (look.zoom, look.pan));
     if across <= 0.0 || down <= 0.0 || page.width <= 0.0 {
         return false;
     }
@@ -5101,8 +5101,44 @@ mod tests {
 
     use super::{
         CARET_PAD, Chrome, Diagnostics, Hits, KEY_CHROME, MAX_KEY_STEP, MIN_KEY_STEP, crumb_names,
-        draw, field_scroll, keys_shape,
+        draw, field_scroll, fitted_box, keys_shape,
     };
+    use crate::layout::Area;
+
+    /// **A draft and the render that replaces it occupy the same rectangle.**
+    ///
+    /// The whole point of drafting a page at a third of the panel is that it
+    /// stands in for the finished one *where the finished one will be*. Drawn at
+    /// one to one instead — which is what happened, because the flag the drawing
+    /// read was cleared by the draft's own arrival — a third-size page sits in
+    /// the middle of the panel and jumps to full size when the render lands.
+    ///
+    /// The sizes are a real pair: an A5 page fitted into a 1004×590 box, and the
+    /// same page fitted into the third of it a draft asks for.
+    #[test]
+    fn a_draft_stands_where_the_finished_page_will_be() {
+        let panel = Area { x: 48.0, y: 82.0, width: 1004.0, height: 590.0 };
+        let full = (417, 590);
+        let draft = (139, 196);
+        let still = (1.0, (0.0, 0.0));
+        let finished = fitted_box(panel, full, false, still);
+        let standing_in = fitted_box(panel, draft, true, still);
+        for (a, b) in [
+            (finished.x, standing_in.x),
+            (finished.y, standing_in.y),
+            (finished.width, standing_in.width),
+            (finished.height, standing_in.height),
+        ] {
+            assert!(
+                (a - b).abs() < 2.0,
+                "the draft is at {standing_in:?}, the page at {finished:?}"
+            );
+        }
+        // And the draft drawn as though it were finished is the defect: small, in
+        // the middle, and nowhere near the rectangle above.
+        let wrong = fitted_box(panel, draft, false, still);
+        assert!(wrong.width < finished.width / 2.0, "the draft at one to one is {wrong:?}");
+    }
     use crate::frames::Frames;
     use crate::layout::Layout;
     use crate::pane::{Jobs, Pane};

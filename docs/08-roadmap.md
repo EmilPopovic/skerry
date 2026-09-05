@@ -436,6 +436,20 @@ the pointer is on. A wrapped line is still one paragraph, so the third click tak
 the line the file has rather than the row the panel drew — otherwise the gesture
 would take a different amount of text in a narrow window than in a wide one.
 
+**A page is rendered at the size it is drawn at**, which it was not: the child
+was asked for a box and set the *page's* long edge to the box's long edge, so a
+portrait page in a landscape panel came back 709×1004 where 417×590 was wanted —
+2.9× the pixels, downscaled again on the way to the screen. Past the child's own
+ceiling the same arithmetic made the render *smaller* than the panel, and a page
+drawn at one to one inside a panel it does not fill is the placeholder-is-bigger
+-than-the-picture people reported. Poppler distorts when handed both axes, so the
+fit is computed from what `pdfinfo` says the page is; mupdf fits inside both and
+is handed the box. **And the page either side is always there**: the prefetch
+goes both ways and the three are pinned against the byte budget
+([ADR 0028](adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md)),
+a held page key no longer queues a render per press, and a document reopens on
+the page it was left at.
+
 **And the time to a first pixel is a third to a half of what it was**, from three
 changes that came out of one measurement — the thumbnail already on the GPU stands
 in for a picture (**0 ms**, was 67–155), a page is drafted at a third size first

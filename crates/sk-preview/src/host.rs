@@ -235,6 +235,25 @@ impl Previews {
         self.queue.push(want);
     }
 
+    /// Drops queued previews of `path` for any page not in `pages`.
+    ///
+    /// **Because holding a page key queues a render per press.** The dedup above
+    /// supersedes a want at a *different size*; two pages of one document at the
+    /// same size are two different wants and both are kept, so twenty presses of
+    /// `↓` in two seconds left twenty renders queued at sixty milliseconds each —
+    /// and the panel showed the page from two seconds ago until the queue drained.
+    /// That is the reported "holding up or down freezes the preview".
+    ///
+    /// The caller passes the page on screen and the ones it wants prefetched, so
+    /// what is left is bounded by that set however fast the keys arrive. What is
+    /// already in flight finishes: a batch cannot be recalled, and one stale
+    /// render is the bound.
+    pub fn only_pages(&mut self, path: &Path, pages: &[u32]) {
+        self.queue.retain(|queued| {
+            queued.ask != Ask::Preview || queued.path != path || pages.contains(&queued.page)
+        });
+    }
+
     /// Forgets everything not yet asked for.
     ///
     /// For a listing that has been left: the thumbnails of a folder nobody is

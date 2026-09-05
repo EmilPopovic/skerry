@@ -20,6 +20,7 @@
 //! window 1100x720       logical pixels
 //! columns 520 96 128    name, size and modified widths, in logical pixels
 //! expanded /home/emil   a place opened in the sidebar's tree, one line each
+//! page 7 /home/a.pdf   which page a document was last left on, one line each
 //! split beside 0.5      beside | below, then a ratio
 //!   leaf 1              the index of the showing tab
 //!     tab name+ 0 /home     a sort, a scroll offset, and the path last
@@ -94,9 +95,25 @@ pub struct Session {
     /// gone comes back as a line that opens nothing, which costs one read and no
     /// row.
     pub expanded: Vec<PathBuf>,
+    /// Which page each document was last left on, most recent first.
+    ///
+    /// **A reading position is part of how the window was left.** Reopening a
+    /// four-hundred-page manual at page one is the same failure as reopening a
+    /// window at the home folder, and [rule
+    /// 6](../../../docs/03-principles.md) is about not losing what a person set
+    /// up. Bounded — see [`MOST_PAGES`] — and one line each, with the path last
+    /// for the grammar's own reason.
+    pub pages: Vec<(PathBuf, u32)>,
     /// The pane tree.
     pub tree: Node,
 }
+
+/// How many documents' reading positions to keep.
+///
+/// **Thirty-two, and the oldest goes.** The list is written on every change like
+/// the rest of the file, so its length is what a save costs; thirty-two is more
+/// documents than a person has open in a week and four lines of text.
+pub const MOST_PAGES: usize = 32;
 
 /// One node of the saved tree.
 #[derive(Clone, PartialEq, Debug)]
@@ -218,6 +235,9 @@ pub fn render(session: &Session) -> String {
     for path in &session.expanded {
         let _ = writeln!(out, "expanded {}", path.display());
     }
+    for (path, page) in session.pages.iter().take(MOST_PAGES) {
+        let _ = writeln!(out, "page {page} {}", path.display());
+    }
     write_node(&session.tree, 0, &mut out);
     out
 }
@@ -309,6 +329,7 @@ pub fn parse(text: &str) -> Option<Session> {
         window: (1100, 720),
         columns: crate::layout::Columns::default(),
         expanded: Vec::new(),
+        pages: Vec::new(),
         tree: Node::Leaf { active: 0, tabs: Vec::new() },
     };
     let rest: Vec<&str> = lines.collect();
@@ -330,6 +351,17 @@ pub fn parse(text: &str) -> Option<Session> {
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
             "columns" => session.columns = read_columns(value),
             "expanded" if !value.is_empty() => session.expanded.push(PathBuf::from(value)),
+            // `page 7 /home/emil/manual.pdf` — the number first, so the path
+            // keeps the rest of the line and needs no quoting.
+            "page" => {
+                if let Some((number, path)) = value.split_once(' ')
+                    && let Ok(page) = number.parse::<u32>()
+                    && !path.is_empty()
+                    && session.pages.len() < MOST_PAGES
+                {
+                    session.pages.push((PathBuf::from(path), page.max(1)));
+                }
+            }
             "window" => {
                 if let Some(size) = read_size(value) {
                     session.window = size;
@@ -447,7 +479,7 @@ fn read_tab(rest: &str) -> Option<Tab> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Node, Session, Tab, parse, render};
+    use super::{MOST_PAGES, Node, Session, Tab, parse, render};
     use crate::panes::Axis;
     use sk_model::{Sort, SortColumn};
     use std::path::PathBuf;
@@ -486,10 +518,42 @@ mod tests {
         assert!(render(&session).contains("tab name+ 120 /tmp/my notes"), "{}", render(&session));
     }
 
+    /// A reading position survives the round trip, and an old file has none.
+    #[test]
+    fn a_page_a_document_was_left_on_comes_back() {
+        let mut session = nested();
+        session.pages = vec![
+            (PathBuf::from("/tmp/manual.pdf"), 47),
+            (PathBuf::from("/tmp/a book with spaces.pdf"), 2),
+        ];
+        let text = render(&session);
+        assert!(text.contains("page 47 /tmp/manual.pdf"), "{text}");
+        let back = parse(&text).expect("read back");
+        assert_eq!(back.pages, session.pages);
+
+        // A file written before this line existed restores nothing, which is a
+        // document that opens at page one — the behaviour it had.
+        let older: String =
+            text.lines().filter(|line| !line.starts_with("page ")).collect::<Vec<_>>().join("\n");
+        assert!(parse(&format!("{older}\n")).expect("read back").pages.is_empty());
+    }
+
+    /// The list is bounded, so a session file cannot grow without end.
+    #[test]
+    fn only_so_many_reading_positions_are_kept() {
+        let mut session = nested();
+        session.pages =
+            (0..MOST_PAGES + 8).map(|n| (PathBuf::from(format!("/tmp/{n}.pdf")), 3)).collect();
+        let text = render(&session);
+        assert_eq!(text.lines().filter(|line| line.starts_with("page ")).count(), MOST_PAGES);
+        assert_eq!(parse(&text).expect("read back").pages.len(), MOST_PAGES);
+    }
+
     fn nested() -> Session {
         Session {
             aside: crate::sidebar::DEFAULT_WIDTH,
             expanded: Vec::new(),
+            pages: Vec::new(),
             dark: false,
             sidebar: false,
             history: false,

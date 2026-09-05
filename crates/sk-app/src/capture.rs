@@ -257,7 +257,7 @@ fn sample_quick_look(
                 look.pan = crate::view::clamped_pan(
                     inner,
                     answer.size,
-                    look.coarse,
+                    look.drafted,
                     (look.zoom, look.pan),
                 );
                 served = Some(crate::quicklook::Shot {

@@ -399,6 +399,11 @@ impl Renderer {
         self.rebuild_bindings();
     }
 
+    /// Pages the preview budget may not drop. See [`crate::images::Preview::keep`].
+    pub fn keep_previews(&mut self, keys: &[ImageKey]) {
+        self.looking.keep(keys);
+    }
+
     /// Forgets every held page. For a panel that has closed.
     pub fn forget_previews(&mut self) {
         for gone in self.looking.forget_all() {

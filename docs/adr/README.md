@@ -35,6 +35,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0025](0025-the-config-file-is-the-keymap-written-out.md) | The config file is the keymap written out, and the program never writes it behind you | Accepted |
 | [0026](0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md) | AT-SPI is a tree derived from the frame, published on the bus we already speak | Accepted |
 | [0027](0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md) | A setting is a line in the config; the session remembers what the window changed | Accepted |
+| [0028](0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md) | The page you are on and its two neighbours are never evicted | Accepted |
 
 ## Triggers that have been answered
 

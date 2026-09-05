@@ -249,6 +249,8 @@ pub struct Preview {
     pending: Vec<(ImageKey, (u32, u32), Vec<u8>)>,
     /// Which key the renderer's bind group currently points at.
     bound: Option<ImageKey>,
+    /// What the budget may not drop. See [`Preview::keep`].
+    pinned: Vec<ImageKey>,
     frame: u64,
 }
 
@@ -343,21 +345,36 @@ impl Preview {
         self.bound = key;
     }
 
+    /// Pictures the budget may not drop, whatever it costs.
+    ///
+    /// **[ADR 0028](../../../docs/adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md).**
+    /// The page on screen and the one on either side of it are the difference
+    /// between turning pages and watching a placeholder, and they are pinned
+    /// rather than merely recently drawn: a neighbour has *never* been drawn, so
+    /// every eviction rule that sorts on when a picture was last on screen picks
+    /// it first. Replaced whole each frame by the one caller that knows which
+    /// pages those are.
+    pub fn keep(&mut self, keys: &[ImageKey]) {
+        self.pinned.clear();
+        self.pinned.extend_from_slice(keys);
+    }
+
     /// The keys to drop so the budget holds, least recently drawn first.
     ///
-    /// **Never this frame's**, which is the atlas's rule applied to a second
-    /// store: a full store degrades to a page that has to be rendered again, and
-    /// never to the wrong page on screen.
+    /// **Never this frame's, and never a pinned one**, which is the atlas's rule
+    /// applied to a second store plus ADR 0028's: a full store degrades to a page
+    /// that has to be rendered again, and never to the wrong page on screen.
     pub fn over_budget(&mut self) -> Vec<ImageKey> {
         let mut total: usize = self.held.iter().map(Kept::bytes).sum();
         let mut dropped = Vec::new();
         while total > MOST_HELD_BYTES && self.held.len() > 1 {
             let current = self.frame;
+            let pinned = &self.pinned;
             let Some(at) = self
                 .held
                 .iter()
                 .enumerate()
-                .filter(|(_, kept)| kept.frame != current)
+                .filter(|(_, kept)| kept.frame != current && !pinned.contains(&kept.key))
                 .min_by_key(|(_, kept)| kept.frame)
                 .map(|(at, _)| at)
             else {
@@ -376,6 +393,7 @@ impl Preview {
     /// Forgets everything. For a panel that has closed.
     pub fn forget_all(&mut self) -> Vec<ImageKey> {
         self.pending.clear();
+        self.pinned.clear();
         self.bound = None;
         self.held.drain(..).map(|kept| kept.key).collect()
     }

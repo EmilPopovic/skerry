@@ -521,6 +521,18 @@ pub(crate) struct QuickLook {
     pub(crate) held: std::collections::HashMap<u32, (ImageKey, (u32, u32))>,
     /// The page being fetched ahead of being wanted, if any.
     pub(crate) ahead: Option<u32>,
+    /// Whether what is *on screen* is a draft rather than the finished render.
+    ///
+    /// **Not the same question as [`Self::coarse`], and conflating them is what
+    /// made a page turn look like a rescale.** `coarse` says what the *next* ask
+    /// is, and [`Self::took`] clears it the moment the draft arrives — so the
+    /// draft was on screen with `coarse` already false, drawn at one to one
+    /// because that is what a finished picture gets: a third-size page in the
+    /// middle of the panel, jumping to full size when the render landed.
+    ///
+    /// A draft is drawn scaled up to fill the box the finished one will occupy,
+    /// which is the whole point of having one.
+    pub(crate) drafted: bool,
     /// Whether the next ask is the quick coarse one rather than the full size.
     ///
     /// **Documents only.** A page's cost is proportional to what is drawn —
@@ -617,6 +629,7 @@ impl QuickLook {
             held: std::collections::HashMap::new(),
             ahead: None,
             coarse: shows == Shows::Page,
+            drafted: false,
             text: None,
             refusal: None,
             page: 1,
@@ -928,6 +941,11 @@ impl QuickLook {
         }
         if page == self.page {
             self.image = Some((key, size));
+            // **What arrived is a draft exactly when a draft was asked for.** The
+            // reply is matched against the shot currently outstanding, so there is
+            // no third possibility — and this is the flag the drawing reads, one
+            // line before the flag that decides the *next* ask is cleared.
+            self.drafted = self.coarse;
             self.shown_at = Some(std::time::Instant::now());
             // The stand-in has done its job and must stop being drawn under a
             // picture with transparency in it.
@@ -967,22 +985,57 @@ impl QuickLook {
         self.shown_at = Some(std::time::Instant::now());
         self.standby = None;
         self.coarse = false;
+        // Only a full render is ever held — see `took` — so what is on screen now
+        // is not a stand-in.
+        self.drafted = false;
         self.asked = Some(Shot { within, page: self.page });
         true
     }
 
     /// The next page worth rendering before anybody asks for it.
     ///
-    /// **Two ahead, and only once the page on screen is finished.** Guessing while
-    /// the current page is still being drafted would put the guess in front of the
-    /// thing being waited for — see [`sk_preview::Want::is_urgent`].
+    /// **Both ways, the neighbours first.** It used to look only forward, so `↑`
+    /// was always a wait and `↓` was free — which is a preview that is quick in
+    /// the direction nobody notices and slow in the one they do. The order is the
+    /// next page, the previous page, then one further on: the two either side are
+    /// [ADR
+    /// 0028](../../../docs/adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md)'s
+    /// promise and the third is what makes reading forwards stay ahead.
+    ///
+    /// **Only once the page on screen is finished.** Guessing while the current
+    /// page is still being drafted would put the guess in front of the thing
+    /// being waited for — see [`sk_preview::Want::is_urgent`].
     pub(crate) fn next_ahead(&self) -> Option<u32> {
         if !self.paged() || self.coarse || self.image.is_none() {
             return None;
         }
-        (1..=AHEAD)
-            .map(|step| self.page + step)
-            .find(|page| (self.pages == 0 || *page <= self.pages) && !self.held.contains_key(page))
+        self.neighbours().into_iter().find(|page| !self.held.contains_key(page))
+    }
+
+    /// The pages either side of this one, and one further on, that exist.
+    ///
+    /// In the order they are worth having, and never the page on screen: that one
+    /// is `image` and is asked for by the ordinary path.
+    pub(crate) fn neighbours(&self) -> Vec<u32> {
+        let exists = |page: u32| page >= 1 && (self.pages == 0 || page <= self.pages);
+        let mut out = Vec::with_capacity(3);
+        for page in [self.page + 1, self.page.saturating_sub(1), self.page + AHEAD] {
+            if page != self.page && exists(page) && !out.contains(&page) {
+                out.push(page);
+            }
+        }
+        out
+    }
+
+    /// The textures the renderer must not drop: this page and its neighbours.
+    pub(crate) fn pinned(&self) -> Vec<ImageKey> {
+        let mut keys: Vec<ImageKey> = self.image.map(|(key, _)| key).into_iter().collect();
+        for page in self.neighbours() {
+            if let Some((key, _)) = self.held.get(&page) {
+                keys.push(*key);
+            }
+        }
+        keys
     }
 
     /// Puts the page back after a child said there is no such page.
@@ -1322,7 +1375,7 @@ impl QuickLook {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Chosen, LINES, QuickLook, Spot, Step, Text, Tone};
+    use super::{Chosen, ImageKey, LINES, QuickLook, Shot, Spot, Step, Text, Tone};
     use crate::previews::Shows;
     use sk_preview::Refusal;
 
@@ -1552,6 +1605,7 @@ mod tests {
             held: std::collections::HashMap::new(),
             ahead: None,
             coarse: false,
+            drafted: false,
             asked: Some(super::Shot { within: (800, 600), page: 1 }),
             scroll: sk_ui::Scroll::default(),
             chosen: None,
@@ -1569,6 +1623,43 @@ mod tests {
             as_on_disk: None,
             reading: None,
         }
+    }
+
+    /// **A draft on screen says so, and the finished render says it is not one.**
+    ///
+    /// The drawing scales a stand-in up to fill the box the finished page will
+    /// occupy, and draws a finished one at one to one — so which of the two is on
+    /// screen has to be a fact about the *image*, not about what will be asked
+    /// for next. `coarse` is the second of those, and clearing it as the draft
+    /// arrives is what drew a third-size page in the middle of the panel and then
+    /// jumped it to full size when the render landed.
+    #[test]
+    fn a_draft_on_screen_is_marked_as_one_and_the_render_unmarks_it() {
+        let mut look = paged(3);
+        look.coarse = true;
+        look.asked = Some(Shot { within: (334, 196), page: 1 });
+
+        look.took(ImageKey(1), (139, 196), 1);
+        assert!(look.drafted, "the draft is a stand-in and has to be drawn like one");
+        assert!(!look.coarse, "and the next ask is the full size");
+        assert!(look.held.is_empty(), "a draft is not remembered");
+
+        look.asked = Some(Shot { within: (1004, 590), page: 1 });
+        look.took(ImageKey(2), (417, 590), 1);
+        assert!(!look.drafted, "the finished page is not a stand-in");
+        assert_eq!(look.held.len(), 1, "and it is remembered");
+    }
+
+    /// A page taken off the held map is a finished one, whatever came before it.
+    #[test]
+    fn a_held_page_is_never_a_draft() {
+        let mut look = paged(3);
+        look.held.insert(2, (ImageKey(9), (417, 590)));
+        look.coarse = true;
+        look.drafted = true;
+        look.page = 2;
+        assert!(look.show_held((1004, 590)));
+        assert!(!look.drafted, "only full renders are held");
     }
 
     /// A look holding `body` as its text, for the selection arithmetic.

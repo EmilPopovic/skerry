@@ -1311,7 +1311,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 138
+FEWEST_SCENARIOS = 140
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -2023,6 +2023,201 @@ def double_click_in_a_preview(run: Run, fixture: Path) -> None:
     held = clipboard(run)
     if held != lines[1]:
         raise Failure(f"the clipboard holds {held!r} rather than the line")
+
+
+@scenario("a-page-turn-does-not-move-the-picture", fresh=True)
+def a_page_turn_does_not_move_the_picture(run: Run, fixture: Path) -> None:
+    """**The draft and the finished render occupy the same rectangle.**
+
+    A page is drafted at a third of the panel and then rendered at full size, and
+    the draft is drawn scaled up to stand in for it — so the two agreeing to
+    within a pixel is the whole of what makes a page turn look still rather than
+    like something rescaling. Nothing had ever asserted it, and the report of it
+    was that the placeholder is small and grows.
+
+    `look_page_box` is where the page was *actually* drawn, reported by the frame
+    that drew it, which is the only number that can answer this: the harness
+    recomputing `fitted_box` would be a second copy of the arithmetic under test.
+    """
+    pages = 6
+    (fixture / "book.pdf").write_bytes(many_page_pdf(pages))
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text book\nsleep 400\n")
+    until(run, cursor="book.pdf")
+    run.drive("key space\nsleep 200\n")
+
+    finished = holds(
+        run,
+        lambda it: "coarse=false" in it.get("look_shot", "") and it.get("look_page_box", "") != "",
+        "the full render",
+    )
+
+    # **The render fits the box and touches one side of it.** `-scale-to` sets a
+    # *page's* long edge, so a portrait page asked for a landscape box came back
+    # 709×1004 for a box of 1004×590 — 2.9× the pixels, downscaled again on the
+    # way to the screen, and on a panel past the child's ceiling it came back
+    # *smaller* than the box, which is a page drawn at one to one inside a panel
+    # it does not fill. Both are this one assertion.
+    asked, got = shot_of(finished)
+    if got[0] > asked[0] + 1 or got[1] > asked[1] + 1:
+        raise Failure(f"the render {got} does not fit the box {asked} it was asked for")
+    if got[0] < asked[0] - 1 and got[1] < asked[1] - 1:
+        raise Failure(f"the render {got} touches neither side of {asked}: the panel has a margin")
+
+    box = [float(it) for it in finished["look_page_box"].split(":")]
+
+    # **And a turn does not move it.** Every page of this document is the same
+    # size, so the rectangle after the turn is the rectangle before it — a page
+    # that arrived at a different size would be the picture rescaling under
+    # somebody reading it.
+    run.drive("key down\nsleep 700\n")
+    turned = holds(
+        run,
+        lambda it: it.get("look_page") == f"2/{pages}" and "coarse=false" in it.get("look_shot", ""),
+        "page two, fully rendered",
+    )
+    after = [float(it) for it in turned["look_page_box"].split(":")]
+    moved = max(abs(a - b) for a, b in zip(box, after))
+    if moved > 2.0:
+        raise Failure(
+            f"turning the page moved the picture {moved:.1f} logical pixels: "
+            f"{finished['look_page_box']} then {turned['look_page_box']}"
+        )
+
+
+@scenario("a-pdf-keeps-its-neighbours-and-its-place", fresh=True)
+def a_pdf_keeps_its_neighbours_and_its_place(run: Run, fixture: Path) -> None:
+    """**Three things a person reading a document notices, and one they should
+    not.**
+
+    * The page either side of this one is already rendered, so `↑` costs what `↓`
+      costs. The prefetch used to look only forward, which is a preview that is
+      quick in the direction nobody notices.
+    * Holding a page key does not queue a render per press. It did, at sixty
+      milliseconds each, and the panel then showed the page from two seconds ago
+      until the queue drained — the reported freeze.
+    * A document reopens where it was left, rather than at page one.
+    """
+    pages = 8
+    (fixture / "book.pdf").write_bytes(many_page_pdf(pages))
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text book\nsleep 400\n")
+    until(run, cursor="book.pdf")
+    run.drive("key space\nsleep 200\n")
+    until_looking(run, "book.pdf", "page")
+
+    # Forward twice, so there is a page on either side to have.
+    run.drive("key down\nsleep 600\nkey down\nsleep 900\n")
+    ready = holds(
+        run,
+        lambda it: it.get("look_page") == f"3/{pages}" and int(it.get("look_held", "0")) >= 3,
+        "page three with its neighbours held",
+    )
+
+    del ready
+
+    # **Holding the key does not build a backlog.** Eight presses with no pause,
+    # then one report: what is queued is bounded by the pages still wanted, not by
+    # how fast the keys arrived.
+    run.drive("key down\n" * 8 + "sleep 900\n")
+    settled_again = holds(
+        run,
+        lambda it: "coarse=false" in it.get("look_shot", ""),
+        "a page fully rendered after the burst",
+    )
+    landed = int(settled_again["look_page"].split("/")[0])
+    if landed < 3:
+        raise Failure(f"eight presses from page two ended on page {landed}")
+
+    # And the place is kept: close the panel, open it again, same page.
+    run.drive("key escape\nsleep 300\nkey space\nsleep 700\n")
+    reopened = holds(
+        run,
+        lambda it: it.get("looking") == "book.pdf:page" and it.get("look_page", "").endswith(f"/{pages}"),
+        "the panel open again",
+    )
+    if reopened["look_page"] != f"{landed}/{pages}":
+        raise Failure(
+            f"it reopened on {reopened['look_page']} rather than page {landed}, where it was left"
+        )
+
+    # **And now the page *behind* this one, which nobody has visited.** Reopening
+    # threw every rendered page away, so what is held here was prefetched — and
+    # the prefetch used to look only forward, which made `↑` a wait every time.
+    # This is the assertion that fails without it: turning back to a page that has
+    # never been on screen must not show a draft.
+    holds(
+        run,
+        lambda it: int(it.get("look_held", "0")) >= 2 and "coarse=false" in it.get("look_shot", ""),
+        "the reopened page and a neighbour",
+    )
+    run.drive("key up\nsleep 250\n")
+    back = holds(run, lambda it: it.get("look_page") == f"{landed - 1}/{pages}", "the page before")
+    if "coarse=true" in back.get("look_shot", ""):
+        raise Failure(
+            f"turning back to page {landed - 1} showed a draft: only the pages ahead were fetched"
+        )
+
+
+def shot_of(state: dict[str, str]) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The box the child was asked for and the pixels it answered with."""
+    fields = dict(pair.split("=", 1) for pair in state["look_shot"].split(",") if "=" in pair)
+    def pair(name: str) -> tuple[int, int]:
+        across, _, down = fields.get(name, "0x0").partition("x")
+        return (int(across), int(down))
+    return pair("asked"), pair("got")
+
+
+def many_page_pdf(pages: int) -> bytes:
+    """A PDF of `pages` A5 pages, each with its number on it.
+
+    Written out rather than committed, for the reason the three-page one inside
+    `arrows-walk-the-look-and-a-pdfs-pages` is: a fixture nobody can read is a
+    fixture nobody can change.
+    """
+    font = 3 + pages * 2
+    bodies = [f"BT /F1 36 Tf 60 400 Td (Page {n} of {pages}.) Tj ET".encode() for n in range(1, pages + 1)]
+    kids = " ".join(f"{3 + i} 0 R" for i in range(pages))
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode(),
+    ]
+    for index in range(pages):
+        objects.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] /Resources << /Font << /F1 "
+            + str(font).encode()
+            + b" 0 R >> >> /Contents "
+            + str(3 + pages + index).encode()
+            + b" 0 R >>"
+        )
+    for body in bodies:
+        objects.append(
+            b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream"
+        )
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += str(number).encode() + b" 0 obj\n" + obj + b"\nendobj\n"
+    start = len(out)
+    out += b"xref\n0 " + str(len(objects) + 1).encode() + b"\n0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        b"trailer\n<< /Size "
+        + str(len(objects) + 1).encode()
+        + b" /Root 1 0 R >>\nstartxref\n"
+        + str(start).encode()
+        + b"\n%%EOF\n"
+    )
+    return bytes(out)
 
 
 def look_aim(run: Run, control: str) -> tuple[float, float]:
