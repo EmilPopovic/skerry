@@ -2051,7 +2051,7 @@ def a_page_turn_does_not_move_the_picture(run: Run, fixture: Path) -> None:
 
     finished = holds(
         run,
-        lambda it: "coarse=false" in it.get("look_shot", "") and it.get("look_page_box", "") != "",
+        lambda it: drawn_in_full(it) and it.get("look_page_box", "") != "",
         "the full render",
     )
 
@@ -2076,7 +2076,7 @@ def a_page_turn_does_not_move_the_picture(run: Run, fixture: Path) -> None:
     run.drive("key down\nsleep 700\n")
     turned = holds(
         run,
-        lambda it: it.get("look_page") == f"2/{pages}" and "coarse=false" in it.get("look_shot", ""),
+        lambda it: it.get("look_page") == f"2/{pages}" and drawn_in_full(it),
         "page two, fully rendered",
     )
     after = [float(it) for it in turned["look_page_box"].split(":")]
@@ -2128,7 +2128,7 @@ def a_pdf_keeps_its_neighbours_and_its_place(run: Run, fixture: Path) -> None:
     run.drive("key down\n" * 8 + "sleep 900\n")
     settled_again = holds(
         run,
-        lambda it: "coarse=false" in it.get("look_shot", ""),
+        lambda it: drawn_in_full(it),
         "a page fully rendered after the burst",
     )
     landed = int(settled_again["look_page"].split("/")[0])
@@ -2154,15 +2154,27 @@ def a_pdf_keeps_its_neighbours_and_its_place(run: Run, fixture: Path) -> None:
     # never been on screen must not show a draft.
     holds(
         run,
-        lambda it: int(it.get("look_held", "0")) >= 2 and "coarse=false" in it.get("look_shot", ""),
+        lambda it: int(it.get("look_held", "0")) >= 2 and drawn_in_full(it),
         "the reopened page and a neighbour",
     )
     run.drive("key up\nsleep 250\n")
     back = holds(run, lambda it: it.get("look_page") == f"{landed - 1}/{pages}", "the page before")
-    if "coarse=true" in back.get("look_shot", ""):
+    if not drawn_in_full(back):
         raise Failure(
             f"turning back to page {landed - 1} showed a draft: only the pages ahead were fetched"
         )
+
+
+def drawn_in_full(state: dict[str, str]) -> bool:
+    """Whether what is on screen is the finished render rather than a draft.
+
+    **`drafted`, not `coarse`.** The two mean different things — one is what is on
+    screen and the other is what will be asked for next — and a substring test for
+    `coarse=false` matches `coarse=false,drafted=true`, which is a draft. That is
+    what this asserted about on the display server whose panel is big enough for
+    the full render to be slower than the report.
+    """
+    return "drafted=false" in state.get("look_shot", "")
 
 
 def shot_of(state: dict[str, str]) -> tuple[tuple[int, int], tuple[int, int]]:
