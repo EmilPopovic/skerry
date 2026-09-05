@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 824 tests, 140 GUI scenarios **on both Wayland and X11**,
-seventy-five golden frames, every gate green: a Details view
+sandboxed helpers, 861 tests, 142 GUI scenarios **on both Wayland and X11**,
+seventy-nine golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -99,7 +99,15 @@ selects and a press on the paper moves the page — or the file's own text — *
 [`Scope::Look`](crates/sk-cmd/src/registry.rs), the third scope the resolver was
 written to expect — and **a double click takes the word under it, a third the
 line**, over one rule in [`sk_app::word`](crates/sk-app/src/word.rs) that a page's
-words and every field the window opens answer to as well — drawn as runs carrying
+words and every field the window opens answer to as well — **or markdown,
+rendered**: headings at their own sizes, real italic and bold faces, code on its
+own ground, lists that line up under their own words, tables, quote bars and
+task boxes, from a parser of ours whose rule is that anything it does not
+recognise draws as its own text
+([ADR 0029](docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md)) —
+measured against 445 real documents, where the only character it ever dropped
+was the `x` inside a ticked box; `Ctrl+M` swaps it for the source, `Ctrl+E`
+edits that, and leaving the editor comes back to the rendering — drawn as runs carrying
 a tone, and **a highlighter behind that seam**: four
 roles — comment, keyword, literal, number — over Rust, the C-likes, Python and
 the shells, a scanner rather than a grammar, with the theme deciding the hues so

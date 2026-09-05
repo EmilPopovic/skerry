@@ -516,6 +516,23 @@ enum Claim {
     Search,
 }
 
+/// Measures text with the window's own faces, for the markdown layout.
+///
+/// **Logical pixels in and out.** Everything above `sk-plat` works in logical
+/// pixels and the shaper works in device ones, so the conversion happens here —
+/// once, in the one place the layout touches the font stack.
+struct Shaper<'a> {
+    cache: &'a mut sk_text::LayoutCache,
+    fonts: &'a mut sk_text::Fonts,
+    scale: f32,
+}
+
+impl crate::mdlayout::Measure for Shaper<'_> {
+    fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
+        sk_ui::advance_of(self.cache, self.fonts, text, weight, size * self.scale) / self.scale
+    }
+}
+
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
 fn clock_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
@@ -3096,11 +3113,13 @@ impl App {
             Some(crate::view::LookControl::Edit) => self.toggle_editing_the_look(),
             Some(crate::view::LookControl::Discard) => self.discard_the_look(),
             Some(crate::view::LookControl::Play) => self.toggle_playing(),
+            Some(crate::view::LookControl::Source) => self.toggle_the_rendering(),
             None => {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
                 if inside.contains(position.x, position.y)
-                    && (self.start_choosing_text(position, shift, clicks)
+                    && (self.start_choosing_rendered(position, shift, clicks)
+                        || self.start_choosing_text(position, shift, clicks)
                         || self.start_choosing_a_page(position, shift, clicks)
                         || self.start_panning(position))
                 {
@@ -3211,6 +3230,66 @@ impl App {
     /// **Only for text.** A press on a picture or a page is not the start of
     /// anything — there is nothing there to select — and a click that quietly
     /// armed a drag would make the panel feel like it had a mode.
+    fn start_choosing_rendered(&mut self, position: Point, shift: bool, clicks: u8) -> bool {
+        let Some(spot) = self.rendered_spot_at(position) else { return false };
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        if clicks >= 2 {
+            let Some(laid) = look.laid.as_ref() else { return false };
+            let Some(line) = laid.lines.get(spot.line) else { return false };
+            let (from, to) = if clicks > 2 {
+                (0, line.text.len())
+            } else {
+                crate::word::around(&line.text, spot.byte)
+            };
+            look.picked = Some(crate::quicklook::Chosen {
+                anchor: crate::quicklook::Spot { line: spot.line, byte: from },
+                caret: crate::quicklook::Spot { line: spot.line, byte: to },
+            });
+            look.picking = false;
+            return true;
+        }
+        let anchor = match look.picked.filter(|_| shift) {
+            Some(picked) => picked.anchor,
+            None => spot,
+        };
+        look.picked = Some(crate::quicklook::Chosen { anchor, caret: spot });
+        look.picking = true;
+        true
+    }
+
+    /// Extends a rendered selection while the button is down.
+    fn extend_the_rendered_choice(&mut self, position: Point) -> bool {
+        if !self.quick_look.as_ref().is_some_and(|look| look.picking) {
+            return false;
+        }
+        let Some(spot) = self.rendered_spot_at(position) else { return false };
+        let Some(look) = self.quick_look.as_mut() else { return false };
+        let Some(picked) = look.picked.as_mut() else { return false };
+        if picked.caret == spot {
+            return false;
+        }
+        picked.caret = spot;
+        true
+    }
+
+    /// Which line and byte of the rendered view a point is over.
+    ///
+    /// **The nearest place, never nothing.** A drag that leaves the text keeps
+    /// extending, which is what dragging past an edge means everywhere.
+    fn rendered_spot_at(&self, position: Point) -> Option<crate::quicklook::Spot> {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let look = self.quick_look.as_ref()?;
+        let laid = look.laid.as_ref().filter(|_| look.rendered)?;
+        if laid.lines.is_empty() {
+            return None;
+        }
+        let y = position.y - inner.y + look.scroll.offset();
+        let line = laid.line_at(y).min(laid.lines.len() - 1);
+        let x = position.x - inner.x - crate::view::MARKDOWN_PAD;
+        let byte = crate::mdlayout::byte_at(&laid.lines[line], x);
+        Some(crate::quicklook::Spot { line, byte })
+    }
+
     fn start_choosing_text(&mut self, position: Point, shift: bool, clicks: u8) -> bool {
         let Some(spot) = self.text_spot_at(position) else { return false };
         let Some(look) = self.quick_look.as_mut() else { return false };
@@ -3267,6 +3346,69 @@ impl App {
             (position.x, position.y),
             (cache, fonts, scale),
         ))
+    }
+
+    /// What was asked for, what came back, and whether it is a draft.
+    ///
+    /// The three numbers behind "the picture changed size when the real one
+    /// arrived": a draft is drawn scaled up to fill the panel and a full render
+    /// is drawn at one to one, so the two agreeing is the whole of what makes a
+    /// page turn look still.
+    fn look_shot(&self) -> String {
+        self.quick_look.as_ref().map_or_else(
+            || "none".to_owned(),
+            |look| {
+                let asked = look.asked.map_or_else(
+                    || "none".to_owned(),
+                    |it| format!("{}x{}", it.within.0, it.within.1),
+                );
+                let got = look.image.map_or_else(
+                    || "none".to_owned(),
+                    |(_, size)| format!("{}x{}", size.0, size.1),
+                );
+                format!("asked={asked},got={got},coarse={},drafted={}", look.coarse, look.drafted)
+            },
+        )
+    }
+
+    /// Which of the three states a markdown preview is in, for a scenario.
+    ///
+    /// `none` where the file is not markdown, so a test can tell "this file does
+    /// not render" from "it is rendering and showing the source".
+    fn look_mode(&self) -> &'static str {
+        let Some(look) = self.quick_look.as_ref().filter(|it| it.has_markdown()) else {
+            return "none";
+        };
+        if look.editing {
+            "editing"
+        } else if look.rendered {
+            "rendered"
+        } else {
+            "source"
+        }
+    }
+
+    /// Whether the panel is showing a markdown file, rendered or not.
+    pub(crate) fn looking_at_markdown(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| !look.blocks.is_empty())
+    }
+
+    /// Swaps the rendered view for the source and back.
+    ///
+    /// **Not remembered** — ADR 0029. Every open of a markdown file starts
+    /// rendered; this lasts as long as the panel does.
+    pub(crate) fn toggle_the_rendering(&mut self) {
+        let Some(look) = self.quick_look.as_mut() else { return };
+        if look.blocks.is_empty() {
+            return;
+        }
+        look.rendered = !look.rendered;
+        // The two views scroll different distances, and a position measured in
+        // one is meaningless in the other.
+        look.scroll.to(0.0);
+        look.picked = None;
+        look.chosen = None;
+        self.dirty = true;
     }
 
     /// Whether a quick look is showing text, so its two chords are live.
@@ -5469,6 +5611,15 @@ impl App {
         self.save_the_look();
         if let Some(look) = self.quick_look.as_mut() {
             look.editing = false;
+            look.rendered = std::mem::take(&mut look.was_rendered);
+            // **Re-parsed, because the document is not the one that was parsed.**
+            // Coming back to the rendering after an edit and seeing the text from
+            // before it is the same defect as a listing that goes stale.
+            if look.rendered {
+                let body = look.text.as_ref().map(crate::quicklook::Text::body);
+                look.blocks = body.map(|it| crate::markdown::parse(&it)).unwrap_or_default();
+                look.laid = None;
+            }
         }
         self.dirty = true;
     }
@@ -6450,6 +6601,32 @@ scope_aim={scope_aim:?}",
         true
     }
 
+    /// Lays the rendered markdown out, if it is showing and the width changed.
+    ///
+    /// **Once per width, never per frame** — [`crate::mdlayout`]. Measuring a
+    /// thousand words costs more than a frame has, and a panel that is not being
+    /// resized asks the same question every time.
+    fn lay_the_markdown_out(&mut self) {
+        let inner = crate::view::quick_look_area(&self.layout);
+        let size = self.theme.metrics.text_size;
+        let scale = self.window.scale();
+        let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size * 4.0);
+        let Some(look) = self.quick_look.as_ref() else { return };
+        if !look.rendered || look.blocks.is_empty() {
+            return;
+        }
+        if look.laid.as_ref().is_some_and(|laid| laid.fits(room, size, scale)) {
+            return;
+        }
+        let Self { quick_look, cache, fonts, .. } = self;
+        let Some(look) = quick_look.as_mut() else { return };
+        let mut shaper = Shaper { cache, fonts, scale };
+        let laid = crate::mdlayout::lay_out(&look.blocks, room, size, scale, &mut shaper);
+        look.scroll.set_extent(laid.height, inner.height);
+        look.laid = Some(laid);
+        self.dirty = true;
+    }
+
     /// Which page a document was last left on, if this one was.
     fn page_left_at(&self, path: &std::path::Path) -> Option<u32> {
         self.pages_left_at.iter().find(|(kept, _)| kept == path).map(|(_, page)| *page)
@@ -6638,6 +6815,7 @@ scope_aim={scope_aim:?}",
         let pinned = look.pinned();
         self.renderer.keep_previews(&pinned);
         self.remember_the_page();
+        self.lay_the_markdown_out();
         // **And the queue holds only the pages still wanted.** A held page key
         // queues a render per press, and the panel then shows the page from two
         // seconds ago while the queue drains — see `Host::only_pages`.
@@ -7338,6 +7516,7 @@ look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
                     crate::view::LookControl::Edit => "edit",
                     crate::view::LookControl::Discard => "discard",
                     crate::view::LookControl::Play => "play",
+                    crate::view::LookControl::Source => "source",
                 };
                 format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
             })
@@ -7379,25 +7558,7 @@ look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
             .and_then(|look| look.text.as_ref())
             .map_or(0, |text| text.rows().len());
         let look_unsaved = self.look_is_unsaved();
-        // **What was asked for, what came back, and whether it is a draft** — the
-        // three numbers behind "the picture changed size when the real one
-        // arrived". A draft is drawn scaled up to fill the panel and a full
-        // render is drawn at one to one, so the two agreeing is the whole of what
-        // makes a page turn look still.
-        let look_shot = self.quick_look.as_ref().map_or_else(
-            || "none".to_owned(),
-            |look| {
-                let asked = look.asked.map_or_else(
-                    || "none".to_owned(),
-                    |it| format!("{}x{}", it.within.0, it.within.1),
-                );
-                let got = look.image.map_or_else(
-                    || "none".to_owned(),
-                    |(_, size)| format!("{}x{}", size.0, size.1),
-                );
-                format!("asked={asked},got={got},coarse={},drafted={}", look.coarse, look.drafted)
-            },
-        );
+        let look_shot = self.look_shot();
         let page = self.page_state();
         // The magnification and where the picture has been dragged to, which is
         // the whole of what a pinch and a pan change: a scenario asserting on
@@ -7408,6 +7569,7 @@ look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
         );
         // Whether an animation is running, which is the one thing on screen that
         // changes while the hands are still.
+        let look_mode = self.look_mode();
         let look_playing = self.looking_at_an_animation()
             && self.quick_look.as_ref().is_some_and(|look| look.playing);
         let look_page = self.quick_look.as_ref().map_or_else(
@@ -7429,7 +7591,7 @@ look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
             "looking={looking} look_page={look_page} look_aim={look_aim:?} \
 look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
 look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
-look_playing={look_playing} look_zoom={look_zoom} look_pan={look_pan} \
+look_playing={look_playing} look_mode={look_mode} look_zoom={look_zoom} look_pan={look_pan} \
 look_shot={look_shot} \
 {page}"
         )
@@ -9107,7 +9269,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         let ended = self.band.take().is_some();
         let released = self.thumb_grab.take().is_some();
         let dragged = self.text_drag.take().is_some();
-        let chose = self.quick_look.as_mut().is_some_and(|look| std::mem::take(&mut look.dragging));
+        let chose = self.quick_look.as_mut().is_some_and(|look| {
+            // Both, for the reason above: two selection models, one release.
+            let text = std::mem::take(&mut look.dragging);
+            let rendered = std::mem::take(&mut look.picking);
+            text || rendered
+        });
         let panned = self.look_pan.take().is_some();
         let read = std::mem::take(&mut self.page_drag);
         let divided = self.placement.dragging.take().is_some();
@@ -10048,7 +10215,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             // the selection, which is what dragging past an edge means in every
             // text view — and this branch is now the only place a motion event
             // reaches while a look is open.
-            if self.extend_the_text_choice(position)
+            if self.extend_the_rendered_choice(position)
+                || self.extend_the_text_choice(position)
                 || self.extend_the_page_choice(position)
                 || self.pan_the_look(position)
             {
@@ -10183,7 +10351,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // **Before the hover work below it takes an early return.** A drag that
         // leaves the panel still extends the selection, which is what dragging
         // past an edge means in every text view.
-        if self.extend_the_text_choice(position) {
+        if self.extend_the_rendered_choice(position) || self.extend_the_text_choice(position) {
             self.dirty = true;
         }
         self.hover_the_history(position);

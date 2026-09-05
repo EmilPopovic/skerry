@@ -36,11 +36,22 @@ pub enum Weight {
     /// A file's own text, where the columns are the content.
     ///
     /// **Not a weight, and it is here anyway.** This enum is what picks a face
-    /// out of the chain, and a third face is what a mono preview needs; a second
-    /// axis for one caller would be two enums to thread through every
-    /// `TextStyle`, `RunKey` and glyph key in the program. If a fourth face ever
-    /// arrives — an italic — that is the moment to split them.
+    /// out of the chain, and one axis is what a `TextStyle`, a `RunKey` and a
+    /// glyph key each carry. Splitting it into a family and a style would be two
+    /// enums threaded through every one of them, and the product of the two is
+    /// four combinations of which this program draws five things — so the fifth
+    /// and sixth entries below are named rather than computed.
     Mono,
+    /// Emphasis in rendered markdown — [ADR
+    /// 0029](../../../docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).
+    ///
+    /// **A real face, never a synthesised slant.** A sheared regular is what a
+    /// toolkit does when it has nothing, and it is legible in the way a stretched
+    /// bitmap is legible; where the machine has no italic this falls back to the
+    /// regular face and emphasis is carried by nothing, which is honest.
+    Italic,
+    /// Strong emphasis inside emphasis, which every README has.
+    BoldItalic,
 }
 
 /// Where a glyph raster is identified from.
@@ -204,6 +215,30 @@ const UI_REGULAR: &[&str] = &[
     "dejavusans",
 ];
 
+/// The italic faces, in the same order and by the same rule as the regular ones.
+const UI_ITALIC: &[&str] = &[
+    "interitalic",
+    "notosansitalic",
+    "cantarelloblique",
+    "adwaitasansitalic",
+    "opensansitalic",
+    "robotoitalic",
+    "ubuntui",
+    "liberationsansitalic",
+    "dejavusansoblique",
+];
+
+const UI_BOLD_ITALIC: &[&str] = &[
+    "interbolditalic",
+    "notosansbolditalic",
+    "adwaitasansbolditalic",
+    "opensansbolditalic",
+    "robotobolditalic",
+    "ubuntubi",
+    "liberationsansbolditalic",
+    "dejavusansboldoblique",
+];
+
 const UI_BOLD: &[&str] = &[
     "interbold",
     "notosansbold",
@@ -261,6 +296,8 @@ pub struct Fonts {
     regular: u16,
     bold: u16,
     mono: u16,
+    italic: u16,
+    bold_italic: u16,
     pub(crate) shape_context: ShapeContext,
     scale_context: ScaleContext,
     pub(crate) scratch: crate::shape::Scratch,
@@ -290,6 +327,29 @@ impl Fonts {
         // none.
         let mono = take(&mut faces, &mut opened, &candidates, UI_MONO, &mut missing, "a mono face")
             .or(regular);
+        // **Regular where there is no italic, and bold where there is no bold
+        // italic.** The same bargain the bold face makes one line up: a face that
+        // is not there is emphasis a reader does not get, and a sheared regular is
+        // worse than plain text at every size this draws at.
+        let italic = take(
+            &mut faces,
+            &mut opened,
+            &candidates,
+            UI_ITALIC,
+            &mut missing,
+            "an italic UI sans",
+        )
+        .or(regular);
+        let bold_italic = take(
+            &mut faces,
+            &mut opened,
+            &candidates,
+            UI_BOLD_ITALIC,
+            &mut missing,
+            "a bold italic UI sans",
+        )
+        .or(italic)
+        .or(bold);
 
         // Deduplicated by path, because two needles can name one file:
         // `notosanscjkregular` and `notosanscjk` both resolve to
@@ -318,6 +378,8 @@ impl Fonts {
             regular,
             bold: bold.unwrap_or(regular),
             mono: mono.unwrap_or(regular),
+            italic: italic.unwrap_or(regular),
+            bold_italic: bold_italic.unwrap_or(regular),
             shape_context: ShapeContext::new(),
             scale_context: ScaleContext::new(),
             scratch: crate::shape::Scratch::default(),
@@ -366,6 +428,8 @@ impl Fonts {
             Weight::Regular => self.regular,
             Weight::Bold => self.bold,
             Weight::Mono => self.mono,
+            Weight::Italic => self.italic,
+            Weight::BoldItalic => self.bold_italic,
         }
     }
 

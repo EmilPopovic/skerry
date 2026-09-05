@@ -98,6 +98,59 @@ fn warm_and_draw(
 /// **Its own function because `sample_quick_look` is at the hundred-line limit**,
 /// and this is the half that has nothing to do with a child: a text file is read
 /// in this process, and everything below the early return is a round trip.
+/// Measures text with the capture's own faces, for the markdown layout.
+///
+/// The window has one of these too — one measurer per owner of a font stack, and
+/// both convert logical to device in the same place.
+struct Measurer<'a> {
+    cache: &'a mut LayoutCache,
+    fonts: &'a mut sk_text::Fonts,
+    scale: f32,
+}
+
+impl crate::mdlayout::Measure for Measurer<'_> {
+    fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
+        sk_ui::advance_of(self.cache, self.fonts, text, weight, size * self.scale) / self.scale
+    }
+}
+
+/// Which row `--look` names, and what it can be shown as.
+fn looked_at(
+    request: &Capture,
+    pane: &Pane,
+) -> Option<(crate::previews::Shows, std::path::PathBuf, i64)> {
+    let wanted = request.looking.as_deref()?;
+    let types = sk_desktop::MimeDatabase::load();
+    let row = (0..pane.listing.rows())
+        .filter_map(|row| pane.listing.at(row))
+        .find(|id| pane.listing.name(*id) == wanted)?;
+    let kind = sk_desktop::kind_of(&pane.listing, row, Some(&types));
+    let shows = crate::previews::shows(wanted, kind, Some(&types))?;
+    Some((shows, pane.path_of(row), pane.listing.mtime(row)))
+}
+
+/// The layout the window does before it draws — `App::lay_the_markdown_out`.
+///
+/// **Repeated here on purpose.** A capture builds its own sample and never runs
+/// the frame loop, so a step that lives there has to be done here as well or the
+/// frame is of a state the program never has — the trap `12-measurement.md`
+/// records against the text preview's own wrap.
+fn lay_the_markdown_out(
+    look: &mut crate::quicklook::QuickLook,
+    where_: (crate::layout::Area, &Theme, &mut LayoutCache),
+    fonts: &mut sk_text::Fonts,
+    scale: f32,
+) {
+    let (inner, theme, cache) = where_;
+    if !look.rendered || look.blocks.is_empty() {
+        return;
+    }
+    let size = theme.metrics.text_size;
+    let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size);
+    let mut shaper = Measurer { cache, fonts, scale };
+    look.laid = Some(crate::mdlayout::lay_out(&look.blocks, room, size, scale, &mut shaper));
+}
+
 fn sample_text(
     request: &Capture,
     session: &mut Session,
@@ -118,6 +171,7 @@ fn sample_text(
         );
         text.wrap(cells);
     }
+    lay_the_markdown_out(look, (inner, theme, cache), &mut session.fonts, scale);
     if request.look_selected {
         look.select_all();
     }
@@ -152,14 +206,7 @@ fn sample_quick_look(
     where_: (&Layout, &Theme, &mut LayoutCache),
 ) -> Option<crate::quicklook::QuickLook> {
     let (layout, theme, cache) = where_;
-    let wanted = request.looking.as_deref()?;
-    let types = sk_desktop::MimeDatabase::load();
-    let row = (0..pane.listing.rows())
-        .filter_map(|row| pane.listing.at(row))
-        .find(|id| pane.listing.name(*id) == wanted)?;
-    let kind = sk_desktop::kind_of(&pane.listing, row, Some(&types));
-    let shows = crate::previews::shows(wanted, kind, Some(&types))?;
-    let (path, mtime) = (pane.path_of(row), pane.listing.mtime(row));
+    let (shows, path, mtime) = looked_at(request, pane)?;
     let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &session.jobs);
 
     // The same box the panel will be drawn into, in device pixels — the one
@@ -173,6 +220,9 @@ fn sample_quick_look(
     if shows == crate::previews::Shows::Text {
         while !look.drain() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
+        }
+        if request.look_source {
+            look.rendered = false;
         }
         sample_text(request, session, &mut look, (inner, theme, cache), scale);
         return Some(look);
@@ -413,6 +463,12 @@ pub struct Capture {
     /// selection is drawn behind the runs and across a blank line, and the whole
     /// file shows that in one picture.
     pub look_selected: bool,
+    /// Whether a markdown preview shows its source rather than the rendering.
+    ///
+    /// **Rendered is the default and this is the frame of the other half** — ADR
+    /// 0029. Not a remembered mode: the flag exists so both states have a
+    /// picture, which is what a toggle owes.
+    pub look_source: bool,
     /// Whether that preview is in edit mode, with a caret in it.
     pub look_editing: bool,
     /// Which quick look to draw, by the name of the file it is of.

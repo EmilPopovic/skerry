@@ -426,6 +426,24 @@ preview selects text, and the registry is the only place that difference can liv
 if a keymap is to be rebindable. The pointer reaches both through the preview's own
 context menu.
 
+**Markdown renders** — [ADR
+0029](adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).
+A README opens rendered: headings at their own sizes with a rule under the top
+two, real italic and bold faces — which is what split `sk_text::Weight`, a
+trigger that enum's own comment had been carrying — inline and fenced code on
+their own ground, lists indented with their markers in the margin, task boxes,
+block quotes with a bar, GFM tables, links in the accent colour and an image as
+its alt text. The parser is ours and deliberately small; its rule is that
+**anything it does not recognise draws as its own text**, which is what makes a
+small parser honest rather than lossy. Measured over 445 markdown files from the
+crate registry: the only character it ever dropped was the `x` inside `- [x]`,
+which becomes a box. `Ctrl+M` swaps the rendering for the source and back — the
+mode is not remembered — `Ctrl+E` edits the source, and leaving the editor comes
+back to the *edited* document rendered. Text can be selected over the rendering
+and copied as the words are laid out. HTML is planned and absent: it draws as its
+characters, and drawing it as a box is a decision about a second parser and a
+sanitiser that gets its own record.
+
 **A double click takes the word under it and a third takes the line**, in the text
 preview, in a page's words and in every field the window opens — one rule in
 [`sk_app::word`](../crates/sk-app/src/word.rs), which is a run of letters, digits

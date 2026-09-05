@@ -90,6 +90,17 @@ pub(crate) enum Tone {
     Number,
 }
 
+/// Whether a name is one this program renders as markdown.
+///
+/// **By extension, because that is what a markdown file has.** The MIME database
+/// says `text/markdown` for the same two, and a file with neither is a text file
+/// with asterisks in it — which is what the source view is for.
+#[must_use]
+pub(crate) fn is_markdown(name: &str) -> bool {
+    let extension = name.rsplit_once('.').map(|(_, it)| it.to_lowercase());
+    matches!(extension.as_deref(), Some("md" | "markdown"))
+}
+
 /// One run of characters in one tone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Span {
@@ -521,6 +532,28 @@ pub(crate) struct QuickLook {
     pub(crate) held: std::collections::HashMap<u32, (ImageKey, (u32, u32))>,
     /// The page being fetched ahead of being wanted, if any.
     pub(crate) ahead: Option<u32>,
+    /// The document, parsed, where the file is markdown. Empty otherwise.
+    ///
+    /// **[ADR 0029](../../../docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).**
+    pub(crate) blocks: Vec<crate::markdown::Block>,
+    /// Whether the rendering was showing when the editor was opened.
+    ///
+    /// See [`Self::start_editing`]: the source is what an editor edits, and this
+    /// is how the rendering comes back.
+    pub(crate) was_rendered: bool,
+    /// Whether the rendered view is showing, rather than the source.
+    ///
+    /// **Rendered by default and never remembered.** Every open of a `.md` starts
+    /// rendered and the toggle dies with the panel: a remembered mode is a
+    /// setting, and a setting owes a precedence rule against the session file
+    /// that ADR 0027 has not been asked for here.
+    pub(crate) rendered: bool,
+    /// The rendered document laid out for the width it was last drawn at.
+    pub(crate) laid: Option<crate::mdlayout::Laid>,
+    /// What is selected in the rendered view, as places in its visual lines.
+    pub(crate) picked: Option<Chosen>,
+    /// Whether a drag is choosing in the rendered view.
+    pub(crate) picking: bool,
     /// Whether what is *on screen* is a draft rather than the finished render.
     ///
     /// **Not the same question as [`Self::coarse`], and conflating them is what
@@ -629,6 +662,12 @@ impl QuickLook {
             held: std::collections::HashMap::new(),
             ahead: None,
             coarse: shows == Shows::Page,
+            blocks: Vec::new(),
+            rendered: false,
+            was_rendered: false,
+            laid: None,
+            picked: None,
+            picking: false,
             drafted: false,
             text: None,
             refusal: None,
@@ -677,6 +716,14 @@ impl QuickLook {
         match body {
             Some(body) => {
                 let language = crate::highlight::Language::of(&self.title());
+                // **Parsed once, when the bytes land.** A document is parsed on
+                // the frame it arrives on and never again; what a resize costs is
+                // the layout, which is cached separately — see
+                // [`crate::mdlayout`].
+                if is_markdown(&self.title()) {
+                    self.blocks = crate::markdown::parse(&body);
+                    self.rendered = true;
+                }
                 self.text = Some(Text::of(&body, language));
             }
             None => self.refusal = Some(Refusal::Unreadable),
@@ -1104,6 +1151,16 @@ impl QuickLook {
     /// panel says so with an ellipsis and the clipboard gets what is on screen.
     /// Copying bytes nobody has seen would be a paste nobody could predict.
     pub(crate) fn select_all(&mut self) {
+        if self.rendered
+            && let Some(laid) = self.laid.as_ref()
+        {
+            let Some(last) = laid.lines.len().checked_sub(1) else { return };
+            self.picked = Some(Chosen {
+                anchor: Spot { line: 0, byte: 0 },
+                caret: Spot { line: last, byte: laid.lines[last].text.len() },
+            });
+            return;
+        }
         if let Some(page) = self.page_text.as_mut() {
             page.select_all();
             return;
@@ -1145,7 +1202,39 @@ impl QuickLook {
     /// words, and both are "there is something to copy".
     pub(crate) fn has_selection(&self) -> bool {
         self.chosen.is_some_and(|chosen| !chosen.is_empty())
+            || self.picked.is_some_and(|picked| !picked.is_empty())
             || self.page_text.as_ref().is_some_and(crate::pagetext::Page::has_selection)
+    }
+
+    /// What is selected in the rendered view, as the words it covers.
+    ///
+    /// **The words as they are laid out, not the markup they came from** — ADR
+    /// 0029. Selecting the asterisks is what the source view is for, and it is one
+    /// press away.
+    pub(crate) fn picked_text(&self) -> Option<String> {
+        let laid = self.laid.as_ref()?;
+        let picked = self.picked.filter(|it| !it.is_empty())?;
+        let (from, to) = picked.ordered();
+        let mut out = String::new();
+        for index in from.line..=to.line.min(laid.lines.len().saturating_sub(1)) {
+            let line = laid.lines.get(index)?;
+            let start = if index == from.line { from.byte.min(line.text.len()) } else { 0 };
+            let end = if index == to.line { to.byte.min(line.text.len()) } else { line.text.len() };
+            if start > end || !line.text.is_char_boundary(start) || !line.text.is_char_boundary(end)
+            {
+                continue;
+            }
+            if index > from.line {
+                out.push('\n');
+            }
+            out.push_str(&line.text[start..end]);
+        }
+        Some(out)
+    }
+
+    /// Whether this file is one the panel can render as markdown.
+    pub(crate) fn has_markdown(&self) -> bool {
+        !self.blocks.is_empty()
     }
 
     /// Whether there is text on screen at all — a file's, or a page's words.
@@ -1158,6 +1247,9 @@ impl QuickLook {
     /// **`\n` and not the platform's separator**, because there is one platform
     /// and it is the one whose separator is `\n`.
     pub(crate) fn chosen_text(&self) -> Option<String> {
+        if self.rendered && self.picked.is_some() {
+            return self.picked_text();
+        }
         if let Some(page) = self.page_text.as_ref() {
             return page.text();
         }
@@ -1201,6 +1293,12 @@ impl QuickLook {
         let Some(text) = self.text.as_ref() else { return };
         self.as_on_disk = Some(text.body());
         self.editing = true;
+        // **Editing is the source, and leaving it comes back.** A rendered
+        // document has no caret to put anywhere — ADR 0029 — and the thing a
+        // person was reading is the thing they should get back when they are
+        // done typing.
+        self.was_rendered = std::mem::take(&mut self.rendered);
+        self.picked = None;
         if self.chosen.is_none() {
             self.put_caret(Spot { line: 0, byte: 0 });
         }
@@ -1605,6 +1703,12 @@ mod tests {
             held: std::collections::HashMap::new(),
             ahead: None,
             coarse: false,
+            blocks: Vec::new(),
+            rendered: false,
+            was_rendered: false,
+            laid: None,
+            picked: None,
+            picking: false,
             drafted: false,
             asked: Some(super::Shot { within: (800, 600), page: 1 }),
             scroll: sk_ui::Scroll::default(),

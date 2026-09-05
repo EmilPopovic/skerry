@@ -36,6 +36,7 @@ install: build
 	install -Dm644 packaging/dev.skerry.Skerry.desktop \
 		$(datadir)/applications/dev.skerry.Skerry.desktop
 	install -Dm644 LICENSE $(datadir)/licenses/skerry/LICENSE
+	install -Dm644 NOTICE $(datadir)/licenses/skerry/NOTICE
 
 uninstall:
 	for binary in $(BINARIES); do rm -f $(bindir)/$$binary; done

@@ -1311,7 +1311,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 140
+FEWEST_SCENARIOS = 142
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -2163,6 +2163,88 @@ def a_pdf_keeps_its_neighbours_and_its_place(run: Run, fixture: Path) -> None:
         raise Failure(
             f"turning back to page {landed - 1} showed a draft: only the pages ahead were fetched"
         )
+
+
+@scenario("markdown-renders-and-toggles-to-its-source", fresh=True)
+def markdown_renders_and_toggles(run: Run, fixture: Path) -> None:
+    """**A README opens rendered, toggles to its source, and back.**
+
+    [ADR 0029](../docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).
+    Four claims a golden frame cannot make, because each is about what the window
+    *does* rather than what one frame looks like:
+
+    * a markdown file opens rendered, without being asked;
+    * `Ctrl+M` swaps to the source and back, and the strip's button does the same
+      thing for a pointer — rule 5;
+    * text can be selected in the rendered view and `Ctrl+C` puts it on the
+      clipboard, read back by a separate client;
+    * and `Ctrl+E` edits the *source*, then comes back to the rendering — because
+      the thing a person was reading is the thing they should get back.
+    """
+    (fixture / "notes.md").write_text(
+        "# The title\n\nA paragraph with **strong** words in it.\n\n"
+        "- one item\n- two item\n\n```\nfenced code\n```\n"
+    )
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text notes\nsleep 400\n")
+    until(run, cursor="notes.md")
+    run.drive("key space\nsleep 700\n")
+
+    # Rendered without being asked, which is the default the ADR chose.
+    opened = holds(run, lambda it: it.get("look_mode") == "rendered", "a rendered preview")
+    if opened["looking"] != "notes.md:text":
+        raise Failure(f"the look is {opened['looking']!r}")
+
+    # `Ctrl+M` to the source and back.
+    run.drive("key ctrl+m\nsleep 300\n")
+    holds(run, lambda it: it.get("look_mode") == "source", "the source")
+    run.drive("key ctrl+m\nsleep 300\n")
+    holds(run, lambda it: it.get("look_mode") == "rendered", "the rendering again")
+
+    # And the pointer's way to the same thing, which is the strip's own button.
+    at = look_aim(run, "source")
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick\nsleep 400\n")
+    holds(run, lambda it: it.get("look_mode") == "source", "the source, from the button")
+    run.drive("key ctrl+m\nsleep 300\n")
+    holds(run, lambda it: it.get("look_mode") == "rendered", "rendered once more")
+
+    # **Selection over the rendered words.** `Ctrl+A` then `Ctrl+C`, read back by
+    # a separate client: what a person copies is the text as it is laid out, so
+    # the markup is not in it and the words are.
+    run.drive("key ctrl+a\nsleep 300\nkey ctrl+c\nsleep 500\n")
+    held = clipboard(run)
+    if "The title" not in held or "strong" not in held:
+        raise Failure(f"the clipboard holds {held!r}")
+    if "**" in held or held.startswith("#"):
+        raise Failure(f"the clipboard holds the markup rather than the words: {held!r}")
+
+    # **`Ctrl+E` edits the source and comes back to the rendering.** A person
+    # reading a document who fixes a typo is still reading a document — and what
+    # comes back is the *edited* document, not the one that was parsed when the
+    # panel opened.
+    run.drive("key ctrl+e\nsleep 400\n")
+    holds(run, lambda it: it.get("look_mode") == "editing", "the editor")
+    run.drive("text ZZ\nsleep 300\nkey ctrl+e\nsleep 700\n")
+    holds(run, lambda it: it.get("look_mode") == "rendered", "the rendering after the edit")
+    if "ZZ" not in (fixture / "notes.md").read_text():
+        raise Failure("the edit did not reach the file")
+    run.drive("key ctrl+a\nsleep 300\nkey ctrl+c\nsleep 500\n")
+    if "ZZ" not in clipboard(run):
+        raise Failure("the rendering came back showing the document from before the edit")
+
+    # A file that is not markdown has none of this: the toggle is not drawn and
+    # the mode says so.
+    run.drive("key escape\nsleep 300\ntext file-1.txt\nsleep 400\n")
+    until(run, cursor="file-1.txt")
+    run.drive("key space\nsleep 600\n")
+    plain = holds(run, lambda it: it.get("looking") == "file-1.txt:text", "a plain text preview")
+    if plain["look_mode"] != "none":
+        raise Failure(f"a text file reports look_mode={plain['look_mode']!r}")
+    if "source" in plain.get("look_aim", ""):
+        raise Failure("the rendering toggle is drawn over a file that does not render")
 
 
 def drawn_in_full(state: dict[str, str]) -> bool:

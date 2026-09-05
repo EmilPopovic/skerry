@@ -283,6 +283,26 @@ FRAMES = [
     # read in this process because reading a file is not decoding.
     ("quick-look-image", ["--size", "900x600", "--scale", "125", "--look", "circle.png"],
      "pictures"),
+    # **Markdown, rendered** — ADR 0029. The frame is the test: a parser with no
+    # picture of its output is a parser whose headings could all be the same size.
+    ("markdown", ["--size", "900x620", "--scale", "125", "--look", "README.md"],
+     "markdown"),
+    # And the same file as its source, which is the other half of the toggle and
+    # the state `Ctrl+E` edits.
+    ("markdown-source",
+     ["--size", "900x620", "--scale", "125", "--look", "README.md", "--look-source"],
+     "markdown"),
+    # In the light palette, because a renderer that only looks right on one ground
+    # is a renderer nobody checked — the code block's own ground is the part that
+    # goes wrong.
+    ("markdown-light",
+     ["--size", "900x620", "--scale", "125", "--light", "--look", "README.md"],
+     "markdown"),
+    # A selection across it, which is what "view-only" still owes: the words as
+    # they are laid out, over three lines and two blocks.
+    ("markdown-selected",
+     ["--size", "900x620", "--scale", "125", "--look", "README.md", "--look-selected"],
+     "markdown"),
     ("quick-look-page", ["--size", "900x600", "--scale", "125", "--look", "paper.pdf"],
      "pictures"),
     # The text one is where the syntax-highlighting seam is: every line is drawn as
@@ -501,6 +521,7 @@ def build_fixture() -> Path:
     for name, size in entries:
         os.truncate(directory / name, size)
     build_pictures()
+    build_markdown()
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
     return directory
@@ -567,6 +588,66 @@ def three_page_pdf(rotate: int = 0) -> bytes:
     out += (b"trailer\n<< /Size " + str(len(objects) + 1).encode()
             + b" /Root 1 0 R >>\nstartxref\n" + str(start).encode() + b"\n%%EOF\n")
     return bytes(out)
+
+
+def build_markdown() -> None:
+    """A fixture of one README, in a directory of its own.
+
+    **Its own root, because a file added to a shared one moves nineteen frames.**
+    The first version of this put the README beside the pictures, and the item
+    count in the status line changed under every quick-look frame there is — a
+    fixture is a premise, and changing one silently re-blesses everything that
+    stood on it.
+    """
+    directory = FIXTURE / "markdown"
+    directory.mkdir(parents=True, exist_ok=True)
+    # **A README, which is the file the markdown renderer exists for.** One of
+    # everything a real one has: two heading levels, emphasis, strong, code
+    # inline and fenced, a link, a badge — a link around an image — a bullet list
+    # with a nested item, a task list, a numbered list, a quote, a table, a rule,
+    # and a line of raw HTML that has to render as its own characters.
+    (directory / "README.md").write_text(
+        "# Skerry\n"
+        "\n"
+        "A file manager for **Linux**, built on the premise that latency is a\n"
+        "*feature*. See the [documentation](https://example.com/docs).\n"
+        "\n"
+        "[![build](https://img.example/badge.svg)](https://ci.example/skerry)\n"
+        "\n"
+        "## Getting started\n"
+        "\n"
+        "Run `make install`, then:\n"
+        "\n"
+        "```sh\n"
+        "skerry ~/Downloads\n"
+        "```\n"
+        "\n"
+        "- One bullet, with `code` in it\n"
+        "- Another, which is long enough that it has to wrap somewhere inside the\n"
+        "  panel and carry on under its own words rather than under the bullet\n"
+        "  - A nested one\n"
+        "- [x] Done\n"
+        "- [ ] Owed\n"
+        "\n"
+        "1. First\n"
+        "2. Second\n"
+        "\n"
+        "> A quote, which gets a bar down the left.\n"
+        "\n"
+        "| Column | What it is |\n"
+        "| :----- | ---------: |\n"
+        "| Name   | the file |\n"
+        "| Size   | how big |\n"
+        "\n"
+        "---\n"
+        "\n"
+        "<div class=\"raw\">HTML renders as itself.</div>\n"
+        "\n"
+        "And ~~struck~~ text, plus ***both at once***.\n"
+    )
+
+    for path in sorted(directory.rglob("*")) + [directory]:
+        os.utime(path, (FIXED_MTIME, FIXED_MTIME))
 
 
 def build_pictures() -> None:

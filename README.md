@@ -4,7 +4,7 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 824 tests, 140 GUI scenarios on both Wayland and X11, seventy-five golden
+helpers, 861 tests, 142 GUI scenarios on both Wayland and X11, seventy-nine golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -54,9 +54,9 @@ method, and the four budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares seventy-five rendered frames to
+defect nothing else could: `tools/golden` compares seventy-nine rendered frames to
 committed references on lavapipe, `tools/gui-test` presses keys and moves a pointer
-through 137 scenarios on two display servers — one of which mounts a filesystem in a
+through 142 scenarios on two display servers — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
 filesystem torture matrix that is a CI job rather than thrown-away spike code. All
 three run on every push, the scenarios under `Xvfb`; the Wayland half of them stays
@@ -175,7 +175,10 @@ the first bug report on one of them.
   entries, and the resident floor. See
   [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 - **No archive, media or hex previews.** Pictures — the right way up, from the
-  EXIF tag — PDFs and text are what a quick look shows.
+  EXIF tag — PDFs, source with a highlighter, and **markdown rendered** are what a
+  quick look shows. The markdown parser is ours and deliberately small: anything
+  it does not recognise, HTML included, draws as its own text rather than
+  disappearing ([ADR 0029](docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md)).
 
 ## Working on it
 
@@ -195,7 +198,9 @@ quietly. See [tools/README.md](tools/README.md).
 
 ## Licence
 
-Apache-2.0: [LICENSE](LICENSE). Every source file carries an
+Apache-2.0: [LICENSE](LICENSE), with the attribution notice in
+[NOTICE](NOTICE) that the licence asks a distribution to carry. Every source
+file carries an
 `SPDX-License-Identifier` line saying the same thing, and `tools/check` fails a build
 for one that does not.
 

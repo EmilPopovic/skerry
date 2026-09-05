@@ -543,3 +543,8 @@ field.name = Name
 field.path = Location
 field.palette = Command
 field.search = Search
+
+# The rendered-markdown toggle — ADR 0029. Two strings, because the button says
+# where it goes rather than where it is.
+action.look_source = Show the source
+action.look_rendered = Show it rendered

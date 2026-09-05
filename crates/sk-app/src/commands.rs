@@ -1385,6 +1385,17 @@ fn look_scope(registry: &mut Registry<App>) {
             run: App::toggle_editing_the_look,
         },
         CommandSpec {
+            id: "look.source",
+            name: "action.look_source",
+            group: Group::View,
+            // **`Ctrl+M` for markdown**, in the look's own scope. `Ctrl+R` would
+            // have been *raw* and is already Discard here, which is the kind of
+            // clash the registry refuses rather than silently resolves.
+            keys: &["ctrl+m"],
+            enabled: App::looking_at_markdown,
+            run: App::toggle_the_rendering,
+        },
+        CommandSpec {
             id: "look.find",
             name: "action.look_find",
             group: Group::View,

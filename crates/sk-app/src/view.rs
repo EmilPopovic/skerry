@@ -198,6 +198,8 @@ pub enum LookControl {
     Discard,
     /// Plays the animation, or stops it where it is.
     Play,
+    /// Swaps a rendered markdown document for its source, and back.
+    Source,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -1162,6 +1164,10 @@ fn quick_look(
         painter.standby(key, fitted(painter, inner, aspect, grows(aspect)), theme.palette.text);
         return;
     }
+    if let Some(laid) = look.laid.as_ref().filter(|_| look.rendered) {
+        quick_look_rendered(painter, look, laid, inner);
+        return;
+    }
     if let Some(text) = &look.text {
         quick_look_text(painter, look, text, inner);
         return;
@@ -1211,6 +1217,24 @@ fn quick_look_controls(
     // exactly where that is true — rule 4, which is that a feature reachable only
     // by knowing the chord is a feature most people never find.
     let mut right = strip.right() - 8.0;
+    // **The rendering toggle, only where there is markdown.** Rule 4: a mode
+    // reachable only by a chord is a mode most people never find, and this one
+    // changes what the panel *is*.
+    if look.has_markdown() {
+        let key = if look.rendered { "action.look_source" } else { "action.look_rendered" };
+        let label = i18n::lookup(key);
+        let width = text_width(painter, label, metrics.header_size, false) + 16.0;
+        let area = Area { x: right - width, y: strip.y, width, height: side };
+        let ink = if look.rendered { theme.palette.dim } else { theme.palette.accent };
+        if hovered == Some(LookControl::Source) {
+            let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
+            painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
+        }
+        let style = TextStyle::new(metrics.header_size, ink).centred();
+        line(painter, label, style, area.x, area.width, baseline);
+        hits.look.push((LookControl::Source, area));
+        right -= width + 4.0;
+    }
     if look.text.is_some() {
         let key = if look.editing { "look.done" } else { "look.edit" };
         let label = i18n::lookup(key);
@@ -1403,6 +1427,121 @@ pub(crate) fn fitted_box(
 
 /// The inset between the text and the panel's edges.
 const TEXT_PAD: f32 = 14.0;
+
+/// The margin a rendered document is laid out inside.
+///
+/// **Wider than the source view's.** Prose is read in lines of sixty to eighty
+/// characters and a panel is wider than that; the margin is what stops a
+/// paragraph running the whole width of a maximised window.
+pub(crate) const MARKDOWN_PAD: f32 = 28.0;
+
+/// Draws a rendered markdown document, the lines that are on screen.
+///
+/// **[ADR 0029](../../../docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).**
+/// The layout is done — [`crate::mdlayout`] did it against this width before the
+/// frame started — so this places what it is given and colours it.
+fn quick_look_rendered(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    laid: &crate::mdlayout::Laid,
+    inner: Area,
+) {
+    use crate::mdlayout::{Ink, Rule};
+
+    let theme = *painter.theme;
+    let from = look.scroll.offset();
+    let left = inner.x + MARKDOWN_PAD;
+    let clip = painter.rect(inner.x, inner.y, inner.width, inner.height);
+    painter.list.push_clip(clip);
+    for index in laid.window(from, inner.height) {
+        let line = &laid.lines[index];
+        let top = inner.y + line.top - from;
+        // **A code block's ground, drawn the whole width of the column.** One
+        // rectangle per line rather than one per block: a block is a run of lines
+        // and the lines are what this loop has, so the seam between two of them
+        // has to be invisible — which it is, because they abut exactly.
+        if line.code {
+            let shape = painter.rect(left, top, inner.width - MARKDOWN_PAD * 2.0, line.height);
+            painter.list.rect(shape, theme.palette.button_hover, 0.0);
+        }
+        for depth in 0..line.quoted {
+            let x = left + f32::from(depth) * 18.0;
+            painter.list.rect(
+                painter.rect(x, top, painter.snap(2.0).max(1.0) / painter.scale, line.height),
+                theme.palette.divider,
+                0.0,
+            );
+        }
+        markdown_selection(painter, look, laid, (index, top, left));
+        for run in &line.runs {
+            let colour = match run.ink {
+                Ink::Body | Ink::Heading(_) => theme.palette.text,
+                Ink::Code => theme.palette.code.literal,
+                Ink::Link => theme.palette.accent,
+                Ink::Faint => theme.palette.dim,
+            };
+            let style =
+                TextStyle { weight: run.weight, size: run.size, color: colour, align: Align::Left };
+            let baseline = painter.baseline(top, line.height, run.size);
+            // **The box runs to the edge of the column, not to the run's own
+            // width.** `label` ellipsizes what will not fit the rectangle it is
+            // given, and a rectangle of exactly the measured width loses that
+            // measurement to rounding — every word came out as `Skerr…`. The
+            // width is for the *layout*; the drawing only needs room, and the
+            // panel's own clip is what stops it running over.
+            let room = (inner.width - MARKDOWN_PAD - run.x).max(1.0);
+            let box_rect = painter.rect(left + run.x, top, room, line.height);
+            painter.label(&run.text, style, box_rect, baseline);
+            if run.struck {
+                let middle = top + line.height * 0.45;
+                painter.hairline(left + run.x, middle, run.width, theme.palette.dim);
+            }
+        }
+        match line.rule {
+            Rule::None => {}
+            Rule::Across => {
+                let middle = top + line.height / 2.0;
+                painter.hairline(
+                    left,
+                    middle,
+                    inner.width - MARKDOWN_PAD * 2.0,
+                    theme.palette.divider,
+                );
+            }
+            Rule::Under => {
+                let under = top + line.height - 2.0;
+                painter.hairline(
+                    left,
+                    under,
+                    inner.width - MARKDOWN_PAD * 2.0,
+                    theme.palette.divider,
+                );
+            }
+        }
+    }
+    painter.list.pop_clip();
+}
+
+/// The selection behind one line of the rendered view.
+fn markdown_selection(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    laid: &crate::mdlayout::Laid,
+    place: (usize, f32, f32),
+) {
+    let (index, top, left) = place;
+    let Some(picked) = look.picked.filter(|it| !it.is_empty()) else { return };
+    let (start, end) = picked.ordered();
+    if index < start.line || index > end.line {
+        return;
+    }
+    let line = &laid.lines[index];
+    let from = if index == start.line { start.byte } else { 0 };
+    let to = if index == end.line { end.byte } else { line.text.len() };
+    let (x, right) = (crate::mdlayout::at_byte(line, from), crate::mdlayout::at_byte(line, to));
+    let shape = painter.rect(left + x, top, (right - x).max(2.0), line.height);
+    painter.list.rect(shape, painter.theme.palette.accent.with_alpha(90), 0.0);
+}
 
 /// The gap between the line numbers and the text they belong to.
 const TEXT_GUTTER_GAP: f32 = 10.0;

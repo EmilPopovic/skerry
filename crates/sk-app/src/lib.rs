@@ -41,6 +41,8 @@ mod highlight;
 mod indexing;
 mod keys;
 mod layout;
+mod markdown;
+mod mdlayout;
 mod menu;
 mod openers;
 mod pagetext;
@@ -61,6 +63,7 @@ mod views;
 mod word;
 
 pub use app::{App, Options};
+
 pub use bench::{Bench, run as bench};
 pub use capture::{Capture, run as capture};
 pub use service::{Standing, desktop_prefers_dark, take_the_name};

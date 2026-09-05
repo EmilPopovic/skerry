@@ -64,6 +64,7 @@ struct Overlays {
     collapsed: bool,
     history: bool,
     look_selected: bool,
+    look_source: bool,
     look_editing: bool,
     pinned: bool,
     tree: bool,
@@ -98,6 +99,7 @@ impl Overlays {
             "--indexing" => &mut self.indexing,
             "--grid" => &mut self.grid,
             "--look-selected" => &mut self.look_selected,
+            "--look-source" => &mut self.look_source,
             "--look-editing" => &mut self.look_editing,
             "--pinned" => &mut self.pinned,
             "--tree" => &mut self.tree,
@@ -181,6 +183,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         grouped_kind: overlays.grouped_kind,
         checked: overlays.checked,
         look_selected: overlays.look_selected,
+        look_source: overlays.look_source,
         look_editing: overlays.look_editing,
         collapsed: overlays.collapsed,
         history: overlays.history,
@@ -452,6 +455,7 @@ skerry [OPTIONS] [PATH]
   --split          split the window, for a golden frame of two panes
   --rename         show a name being typed, for a golden frame of it
   --look-selected  select all of a text preview's text, for a frame of it
+  --look-source    show a markdown preview as its source rather than rendered
   --look-editing   put a text preview into edit mode, for a frame of the caret
   --look-page <n>  which page or animation frame the quick look is on
   --look-zoom <f>  how much the quick look's picture is magnified
