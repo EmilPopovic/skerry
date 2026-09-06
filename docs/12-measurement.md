@@ -3003,3 +3003,90 @@ followed, which failed one colour further down the list. `menu_dim` lists every
 row whether it was drawn or not, so it answers "is it there" without moving
 anything. **A reachability check that has side effects is not a check you can put
 before the thing it is checking.**
+
+## Nine point six seconds that were never ours
+
+`a-drag-in-from-another-application-lands` failed about one run in ten on X11,
+and three rounds of hypotheses had already been spent on this program before the
+right instrument settled it. The fourth round is worth writing down because the
+first three were each *nearly* right.
+
+The dump the scenario prints at its own deadline says:
+
+```
+drag_in=true selections=0/0/0 drops=1/1/0@9615ms-of-9615ms
+        window sockets fd3:recv=0,send=0
+        peer sockets   fd15:recv=0,send=0 ... fd13:recv=0,send=0
+        thread … skerry        wchan=poll_schedule_timeout  syscall=ppoll
+        thread … skerry-job-15 wchan=anon_pipe_read         syscall=read
+```
+
+Read it in order. The frame loop is asleep in `ppoll` on two descriptors, which
+is what an idle window looks like. A pool thread is blocked reading the drop's
+pipe, which is what waiting for an end-of-file looks like. Both sockets have zero
+bytes queued in either direction, so **nothing had been sent to us and nothing
+was waiting to be read** — the window was not ignoring an answer, it was waiting
+for one.
+
+`drops=1/1/0` was read wrongly twice. The three numbers are reads started, reads
+that came back, and messages the loop acted on — and the middle one is stored at
+the *end* of the job. A `1/1/0` printed by the dump therefore means "the job
+finished just now, on the keystroke that asked for this dump", not "a message was
+delivered and dropped". The `9615ms` beside it is the job's own elapsed **from
+the spawn**, queueing included, which is why it equals the age of the request.
+
+What settled it was a timestamp on either side of the wire — three lines written
+to a file from `request_from` and from `arrived`:
+
+```
+604.551 asked      convert_selection leaves this window
+614.170 arrived    SelectionNotify is handled
+614.171 sent       the bytes go into the pipe, and the read returns
+```
+
+**9.62 seconds, and the peer's own log says its `drag-data-get` handler had
+already run** — the scenario waits for that line before it starts counting. So
+GTK produced the data early and the reply reached us nine and a half seconds
+later, with nothing on either socket in between.
+
+Two fixes were tried against that and measured, not assumed. An idle source that
+flushes GDK's display after the handler: no measurable change. Fifty flushes at
+20 ms — a full second of forced main-loop iterations: **2 failures in 20**, which
+is exactly the rate without it. No amount of flushing produces a reply that has
+not been queued.
+
+So the delay is the peer's, and the scenario's eight-second budget was a guess at
+a third-party toolkit. It is twenty now, with the number written down beside it.
+The claim the scenario makes is that bytes cross between two applications; how
+fast GTK is under `Xvfb` with no window manager is not a claim this project can
+hold anybody to.
+
+**And then the delay turned out not to be a duration at all.** With the budget
+raised to twenty seconds the next failure read `21606ms`: the reply had not taken
+9.6 seconds, it had taken *until the scenario gave up and asked for a state
+dump*. The dump is an `F12`, an `F12` is a keystroke, and a keystroke is an event
+delivered to this window. So the last experiment was to send one while waiting
+rather than only at the end:
+
+| what the wait does | failures in 20 |
+| --- | --- |
+| polls the directory, peer flushes on an idle | 2 |
+| polls the directory, peer flushes 50× over a second | 2 |
+| polls the directory, budget raised to 20 s | 1 |
+| **polls the directory *and* sends this window a key** | **0** |
+
+The reply arrives when this window is given an event and not before, with nothing
+queued on either socket in between. Where that lives between GTK and `Xvfb` is
+not settled here and this is not a fix for it — but it is the honest condition to
+test under. A window on a real desktop is never event-starved: a compositor, a
+window manager and a pointer under a hand send it something several times a
+second. A bare `Xvfb` with no window manager and a virtual pointer parked where
+the drop left it sends nothing at all, and **that quiet is the artefact, not the
+drag**.
+
+The general lesson is about the instrument rather than the bug. **Three counters
+and a socket census narrowed it to two processes and could not choose between
+them; two timestamps on the same wire chose in one run** — and then a single
+elapsed figure that moved with the deadline said the duration had never been a
+duration. A counter says how much happened. The question here was always *when*,
+and twice the answer was *the moment somebody looked*.

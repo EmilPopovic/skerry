@@ -5094,12 +5094,41 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
         # made the difference visible.
         peer.wait_for("asked for text/uri-list")
         landed = False
-        deadline = time.time() + 8.0
+        # **Twenty seconds, and the number is the peer's.** GTK's handler has run
+        # by this line — that is what the wait above is — and the
+        # `SelectionNotify` that answers it is still, about one drag in ten,
+        # **9.6 seconds** behind it, measured with a timestamp either side of the
+        # wire and with `ss -x` showing zero queued bytes on both processes for
+        # the whole of the gap. Nothing had been sent, this window was correctly
+        # asleep, and the file lands the moment the reply does. Fifty flushes at
+        # 20 ms from inside the peer's handler changed the rate not at all.
+        #
+        # So the budget here is a budget for somebody else's toolkit, and eight
+        # seconds was a guess at it. Twenty is a ceiling rather than an
+        # expectation: what actually removed the flake is the keystroke in the
+        # loop below. See
+        # [12-measurement.md](../docs/12-measurement.md#nine-point-six-seconds-that-were-never-ours).
+        deadline = time.time() + 20.0
         while time.time() < deadline:
             if (fixture / carried.name).exists():
                 landed = True
                 break
-            time.sleep(0.05)
+            # **Polled with an `F12`, and the keystroke is the point.**
+            # Measured, twenty runs each: waiting on the directory alone fails
+            # 2 in 20 and the reply lands 9.6 s late; waiting on it while
+            # sending this window a key fails **0 in 20**. The reply arrives when
+            # this window is given an event and not before, with nothing queued
+            # on either socket in the meantime — see the section this comment's
+            # sibling links to. Where that lives between GTK and `Xvfb` is not
+            # settled, and this is not a fix for it.
+            #
+            # It is the honest condition to test under. A window on a real
+            # desktop is never event-starved: a compositor, a window manager and
+            # a pointer that a hand is resting on send it something several times
+            # a second. A bare `Xvfb` with no window manager and a virtual
+            # pointer parked where the drop left it sends nothing at all, and
+            # that quiet is the artefact, not the drag.
+            run.drive("key f12\nsleep 120\n", answering=False)
         if not landed:
             # **What the window thought, not just what the directory holds.** The
             # peer has been asked for the data by this point, so a file that never
@@ -5135,7 +5164,7 @@ def a_drag_in_lands(run: Run, fixture: Path) -> None:
             run.drive("key f12\nsleep 200\n")
             said = run.state()
             raise Failure(
-                f"nothing landed in 8s: {held}; "
+                f"nothing landed in 20s: {held}; "
                 f"drag_in={said['drag_in']} selections={said['selections']} "
                 f"drops={said['drops']} "
                 f"busy={said['busy']} queue={said['queue']} "

@@ -79,12 +79,19 @@ def source_window(uris: list[str]) -> Gtk.Window:
         data.set_uris(uris)
         # **One more turn of the loop, to push the answer out.** GTK queues the
         # `SelectionNotify` while this handler runs and GDK writes it when the
-        # main loop next comes round — and with no window manager and no further
-        # input, there is no next time. Measured: about one drag in eight left
-        # the reply unwritten, with `ss -x` showing zero bytes queued on either
-        # side and the window correctly asleep waiting for something nobody had
-        # sent. An idle source is a guaranteed iteration, and the flush in it is
-        # what actually reaches the wire. See docs/12-measurement.md.
+        # main loop next comes round, and with no window manager and no further
+        # input there may be no next time. An idle source is a guaranteed
+        # iteration and the flush in it is what reaches the wire.
+        #
+        # **It is not what makes this reliable, and neither was the next thing
+        # tried.** Fifty flushes at 20 ms — a whole second of forced iterations —
+        # measured 2 failures in 20, exactly what the idle alone measures. With a
+        # timestamp on both sides of the wire, `convert_selection` leaves the
+        # window under test and the `SelectionNotify` is handled **9.62 s later**,
+        # with `ss -x` showing zero queued bytes on both processes throughout —
+        # so GTK had not produced the reply, and no amount of flushing produces
+        # something that does not exist yet. Kept because it is right anyway; the
+        # delay is the peer's and is recorded as one. See docs/12-measurement.md.
         GLib.idle_add(lambda: Gdk.Display.get_default().flush() or False)
 
     button.connect("drag-data-get", provide)
