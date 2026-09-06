@@ -170,6 +170,9 @@ FRAMES = [
     # only frame with the danger colour in it. It was a sentence in the status
     # strip, in the grey a row count is drawn in.
     ("delete-for-good", ["--size", "900x520", "--scale", "125", "--erase"]),
+    # The same panel, asking about something that *can* be taken back — the
+    # sentence, the verb and the colour are the whole difference.
+    ("trash-question", ["--size", "900x520", "--scale", "125", "--trash-question"]),
     # The status strip mid-copy: the bar is the strip rather than two pixels on
     # its divider, the sentence is at full strength, and Pause and Stop are in it.
     # The only frame that would catch the fill and the text drifting apart.

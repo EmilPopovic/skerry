@@ -4,7 +4,7 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 885 tests, 143 GUI scenarios on both Wayland and X11, eighty-two golden
+helpers, 885 tests, 144 GUI scenarios on both Wayland and X11, eighty-three golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -168,8 +168,10 @@ the first bug report on one of them.
   is reported absent rather than pretended.
 - **No mounting.** A volume's label and its free space are drawn without `udisks2`,
   but mounting and ejecting one are not written yet.
-- **Settings are keys.** `Ctrl ,` writes the whole keymap to a file you own; anything
-  else is a chord or a drag, and there is no preferences surface yet.
+- **Six settings, and no more.** `Ctrl ,` opens a panel listing the theme, hidden
+  files, the sidebar and its width, what a new folder opens as, and whether Move to
+  Trash asks first — each with its value and where that value came from. Everything
+  else is a chord, a drag, or per-folder and remembered where you set it.
 - **Four performance budget rows are missed**, and each is recorded with its number
   rather than widened: cold start, the 1M sort, one scroll run in five at a million
   entries, and the resident floor. See

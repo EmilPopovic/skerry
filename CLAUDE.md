@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 885 tests, 143 GUI scenarios **on both Wayland and X11**,
-eighty-two golden frames, every gate green: a Details view
+sandboxed helpers, 885 tests, 144 GUI scenarios **on both Wayland and X11**,
+eighty-three golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -152,12 +152,21 @@ and a scenario walks that tree with `gdbus`, which found an array aligned to eig
 bytes where the specification says four, in a marshaller a year old that no
 foreign client had ever read. Every command is reachable by keyboard
 alone and by pointer alone, and a test fails the build for one that is not — and
-**the keymap is a file**: `Ctrl ,` writes every command and its chords to
+**the keymap is a file**: every command and its chords go to
 `$XDG_CONFIG_HOME/skerry/config`, a line rebinds one, an empty right-hand side
 unbinds it, and a typo is a problem printed at startup rather than a command that
 has quietly lost its key
-([ADR 0025](docs/adr/0025-the-config-file-is-the-keymap-written-out.md)). What
-is done and what is owed:
+([ADR 0025](docs/adr/0025-the-config-file-is-the-keymap-written-out.md)) — and
+**settings are lines in the same file**, with `Ctrl ,` opening a panel that lists
+each one, its value, and **where that value came from**: the config says what a
+*fresh* window does, the session says what *this* one was left doing and wins,
+but only for a setting the window itself changed
+([ADR 0027](docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)),
+so editing the file moves a machine that has not been told otherwise and never
+argues with somebody who set it from inside — one of its rows makes this the
+desktop's handler for folders, by hand, into `mimeapps.list`, preserving every
+line somebody else wrote and refusing to rewrite a file whose syntax it cannot
+re-emit. What is done and what is owed:
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). The numbers and the
 three budget rows currently missed:
 [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).

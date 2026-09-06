@@ -448,6 +448,16 @@ mod tests {
                     "{} did not survive {word:?}",
                     setting.name()
                 );
+                // The one setting with no true-or-false position, checked as the
+                // number it is — without this the loop above asserts `false ==
+                // false` about it and says nothing at all.
+                if setting == Setting::SidebarWidth {
+                    assert!(
+                        (read.aside - wrote.aside).abs() < f32::EPSILON,
+                        "the width came back as {} from {word:?}",
+                        read.aside
+                    );
+                }
             }
         }
     }

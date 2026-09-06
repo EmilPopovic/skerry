@@ -1311,7 +1311,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 143
+FEWEST_SCENARIOS = 144
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5840,12 +5840,22 @@ def own_config(run: Run, label: str) -> dict:
     Nemo read — so a scenario that wrote to the real one would put a temporary
     fixture into the sidebar of every file manager on the machine running the
     suite, and leave it there.
+
+    **And its own data directory, on the same filesystem as the fixture.** The
+    Trash lives under `$XDG_DATA_HOME`, and the specification puts a file on
+    another filesystem somewhere else entirely or refuses the move — so a
+    scenario that left this pointing at the real home either wrote into the trash
+    of whoever ran the suite or, because the fixtures are on tmpfs and a home
+    usually is not, silently trashed nothing at all and failed as *the row is
+    still there*. Measured: exactly that, in the first run of
+    `asking-before-the-trash-is-a-setting`.
     """
     home = run.log.parent / f"config-{label}"
     home.mkdir(parents=True, exist_ok=True)
     return {
         "XDG_CONFIG_HOME": str(home),
         "XDG_STATE_HOME": str(run.log.parent / f"state-{label}"),
+        "XDG_DATA_HOME": str(run.log.parent / f"data-{label}"),
     }
 
 
@@ -6116,6 +6126,69 @@ def every_settings_row_answers_a_pointer(run: Run, fixture: Path) -> None:
         own.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
         gone = holds(own, lambda it: not settings_of(it), "the panel closed")
         expect(gone, settings="")
+    finally:
+        own.close()
+
+
+@scenario("asking-before-the-trash-is-a-setting", fresh=True)
+def asking_before_the_trash_is_a_setting(run: Run, fixture: Path) -> None:
+    """The one setting that changes what an action *does*, in both positions.
+
+    **Off by default, because rule 3 is the safety net**: every trash is one
+    `Ctrl+Z`, so a confirmation for something reversible is friction rather than
+    protection. It is a setting because a person who wants it is not wrong — ADR
+    0027 — and this asserts both positions, which is the only way to tell a
+    setting that works from a panel that draws a switch.
+
+    The question is the panel a permanent deletion already draws, so what matters
+    here is the difference: it starts on Cancel, Cancel keeps the file, a second
+    `Delete` answers it, and what it did is on the undo stack — which is the
+    whole reason asking was optional in the first place.
+    """
+    run.close()
+    place = own_config(run, "confirm-trash")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        rows = int(listed(own)["rows"])
+
+        # Off: the row goes, with no question at all.
+        own.drive("key end\nsleep 250\nkey delete\nsleep 1200\nkey f12\nsleep 250\n")
+        gone = until(own, rows=str(rows - 1))
+        expect(gone, erasing="0")
+        own.drive("key ctrl+z\nsleep 1200\nkey f12\nsleep 250\n")
+        until(own, rows=str(rows))
+
+        # On, from the panel — the sixth row, pressed rather than typed.
+        state = settings_open(own)
+        if settings_of(state).get("confirm_trash") != ("off", "default"):
+            raise Failure(f"a fresh window is {settings_of(state).get('confirm_trash')}")
+        yes = a_control(own, state, 5, "yes")
+        own.drive(f"move {yes[0]:.2f} {yes[1]:.2f}\nclick left\nsleep 400\nkey f12\nsleep 250\n")
+        turned = holds(
+            own, lambda it: settings_of(it).get("confirm_trash", ("",))[0] == "on", "asking"
+        )
+        if settings_of(turned)["confirm_trash"] != ("on", "window"):
+            raise Failure(f"the row reads {settings_of(turned)['confirm_trash']}")
+        own.drive("key escape\nsleep 400\nkey f12\nsleep 250\n")
+        holds(own, lambda it: not settings_of(it), "the panel closed")
+
+        # And now the same keystroke asks instead.
+        own.drive("key end\nsleep 250\nkey delete\nsleep 700\nkey f12\nsleep 250\n")
+        asked = holds(own, lambda it: it.get("erasing") != "0", "the question")
+        expect(asked, erasing_on="cancel", rows=str(rows))
+
+        # Cancel keeps the file, which is the half a question exists for.
+        own.drive("key escape\nsleep 400\nkey f12\nsleep 250\n")
+        kept = holds(own, lambda it: it.get("erasing") == "0", "the question dismissed")
+        expect(kept, rows=str(rows))
+
+        # Asking again and answering it moves the file — and `Ctrl+Z` walks it
+        # back, which a permanent deletion's question cannot offer.
+        own.drive("key delete\nsleep 700\nkey delete\nsleep 1200\nkey f12\nsleep 250\n")
+        trashed = until(own, rows=str(rows - 1))
+        expect(trashed, erasing="0", undo="true")
+        own.drive("key ctrl+z\nsleep 1200\nkey f12\nsleep 250\n")
+        until(own, rows=str(rows))
     finally:
         own.close()
 

@@ -415,6 +415,9 @@ pub struct Capture {
     pub clash: bool,
     /// Whether to draw the question a permanent deletion asks.
     pub erase: bool,
+    /// Whether to draw the same panel asking about a Move to Trash instead —
+    /// the `confirm_trash` setting, which is off unless somebody turns it on.
+    pub trash_question: bool,
     /// Whether to draw the status strip mid-operation: the bar behind its own
     /// text, with Pause and Stop in it.
     pub progress: bool,
@@ -1382,7 +1385,12 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         leaves: &leaves,
         dividers: &dividers,
         drop_tab,
-        erasing: request.erase.then_some((doomed.as_slice(), 9, false, true)),
+        erasing: (request.erase || request.trash_question).then_some((
+            doomed.as_slice(),
+            9,
+            false,
+            request.erase,
+        )),
     };
     let stats = warm_and_draw(
         &mut session,
