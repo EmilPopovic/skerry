@@ -2954,3 +2954,52 @@ The general form: **a test that polls a program is also driving it.** Where the
 behaviour under test is what happens when nothing happens, the poll has to be
 outside the program — a file on disk, a process that exited — or the test is
 measuring a window that is being kept awake by the question.
+
+## What the sweep shares is what the sweep depends on the order of
+
+Two scenarios failed in the same sweep and neither was about the thing that
+broke them. `palette-by-pointer` clicked *Show hidden files* in the palette and
+asserted the window now showed them; it reported `hidden is 'false', wanted
+'true'`, which reads as the click having missed.
+
+It had not missed. The window had opened with hidden files **already on**,
+because a scenario earlier in the sweep had turned them on and every scenario
+shared one `XDG_STATE_HOME`. The click was correct and so was the assertion; the
+premise was wrong.
+
+The change that exposed it is
+[ADR 0027](adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)'s:
+the six settings come out of the session file whatever directory the command
+line named, because a named folder says nothing about a theme. Before that, a
+scenario passing a path discarded the whole session and could not be reached by
+what the one before it had done.
+
+The harness already knew about this shape and had solved it once. `fresh` gives a
+scenario its own fixture *and* its own `XDG_DATA_HOME`, and the comment on it
+says why: a view mode or a grouping is written against the path it was set on,
+so every later scenario over that path inherits it. **That fix works because the
+views file is keyed by a path.** The session's settings are keyed by nothing —
+they are the window's, not the folder's — so no fixture can isolate them and only
+a separate directory does. One state directory per scenario, and the ordering
+disappears.
+
+The lesson generalises past this program. **Every piece of state a suite shares
+is a hidden argument to every test after the first**, and the ones that bite are
+the ones with no key: a path-keyed record is isolated by using a different path,
+and a global is isolated by nothing at all. When a test fails on a premise rather
+than on its subject, the first question is what the test before it wrote.
+
+**And the sweep that found it found a second thing that was nobody's regression.**
+`a-folder-keeps-the-colour-it-was-given` failed three times in three on Wayland
+and passed on X11, and a worktree at the commit before the day's work failed the
+same way — so it had been latent, and the last green Wayland sweep had been luck.
+The cause is the trap the palette's own helper is documented for: the scenario
+asserted that two rows were in `menu_aim`, which lists only the rows a menu
+*drew*. A folder's menu is twenty-four rows; it fits under Xvfb's 720-pixel
+window and does not under the nested compositor's shorter tile. Two fixes were
+tried and only the second is right — routing the check through the helper that
+scrolls made it pass, and then scrolled the menu out from under the *click* that
+followed, which failed one colour further down the list. `menu_dim` lists every
+row whether it was drawn or not, so it answers "is it there" without moving
+anything. **A reachability check that has side effects is not a check you can put
+before the thing it is checking.**

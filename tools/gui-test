@@ -6559,14 +6559,21 @@ def colour_a_folder(run: Run, fixture: Path) -> None:
         expect(row, hover_name="alpha")
         own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        for wanted in ("view.colour_red", "view.colour_none"):
-            if wanted not in opened["menu_aim"]:
-                raise Failure(f"{wanted} is not on a folder's menu: {opened['menu_aim']!r}")
-        # Remove the colour is dimmed on a folder that has none, so the row says
-        # whether there is anything to take away.
+        # **`menu_dim` and not `menu_aim`.** A folder's menu is twenty-four rows
+        # and `menu_aim` lists only the ones that are *drawn*, so asserting
+        # against it asserts that the menu fits — which it does under Xvfb's
+        # 720-pixel window and does not under the nested compositor's shorter
+        # tile, so this failed three times in three on Wayland while passing on
+        # X11. That is the trap `palette-by-pointer` names two hundred lines
+        # above. `menu_dim` lists every row whatever is drawn, so it answers both
+        # halves at once: Remove the colour is *there*, and it is dimmed, because
+        # a folder with no colour has nothing to take away.
         if "view.colour_none" not in opened["menu_dim"]:
-            raise Failure(f"Remove the colour is offered on a plain folder: {opened['menu_dim']!r}")
+            raise Failure(f"Remove the colour is not dimmed and there: {opened['menu_dim']!r}")
 
+        # And the row that is clicked is reached through the helper that scrolls,
+        # which is the only thing that can say a row nobody has drawn is
+        # reachable at all.
         aimed = menu_aim(own, opened, "view.colour_red")
         own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
         until(own, coloured="alpha:red")
