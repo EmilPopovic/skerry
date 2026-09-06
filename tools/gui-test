@@ -6785,13 +6785,19 @@ def page_words(path: Path) -> tuple[float, float, list[tuple[float, float, float
 
 @scenario("the-keymap-is-a-file-that-can-be-edited", fresh=True)
 def the_keymap_is_a_file(run: Run, fixture: Path) -> None:
-    """`Ctrl ,` writes the keymap out, and a line in it rebinds a chord.
+    """`Ctrl Alt ,` writes the keymap out, and a line in it rebinds a chord.
 
     **[ADR 0025](../docs/adr/0025-the-config-file-is-the-keymap-written-out.md)
     end to end.** The unit tests say the file round-trips; only a window can say
     that a chord edited in it is the chord the program answers to — which is the
     whole feature, and it spans a restart because the file is read once at
     startup.
+
+    **The chord moved**, because
+    [ADR 0027](../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)
+    gave `Ctrl ,` to the settings panel — where writing the keymap is a row, so
+    the thing somebody learned that chord for is one press away and is now
+    visible to everybody who never knew it.
 
     Its own `XDG_CONFIG_HOME`, like anything that pins: the file this writes is
     the one a person running the suite keeps their own keymap in.
@@ -6808,7 +6814,7 @@ def the_keymap_is_a_file(run: Run, fixture: Path) -> None:
         # until somebody asks.
         if written.exists():
             raise Failure(f"{written} was written without being asked for")
-        first.drive("key ctrl+,\nsleep 600\nkey f12\nsleep 200\n")
+        first.drive("key ctrl+alt+,\nsleep 600\nkey f12\nsleep 200\n")
         said = holds(first, lambda it: bool(it.get("notice")), "a notice about the keymap")
         if str(written) not in said["notice"]:
             raise Failure(f"the notice reads {said['notice']!r}")
@@ -6820,7 +6826,7 @@ def the_keymap_is_a_file(run: Run, fixture: Path) -> None:
             raise Failure(f"the file holds {text.count(chr(10))} lines")
 
         # And a second ask does not overwrite what somebody may have edited.
-        first.drive("key ctrl+,\nsleep 500\nkey f12\nsleep 200\n")
+        first.drive("key ctrl+alt+,\nsleep 500\nkey f12\nsleep 200\n")
         again = holds(first, lambda it: "already" in it.get("notice", ""), "a refusal to overwrite")
         assert again is not None
     finally:
@@ -9492,6 +9498,9 @@ def main(argv: list[str]) -> int:
                 own = getattr(function, "fresh", False)
                 path = make_fixture(work, f"fixture-{name}") if own else fixture
                 data = work / "data" / name
+                # See `STATE`: one session file per scenario, always, because the
+                # settings in it are keyed by nothing a fixture isolates.
+                STATE = str(work / "state" / name)
                 environment = {"XDG_DATA_HOME": str(data)} if own else None
                 if getattr(function, "bus", False):
                     if not shutil.which("dbus-daemon"):
