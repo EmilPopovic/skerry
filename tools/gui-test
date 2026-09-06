@@ -1311,7 +1311,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 141
+FEWEST_SCENARIOS = 143
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5930,6 +5930,194 @@ def pinning_a_folder(run: Run, fixture: Path) -> None:
         until(back, pinned=f"alpha,{fixture.name}")
     finally:
         back.close()
+
+
+def settings_of(state: dict[str, str]) -> dict[str, tuple[str, str]]:
+    """The settings panel's rows, as `name -> (value, where it came from)`."""
+    rows = {}
+    for field in state.get("settings", "").split(" ")[0].split(","):
+        if "=" not in field:
+            continue
+        name, rest = field.split("=", 1)
+        value, _, source = rest.partition("/")
+        rows[name] = (value, source)
+    return rows
+
+
+def settings_open(run: Run) -> dict[str, str]:
+    """Opens the settings panel and returns the state with it up."""
+    run.drive("key ctrl+,\nsleep 400\nkey f12\nsleep 250\n")
+    return holds(run, lambda it: bool(settings_of(it)), "the settings panel")
+
+
+def a_control(run: Run, state: dict[str, str], row: int, which: str) -> tuple[float, float]:
+    """The middle of one control the panel drew, as the driver's percentages.
+
+    From the rectangle the *frame* recorded and never recomputed here — see
+    [12-measurement.md](../docs/12-measurement.md#a-test-that-aims-at-the-hit-box-agrees-with-the-bug).
+    """
+    for field in state.get("settings_aim", "").split(","):
+        parts = field.split(":")
+        if len(parts) == 4 and int(parts[0]) == row and parts[1] == which:
+            return aim(run, state, float(parts[2]), float(parts[3]))
+    raise Failure(f"no {which} control on row {row}: {state.get('settings_aim')!r}")
+
+
+@scenario("a-setting-is-a-line-in-the-file-and-the-window-can-change-it", fresh=True)
+def a_setting_is_a_line_and_the_window_can_change_it(run: Run, fixture: Path) -> None:
+    """**ADR 0027's precedence rule, end to end, across three processes.**
+
+    The file says what a *fresh* window does; the session says what *this* window
+    was last left doing and wins — but only for a setting the window itself
+    changed. The three claims that rule makes are three restarts:
+
+    * a line in the file is what the window starts as, and the panel says so;
+    * a value the window changed survives `kill -9` and outranks the file;
+    * a value the window never touched **follows the file when the file moves**,
+      which is the half a session-always-wins design silently loses.
+
+    Its own `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, because both files are real
+    ones: without it this would edit the config of whoever ran the suite.
+    """
+    run.close()
+    place = own_config(run, "settings")
+    config = Path(place["XDG_CONFIG_HOME"]) / "skerry" / "config"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("theme = light\nhidden = on\nsidebar_width = 300\n")
+
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        rows = settings_of(settings_open(own))
+        for name, want in [
+            ("theme", ("light", "file")),
+            ("hidden", ("on", "file")),
+            ("sidebar_width", ("300", "file")),
+            ("view", ("details", "default")),
+            ("confirm_trash", ("off", "default")),
+        ]:
+            if rows.get(name) != want:
+                raise Failure(f"{name} is {rows.get(name)}, not {want} — the file was not read")
+
+        # The keyboard half: the highlight starts on Theme and `→` is its true
+        # position, which for a theme is dark.
+        own.drive("key right\nsleep 300\nkey f12\nsleep 200\n")
+        changed = settings_of(holds(own, lambda it: settings_of(it).get("theme", ("", ""))[0] == "dark", "a dark theme"))
+        if changed["theme"] != ("dark", "window"):
+            raise Failure(f"theme is {changed['theme']}, not changed by the window")
+        if changed["hidden"] != ("on", "file"):
+            raise Failure(f"changing the theme moved hidden to {changed['hidden']}")
+        # **Long enough for the session's own floor.** `SESSION_FLOOR` is two
+        # seconds and a `kill -9` inside it loses the write — which is the file's
+        # design and not a defect: a scroll changes sixty times a second and none
+        # of those is a reason to write a file. Rule 6 is about what a person set
+        # up a moment ago, not a moment before that.
+        session = Path(place["XDG_STATE_HOME"]) / "skerry" / "session"
+        deadline = time.time() + PATIENCE
+        while time.time() < deadline:
+            written = session.read_text() if session.is_file() else ""
+            if "theme dark" in written and "touched" in written:
+                break
+            time.sleep(0.2)
+        else:
+            raise Failure(f"the session never recorded the change: {session} holds {written!r}")
+        own.kill()
+    finally:
+        own.close()
+
+    # Second process, same file. The theme the window changed comes back; the
+    # three it did not are still the file's.
+    back = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(back)
+        rows = settings_of(settings_open(back))
+        if rows.get("theme") != ("dark", "window"):
+            raise Failure(f"the window's own theme did not survive: {rows.get('theme')}")
+        if rows.get("sidebar_width") != ("300", "file"):
+            raise Failure(f"the file's width did not survive: {rows.get('sidebar_width')}")
+        back.close()
+    finally:
+        back.close()
+
+    # Third process, an edited file. The width follows it because nothing in the
+    # window has ever touched that setting; the theme does not, because something
+    # has.
+    config.write_text("theme = light\nhidden = on\nsidebar_width = 200\n")
+    moved = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(moved)
+        rows = settings_of(settings_open(moved))
+        if rows.get("sidebar_width") != ("200", "file"):
+            raise Failure(
+                f"the width is {rows.get('sidebar_width')} — a setting the window never "
+                f"changed has stopped following the file"
+            )
+        if rows.get("theme") != ("dark", "window"):
+            raise Failure(f"the file overrode a setting the window had changed: {rows.get('theme')}")
+    finally:
+        moved.close()
+
+
+@scenario("every-settings-row-answers-a-pointer", fresh=True)
+def every_settings_row_answers_a_pointer(run: Run, fixture: Path) -> None:
+    """Rule 5's other half, for the newest surface in the program.
+
+    Every control the panel draws is a rectangle the *frame* recorded, and this
+    presses them: the two words of a switch mean their own word rather than "the
+    other one", and the number's two steps move it by twenty each way.
+
+    **A press on the word that is already lit does nothing**, which is the
+    difference between a switch and a toggle and the reason the two halves are
+    separate rectangles — a control that flipped whatever it was told cannot be
+    used twice.
+    """
+    run.close()
+    place = own_config(run, "settings-pointer")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        state = settings_open(own)
+        rows = settings_of(state)
+        if rows.get("theme") != ("dark", "default"):
+            raise Failure(f"a fresh window is {rows.get('theme')}, not dark by default")
+
+        # The word that is already lit, twice: nothing moves.
+        dark = a_control(own, state, 0, "yes")
+        own.drive(f"move {dark[0]:.2f} {dark[1]:.2f}\nclick left\nsleep 300\n")
+        own.drive(f"click left\nsleep 300\nkey f12\nsleep 200\n")
+        still = settings_of(own.state())
+        if still.get("theme") != ("dark", "window"):
+            raise Failure(f"two presses on Dark left {still.get('theme')}")
+
+        # And the other word, once.
+        state = own.state()
+        light = a_control(own, state, 0, "no")
+        own.drive(f"move {light[0]:.2f} {light[1]:.2f}\nclick left\nsleep 400\nkey f12\nsleep 200\n")
+        after = settings_of(holds(own, lambda it: settings_of(it).get("theme", ("", ""))[0] == "light", "a light theme"))
+        if after["theme"] != ("light", "window"):
+            raise Failure(f"a press on Light left {after['theme']}")
+
+        # The number, both ways. Twenty each press — `settings::WIDTH_STEP`.
+        state = own.state()
+        was = int(settings_of(state)["sidebar_width"][0])
+        wider = a_control(own, state, 3, "yes")
+        own.drive(f"move {wider[0]:.2f} {wider[1]:.2f}\nclick left\nsleep 350\nkey f12\nsleep 200\n")
+        grew = settings_of(holds(own, lambda it: settings_of(it).get("sidebar_width", ("0",))[0] != str(was), "a wider list"))
+        if int(grew["sidebar_width"][0]) != was + 20:
+            raise Failure(f"the width went from {was} to {grew['sidebar_width'][0]}, not {was + 20}")
+        state = own.state()
+        narrower = a_control(own, state, 3, "no")
+        own.drive(f"move {narrower[0]:.2f} {narrower[1]:.2f}\nclick left\nsleep 350\nkey f12\nsleep 200\n")
+        shrank = settings_of(holds(own, lambda it: settings_of(it).get("sidebar_width", ("0",))[0] == str(was), "the width back"))
+        if int(shrank["sidebar_width"][0]) != was:
+            raise Failure(f"the width came back to {shrank['sidebar_width'][0]}, not {was}")
+
+        # Escape is the way out, and the panel goes.
+        own.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
+        gone = holds(own, lambda it: not settings_of(it), "the panel closed")
+        expect(gone, settings="")
+    finally:
+        own.close()
 
 
 @scenario("a-well-known-place-cannot-be-unpinned", fresh=True)

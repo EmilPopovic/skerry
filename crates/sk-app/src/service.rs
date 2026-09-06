@@ -27,6 +27,14 @@ use sk_util::WakeHandle;
 /// Our own name, which is the window's `app_id`.
 pub const NAME: &str = "dev.skerry.Skerry";
 
+/// The basename of the `.desktop` file this program installs.
+///
+/// **The same string as [`NAME`] with a suffix**, because a desktop matches an
+/// application to its window by string equality between the `app_id`, the bus
+/// name and this file's basename — see
+/// [08-roadmap.md](../../../docs/08-roadmap.md#m7--4-wk--desktop-citizenship).
+pub const DESKTOP_ID: &str = "dev.skerry.Skerry.desktop";
+
 /// The desktop's name for a file manager.
 const FILE_MANAGER: &str = "org.freedesktop.FileManager1";
 

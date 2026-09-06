@@ -15,20 +15,22 @@
 //! hundred lines for the same reason: rule 10 asks whether a dependency earns its
 //! row, and a `HashMap<String, String>` does not.
 //!
-//! # What is not in it
+//! # Settings, beside the keys
 //!
-//! Settings. The theme, the sidebar, the default view: every one of them is
-//! something the window also changes as it runs, and
-//! [ADR 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md)'s
-//! session file already remembers how it was left — so each needs a precedence
-//! rule between the two, which is the successor ADR 0025's revisit trigger names.
-//! A chord needs no such rule: nothing in the window rebinds a key while it runs.
+//! **[ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)**
+//! answered the precedence question ADR 0025 declined to invent, so the same
+//! grammar now carries both: `theme = dark` sits beside
+//! `view.theme = ctrl+shift+d`. **A name with no dot is a setting**, because
+//! every command id has one — which is checked by a test rather than assumed —
+//! and a name that is neither is a problem printed at start-up, exactly as a bad
+//! chord already is.
 
 use std::path::PathBuf;
 
 use sk_cmd::Registry;
 
 use crate::app::App;
+use crate::settings::{ALL, Marks, Setting, Values};
 
 /// Where the file is, if the machine says where configuration goes.
 ///
@@ -50,6 +52,15 @@ pub(crate) fn place() -> Option<PathBuf> {
 /// order the file has them and a person reads them against the file.
 pub(crate) struct Config {
     keys: Vec<(String, Vec<String>)>,
+    /// What the settings lines said, over the defaults.
+    pub(crate) values: Values,
+    /// Which settings the file named, which is the panel's third column.
+    pub(crate) marks: Marks,
+    /// The settings lines this build could not read, as the words they used.
+    ///
+    /// **Kept rather than reported here**, because the window prints these
+    /// beside the registry's own refusals and both have to be in file order.
+    pub(crate) refused: Vec<String>,
 }
 
 impl Config {
@@ -66,6 +77,9 @@ impl Config {
     /// Parses the text of one.
     pub(crate) fn of(text: &str) -> Self {
         let mut keys = Vec::new();
+        let mut values = Values::default();
+        let mut marks = Marks::default();
+        let mut refused = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -85,6 +99,20 @@ impl Config {
                 keys.push((line.to_owned(), Vec::new()));
                 continue;
             };
+            // **A setting is a name with no dot**, which every command id has —
+            // `a_command_id_is_never_mistaken_for_a_setting` is what keeps that
+            // true as commands are added.
+            if let Some(setting) = Setting::named(id.trim()) {
+                if values.take(setting, chords) {
+                    marks.name(setting);
+                } else {
+                    refused.push(sk_model::i18n::format(
+                        "error.setting_value",
+                        &[&setting.name(), &chords.trim()],
+                    ));
+                }
+                continue;
+            }
             let chords = chords
                 .split(',')
                 .map(str::trim)
@@ -93,7 +121,7 @@ impl Config {
                 .collect();
             keys.push((id.trim().to_owned(), chords));
         }
-        Self { keys }
+        Self { keys, values, marks, refused }
     }
 
     /// How many lines named a command.
@@ -121,13 +149,37 @@ impl Config {
 /// answer to "what can I bind", which is the discovery half of rule 4 and the
 /// reason this is written at all.
 #[must_use]
-pub(crate) fn text(registry: &Registry<App>) -> String {
+pub(crate) fn text(registry: &Registry<App>, values: &Values) -> String {
     let mut out = String::with_capacity(8 * 1024);
     // Two lines and two keys, because the catalogue's values are verbatim: an
     // escape in one would be a literal backslash in the file.
     for key in ["config.header", "config.header_more"] {
         out.push_str("# ");
         out.push_str(sk_model::i18n::lookup(key));
+        out.push('\n');
+    }
+    // **The settings first, at what the window is set to now.** The file is the
+    // answer to "what can I change", and six lines a person can see are worth
+    // more than six they have to be told about — the same argument that writes
+    // every command rather than only the rebound ones.
+    out.push('\n');
+    out.push_str("# ");
+    out.push_str(sk_model::i18n::lookup("settings.title"));
+    out.push('\n');
+    let widest = ALL.iter().map(|it| it.name().len()).max().unwrap_or(0);
+    for setting in ALL {
+        out.push_str(setting.name());
+        for _ in setting.name().len()..widest {
+            out.push(' ');
+        }
+        let word = values.word(setting);
+        out.push_str(" = ");
+        out.push_str(&word);
+        for _ in word.len()..28 {
+            out.push(' ');
+        }
+        out.push_str(" # ");
+        out.push_str(sk_model::i18n::lookup(setting.label_key()));
         out.push('\n');
     }
     let mut group = None;
@@ -176,14 +228,14 @@ pub(crate) fn text(registry: &Registry<App>) -> String {
 /// **Refuses to overwrite**, which is ADR 0025's rule about who owns the file: a
 /// person who has edited it gets told the file is there rather than losing what
 /// they wrote. Deleting it is how they ask for a fresh one.
-pub(crate) fn write(registry: &Registry<App>) -> Result<PathBuf, String> {
+pub(crate) fn write(registry: &Registry<App>, values: &Values) -> Result<PathBuf, String> {
     let Some(path) = place() else {
         return Err(sk_model::i18n::lookup("error.no_config_home").to_owned());
     };
     if path.exists() {
         return Err(sk_model::i18n::format("error.config_exists", &[&path.display()]));
     }
-    if !sk_fs::save::atomically(&path, &text(registry)) {
+    if !sk_fs::save::atomically(&path, &text(registry, values)) {
         return Err(sk_model::i18n::format("error.config_refused", &[&path.display()]));
     }
     Ok(path)
@@ -231,5 +283,78 @@ mod tests {
         let config = Config::of("go.back\n");
         assert_eq!(config.len(), 1);
         assert_eq!(config.keys[0].1, Vec::<String>::new());
+    }
+
+    /// **The rule the whole split rests on.** A setting is a name with no dot,
+    /// and every command id has one — so a command can never be read as a
+    /// setting, whatever gets added later.
+    #[test]
+    fn a_command_id_is_never_mistaken_for_a_setting() {
+        let registry = crate::commands::registry();
+        for row in registry.iter() {
+            assert!(row.id.contains('.'), "{} has no dot and would parse as a setting", row.id);
+            assert!(
+                crate::settings::Setting::named(row.id).is_none(),
+                "{} collides with a setting name",
+                row.id
+            );
+        }
+    }
+
+    /// Settings and chords in one file, each going where it belongs.
+    #[test]
+    fn a_setting_and_a_chord_share_one_grammar() {
+        let config = Config::of(
+            "theme = light\n\
+             go.back = alt+left\n\
+             sidebar_width = 300\n\
+             hidden = on   # with a trailing comment\n",
+        );
+        assert_eq!(config.len(), 1, "a setting was taken for a command");
+        assert_eq!(config.keys[0].0, "go.back");
+        assert!(!config.values.dark);
+        assert!(config.values.hidden);
+        assert!((config.values.aside - 300.0).abs() < f32::EPSILON);
+        assert!(config.refused.is_empty(), "{:?}", config.refused);
+        assert_eq!(
+            config.marks.names(),
+            Vec::<&str>::new(),
+            "reading the file is not the window changing it"
+        );
+    }
+
+    /// A value this build does not understand is a problem naming the line,
+    /// not a setting silently left at its default.
+    #[test]
+    fn a_setting_with_a_value_we_cannot_read_is_a_problem() {
+        let config = Config::of("theme = purple\n");
+        assert_eq!(config.refused.len(), 1);
+        assert!(config.refused[0].contains("purple"), "{:?}", config.refused);
+        assert!(config.values.dark, "a refused line moved the value anyway");
+    }
+
+    /// The file this program writes has to be the file it reads.
+    #[test]
+    fn the_settings_it_writes_are_the_settings_it_reads_back() {
+        let registry = crate::commands::registry();
+        let wrote = crate::settings::Values {
+            dark: false,
+            hidden: true,
+            sidebar: false,
+            aside: 260.0,
+            layout: crate::views::Layout::Grid,
+            confirm_trash: true,
+        };
+        let read = Config::of(&super::text(&registry, &wrote));
+        assert_eq!(read.values, wrote);
+        assert!(read.refused.is_empty(), "{:?}", read.refused);
+        for setting in crate::settings::ALL {
+            assert_eq!(
+                read.marks.source(setting),
+                crate::settings::Source::File,
+                "{} was not named by the file it was written into",
+                setting.name()
+            );
+        }
     }
 }

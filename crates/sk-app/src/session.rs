@@ -16,6 +16,9 @@
 //! sidebar on 220        on | off, then how wide it has been dragged
 //! history on            on | off — whether the visible history is expanded
 //! hidden off            on | off
+//! view details          details | grid — what a folder with no record gets
+//! confirm off           on | off — whether Move to Trash asks first
+//! touched theme hidden  the settings this window changed, in table order
 //! zoom 2                an index into App::ZOOM
 //! window 1100x720       logical pixels
 //! columns 520 96 128    name, size and modified widths, in logical pixels
@@ -75,6 +78,18 @@ pub struct Session {
     pub history: bool,
     /// Whether dotfiles were shown.
     pub hidden: bool,
+    /// What a folder with no record of its own is laid out as.
+    pub layout: crate::views::Layout,
+    /// Whether Move to Trash asks first.
+    pub confirm_trash: bool,
+    /// Which settings this window changed, and so may override the config file.
+    ///
+    /// **[ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md).**
+    /// A file with no `touched` line reads as nothing touched, so an older
+    /// session restores the config's values — which is the behaviour a first
+    /// upgrade should have, and the reason this is a line rather than a version
+    /// bump.
+    pub touched: crate::settings::Marks,
     /// Which zoom step, as an index.
     pub zoom: usize,
     /// The window's logical size.
@@ -220,6 +235,11 @@ pub fn render(session: &Session) -> String {
     );
     out.push_str(if session.history { "history on\n" } else { "history off\n" });
     out.push_str(if session.hidden { "hidden on\n" } else { "hidden off\n" });
+    let _ = writeln!(out, "view {}", session.layout.token());
+    out.push_str(if session.confirm_trash { "confirm on\n" } else { "confirm off\n" });
+    // **Written even when empty**, so a window that has un-touched nothing still
+    // says so and the line is a fact rather than an absence to be inferred.
+    let _ = writeln!(out, "touched {}", session.touched.names().join(" "));
     let _ = writeln!(out, "zoom {}", session.zoom);
     let _ = writeln!(out, "window {}x{}", session.window.0, session.window.1);
     // Rounded, because a width comes from a pointer position and the file is a
@@ -325,6 +345,9 @@ pub fn parse(text: &str) -> Option<Session> {
         aside: crate::sidebar::DEFAULT_WIDTH,
         history: false,
         hidden: false,
+        layout: crate::views::Layout::Details,
+        confirm_trash: false,
+        touched: crate::settings::Marks::default(),
         zoom: crate::app::ZOOM_DEFAULT,
         window: (1100, 720),
         columns: crate::layout::Columns::default(),
@@ -348,6 +371,13 @@ pub fn parse(text: &str) -> Option<Session> {
             }
             "history" => session.history = value == "on",
             "hidden" => session.hidden = value == "on",
+            "view" => {
+                if let Some(layout) = crate::views::Layout::from_token(value) {
+                    session.layout = layout;
+                }
+            }
+            "confirm" => session.confirm_trash = value == "on",
+            "touched" => session.touched.read(value),
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
             "columns" => session.columns = read_columns(value),
             "expanded" if !value.is_empty() => session.expanded.push(PathBuf::from(value)),
@@ -558,6 +588,9 @@ mod tests {
             sidebar: false,
             history: false,
             hidden: true,
+            layout: crate::views::Layout::Details,
+            confirm_trash: false,
+            touched: crate::settings::Marks::default(),
             zoom: 4,
             window: (1440, 900),
             columns: crate::layout::Columns::default(),

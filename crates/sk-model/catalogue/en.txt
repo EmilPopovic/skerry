@@ -90,6 +90,13 @@ erase.and_more = and {0} more
 erase.forever = This cannot be undone.
 erase.cancel = Cancel
 erase.delete = Delete
+# The same panel, asking about a Move to Trash — only when the setting says
+# to. The sentence says the opposite of the one above it, which is the whole
+# reason a person can be asked about something reversible without alarm.
+trash.title_one = Move “{0}” to Trash?
+trash.title_many = Move {0} items to Trash?
+trash.undoable = This can be undone.
+trash.move = Move to Trash
 error.name_refused = This disk cannot store a file called “{0}”. Rename it and try again.
 error.clipboard_refused = The clipboard would not hand over {0}
 error.clipboard_no_files = The clipboard holds no files to paste.
@@ -162,6 +169,41 @@ notice.config_written = The keymap was written to {0}
 error.no_config_home = There is no config directory to write a keymap into
 error.config_exists = {0} is already there — delete it for a fresh one
 error.config_refused = {0} could not be written — check that the directory can be written
+# A settings line whose value this build does not understand. Names both, because
+# a person fixes it by reading the file against the message.
+error.setting_value = {0} does not understand {1}
+# The settings panel — ADR 0027. The labels are what a person scans, so each says
+# the thing rather than the field: "Show hidden files", not "Hidden".
+settings.title = Settings
+settings.theme = Theme
+settings.hidden = Show hidden files
+settings.sidebar = List of places
+settings.sidebar_width = Width of that list
+settings.view = New folders open as
+settings.confirm_trash = Ask before moving to Trash
+# The two words on a switch. Each pair is the whole choice, so a person can see
+# what the other position would be without pressing it.
+settings.dark = Dark
+settings.light = Light
+settings.on = On
+settings.off = Off
+settings.shown = Shown
+settings.hidden_word = Hidden
+settings.details = List
+settings.grid = Grid
+settings.yes = Yes
+settings.no = No
+# The third column: which of the two files decided this value, or neither.
+settings.from_default = default
+settings.from_file = file
+settings.from_window = changed
+# The two rows that do something rather than hold a value.
+settings.handler = Open folders with Skerry
+settings.keymap = Write the keymap to a file
+settings.write = Write
+settings.handler_written = Written to {0}
+error.mimeapps_unreadable = Line {0} of mimeapps.list is not something Skerry can rewrite — it was left alone
+error.mimeapps_refused = mimeapps.list could not be written — check that the config directory can be written
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
 # What is left on a volume, at the right of its row in the list of places.
@@ -429,6 +471,7 @@ action.extend_right = Extend selection right
 action.index_build = Index this folder
 action.index_build_all = Index every filesystem
 action.config_write = Write the keymap to a file
+action.settings = Settings
 action.index_forget = Delete this folder's index
 
 # Properties.

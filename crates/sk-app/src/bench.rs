@@ -161,6 +161,7 @@ fn chrome_of<'a>(
         palette: None,
         properties: None,
         openers: None,
+        settings: None,
         hint,
         leaves,
         dividers,

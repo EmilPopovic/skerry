@@ -22,6 +22,7 @@ use crate::menu::Menu;
 use crate::palette::Palette;
 use crate::pane::Pane;
 use crate::panes::{Divider, PaneId, PaneLayout, Panes, SplitId};
+use crate::settings::Marks;
 use crate::sidebar::Mark;
 
 /// Which column a row cache key is for.
@@ -112,7 +113,7 @@ pub struct Chrome<'a> {
     pub clash: Option<&'a crate::edit::Clash>,
     /// What a permanent deletion is asking about: the names it would erase, how
     /// many there are in total, and whether the keyboard is on Delete.
-    pub erasing: Option<(&'a [String], usize, bool)>,
+    pub erasing: Option<(&'a [String], usize, bool, bool)>,
     /// Which answer it is on.
     pub answering: usize,
     /// Whether the answer would cover the rest of the queue.
@@ -158,6 +159,8 @@ pub struct Chrome<'a> {
     pub properties: Option<&'a crate::properties::Properties>,
     /// The Open With list, while it is open.
     pub openers: Option<&'a crate::openers::Openers>,
+    /// The settings panel, while it is open, and what all six are set to.
+    pub settings: Option<(&'a crate::settings::Panel, crate::settings::Values, Marks)>,
     /// The keyboard hint in the corner of the path bar, from the registry.
     pub hint: &'a str,
     /// Where each leaf of the pane tree is, in layout order.
@@ -262,6 +265,16 @@ pub struct Hits {
     pub palette: Vec<Area>,
     /// The same, for the Open With list's drawn rows.
     pub openers: Vec<Area>,
+    /// Every control in the settings panel: its row, which half of that row it
+    /// is, and where.
+    ///
+    /// **A row can carry two rectangles and reports the one that was hit.** A
+    /// press on *Dark* has to mean dark rather than "the other one", because a
+    /// pointer aims at a word and a toggle that flips whatever it is told is a
+    /// control a person cannot use twice. The row travels with the rectangle
+    /// rather than being counted back from the order, because a row pushes one
+    /// control or two and counting is a rule that breaks on the seventh setting.
+    pub settings: Vec<(usize, SettingAim, Area)>,
     /// One rectangle per *drawn* search result, in draw order — so the index a
     /// click reports is an offset from the list's scroll.
     pub search: Vec<Area>,
@@ -447,19 +460,14 @@ pub fn draw(
     if let Some(palette) = chrome.palette {
         command_palette(painter, layout, palette, hits);
     }
-    if let Some(search) = chrome.search {
-        search_panel(painter, layout, search, hits);
-    } else {
-        hits.search.clear();
-        hits.search_field = None;
-        hits.search_scope.clear();
-    }
+    search_panel(painter, layout, chrome.search, hits);
     if let Some(panel) = chrome.properties {
         properties(hits, painter, layout, panel, now);
     }
     if let Some(list) = chrome.openers {
         open_with(painter, layout, list, hits);
     }
+    settings_panel(painter, layout, chrome.settings, hits);
     // Over both of those: it is the one overlay with no way to dismiss it, so
     // anything drawn on top of it would be drawn on top of the only thing on
     // screen that can be acted on.
@@ -472,8 +480,8 @@ pub fn draw(
     // The same place, for the same reason: a question with no dismissal must be
     // the thing on top. The two cannot be open at once — one is a queue asking
     // about a name, the other is a queue that has not started.
-    if let Some((names, total, on_delete)) = chrome.erasing {
-        erase_panel(painter, layout, names, total, on_delete, hits);
+    if let Some((names, total, on_delete, forever)) = chrome.erasing {
+        erase_panel(painter, layout, names, (total, on_delete, forever), hits);
     } else {
         hits.erase_cancel = None;
         hits.erase_delete = None;
@@ -2116,6 +2124,238 @@ fn open_with(
     }
 }
 
+/// Which half of a settings row a press landed on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SettingAim {
+    /// The word for the true position, or the `+` of a number.
+    Yes,
+    /// The word for the false position, or the `−`.
+    No,
+    /// A row with one control that does something.
+    Do,
+}
+
+/// The settings panel: every setting, its value, and where that value came from.
+///
+/// **Three columns because there are three questions.** What it is called, what
+/// it is set to, and *why* — and the third is the one
+/// [ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)
+/// asked for by name, because a panel that shows a value without saying whether
+/// the file or the window decided it cannot explain the precedence rule to
+/// anybody.
+fn settings_panel(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    showing: Option<(&crate::settings::Panel, crate::settings::Values, Marks)>,
+    hits: &mut Hits,
+) {
+    // The clear is here rather than at the call site, because a rectangle from
+    // the frame before is a control a press still lands on.
+    let Some((panel, values, marks)) = showing else {
+        hits.settings.clear();
+        return;
+    };
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let all = crate::settings::rows();
+    let title = i18n::lookup("settings.title");
+
+    // A pixel of slack past the widest measurement, because the box a label is
+    // drawn into is the box it is ellipsised against: measured exactly, the
+    // longest label loses its last glyph to a rounding step.
+    let mut labels: f32 = text_width(painter, title, metrics.path_size, true);
+    for row in &all {
+        let label = i18n::lookup(row.label_key());
+        labels = labels.max(text_width(painter, label, metrics.text_size, false) + 2.0);
+    }
+    let width = (labels + SETTINGS_CONTROL + SETTINGS_SOURCE + PROPERTIES_INSET * 3.0)
+        .clamp(PROPERTIES_WIDTH.0.min(layout.window.width), layout.window.width - 32.0);
+    let said = panel.said.as_ref().map_or(0.0, |_| SETTINGS_STEP);
+    let height = SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP + PROPERTIES_INSET + said;
+    let area = Area {
+        x: ((layout.window.width - width) / 2.0).max(0.0),
+        y: ((layout.window.height - height) / 2.0).max(8.0),
+        width,
+        height,
+    };
+    panel_shape(painter, area, hits);
+
+    let inner = area.width - PROPERTIES_INSET * 2.0;
+    let baseline = painter.baseline(area.y + 4.0, SETTINGS_TITLE - 12.0, metrics.path_size);
+    let style = TextStyle::new(metrics.path_size, theme.palette.text).bold();
+    line(painter, title, style, area.x + PROPERTIES_INSET, inner, baseline);
+    painter.hairline(
+        area.x + PROPERTIES_INSET,
+        area.y + SETTINGS_TITLE - 1.0,
+        inner,
+        theme.palette.divider,
+    );
+
+    hits.settings.clear();
+    for (index, row) in all.iter().enumerate() {
+        let top = area.y + SETTINGS_TITLE + index as f32 * SETTINGS_STEP;
+        if panel.active == index {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, SETTINGS_STEP);
+            painter.list.rect(pill, theme.palette.hover, painter.px(5.0));
+        }
+        let baseline = painter.baseline(top, SETTINGS_STEP, metrics.text_size);
+        line(
+            painter,
+            i18n::lookup(row.label_key()),
+            TextStyle::new(metrics.text_size, theme.palette.text),
+            area.x + PROPERTIES_INSET,
+            labels,
+            baseline,
+        );
+        let source = match row {
+            crate::settings::Row::Of(setting) => i18n::lookup(marks.source(*setting).label_key()),
+            _ => "",
+        };
+        line(
+            painter,
+            source,
+            TextStyle::new(metrics.header_size, theme.palette.dim).right(),
+            area.right() - PROPERTIES_INSET - SETTINGS_SOURCE,
+            SETTINGS_SOURCE,
+            baseline,
+        );
+        let right = area.right() - PROPERTIES_INSET - SETTINGS_SOURCE - 12.0;
+        setting_control(painter, (index, *row), (&values, panel), (top, right), hits);
+    }
+
+    if let Some(said) = &panel.said {
+        let top = area.y + SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP;
+        let baseline = painter.baseline(top, SETTINGS_STEP, metrics.header_size);
+        line(
+            painter,
+            said,
+            TextStyle::new(metrics.header_size, theme.palette.dim),
+            area.x + PROPERTIES_INSET,
+            inner,
+            baseline,
+        );
+    }
+}
+
+/// One row's control, right-aligned, and the rectangles a press tests against.
+fn setting_control(
+    painter: &mut Painter<'_>,
+    which: (usize, crate::settings::Row),
+    state: (&crate::settings::Values, &crate::settings::Panel),
+    at: (f32, f32),
+    hits: &mut Hits,
+) {
+    let (index, row) = which;
+    let (values, panel) = state;
+    let (top, right) = at;
+    let middle = top + (SETTINGS_STEP - SETTING_BUTTON) / 2.0;
+    let mut edge = right;
+    // Right to left, so the pair reads left to right: the true word, then the
+    // false one.
+    match row.kind() {
+        crate::settings::Kind::Either { yes, no } => {
+            let on = match row {
+                crate::settings::Row::Of(setting) => values.yes(setting),
+                _ => panel.handler.unwrap_or(false),
+            };
+            // The handler row says nothing at all until the job has read
+            // `mimeapps.list`: neither word is lit, rather than *No* being
+            // asserted and wrong for as long as a read takes.
+            let known = !matches!(row, crate::settings::Row::Handler if panel.handler.is_none());
+            for (label, chosen, aim) in [
+                (i18n::lookup(no), known && !on, SettingAim::No),
+                (i18n::lookup(yes), known && on, SettingAim::Yes),
+            ] {
+                edge = setting_button(painter, label, (index, chosen, aim), (edge, middle), hits);
+            }
+        }
+        crate::settings::Kind::Number => {
+            edge =
+                setting_button(painter, "+", (index, false, SettingAim::Yes), (edge, middle), hits);
+            let theme = *painter.theme;
+            let metrics = theme.metrics;
+            let shown = format::grouped(values.aside.round() as usize);
+            let width = text_width(painter, &shown, metrics.header_size, false).max(28.0);
+            let baseline = painter.baseline(middle, SETTING_BUTTON, metrics.header_size);
+            line(
+                painter,
+                &shown,
+                TextStyle::new(metrics.header_size, theme.palette.text).centred(),
+                edge - width,
+                width,
+                baseline,
+            );
+            edge -= width + 4.0;
+            // A minus sign and not a hyphen: the two are a pixel apart at this
+            // size and only one of them is centred on the digits beside it.
+            setting_button(
+                painter,
+                "\u{2212}",
+                (index, false, SettingAim::No),
+                (edge, middle),
+                hits,
+            );
+        }
+        crate::settings::Kind::Action => {
+            setting_button(
+                painter,
+                i18n::lookup("settings.write"),
+                (index, false, SettingAim::Do),
+                (edge, middle),
+                hits,
+            );
+        }
+    }
+}
+
+/// One control in a settings row, drawn right-aligned to `edge`. Its left edge,
+/// less the gap, so the next one can be placed beside it.
+fn setting_button(
+    painter: &mut Painter<'_>,
+    label: &str,
+    what: (usize, bool, SettingAim),
+    at: (f32, f32),
+    hits: &mut Hits,
+) -> f32 {
+    let (index, chosen, aim) = what;
+    let (edge, top) = at;
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let width = text_width(painter, label, metrics.header_size, false) + 16.0;
+    let area = Area { x: edge - width, y: top, width, height: SETTING_BUTTON };
+    let shape = painter.rect(area.x, area.y, area.width, area.height);
+    let radius = painter.px(metrics.radius);
+    let ink = if chosen {
+        painter.list.rect(shape, theme.palette.accent, radius);
+        theme.palette.selected_text
+    } else if aim == SettingAim::Do {
+        // **Outlined, because it is the one control that does something.** A
+        // word in the dim grey the unchosen half of a switch is drawn in reads
+        // as a label, and a label nobody knows is a button is a button nobody
+        // presses.
+        painter.list.stroke(shape, theme.palette.divider, radius, painter.px(1.0).max(1.0));
+        theme.palette.text
+    } else {
+        theme.palette.dim
+    };
+    let style = TextStyle::new(metrics.header_size, ink).centred();
+    let baseline = painter.baseline(area.y, SETTING_BUTTON, metrics.header_size);
+    line(painter, label, style, area.x, area.width, baseline);
+    hits.settings.push((index, aim, area));
+    area.x - 4.0
+}
+
+/// How tall one of those buttons is, in logical pixels.
+const SETTING_BUTTON: f32 = 20.0;
+
+/// The panel's own measurements, in logical pixels.
+const SETTINGS_TITLE: f32 = 40.0;
+const SETTINGS_STEP: f32 = 30.0;
+/// How much room the control column is given when the panel is measured.
+const SETTINGS_CONTROL: f32 = 150.0;
+/// And the column that says where the value came from.
+const SETTINGS_SOURCE: f32 = 64.0;
+
 /// The name-taken question: which two files, and the four answers.
 ///
 /// **Both files described, not just named.** "Replace or keep both" cannot be
@@ -2139,18 +2379,23 @@ fn erase_panel(
     painter: &mut Painter<'_>,
     layout: &Layout,
     names: &[String],
-    total: usize,
-    on_delete: bool,
+    asking: (usize, bool, bool),
     hits: &mut Hits,
 ) {
+    let (total, on_delete, forever) = asking;
     let theme = *painter.theme;
     let metrics = theme.metrics;
+    // **The same panel, three strings apart.** A Move to Trash somebody asked to
+    // be asked about is this question with a different verb and a sentence that
+    // says the opposite: that it *can* be taken back. See `Erasing::forever`.
+    let one = if forever { "erase.title_one" } else { "trash.title_one" };
+    let many = if forever { "erase.title_many" } else { "trash.title_many" };
     let title = if total == 1 {
-        i18n::format("erase.title_one", &[&names.first().cloned().unwrap_or_default()])
+        i18n::format(one, &[&names.first().cloned().unwrap_or_default()])
     } else {
-        i18n::format("erase.title_many", &[&total])
+        i18n::format(many, &[&total])
     };
-    let warning = i18n::lookup("erase.forever");
+    let warning = i18n::lookup(if forever { "erase.forever" } else { "trash.undoable" });
     // A single file is named by the title and listing it again says nothing.
     let listed: &[String] = if total == 1 { &[] } else { names };
     // Only where something *is* left out. With one file the title has named it
@@ -2223,21 +2468,44 @@ fn erase_panel(
     line(
         painter,
         warning,
-        TextStyle::new(metrics.text_size, theme.palette.danger),
+        TextStyle::new(
+            metrics.text_size,
+            if forever { theme.palette.danger } else { theme.palette.dim },
+        ),
         left,
         inner,
         baseline,
     );
     top += ERASE_LINE + ERASE_PAD;
 
+    erase_buttons(painter, (area, top), (on_delete, forever), hits);
+}
+
+/// The question's two answers, and the rectangles a press tests against.
+fn erase_buttons(
+    painter: &mut Painter<'_>,
+    at: (Area, f32),
+    asking: (bool, bool),
+    hits: &mut Hits,
+) {
+    let (area, top) = at;
+    let (on_delete, forever) = asking;
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
     let (w, h) = ERASE_BUTTON;
     let delete = Area { x: area.right() - ERASE_PAD - w, y: top, width: w, height: h };
     let cancel = Area { x: delete.x - w - ERASE_GAP, y: top, width: w, height: h };
-    for (button, label, is_delete) in
-        [(cancel, "erase.cancel", false), (delete, "erase.delete", true)]
-    {
+    let go = if forever { "erase.delete" } else { "trash.move" };
+    for (button, label, is_delete) in [(cancel, "erase.cancel", false), (delete, go, true)] {
         let shape = painter.rect(button.x, button.y, button.width, button.height);
-        let fill_colour = if is_delete { theme.palette.danger } else { theme.palette.chrome };
+        // **The accent and not the danger colour for a Move to Trash.** Red is
+        // what says "this one cannot be taken back", and spending it on
+        // something that can is spending it everywhere.
+        let fill_colour = match (is_delete, forever) {
+            (true, true) => theme.palette.danger,
+            (true, false) => theme.palette.accent,
+            (false, _) => theme.palette.chrome,
+        };
         painter.list.rect(shape, fill_colour, painter.px(metrics.radius));
         if is_delete == on_delete {
             let ring = painter.px(2.0).round().max(1.0);
@@ -2497,10 +2765,20 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
 fn search_panel(
     painter: &mut Painter<'_>,
     layout: &Layout,
-    search: &crate::search::Search,
+    search: Option<&crate::search::Search>,
     hits: &mut Hits,
 ) {
     use crate::palette::{FIELD, INSET, STEP, TOP, WIDTH};
+
+    // The clear is here rather than at the call site, for the reason the
+    // settings panel's is: a rectangle from the frame before is a control a
+    // press still lands on.
+    let Some(search) = search else {
+        hits.search.clear();
+        hits.search_field = None;
+        hits.search_scope.clear();
+        return;
+    };
 
     let theme = *painter.theme;
     let metrics = theme.metrics;
@@ -5399,6 +5677,7 @@ mod tests {
             let mut painter = Painter { list: &mut list, fonts, cache, theme, scale: 1.25 };
             let chrome = Chrome {
                 quick_look: None,
+                settings: None,
                 hovered_look: None,
                 resumable: false,
                 aside_grabbed: false,

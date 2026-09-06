@@ -458,6 +458,10 @@ FRAMES = [
     # the first highlighted — the only frame that would catch the subtitle
     # drawing over the first row.
     ("open-with", ["--size", "900x520", "--scale", "125", "--open-with"]),
+    # Three of the six rows come from three different places, which is the third
+    # column the panel exists to carry — see `sample_settings`.
+    ("settings", ["--size", "900x560", "--scale", "125", "--settings"]),
+    ("settings-light", ["--size", "900x560", "--scale", "125", "--settings", "--light"]),
     # A rename with an input method composing into it: the preedit sits at the
     # caret, underlined, and is not part of the name yet. The only frame that
     # would catch the rule drawing through the glyphs instead of under them.

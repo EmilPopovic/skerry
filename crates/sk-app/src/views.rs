@@ -132,6 +132,15 @@ pub struct Views {
     /// A `Vec` rather than a map: two hundred and fifty-six entries walked
     /// linearly is nothing beside the `openat` that reads them.
     held: Vec<(PathBuf, View)>,
+    /// What a folder with no record of its own — and no ancestor with one — is
+    /// laid out as.
+    ///
+    /// **A field rather than [`View::default`]**, because
+    /// [ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)
+    /// made it a setting. It is read in the two places that matter and they have
+    /// to agree: the answer for a folder nobody has chosen for, and the test
+    /// [`Views::remember`] makes for whether a record says anything at all.
+    pub defaults: View,
     /// The folders somebody gave a colour, most recent first.
     ///
     /// **Its own list, with its own cap.** A colour is not a view: it does not
@@ -160,7 +169,7 @@ impl Views {
             }
             at = here.parent();
         }
-        View::default()
+        self.defaults
     }
 
     /// The record `path` is left with when a pane in `mode` chooses `grouping`.
@@ -184,7 +193,7 @@ impl Views {
 
     /// What `path` would get with no record of its own.
     fn inherited(&self, path: &Path) -> View {
-        path.parent().map_or_else(View::default, |parent| self.for_path(parent))
+        path.parent().map_or(self.defaults, |parent| self.for_path(parent))
     }
 
     /// Remembers `view` for `path`. Whether anything changed.
@@ -339,7 +348,7 @@ impl Views {
                 break;
             }
         }
-        Some(Self { held, colours })
+        Some(Self { held, colours, defaults: View::default() })
     }
 }
 

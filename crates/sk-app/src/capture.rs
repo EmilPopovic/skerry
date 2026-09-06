@@ -492,6 +492,8 @@ pub struct Capture {
     pub properties: bool,
     /// Whether to draw the Open With list.
     pub open_with: bool,
+    /// Whether to draw the settings panel.
+    pub settings: bool,
     /// Whether to draw the rename field with an input method composing in it.
     pub composing: bool,
     /// Whether to split the window, with two tabs in the lower half.
@@ -809,6 +811,7 @@ struct Overlays {
     naming: Option<crate::edit::Naming>,
     properties: Option<crate::properties::Properties>,
     openers: Option<crate::openers::Openers>,
+    settings: Option<(crate::settings::Panel, crate::settings::Values, crate::settings::Marks)>,
     clash: Option<crate::edit::Clash>,
     search: Option<crate::search::Search>,
     carrying: Option<crate::view::Carrying>,
@@ -944,6 +947,32 @@ fn sample_openers() -> crate::openers::Openers {
     )
 }
 
+/// The settings panel, with one value from each of the three sources.
+///
+/// **Not all six at their defaults.** The third column is what the frame exists
+/// to check, and a panel where every row says *default* would look identical to
+/// one where the column had been dropped.
+fn sample_settings() -> (crate::settings::Panel, crate::settings::Values, crate::settings::Marks) {
+    use crate::settings::Setting;
+    let mut panel = crate::settings::Panel::new();
+    panel.active = 1;
+    panel.handler = Some(false);
+    let values = crate::settings::Values {
+        dark: true,
+        hidden: true,
+        sidebar: true,
+        aside: 240.0,
+        layout: crate::views::Layout::Grid,
+        confirm_trash: false,
+    };
+    let mut marks = crate::settings::Marks::default();
+    marks.name(Setting::Hidden);
+    marks.name(Setting::View);
+    marks.touch(Setting::View);
+    marks.name(Setting::SidebarWidth);
+    (panel, values, marks)
+}
+
 /// The instant the fixture's files are stamped with, which `tools/golden` sets
 /// and this states so the panel's three dates are the same in every run.
 const FIXED_MTIME: i64 = 981_158_400;
@@ -978,6 +1007,7 @@ fn sample_overlays(
         ),
         properties: request.properties.then(sample_properties),
         openers: request.open_with.then(sample_openers),
+        settings: request.settings.then(sample_settings),
         clash: request.clash.then(|| sample_clash(&request.path)),
         search: request.search.then(|| sample_search(&request.path)),
         // Stated, because a capture has no pointer: the card follows one, and
@@ -1140,7 +1170,7 @@ struct Sample<'a> {
     leaves: &'a [crate::panes::PaneLayout],
     dividers: &'a [crate::panes::Divider],
     drop_tab: Option<(crate::panes::PaneId, usize)>,
-    erasing: Option<(&'a [String], usize, bool)>,
+    erasing: Option<(&'a [String], usize, bool, bool)>,
     /// The undo stack the history strip lists, with a sample on it.
     edits: &'a crate::edit::Edits,
     /// The quick look, if this frame is of one.
@@ -1225,6 +1255,7 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
+        settings: sample.overlays.settings.as_ref().map(|(p, v, m)| (p, *v, *m)),
         carrying: sample.overlays.carrying.as_ref(),
         search: sample.overlays.search.as_ref(),
         clash: sample.overlays.clash.as_ref(),
@@ -1351,7 +1382,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         leaves: &leaves,
         dividers: &dividers,
         drop_tab,
-        erasing: request.erase.then_some((doomed.as_slice(), 9, false)),
+        erasing: request.erase.then_some((doomed.as_slice(), 9, false, true)),
     };
     let stats = warm_and_draw(
         &mut session,

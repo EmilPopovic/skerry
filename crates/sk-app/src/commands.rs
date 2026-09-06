@@ -1100,13 +1100,28 @@ fn file(registry: &mut Registry<App>) {
 fn help(registry: &mut Registry<App>) {
     for spec in [
         CommandSpec {
+            id: "settings.open",
+            name: "action.settings",
+            group: Group::Help,
+            // **`Ctrl ,` is where every program a person has met keeps its
+            // settings**, and now it opens one — ADR 0027. It used to write the
+            // keymap out, which is a row inside the panel, so the thing somebody
+            // learned this chord for is one press away and is now visible to
+            // everybody who never knew the chord.
+            keys: &["ctrl+,"],
+            enabled: |_: &App| true,
+            run: App::toggle_settings,
+        },
+        CommandSpec {
             id: "config.write",
             name: "action.config_write",
             group: Group::Help,
-            // **`Ctrl ,` is where every program a person has met keeps its
-            // settings**, and this is the whole of the settings surface today:
-            // the keymap, as a file to edit — ADR 0025.
-            keys: &["ctrl+,"],
+            // **Beside the panel it now lives in.** ADR 0027 moved this off
+            // `Ctrl ,`, and it keeps a chord because
+            // `every_command_is_reachable_and_named` asks one of every command.
+            // `Ctrl Shift ,` is not available: a chord's shift is normalised
+            // away for punctuation, so it *is* `Ctrl ,`.
+            keys: &["ctrl+alt+,"],
             enabled: |_: &App| true,
             run: App::write_the_config,
         },
@@ -1169,6 +1184,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));
     reach.push(("tab.close", "the cross on a tab, or a double click on it"));
+    reach.push(("config.write", "a row in the settings panel"));
     for groups in [
         crate::menu::ON_ROW,
         crate::menu::ON_BACKGROUND,

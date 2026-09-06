@@ -55,6 +55,7 @@ mod quicklook;
 mod search;
 mod service;
 mod session;
+mod settings;
 mod sidebar;
 mod sizes;
 mod trail;

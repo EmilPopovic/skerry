@@ -126,6 +126,21 @@ enum ColumnEdge {
 /// resizes because the pointer was three pixels off.
 const COLUMN_GRAB: f32 = 4.0;
 
+/// Which command a key event resolves to in the global scope, by id.
+///
+/// **One place, because five overlays ask the same question.** Each of them lets
+/// exactly one chord through — the diagnostic report, or the chord that opened
+/// it — and each used to spell the three-call chain out.
+fn named(commands: &Registry<App>, event: &sk_plat::KeyEvent) -> Option<&'static str> {
+    commands
+        .resolve(event, Scope::Global)
+        .and_then(|id| commands.describe(id))
+        .map(|command| command.id)
+}
+
+/// The type a file manager is the default for.
+const FOLDERS: &str = "inode/directory";
+
 /// A permanent deletion waiting for an answer.
 ///
 /// Holds the paths rather than re-reading the selection when the answer comes:
@@ -134,6 +149,15 @@ const COLUMN_GRAB: f32 = 4.0;
 struct Erasing {
     paths: Vec<PathBuf>,
     on: Confirm,
+    /// Whether this is the permanent deletion, or a Move to Trash that somebody
+    /// asked to be asked about.
+    ///
+    /// **One panel and one flag, not two panels.** Both ask the same question
+    /// about the same list with the same two buttons; what differs is the
+    /// sentence under the names and whether the action is on the undo stack —
+    /// and a second copy of this machinery would be a second place for the
+    /// keyboard's two-press fast path to be got wrong.
+    forever: bool,
 }
 
 /// Which button the keyboard is on.
@@ -656,6 +680,14 @@ struct Replies {
     /// What a place opened in the sidebar's tree turned out to hold.
     opened_tx: std::sync::mpsc::Sender<(PathBuf, Vec<String>)>,
     opened_rx: Receiver<(PathBuf, Vec<String>)>,
+    /// Whether this machine's `mimeapps.list` names us for folders, and what a
+    /// change to it had to say.
+    ///
+    /// **Both directions on one channel**, because the answer to *did it work*
+    /// is the same shape as the answer to *what is it now*: the state, and a
+    /// sentence when there is one to say.
+    handler_tx: std::sync::mpsc::Sender<(bool, Option<String>)>,
+    handler_rx: Receiver<(bool, Option<String>)>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -683,6 +715,7 @@ impl Replies {
         let (openers_tx, openers_rx) = mpsc::channel();
         let (places_tx, places_rx) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::channel();
+        let (handler_tx, handler_rx) = mpsc::channel();
         let (asked_tx, asked_rx) = mpsc::channel();
         Self {
             paste_tx,
@@ -707,6 +740,8 @@ impl Replies {
             places_rx,
             opened_tx,
             opened_rx,
+            handler_tx,
+            handler_rx,
         }
     }
 }
@@ -1037,6 +1072,29 @@ pub struct App {
     /// the frame loop's, the palette's — and reading a file on the palette's path
     /// would be a syscall on the frame loop, which is rule 1's whole subject.
     keymap: crate::config::Config,
+    /// Whether a session save was turned away by [`SESSION_FLOOR`] and is still
+    /// owed.
+    ///
+    /// **A wake-up with an owner.** See [`Self::keep_the_session`].
+    session_owed: bool,
+    /// Which settings the file named and which this window has changed.
+    ///
+    /// **[ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md).**
+    /// The values themselves live where they are used — the theme in the
+    /// palette, `hidden` on every pane — because a second copy of a live value
+    /// is a second copy to keep in step. What has nowhere else to live is
+    /// *provenance*, which is what the precedence rule and the panel's third
+    /// column are both about.
+    marks: crate::settings::Marks,
+    /// The settings panel, while it is open.
+    panel: Option<crate::settings::Panel>,
+    /// Whether Move to Trash asks before it moves anything.
+    ///
+    /// **Off by default, because rule 3 is the safety net.** Every trash is one
+    /// `Ctrl+Z`, so the question is friction rather than protection — but a
+    /// person who wants it is not wrong, and asking is one line of state and the
+    /// panel [`Erasing`] already draws.
+    confirm_trash: bool,
     /// Whether the display server has already reported this gesture's drop.
     ///
     /// **A drag ends twice.** The pointer's button comes up and the data device
@@ -1110,7 +1168,12 @@ impl App {
         // **Read before the window is opened**, because the size it asks for is
         // in the file. One `openat` and one read of a few hundred bytes, before
         // there is a frame loop for it to be a rule 1 violation of.
-        let session = options.restore.then(crate::session::load).flatten();
+        // **Read whatever the command line named**, because a named directory
+        // says nothing about a theme. ADR 0027's six settings come out of this
+        // file every time; the *layout* — the tree, the columns, the window —
+        // comes out of it only when nobody asked for a particular folder, which
+        // is what `restore` means.
+        let session = crate::session::load();
         // **Beside the session read and for the same reason** — ADR 0025. One
         // `openat` and a few hundred bytes, before there is a frame loop for it
         // to be a rule 1 violation of; and it has to be before the first registry
@@ -1120,7 +1183,13 @@ impl App {
         let window = Window::open(&WindowConfig {
             own_frame: options.own_frame,
             scale_120: options.scale_120,
-            logical: session.as_ref().map_or(WindowConfig::default().logical, |it| it.window),
+            // The layout half, so a named directory opens at the default size
+            // rather than at whatever the last session happened to be — see the
+            // split below.
+            logical: session
+                .as_ref()
+                .filter(|_| options.restore)
+                .map_or(WindowConfig::default().logical, |it| it.window),
             ..WindowConfig::default()
         })?;
         let window_us = window_started.elapsed().as_micros();
@@ -1131,19 +1200,44 @@ impl App {
         let background = Background::start(options.path.clone())?;
         let drawing = open_drawing(&window)?;
         let mut app = Self::assemble(options, window, window_us, background, drawing);
+        // **The file's values before the session's**, which is ADR 0027's
+        // precedence rule in the order the two reads happen: this is what a
+        // fresh window does, and the session below moves only what this window
+        // was told to move.
+        app.marks = keymap.marks;
+        let from_file = keymap.values;
         app.keymap = keymap;
-        let restored = session.is_some();
-        if let Some(session) = session {
-            app.restore_session(&session, options);
+        app.take_values(&from_file);
+        if let Some(session) = &session {
+            app.take_settings(session, options);
+        }
+        // **The palette may have changed twice by now**, and the metrics are
+        // built from it. `restore_layout` does this too; doing it here as well is
+        // one relayout before the first frame and is what keeps a window with no
+        // layout to restore drawing in the theme it was told to.
+        app.apply_zoom();
+        // Whether anything at all has an opinion about the theme, which is what
+        // the desktop's preference below is the fallback for.
+        let stated = app.marks.touched(crate::settings::Setting::Theme);
+        if options.restore
+            && let Some(session) = session
+        {
+            app.restore_layout(&session);
         }
         // **The desktop's own light-or-dark, and only when nothing else has
         // said.** A flag is an instruction for this run and the session file is
         // what this window was last left as; both are about *this* program, and
         // either outranks a preference about the desktop. What is left is a fresh
         // install, which is the case the M7 bar is written about.
-        let asked = (!restored && options.dark.is_none())
-            .then(|| bus.as_mut().and_then(crate::service::desktop_prefers_dark))
-            .flatten();
+        // **And the config file counts as having said**, which is the line ADR
+        // 0027 added to this rule: a person who wrote `theme = light` has said
+        // something about *this* program, and the desktop's preference is about
+        // the desktop.
+        let asked = (!stated
+            && options.dark.is_none()
+            && !app.marks.is_named(crate::settings::Setting::Theme))
+        .then(|| bus.as_mut().and_then(crate::service::desktop_prefers_dark))
+        .flatten();
         if asked.is_some_and(|dark| dark != app.theme.dark) {
             app.theme = if asked == Some(true) { Theme::dark() } else { Theme::light() };
         }
@@ -1163,17 +1257,63 @@ impl App {
         Ok(app)
     }
 
-    /// Puts the window back the way the file says it was.
-    fn restore_session(&mut self, session: &crate::session::Session, options: &Options) {
+    /// Puts the six settings where the session says, for the ones it may speak
+    /// for.
+    ///
+    /// **The session speaks for a setting only where this window changed it** —
+    /// ADR 0027. `self` already holds what the config file said, so an unchanged
+    /// setting is left at the file's answer, and a session written before the
+    /// `touched` line existed leaves all six alone — which is what a first
+    /// upgrade should do.
+    ///
+    /// Separate from [`Self::restore_layout`] because the two answer to
+    /// different things: a directory named on the command line says which folder
+    /// to open and nothing whatever about a theme.
+    fn take_settings(&mut self, session: &crate::session::Session, options: &Options) {
+        use crate::settings::Setting;
+        self.marks.absorb(&session.touched);
+        let changed = |setting| session.touched.touched(setting);
+
         // What was asked for on the command line wins over what was saved: a
         // flag is an instruction for this run and the file is a memory of the
         // last one.
-        let dark = options.dark.unwrap_or(session.dark);
+        let dark = options.dark.unwrap_or(if changed(Setting::Theme) {
+            session.dark
+        } else {
+            self.theme.dark
+        });
         if dark != self.theme.dark {
             self.theme = if dark { Theme::dark() } else { Theme::light() };
         }
-        self.sidebar.open = options.sidebar.unwrap_or(session.sidebar);
-        self.sidebar.width = session.aside.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
+        self.sidebar.open = options.sidebar.unwrap_or(if changed(Setting::Sidebar) {
+            session.sidebar
+        } else {
+            self.sidebar.open
+        });
+        if changed(Setting::SidebarWidth) {
+            self.sidebar.width =
+                session.aside.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
+        }
+        if changed(Setting::View) {
+            self.views.defaults.layout = session.layout;
+        }
+        if changed(Setting::ConfirmTrash) {
+            self.confirm_trash = session.confirm_trash;
+        }
+        if changed(Setting::Hidden) {
+            for pane in self.panes.every_mut() {
+                pane.show_hidden = session.hidden;
+            }
+        }
+    }
+
+    /// Puts the window back the way the file says it was.
+    ///
+    /// Runs after [`Self::take_settings`], and only when no directory was named.
+    fn restore_layout(&mut self, session: &crate::session::Session) {
+        // **Read before the panes are replaced**, because that is where the
+        // answer for it currently lives and the replacement discards it.
+        let hidden = self.values().hidden;
         // **Opened before the sections have arrived**, which is why this is two
         // steps: the tree's shape is a list of paths and the rows it hangs under
         // are still being read on a job. Each read is started here rather than
@@ -1189,7 +1329,7 @@ impl App {
         self.columns = session.columns.clamped();
         self.panes = crate::panes::Panes::restore(&session.tree, &self.jobs);
         for pane in self.panes.every_mut() {
-            pane.show_hidden = session.hidden;
+            pane.show_hidden = hidden;
         }
         // `apply_zoom` rebuilds the metrics from the palette just chosen and
         // relays out, which is also what puts the restored tree on screen.
@@ -1205,6 +1345,9 @@ impl App {
             aside: self.sidebar.width,
             history: self.history_open,
             hidden: self.panes.focused().show_hidden,
+            layout: self.views.defaults.layout,
+            confirm_trash: self.confirm_trash,
+            touched: self.marks,
             zoom: self.zoom,
             window: (self.logical.width as u32, self.logical.height as u32),
             columns: self.columns,
@@ -1212,6 +1355,77 @@ impl App {
             pages: self.pages_left_at.clone(),
             tree: self.panes.describe(),
         }
+    }
+
+    /// What all six settings are set to right now.
+    ///
+    /// Assembled from where each one lives rather than held twice — see
+    /// [`Self::marks`] for why.
+    pub(crate) fn values(&self) -> crate::settings::Values {
+        crate::settings::Values {
+            dark: self.theme.dark,
+            hidden: self.panes.focused().show_hidden,
+            sidebar: self.sidebar.open,
+            aside: self.sidebar.width,
+            layout: self.views.defaults.layout,
+            confirm_trash: self.confirm_trash,
+        }
+    }
+
+    /// Puts every setting where `values` says, marking none of them touched.
+    ///
+    /// **The config file's half of the precedence rule.** This runs before the
+    /// session is restored, so what it sets is what a window with no session —
+    /// and every setting this window has never changed — is left at.
+    fn take_values(&mut self, values: &crate::settings::Values) {
+        if values.dark != self.theme.dark {
+            self.theme = if values.dark { Theme::dark() } else { Theme::light() };
+        }
+        self.sidebar.open = values.sidebar;
+        self.sidebar.width = values.aside.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
+        self.views.defaults.layout = values.layout;
+        self.confirm_trash = values.confirm_trash;
+        for pane in self.panes.every_mut() {
+            pane.show_hidden = values.hidden;
+        }
+    }
+
+    /// Changes one setting and records that this window did it.
+    ///
+    /// **Every path that changes a setting comes through here**, the panel and
+    /// the chord alike, because the touched mark is what lets the session
+    /// override the file and a path that skipped it would set a value the next
+    /// start-up quietly discarded.
+    pub(crate) fn change(&mut self, setting: crate::settings::Setting, yes: bool) {
+        use crate::settings::Setting;
+        self.marks.touch(setting);
+        match setting {
+            Setting::Theme if yes != self.theme.dark => self.toggle_theme(),
+            Setting::Hidden if yes != self.panes.focused().show_hidden => self.toggle_hidden(),
+            Setting::Sidebar if yes != self.sidebar.open => self.toggle_sidebar(),
+            Setting::View => {
+                self.views.defaults.layout =
+                    if yes { crate::views::Layout::Grid } else { crate::views::Layout::Details };
+                self.relayout();
+            }
+            Setting::ConfirmTrash => self.confirm_trash = yes,
+            Setting::Theme | Setting::Hidden | Setting::Sidebar | Setting::SidebarWidth => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Moves the sidebar's width by `delta` logical pixels, from the panel.
+    pub(crate) fn resize_aside(&mut self, delta: f32) {
+        let width =
+            (self.sidebar.width + delta).clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
+        self.marks.touch(crate::settings::Setting::SidebarWidth);
+        if (self.sidebar.width - width).abs() < f32::EPSILON {
+            self.dirty = true;
+            return;
+        }
+        self.sidebar.width = width;
+        self.relayout();
+        self.dirty = true;
     }
 
     /// Writes the session where [`crate::session::path`] says, if it has moved.
@@ -1223,14 +1437,34 @@ impl App {
     /// floor is what keeps that off the frames that matter — a scroll changes
     /// sixty times a second and none of those is a reason to write a file.
     fn keep_the_session(&mut self, now: bool) {
-        if !now && self.session_at.elapsed() < SESSION_FLOOR {
-            return;
-        }
-        self.session_at = Instant::now();
+        // **The floor throttles the write, not the comparison.** It used to
+        // throttle both, and the comparison is the half that decides whether
+        // anything is owed at all — so a change that landed inside the floor was
+        // dropped rather than deferred, and a window that then went idle lost it
+        // to `kill -9`. That is rule 6's own stated failure, produced by the
+        // mechanism written to keep the write off the frames that matter.
+        //
+        // Rendering it every frame costs **0.8–1.5 µs** — a release build, four
+        // tabs in a split, 100,000 renders, three runs — against a 0.342 ms p99,
+        // because the file holds a line per tab and never touches the listing.
+        // Writing it is the expensive half and still happens at most once every
+        // `SESSION_FLOOR`.
         let text = crate::session::render(&self.session());
         if text == self.session_text {
+            self.session_owed = false;
             return;
         }
+        if !now && self.session_at.elapsed() < SESSION_FLOOR {
+            // **A deferred save is a wake-up with an owner**, the same rule an
+            // animation follows: this loop sleeps on descriptors, so nothing
+            // else will ever ask for it. And it is owed only when there is
+            // something to write, which is what keeps an idle window at zero
+            // CPU — the gate one line above this one in the invariant table.
+            self.session_owed = true;
+            return;
+        }
+        self.session_owed = false;
+        self.session_at = Instant::now();
         self.session_text.clone_from(&text);
         if now {
             // **Written here rather than on a job**, and only here: this is the
@@ -1400,6 +1634,10 @@ impl App {
             drops_asked: None,
             drops_took: std::sync::Arc::default(),
             keymap: crate::config::Config::of(""),
+            session_owed: false,
+            marks: crate::settings::Marks::default(),
+            panel: None,
+            confirm_trash: false,
             look_pan: None,
             page_drag: false,
             properties_owed: false,
@@ -1441,6 +1679,13 @@ impl App {
                 eprintln!("skerry: keymap: {problem}");
             }
         }
+        // **Beside them and in file order**, because both come from the same
+        // file and a person reads them against it — ADR 0027. A value this build
+        // cannot read is a problem said out loud rather than a setting quietly
+        // left at its default.
+        for refused in &self.keymap.refused {
+            eprintln!("skerry: config: {refused}");
+        }
         while !self.closing && !self.window.close_requested() {
             self.window.pump(Some(&self.waker), self.timeout());
             // **The clock starts here, not at the painter.** Everything between
@@ -1461,6 +1706,7 @@ impl App {
             self.drain_launches();
             self.drain_facts();
             self.drain_openers();
+            self.drain_handler();
             self.drain_found();
             self.drain_index();
             self.drain_places();
@@ -1549,6 +1795,8 @@ impl App {
             // when the pointer next moves — which is the one thing a person who
             // is holding still is not doing.
             self.spring_due(),
+            // A save the floor deferred, for the reason above it.
+            self.session_owed.then(|| SESSION_FLOOR.saturating_sub(self.session_at.elapsed())),
             // **A playing animation owes its next frame**, and nothing else will
             // ask for it: a GIF is the one thing on screen that changes while the
             // hands are still. `None` the moment it is paused or the file has one
@@ -2001,20 +2249,17 @@ impl App {
         if self.openers.is_some() && self.openers_key(event, commands) {
             return;
         }
+        if self.panel.is_some() && self.settings_key(event, commands) {
+            return;
+        }
         // The Properties panel is a statement, not a field: any key dismisses
         // it, and dismisses only. The diagnostic report passes through for the
         // reason it passes through an open menu — it is the only way the harness
         // can see the panel at all.
-        if self.properties.is_some() {
-            let diagnostic = commands
-                .resolve(event, Scope::Global)
-                .and_then(|id| commands.describe(id))
-                .is_some_and(|command| command.id == "help.dump");
-            if !diagnostic {
-                self.properties = None;
-                self.dirty = true;
-                return;
-            }
+        if self.properties.is_some() && named(commands, event) != Some("help.dump") {
+            self.properties = None;
+            self.dirty = true;
+            return;
         }
         // Before the palette and before the list: a sibling menu is the most
         // specific thing on screen while it is open, and an arrow that moved the
@@ -2949,19 +3194,27 @@ impl App {
         // **The second press is the fast path, not the mechanism.** A person who
         // knows what they are doing presses Delete twice; the panel is what makes
         // that safe for everybody else, and it is what a pointer answers.
-        if self.erasing.as_ref().is_some_and(|asking| asking.paths == paths) {
-            self.erase_for_good();
+        if self.erasing.as_ref().is_some_and(|asking| asking.paths == paths && asking.forever) {
+            self.answer_the_question();
             return;
         }
-        self.erasing = Some(Erasing { paths, on: Confirm::Cancel });
+        self.erasing = Some(Erasing { paths, on: Confirm::Cancel, forever: true });
         self.dirty = true;
     }
 
     /// Does what the panel is asking about, and closes it.
-    pub(crate) fn erase_for_good(&mut self) {
+    ///
+    /// **Whichever question it was.** A permanent deletion and a Move to Trash
+    /// that was asked about are the same panel with the same buttons, and this
+    /// is the one place the difference is spent.
+    pub(crate) fn answer_the_question(&mut self) {
         let Some(asking) = self.erasing.take() else { return };
         self.step_off_the_selection(&asking.paths);
-        let took = self.edits.erase_all(asking.paths, &self.jobs);
+        let took = if asking.forever {
+            self.edits.erase_all(asking.paths, &self.jobs)
+        } else {
+            self.edits.trash_all(asking.paths, &self.jobs)
+        };
         self.said_it_is_busy(took);
         self.dirty = true;
     }
@@ -2987,7 +3240,7 @@ impl App {
             // to be able to answer it, and `Shift+Delete` is what asked — a panel
             // that swallowed the second press would turn the keyboard's two-press
             // fast path into a key that does nothing at all.
-            Key::Named(Named::Delete) => self.erase_for_good(),
+            Key::Named(Named::Delete) => self.answer_the_question(),
             Key::Named(Named::Left | Named::Right | Named::Tab) if bare => {
                 if let Some(asking) = self.erasing.as_mut() {
                     asking.on = match asking.on {
@@ -2997,16 +3250,13 @@ impl App {
                 }
             }
             Key::Named(Named::Enter) => match self.erasing.as_ref().map(|asking| asking.on) {
-                Some(Confirm::Delete) => self.erase_for_good(),
+                Some(Confirm::Delete) => self.answer_the_question(),
                 _ => self.keep_them(),
             },
             _ => {
                 // The diagnostic report passes through, for the reason it passes
                 // through an open menu: it is the only way the harness sees this.
-                let diagnostic = commands
-                    .resolve(event, Scope::Global)
-                    .and_then(|id| commands.describe(id))
-                    .is_some_and(|command| command.id == "help.dump");
+                let diagnostic = named(commands, event) == Some("help.dump");
                 return !diagnostic;
             }
         }
@@ -3089,7 +3339,7 @@ impl App {
         if self.hits.erase_cancel.is_some_and(|a| a.contains(position.x, position.y)) {
             self.keep_them();
         } else if self.hits.erase_delete.is_some_and(|a| a.contains(position.x, position.y)) {
-            self.erase_for_good();
+            self.answer_the_question();
         }
         true
     }
@@ -3470,12 +3720,24 @@ impl App {
         self.dirty = true;
     }
 
-    /// Moves what is selected to the trash.
+    /// Moves what is selected to the trash, asking first if the setting says to.
+    ///
+    /// **The question is off by default**, because rule 3 makes every trash one
+    /// `Ctrl+Z` and a confirmation for something reversible is friction rather
+    /// than protection. It is a setting because a person who wants it is not
+    /// wrong — ADR 0027.
     pub(crate) fn trash_selection(&mut self) {
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
         }
+        let asked = self.erasing.as_ref().is_some_and(|it| it.paths == paths && !it.forever);
+        if self.confirm_trash && !asked {
+            self.erasing = Some(Erasing { paths, on: Confirm::Cancel, forever: false });
+            self.dirty = true;
+            return;
+        }
+        self.erasing = None;
         // The cursor leaves the doomed rows now rather than when the listing
         // comes back: a person deleting four files presses Delete four times, and
         // a cursor that lands nowhere makes the second press do nothing at all —
@@ -3821,6 +4083,7 @@ impl App {
         if (self.sidebar.width - width).abs() < f32::EPSILON {
             return;
         }
+        self.marks.touch(crate::settings::Setting::SidebarWidth);
         self.sidebar.width = width;
         self.relayout();
         self.dirty = true;
@@ -4757,6 +5020,7 @@ impl App {
 
     /// Shows or hides the list of places.
     pub(crate) fn toggle_sidebar(&mut self) {
+        self.marks.touch(crate::settings::Setting::Sidebar);
         self.sidebar.open = !self.sidebar.open;
         self.sidebar.hover = None;
         self.relayout();
@@ -5280,6 +5544,256 @@ impl App {
         });
     }
 
+    /// Opens the settings panel, or closes it if it is already open.
+    ///
+    /// **[ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)**
+    /// makes this the pointer's way to every setting and the answer to rule 4:
+    /// a chord nobody knows is not discoverability, and neither is a config file
+    /// nobody has been told about.
+    pub(crate) fn toggle_settings(&mut self) {
+        self.dirty = true;
+        if self.panel.take().is_some() {
+            return;
+        }
+        self.panel = Some(crate::settings::Panel::new());
+        self.ask_about_the_handler();
+    }
+
+    /// Closes the panel.
+    pub(crate) fn close_settings(&mut self) {
+        self.panel = None;
+        self.dirty = true;
+    }
+
+    /// Reads `mimeapps.list` on a job, so the handler row can say yes or no.
+    ///
+    /// **On a job because it is an `openat` and a read**, which rule 1 does not
+    /// allow the frame loop — so the row starts saying nothing rather than
+    /// saying *No* and being wrong for a frame.
+    fn ask_about_the_handler(&mut self) {
+        let sender = self.replies.handler_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            let is = sk_desktop::mimeapps::is_default(FOLDERS, crate::service::DESKTOP_ID);
+            if sender.send((is, None)).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Writes `mimeapps.list` on a job, and says what it did.
+    fn become_the_handler(&mut self, yes: bool) {
+        let sender = self.replies.handler_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            let id = crate::service::DESKTOP_ID;
+            let done = if yes {
+                sk_desktop::mimeapps::set_default(FOLDERS, id)
+            } else {
+                sk_desktop::mimeapps::clear_default(FOLDERS, id)
+            };
+            let said = match &done {
+                Ok(path) => sk_model::i18n::format("settings.handler_written", &[&path.display()]),
+                Err(sk_desktop::mimeapps::Refused::Unreadable(line)) => {
+                    sk_model::i18n::format("error.mimeapps_unreadable", &[line])
+                }
+                Err(_) => sk_model::i18n::lookup("error.mimeapps_refused").to_owned(),
+            };
+            if sender.send((done.is_ok() && yes, Some(said))).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of what the handler job found or did.
+    fn drain_handler(&mut self) {
+        let Ok((is, said)) = self.replies.handler_rx.try_recv() else { return };
+        if let Some(panel) = self.panel.as_mut() {
+            panel.handler = Some(is);
+            if said.is_some() {
+                panel.said = said;
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// One key to the settings panel. Whether it was consumed.
+    ///
+    /// **`←`/`→` and `Space` all change the row**, because a two-word control is
+    /// answered by either idiom and a person will try both. `Enter` is the same
+    /// as `Space` so the panel needs no separate confirm.
+    ///
+    /// **The panel keeps the keyboard rather than closing on any key.** Unlike
+    /// the Open With list and the Properties panel it is a surface a person
+    /// works in — eight rows, each answered by an arrow — so a stray letter must
+    /// not throw away what they were in the middle of. `Escape` is the way out,
+    /// and so is `Ctrl ,`, which is why that one chord is handed back.
+    fn settings_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        if named(commands, event) == Some("settings.open") {
+            return false;
+        }
+        let bare = event.mods.none();
+        match event.key {
+            Key::Named(Named::Escape) => self.close_settings(),
+            Key::Named(Named::Down | Named::Tab) if bare => self.step_the_panel(1),
+            Key::Named(Named::Up) if bare => self.step_the_panel(-1),
+            Key::Named(Named::Left) if bare => self.answer_the_panel(false),
+            Key::Named(Named::Right) if bare => self.answer_the_panel(true),
+            Key::Named(Named::Enter) | Key::Character(' ') => self.turn_the_panel_row(),
+            // The diagnostic report passes through, for the reason it passes
+            // through an open menu: it is the only way the harness sees this.
+            _ => return named(commands, event) != Some("help.dump"),
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn step_the_panel(&mut self, delta: isize) {
+        if let Some(panel) = self.panel.as_mut() {
+            panel.step(delta);
+            panel.said = None;
+        }
+    }
+
+    /// Puts the row the keyboard is on into a stated position.
+    fn answer_the_panel(&mut self, yes: bool) {
+        use crate::settings::{Kind, Row};
+        let Some(row) = self.panel.as_ref().map(crate::settings::Panel::row) else { return };
+        match (row, row.kind()) {
+            (Row::Of(setting), Kind::Either { .. }) => self.change(setting, yes),
+            (Row::Of(_), Kind::Number) => {
+                self.resize_aside(if yes {
+                    crate::settings::WIDTH_STEP
+                } else {
+                    -crate::settings::WIDTH_STEP
+                });
+            }
+            (Row::Handler, _) => self.become_the_handler(yes),
+            _ => {}
+        }
+    }
+
+    /// Does whatever the row the keyboard is on does, which for a two-word
+    /// control is the other position.
+    fn turn_the_panel_row(&mut self) {
+        use crate::settings::{Kind, Row};
+        let Some(panel) = self.panel.as_ref() else { return };
+        let row = panel.row();
+        match row {
+            Row::Of(setting) => match setting.kind() {
+                Kind::Either { .. } => {
+                    let yes = !self.values().yes(setting);
+                    self.change(setting, yes);
+                }
+                _ => self.resize_aside(crate::settings::WIDTH_STEP),
+            },
+            Row::Handler => {
+                let yes = !panel.handler.unwrap_or(false);
+                self.become_the_handler(yes);
+            }
+            Row::Keymap => self.write_the_config(),
+        }
+    }
+
+    /// A press inside the settings panel. Whether it was taken.
+    ///
+    /// **Always taken while the panel is up, and a press outside closes it.**
+    /// The rule every overlay here follows.
+    fn press_in_the_settings(&mut self, position: Point) -> bool {
+        if self.panel.is_none() {
+            return false;
+        }
+        let control = self
+            .hits
+            .settings
+            .iter()
+            .find(|(_, _, area)| area.contains(position.x, position.y))
+            .map(|(row, which, _)| (*row, *which));
+        let Some((row, which)) = control else {
+            let inside =
+                self.hits.panels.last().is_some_and(|a| a.contains(position.x, position.y));
+            if !inside {
+                self.close_settings();
+            }
+            return true;
+        };
+        if let Some(panel) = self.panel.as_mut() {
+            panel.active = row;
+            panel.said = None;
+        }
+        match which {
+            crate::view::SettingAim::Yes => self.answer_the_panel(true),
+            crate::view::SettingAim::No => self.answer_the_panel(false),
+            crate::view::SettingAim::Do => self.turn_the_panel_row(),
+        }
+        true
+    }
+
+    /// What the settings panel is showing, for the diagnostic line.
+    fn settings_report(&self) -> String {
+        use std::fmt::Write as _;
+        let Some(panel) = self.panel.as_ref() else { return String::new() };
+        let values = self.values();
+        let mut out = String::with_capacity(160);
+        for (index, row) in crate::settings::rows().into_iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            let name = match row {
+                crate::settings::Row::Of(setting) => setting.name(),
+                crate::settings::Row::Handler => "handler",
+                crate::settings::Row::Keymap => "keymap",
+            };
+            let value = match row {
+                crate::settings::Row::Of(setting) => values.word(setting),
+                crate::settings::Row::Handler => {
+                    panel.handler.map_or_else(|| "?".to_owned(), |it| it.to_string())
+                }
+                crate::settings::Row::Keymap => "-".to_owned(),
+            };
+            let from = match row {
+                crate::settings::Row::Of(setting) => match self.marks.source(setting) {
+                    crate::settings::Source::Default => "default",
+                    crate::settings::Source::File => "file",
+                    crate::settings::Source::Window => "window",
+                },
+                _ => "-",
+            };
+            let _ = write!(out, "{name}={value}/{from}");
+        }
+        let _ = write!(out, " on={}", panel.active);
+        out
+    }
+
+    /// A point inside every control the panel drew, for the pointer half of
+    /// rule 5.
+    ///
+    /// `row:which:x:y`, from the rectangles the *frame* recorded — never
+    /// recomputed here, which is the rule
+    /// [12-measurement.md](../../../docs/12-measurement.md#a-test-that-aims-at-the-hit-box-agrees-with-the-bug)
+    /// exists for: a harness aimed at a box this function derived would agree
+    /// with a panel drawn somewhere else entirely.
+    fn settings_aim(&self) -> String {
+        self.hits
+            .settings
+            .iter()
+            .map(|(row, which, area)| {
+                let word = match which {
+                    crate::view::SettingAim::Yes => "yes",
+                    crate::view::SettingAim::No => "no",
+                    crate::view::SettingAim::Do => "do",
+                };
+                format!(
+                    "{row}:{word}:{:.0}:{:.0}",
+                    area.x + area.width / 2.0,
+                    area.y + area.height / 2.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
     /// One key to the Open With list. Returns whether it was consumed.
     fn openers_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
         use sk_plat::{Key, Named};
@@ -5300,10 +5814,7 @@ impl App {
             _ => {
                 // The diagnostic report passes through, for the reason it passes
                 // through an open menu: it is the only way the harness sees this.
-                let diagnostic = commands
-                    .resolve(event, Scope::Global)
-                    .and_then(|id| commands.describe(id))
-                    .is_some_and(|command| command.id == "help.dump");
+                let diagnostic = named(commands, event) == Some("help.dump");
                 if diagnostic {
                     return false;
                 }
@@ -5724,10 +6235,7 @@ impl App {
             _ => {
                 // The diagnostic report passes through, for the reason it passes
                 // through an open menu: it is the only way the harness sees this.
-                let diagnostic = commands
-                    .resolve(event, Scope::Global)
-                    .and_then(|id| commands.describe(id))
-                    .is_some_and(|command| command.id == "help.dump");
+                let diagnostic = named(commands, event) == Some("help.dump");
                 return !diagnostic;
             }
         }
@@ -6231,7 +6739,7 @@ scope_aim={scope_aim:?}",
 
     /// Writes the keymap out, and says where it went or why it did not.
     pub(crate) fn write_the_config(&mut self) {
-        let said = match crate::config::write(&self.commands()) {
+        let said = match crate::config::write(&self.commands(), &self.values()) {
             Ok(path) => sk_model::i18n::format("notice.config_written", &[&path.display()]),
             Err(why) => why,
         };
@@ -6344,10 +6852,7 @@ scope_aim={scope_aim:?}",
             Key::Named(Named::Enter) if event.mods.ctrl => self.flatten_search(),
             Key::Named(Named::Enter) => self.follow_search(),
             _ => {
-                let diagnostic = commands
-                    .resolve(event, Scope::Global)
-                    .and_then(|id| commands.describe(id))
-                    .is_some_and(|command| command.id == "help.dump");
+                let diagnostic = named(commands, event) == Some("help.dump");
                 if diagnostic {
                     return false;
                 }
@@ -7291,11 +7796,13 @@ scope_aim={scope_aim:?}",
 
     /// Shows or hides dotfiles.
     pub(crate) fn toggle_hidden(&mut self) {
+        self.marks.touch(crate::settings::Setting::Hidden);
         self.panes.focused_mut().toggle_hidden(&self.jobs);
     }
 
     /// Swaps the palette.
     pub(crate) fn toggle_theme(&mut self) {
+        self.marks.touch(crate::settings::Setting::Theme);
         self.theme = if self.theme.dark { Theme::light() } else { Theme::dark() };
         self.relayout();
     }
@@ -8273,6 +8780,8 @@ aside_grabbed={}",
         let bar_report = self.bar_state();
         let (column_aim, mode_hover, column_scroll, column_over) = self.column_state();
         let check_aim = self.check_aim();
+        let settings = self.settings_report();
+        let settings_aim = self.settings_aim();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
@@ -8287,7 +8796,7 @@ crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={c
 crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
-composing={composing:?} pointer={cursor_shape} \
+composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_aim={settings_aim:?} \
 {places_report} \
 path_field={path_field} name_field={name_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
@@ -9179,6 +9688,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         if self.press_in_the_openers(position) {
             return true;
         }
+        if self.press_in_the_settings(position) {
+            return true;
+        }
         if self.press_in_the_crumb_menu(position) {
             return true;
         }
@@ -9614,10 +10126,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 // way the GUI harness can see one. Asked of the registry rather
                 // than matched on a key, so rebinding it does not quietly make
                 // the menu opaque again.
-                let diagnostic = commands
-                    .resolve(event, Scope::Global)
-                    .and_then(|id| commands.describe(id))
-                    .is_some_and(|command| command.id == "help.dump");
+                let diagnostic = named(commands, event) == Some("help.dump");
                 if diagnostic {
                     return false;
                 }
@@ -10056,10 +10565,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
                 // harness can see one at all. Asked of the registry rather than
                 // matched on the key, so rebinding the report does not quietly
                 // make the menu opaque again.
-                let diagnostic = commands
-                    .resolve(event, Scope::Global)
-                    .and_then(|id| commands.describe(id))
-                    .is_some_and(|command| command.id == "help.dump");
+                let diagnostic = named(commands, event) == Some("help.dump");
                 if diagnostic {
                     return false;
                 }
@@ -10538,6 +11044,10 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
         // pieces out.
         let aside_grabbed = self.aside_drag || self.on_the_aside_divider(self.pointer);
         let place_drop = self.place_drag.filter(|drag| drag.active).map(|drag| drag.at);
+        // The same, for the settings panel: `values` assembles from six places
+        // and `marks` is a copy, so both are taken while `self` is still whole.
+        let settings_values = self.values();
+        let settings_marks = self.marks;
 
         let Self {
             list,
@@ -10587,6 +11097,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             search,
             properties,
             openers,
+            panel,
             placement,
             indexes,
             ..
@@ -10623,14 +11134,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             }
         });
         let progress = edits.progress_line().or(indexing);
-        let doomed: Option<(Vec<String>, usize, bool)> = erasing.as_ref().map(|asking| {
+        let doomed: Option<(Vec<String>, usize, bool, bool)> = erasing.as_ref().map(|asking| {
             let names = asking
                 .paths
                 .iter()
                 .take(crate::view::ERASE_NAMES)
                 .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
                 .collect();
-            (names, asking.paths.len(), asking.on == Confirm::Delete)
+            (names, asking.paths.len(), asking.on == Confirm::Delete, asking.forever)
         });
         let dropping = files_drag.as_ref().filter(|drag| drag.active);
         // Only for a drag this window started: a peer's carries paths we have
@@ -10678,7 +11189,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             carrying: carrying.as_ref(),
             search: search.as_ref(),
             clash: edits.clash.as_ref(),
-            erasing: doomed.as_ref().map(|(names, total, on)| (names.as_slice(), *total, *on)),
+            erasing: doomed
+                .as_ref()
+                .map(|(names, total, on, forever)| (names.as_slice(), *total, *on, *forever)),
             answering: edits.answering,
             for_the_rest: edits.for_the_rest,
             // The copy's bar if one is running, the index build's otherwise. Both
@@ -10697,6 +11210,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             palette: palette.as_ref(),
             properties: properties.as_ref(),
             openers: openers.as_ref(),
+            settings: panel.as_ref().map(|it| (it, settings_values, settings_marks)),
             hint,
             leaves: &placement.leaves,
             dividers: &placement.dividers,

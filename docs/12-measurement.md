@@ -2894,3 +2894,63 @@ Two general things came out of it.
   drop counters and the selection counters are in the state dump for good. The
   previous round of this hunt was expensive because every question needed a new
   build; this round asked four questions of one build.
+
+## A test that keeps poking cannot see what happens when the poking stops
+
+The scenario for [ADR 0027](adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md)
+does the obvious thing: set a value in the panel, `kill -9`, start again, and
+check the value came back. It failed, and the session file on disk was empty.
+
+The cause is not in the settings. `App::keep_the_session` runs after every frame
+and writes at most once every `SESSION_FLOOR` — two seconds — because a scroll
+changes the file sixty times a second and none of those is a reason to write it.
+When the floor turns a save away, the save is simply dropped: the next frame will
+render the file again and write it then.
+
+**There is no next frame.** This loop sleeps on descriptors and asks for no
+timer, so a window whose last act was a change and which then went idle never
+draws again — and the change is gone at the next `kill -9`. That is rule 6's own
+stated failure, produced by the mechanism written to keep the write off the
+frames that matter.
+
+The gap had been there since the file existed, and the reason nothing caught it
+is worth more than the fix. Every scenario that checks a saved session **drives
+keys until it kills the window** — `hidden-and-sort` toggles three settings and
+polls after each, `layout-survives-kill-9` builds a split. A poll is an `F12`,
+an `F12` is a keystroke, a keystroke is a frame, and a frame is a save. The tests
+were holding the door open for the thing they were testing.
+
+The fix is the rule this loop already had a name for: **a deferred save is a
+wake-up with an owner**, exactly like an animation
+([above](#an-accessor-written-for-a-caller-that-never-arrived)). `timeout()`
+gained one line beside the type-ahead's and the spring's, and the new scenario
+now waits for the *file* to change rather than for a state dump to say so —
+which is what made it visible in the first place, because a state dump is
+produced by the very keystroke that hides the bug.
+
+**And that fix broke the invariant one row above it in the table**, which is the
+better half of the story. `no-cpu-when-idle` failed on the next sweep with *an
+idle window used 1 tick of CPU and drew nothing for them* — because the wake-up
+was owed whenever the floor turned a save away, and the floor turns one away
+after almost every frame. A window with nothing whatever to write was waking up
+two seconds later to find that out.
+
+The floor was throttling two different things and only one of them is expensive.
+Rendering the file is 0.8–1.5 µs — a release build, four tabs in a split, 100,000
+renders, three runs — because it holds a line per tab and never touches the
+listing; *writing* it is an `openat`, a write, an `fsync` and a rename. So the
+floor now throttles the write alone, the comparison happens every frame, and a
+wake-up is owed only when the comparison says there is something to write. Zero
+ticks over three runs of the gate, and the change survives the kill.
+
+Two things worth keeping. **A one-off measurement is a test you delete**: the
+1.5 µs came from an `#[ignore]`d timing test run in release, whose only output
+was the number now in the comment beside the code. And **the gate that caught the
+regression was for a different invariant than the one being fixed** — which is
+the argument for having the eight of them run together rather than reaching for
+whichever seems relevant.
+
+The general form: **a test that polls a program is also driving it.** Where the
+behaviour under test is what happens when nothing happens, the poll has to be
+outside the program — a file on disk, a process that exited — or the test is
+measuring a window that is being kept awake by the question.

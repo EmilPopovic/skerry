@@ -32,6 +32,7 @@ pub mod bus;
 pub mod entry;
 pub mod launch;
 pub mod mime;
+pub mod mimeapps;
 pub mod places;
 
 pub use apps::Applications;
