@@ -9386,6 +9386,12 @@ def no_cpu_when_idle(run: Run, fixture: Path) -> None:
     # and a stray event burns it in one window and draws a frame. `frames` is
     # what tells them apart, and an `F12` on its own does not move it.
     drawn = int(state["frames"])
+    # **And how many times the session has been written**, because this loop has
+    # one deadline that fires without drawing: a save the two-second floor
+    # deferred is a wake-up with an owner, and it is owed only when there is
+    # something to write. If that reasoning is ever wrong, the tick it costs is
+    # here and looks exactly like a timer — so the counter is in the failure.
+    saved = int(state.get("saves", 0))
     for _ in range(3):
         before = ticks()
         time.sleep(3.0)
@@ -9399,8 +9405,13 @@ def no_cpu_when_idle(run: Run, fixture: Path) -> None:
         if spent == 0:
             return
         if moved <= 0:
-            raise Failure(f"an idle window used {spent} ticks of CPU and drew nothing for them")
+            wrote = (int(after.get("saves", 0)) - saved) if after else 0
+            raise Failure(
+                f"an idle window used {spent} ticks of CPU and drew nothing for them"
+                f" ({wrote} session saves in that window)"
+            )
         drawn = int(after["frames"])
+        saved = int(after.get("saves", 0))
     raise Failure("the window kept drawing unasked; it was never idle long enough to measure")
 
 

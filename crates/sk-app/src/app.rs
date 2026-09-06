@@ -1072,6 +1072,13 @@ pub struct App {
     /// the frame loop's, the palette's — and reading a file on the palette's path
     /// would be a syscall on the frame loop, which is rule 1's whole subject.
     keymap: crate::config::Config,
+    /// How many times the session file has been written.
+    ///
+    /// **A diagnostic that costs nothing when unread**, and it answers the one
+    /// question `no-cpu-when-idle` cannot otherwise ask: whether a tick of CPU
+    /// on a window nobody touched was this loop waking up to save. See
+    /// [12-measurement.md](../../../docs/12-measurement.md#a-test-that-keeps-poking-cannot-see-what-happens-when-the-poking-stops).
+    saves: u32,
     /// Whether a session save was turned away by [`SESSION_FLOOR`] and is still
     /// owed.
     ///
@@ -1465,6 +1472,7 @@ impl App {
         }
         self.session_owed = false;
         self.session_at = Instant::now();
+        self.saves = self.saves.saturating_add(1);
         self.session_text.clone_from(&text);
         if now {
             // **Written here rather than on a job**, and only here: this is the
@@ -1634,6 +1642,7 @@ impl App {
             drops_asked: None,
             drops_took: std::sync::Arc::default(),
             keymap: crate::config::Config::of(""),
+            saves: 0,
             session_owed: false,
             marks: crate::settings::Marks::default(),
             panel: None,
@@ -8800,7 +8809,7 @@ composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_ai
 {places_report} \
 path_field={path_field} name_field={name_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
-frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
+frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             self.placement.here.body.y,
             self.placement.here.body.height,
             self.theme.metrics.row_height,
@@ -8834,6 +8843,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} keys={} stats={}",
             self.frames.percentile(0.99),
             self.frames.budget().0,
             self.frames.budget().1,
+            self.saves,
             self.show_keys,
             self.show_stats,
         )
