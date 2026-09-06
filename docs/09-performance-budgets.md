@@ -60,7 +60,7 @@ the same renderer and the same glyph atlas the window uses.
 | First search result | < 50 ms | **0.7 ms** median of 7 over 817,288 entries, **2.9 ms** over 563,605 | met by 17×, and see below for what it does not say |
 | Repeat search over an index | < 50 ms | **6.99 ms** median of 3 over 563,605 entries, against **639.9 ms** to walk the same tree for the same complete answer | met by 7×, and it is the *complete* answer rather than the first result |
 | Load an index | < 250 ms at 1M | **31.7 ms** warm, median of 3 at 563,605 — 45 bytes an entry | met warm; **cold is unmeasured here**, and [Spike F](../spikes/f-index-and-search/README.md) measured 195 ms cold at 1M on a Pi 5 |
-| Frame during a hung mount | < 8 ms | **p99 inside budget across three keystrokes**, each one a fresh answer, while a read of the pane's own directory was blocked in the pool — and a normal directory landed afterwards | met, and see below |
+| Frame during a hung mount | < 8 ms | **not one frame over budget** from the moment the pane reached the mount to the moment it left it — the navigation in, three keystrokes each answered fresh, and the way out to a directory that lands | met, and see below |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window, on **both** display servers. On X11 the frame loop was traced across a three-second idle window and made **zero syscalls** | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
 | RSS at 1M entries | < 250 MB | **136.3 MB** at 200,000 — 20 MB of marginal cost, about 100 bytes an entry | on track, 1M unmeasured |
@@ -584,6 +584,17 @@ The hung-mount row is measured **with a control**: the same listing on the frame
 loop instead of the pool. Without it the row can only pass, because a frame loop
 with no path to a filesystem syscall cannot be blocked by one. Any future version
 of this gate keeps the control or it is not a gate.
+
+**And it is a delta, not a percentile.** The gate used to read `frame_p99_us`
+from a ring buffer holding eleven frames, where nearest rank of 0.99 is the
+maximum — so it asserted that nothing had been slow *since start-up*, pipeline
+creation and first glyph raster included, and failed three times in three on an
+unmodified build. It now reads the over-budget count before the mount is reached
+and requires it not to move, which needs no sample-size precondition and is
+stricter: zero frames over the bar rather than one in a hundred. Watched failing
+against a 20 ms stall spliced into the frame path before it was believed.
+[12-measurement.md](12-measurement.md#a-p99-over-twelve-frames-is-a-maximum) has
+the numbers.
 
 ## What Spike F measured
 

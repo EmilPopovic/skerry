@@ -2398,7 +2398,27 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
         if not line.startswith("hung "):
             raise Skipped(f"no hung mount to test against: {line or 'the server said nothing'}")
 
-        rows = listed(run)["rows"]
+        # **The baseline, taken before the mount is reached.** Every assertion
+        # below is a *delta* on `over` — the count of frames that missed the 8 ms
+        # budget — and never a percentile, because this window has drawn 10–16
+        # frames of the 480 `sk_app::frames` keeps and a nearest-rank p99 over an
+        # unfilled ring is the worst frame *since start-up*. Cold pipeline
+        # compilation and first-glyph rasterisation are in that number, so the
+        # assertion that read it was failing on how fast the window opened while
+        # claiming to be about a blocked `statx`. A delta from here forward covers
+        # exactly the frames drawn with a read stuck in the pool, which is what
+        # rule 1 claims and all it claims.
+        opening = listed(run)
+        rows = opening["rows"]
+        missed = int(opening["over"])
+
+        def still_inside_the_budget(answer: dict[str, str], when: str) -> None:
+            if int(answer["over"]) > missed:
+                raise Failure(
+                    f"{int(answer['over']) - missed} frame(s) of "
+                    f"{int(answer['frames']) - int(opening['frames'])} drawn {when} "
+                    f"missed the 8 ms budget (p99 {answer['frame_p99_us']}us)"
+                )
 
         # Into the mount. The read is issued and never lands.
         run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
@@ -2413,6 +2433,7 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
                 f"a read that cannot land reported loading={hung['loading']!r} and "
                 f"rows={hung['rows']!r} — a mount that has gone away is not an empty folder"
             )
+        still_inside_the_budget(hung, "navigating into the mount")
 
         # **Three fresh answers, with a keystroke between them.** Each one is a
         # frame the loop drew while a read of this pane's own directory was blocked
@@ -2422,16 +2443,7 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
             alive = run.answered(settle=200)
             if alive is None:
                 raise Failure(f"the window stopped answering keys over a hung mount ({attempt})")
-            if int(alive["frame_p99_us"]) > 8000:
-                # **The frame count with it**, because this window has drawn far
-                # fewer than the 480 `sk_app::frames` keeps: a nearest-rank p99
-                # over a window that has not filled is the *worst* frame since
-                # startup, and reading the failure without that is how a slow
-                # first frame reads as a rule 1 violation.
-                raise Failure(
-                    f"a frame took {alive['frame_p99_us']}us over a hung mount, "
-                    f"of {alive['frames']} drawn"
-                )
+            still_inside_the_budget(alive, "answering keys over a hung mount")
 
         # And out again, to a directory that answers. This is the pool's per-device
         # queue: the blocked read still holds a thread and this one has to land.
@@ -2442,8 +2454,7 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
             raise Failure(f"the pane could not leave the mount: {back['path']}")
         if back["rows"] != rows:
             raise Failure(f"the fixture read {back['rows']} rows, not the {rows} it began with")
-        if int(back["frame_p99_us"]) > 8000:
-            raise Failure(f"a frame took {back['frame_p99_us']}us after the hung mount")
+        still_inside_the_budget(back, "leaving the mount for a folder that answers")
     finally:
         # **Unmount before anything else.** It is what releases the read still
         # blocked in the pool; without it that thread sits in uninterruptible sleep

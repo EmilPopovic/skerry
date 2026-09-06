@@ -2691,12 +2691,38 @@ on a nested compositor sharing a GPU with the session running it, and the two
 passing sweeps earlier the same day were the luck, not the baseline. On Xvfb the
 same window's worst frame is 2.9 ms.
 
-Left as it is, deliberately: the fix is either to wait for the window to fill or
-to assert `Frames::worst` with a stated startup allowance, and both change what
-rule 1's canonical gate promises. That is a decision to take on its own, not a
-side effect of a change about double clicks — and the failure now prints how many
-frames it had, so the next person reads the sample count in the message rather
-than discovering it in an afternoon.
+**Resolved, and by neither of the two fixes that were obvious.** Waiting for the
+480-frame window to fill means holding a hung mount open for four seconds of
+drawing that has nothing to do with the mount; asserting `Frames::worst` with a
+startup allowance means writing down a number for how slow the first frame is
+allowed to be, which is a second budget nobody agreed to. The third option is the
+one the ring buffer already had: `over` — the count of frames that missed the 8 ms
+bar — is monotonic, is on the diagnostic line, and never forgets. **Read it before the
+mount is reached and assert it does not move.** That covers exactly the frames
+drawn with a `statx` stuck in the pool, excludes every frame drawn before, and
+needs no allowance for anything, because the claim is now *zero* rather than
+*under a threshold*.
+
+It is also stricter than what it replaced. The old gate permitted one frame in a
+hundred over the bar once the window filled; this one permits none for as long as
+the mount stands, which is what [rule 1](03-principles.md) actually says.
+
+Watched failing before it was believed, since that is the rule the section four
+above this one exists for. A 20 ms spin spliced in ahead of `submit`'s clock, and
+the gate reads:
+
+```
+FAIL  6 frame(s) of 6 drawn navigating into the mount missed the 8 ms
+      budget (p99 23339us)
+```
+
+Three of three on Wayland and one of one on Xvfb now pass, on the machine where
+the old assertion failed three of three on the unmodified build.
+
+The general form is worth more than the fix: **a threshold on a percentile needs
+a distribution, and a monotonic counter needs nothing.** Where a gate can be
+written as "this number did not change across the window under test", it should
+be, because that phrasing has no sample-size precondition to be quietly violated.
 
 ## A test that aims at the hit box agrees with the bug
 
