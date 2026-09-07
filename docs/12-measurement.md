@@ -3276,3 +3276,29 @@ agreed, and the fifth, which nobody would have picked, did not. And **write the
 record before the code**: the ADR had been drafted around the flag, the
 comparison test was written because the record's revisit trigger asked for one,
 and the decision changed before it was committed rather than after it shipped.
+
+## A dispatch written as an open comparison swallows the next thing added to it
+
+The fragment shader has one branch per kind of quad, and the triangles were the
+last group in it:
+
+```wgsl
+if in.kind >= KIND_TRIANGLE { ... }
+```
+
+Four triangle kinds, 3 to 6, and the two textured kinds at 7 and 8 checked
+*above* it — so the open comparison was correct exactly as long as nothing was
+ever added below. A stroked-segment kind at 9 drew as an arrowhead.
+
+The fix is one word. The lesson is that **an open comparison in a dispatch is a
+statement about everything that will ever exist**, and the ordering that makes it
+work is invisible from the branch itself: nothing in `>= KIND_TRIANGLE` says the
+image and preview checks have to come first, and nothing warns the next person
+that adding a constant to a list also changes what an earlier branch matches.
+Bounded above, the dispatch is a set of independent claims that can be read one
+at a time and reordered without consequence.
+
+The same shape has bitten this program twice before at a different layer — a
+substring test that matched the thing it was testing for, and a p99 over a window
+that had not filled. All three are a condition that happens to be true rather
+than one that says what it means.

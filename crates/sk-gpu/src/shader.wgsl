@@ -33,6 +33,10 @@ const KIND_TRIANGLE: u32 = 3u;
 // After the four triangles. A thumbnail from the image atlas — ADR 0018.
 const KIND_IMAGE: u32 = 7u;
 const KIND_PREVIEW: u32 = 8u;
+// A stroked segment: its endpoints ride in `uv` as fractions of the quad and its
+// half-width in `border`. Every mark made of straight strokes is one or two of
+// these — a chevron, an ×, a `+`.
+const KIND_SEGMENT: u32 = 9u;
 
 struct Instance {
     @location(0) rect: vec4<f32>,   // device px: x, y, w, h
@@ -52,6 +56,10 @@ struct Vertex {
     @location(4) @interpolate(flat) half_size: vec2<f32>,
     @location(5) @interpolate(flat) radius: f32,
     @location(6) @interpolate(flat) border: f32,
+    // The instance's `uv` field, unscaled and uninterpolated. A segment's
+    // endpoints are fractions of the quad rather than atlas pixels, so they must
+    // not go through the division that `uv` above does.
+    @location(7) @interpolate(flat) raw: vec4<f32>,
 };
 
 @vertex
@@ -88,6 +96,7 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> Vertex {
     out.half_size = instance.rect.zw * 0.5;
     out.radius = instance.radius;
     out.border = instance.border;
+    out.raw = instance.uv;
     return out;
 }
 
@@ -116,6 +125,14 @@ fn triangle(point: vec2<f32>, half_size: vec2<f32>, kind: u32) -> f32 {
         case 3u: { return triangle_up(vec2<f32>(point.y, -point.x), half_size.yx); }
         default: { return triangle_up(point, half_size); }
     }
+}
+
+/// Distance from `point` to the segment `a`–`b`.
+fn segment_distance(point: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let pa = point - a;
+    let ba = b - a;
+    let along = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * along);
 }
 
 /// Signed distance to a rounded box, negative inside.
@@ -153,7 +170,18 @@ fn fs(in: Vertex) -> @location(0) vec4<f32> {
         let alpha = texel.a * in.color.a;
         return vec4<f32>(texel.rgb * alpha, alpha);
     }
-    if in.kind >= KIND_TRIANGLE {
+    if in.kind == KIND_SEGMENT {
+        let size = in.half_size * 2.0;
+        let a = in.raw.xy * size;
+        let b = in.raw.zw * size;
+        let distance = segment_distance(in.local, a, b) - in.border;
+        let alpha = in.color.a * clamp(0.5 - distance, 0.0, 1.0);
+        return vec4<f32>(in.color.rgb * alpha, alpha);
+    }
+    // **Bounded above, not an open `>=`.** The four triangle kinds are 3 to 6;
+    // an open comparison here swallowed every kind added after them, which is
+    // how a segment first drew as an arrowhead.
+    if in.kind >= KIND_TRIANGLE && in.kind < KIND_IMAGE {
         let distance = triangle(in.local - in.half_size, in.half_size, in.kind);
         let alpha = in.color.a * clamp(0.5 - distance, 0.0, 1.0);
         return vec4<f32>(in.color.rgb * alpha, alpha);

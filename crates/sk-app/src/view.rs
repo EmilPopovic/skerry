@@ -932,11 +932,12 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
     // looks like a complete one that is missing commands.
     let centre = area.x + area.width / 2.0;
     if first > 0 {
-        painter.triangle(centre - 3.5, area.y + 1.0, 7.0, 4.0, theme.palette.dim, Direction::Up);
+        let box_ = painter.rect(centre - 4.0, area.y + 1.0, 8.0, 5.0);
+        painter.chevron(box_, theme.palette.dim, Direction::Up, 1.25);
     }
     if first + drawn.len() < menu.items.len() {
-        let y = area.bottom() - 5.0;
-        painter.triangle(centre - 3.5, y, 7.0, 4.0, theme.palette.dim, Direction::Down);
+        let box_ = painter.rect(centre - 4.0, area.bottom() - 6.0, 8.0, 5.0);
+        painter.chevron(box_, theme.palette.dim, Direction::Down, 1.25);
     }
 }
 
@@ -2672,8 +2673,12 @@ const CLASH_FACTS: f32 = 52.0;
 const CLASH_STEP: f32 = 26.0;
 const CLASH_WIDTH: f32 = 440.0;
 
-/// How much smaller a tab's shape is than the space it is given, at each edge.
-const TAB_INSET: f32 = 3.0;
+/// How thick the line under the showing tab is, in logical pixels.
+///
+/// Two: one is a hairline that reads as a border and three is a bar. It is taken
+/// off the tab's own height rather than drawn over it, so the label stays
+/// centred in what is left.
+const TAB_UNDERLINE: f32 = 2.0;
 
 /// The title and subtitle together, and one application row.
 const OPENERS_TITLE: f32 = 54.0;
@@ -3443,16 +3448,20 @@ fn place_row(
     // is a control that reads a directory with no name — and a control that does
     // nothing is worse than no control.
     if !row.unmounted {
+        // **A chevron and not a filled arrowhead.** A solid triangle is a decade
+        // older than every tree a person is using now — an IDE's, a browser's
+        // inspector, a settings panel — and two thin strokes is what all three
+        // draw. `Painter::chevron` is one primitive for the four of them in this
+        // file.
         let (width, height, at) =
-            if row.open { (9.0, 5.0, Direction::Down) } else { (5.0, 9.0, Direction::Right) };
-        painter.triangle(
+            if row.open { (9.0, 6.0, Direction::Down) } else { (6.0, 9.0, Direction::Right) };
+        let box_ = painter.rect(
             twisty.x + (twisty.width - width) / 2.0,
             twisty.y + (twisty.height - height) / 2.0,
             width,
             height,
-            ink,
-            at,
         );
+        painter.chevron(box_, ink, at, 1.25);
     }
 
     // **Logical pixels all the way to the draw call.** `Painter::rect` is where
@@ -3777,10 +3786,10 @@ fn reload(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
 
 /// Minimise, maximise and close, drawn rather than taken from an icon theme.
 ///
-/// Three marks, all of them axis-aligned rectangles except the close cross,
-/// which is the one shape a quad cannot make and so is the `×` the font already
-/// has. An icon theme would be four hundred lines of `index.theme` parsing and a
-/// dependency on the user having one installed, for three ten-pixel glyphs.
+/// Three marks, all of them drawn: two from axis-aligned rectangles and the
+/// close cross from two stroked segments. An icon theme would be four hundred
+/// lines of `index.theme` parsing and a dependency on the user having one
+/// installed, for three ten-pixel marks.
 fn window_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_>) {
     let theme = *painter.theme;
     for (button, area) in Button::ALL.into_iter().zip(layout.buttons) {
@@ -3821,10 +3830,12 @@ fn window_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_
                 painter.list.stroke(box_rect, ink, 1.0, painter.snap(1.0));
             }
             Button::Close => {
-                let style = TextStyle::new(theme.metrics.path_size + 2.0, ink);
-                let baseline = painter.baseline(area.y, area.height, style.size);
-                let box_rect = painter.rect(area.x, 0.0, area.width, 0.0);
-                painter.label(i18n::lookup("chrome.close"), style.centred(), box_rect, baseline);
+                // **Drawn, not the font's `×`.** The glyph is a different weight
+                // from the two marks beside it, is centred on the font's own
+                // idea of the middle rather than the button's, and is the one
+                // piece of this frame that changed shape with the font chain.
+                let box_rect = painter.rect(centre.0 - 5.0, centre.1 - 5.0, 10.0, 10.0);
+                painter.cross(box_rect, ink, 1.25);
             }
         }
     }
@@ -3881,30 +3892,46 @@ fn tab_strip(
         // The showing tab of the leaf with the keyboard is the background; every
         // other tab is a step off it. `row_background` is the same pair of tints
         // the list uses, so a current tab and a selected row agree.
-        let background = theme.row_background(active && has_keyboard, active || hovered);
-        // **Inset by the same amount top and bottom**, and the text centred in
-        // the shape rather than in the strip: with three pixels off the top and
-        // none off the bottom, every tab's label sat a pixel and a half above
-        // the middle of its own pill.
-        let shape = Area {
-            x: area.x + 2.0,
-            y: area.y + TAB_INSET,
-            width: area.width - 4.0,
-            height: area.height - TAB_INSET * 2.0,
+        // **A flat tab under an accent line, not a pill.** Every editor a
+        // person has a tab strip in — an IDE's, a browser's, a terminal's —
+        // marks the showing tab with a line along one edge and leaves the shape
+        // alone; a filled pill per tab is three shapes competing at the top of
+        // the window. The hover keeps a background, because a hover has to be
+        // something and a line that appears under the pointer would read as a
+        // selection.
+        let shape =
+            Area { x: area.x, y: area.y, width: area.width, height: area.height - TAB_UNDERLINE };
+        // **Four states and one of them is nothing.** The showing tab of the
+        // leaf with the keyboard takes the same tint a selected row does; the
+        // showing tab of another leaf takes the plain hover tint, which says
+        // *this is the one here* without claiming the keyboard; a hovered tab
+        // takes it too; and everything else takes no shape at all, which is what
+        // makes the strip read as one tab in front of the rest.
+        let background = match (active, has_keyboard, hovered) {
+            (true, true, _) => theme.row_background(true, false),
+            (true, false, _) | (false, _, true) => theme.palette.hover,
+            (false, _, false) => Color::NONE,
         };
+        if !background.is_invisible() {
+            let pill = painter.rect(shape.x, shape.y, shape.width, shape.height);
+            painter.list.rect(pill, background, 0.0);
+        }
+        if active {
+            // The keyboard's leaf gets the accent; another leaf's showing tab
+            // gets a line in the dim ink, which says *this is the one* without
+            // claiming the keyboard is here.
+            let ink = if has_keyboard { theme.palette.accent } else { theme.palette.dim };
+            let under = painter.rect(shape.x, shape.bottom(), shape.width, TAB_UNDERLINE);
+            painter.list.rect(under, ink, 0.0);
+        }
         let pill = painter.rect(shape.x, shape.y, shape.width, shape.height);
-        painter.list.rect(pill, background, painter.px(metrics.radius));
         // Where a drop of files would land. The same accent fill a row takes,
         // because a tab and a row are the same promise — this is the directory
         // the files go into — and the ring means "the keyboard is here"
         // everywhere else in this window.
         let marked = chrome.drop_tab == Some((layout.id, index));
         if marked {
-            painter.list.rect(
-                pill,
-                theme.palette.accent.with_alpha(90),
-                painter.px(metrics.radius),
-            );
+            painter.list.rect(pill, theme.palette.accent.with_alpha(90), 0.0);
         }
         // A marked tab reads at full strength whether or not it is the one
         // showing: the dim a background tab is drawn in is a tint away from the
@@ -3912,13 +3939,22 @@ fn tab_strip(
         // nobody can read.
         let colour = if active || marked { theme.palette.text } else { theme.palette.dim };
         let baseline = painter.baseline(shape.y, shape.height, metrics.text_size);
+        // **A mark before the name**, which is what every tab strip a person has
+        // one of draws — and here it is always a folder, because a tab is a
+        // directory. Dimmed on a tab that is not showing, so the strip reads as
+        // one thing in front and the rest behind.
+        let mark = 13.0;
+        let icon = painter.rect(area.x + 9.0, shape.y + (shape.height - mark) / 2.0, mark, mark);
+        let folder = theme.palette.kinds.folder;
+        painter.folder(icon, if active || marked { folder } else { folder.with_alpha(150) });
+        let text_x = area.x + 9.0 + mark + 6.0;
         let close = crate::panes::tab_close(area);
-        let room = close.map_or(area.width - 20.0, |it| it.x - area.x - 16.0);
+        let room = close.map_or(area.right() - 10.0 - text_x, |it| it.x - 6.0 - text_x);
         line(
             painter,
             titles[index],
             TextStyle::new(metrics.text_size, colour),
-            area.x + 10.0,
+            text_x,
             room.max(0.0),
             baseline,
         );
@@ -3934,13 +3970,14 @@ fn tab_strip(
         painter.list.rect(pill, theme.palette.hover, painter.px(metrics.radius));
     }
     let ink = if has_keyboard { theme.palette.text } else { theme.palette.dim };
-    let centre = (plus.x + plus.width / 2.0, plus.y + plus.height / 2.0);
     let arm = 9.0;
-    let thickness = painter.px(1.0).max(1.0).round();
-    let across = painter.rect(centre.0 - arm / 2.0, centre.1, arm, 0.0);
-    painter.list.rect(sk_gpu::Rect::new(across.x, across.y, across.width, thickness), ink, 0.0);
-    let down = painter.rect(centre.0, centre.1 - arm / 2.0, 0.0, arm);
-    painter.list.rect(sk_gpu::Rect::new(down.x, down.y, thickness, down.height), ink, 0.0);
+    let box_ = painter.rect(
+        plus.x + (plus.width - arm) / 2.0,
+        plus.y + (plus.height - arm) / 2.0,
+        arm,
+        arm,
+    );
+    painter.plus(box_, ink, 1.25);
 
     painter.list.pop_clip();
     painter.hairline(
@@ -3951,20 +3988,20 @@ fn tab_strip(
     );
 }
 
-/// The × on a tab.
+/// The × that closes a tab.
+///
+/// **Two strokes.** This was a loop of one-pixel rects stepped along the
+/// diagonal — a staircase at every scale, and the one mark in the window that
+/// looked like it had been plotted rather than drawn.
 fn cross(painter: &mut Painter<'_>, area: Area, ink: Color) {
     let inset = 5.0;
-    let thickness = painter.px(1.0).max(1.0).round();
-    let (x, y) = (area.x + inset, area.y + inset);
-    let side = area.width - inset * 2.0;
-    for step in 0..=(side as usize) {
-        let at = step as f32;
-        let dot = painter.rect(x + at, y + at, 1.0, 1.0);
-        painter.list.rect(dot, ink, 0.0);
-        let dot = painter.rect(x + at, y + side - at, 1.0, 1.0);
-        painter.list.rect(dot, ink, 0.0);
-    }
-    let _ = thickness;
+    let box_ = painter.rect(
+        area.x + inset,
+        area.y + inset,
+        area.width - inset * 2.0,
+        area.height - inset * 2.0,
+    );
+    painter.cross(box_, ink, 1.25);
 }
 
 /// The line between two panes.
@@ -4333,14 +4370,13 @@ fn column_row(
     let box_ = painter.rect(text_x, top, width, metrics.row_height);
     painter.cell(key, listing.name(id), box_, baseline, colour, Align::Left);
     if directory {
-        painter.triangle(
+        let box_ = painter.rect(
             area.right() - metrics.gutter - CHEVRON + 4.0,
-            top + metrics.row_height / 2.0 - 4.0,
+            top + metrics.row_height / 2.0 - 4.5,
             6.0,
-            8.0,
-            theme.palette.dim,
-            Direction::Right,
+            9.0,
         );
+        painter.chevron(box_, theme.palette.dim, Direction::Right, 1.25);
     }
 }
 
@@ -4555,14 +4591,13 @@ fn heading_at(
     // disclosure has always done — see `sk_gpu::Direction`, which exists because
     // four marks like this one would otherwise be four font glyphs.
     let facing = if heading.closed { Direction::Right } else { Direction::Down };
-    painter.triangle(
+    let box_ = painter.rect(
         at.x + metrics.gutter,
         at.y + (at.height - DISCLOSE) / 2.0,
         DISCLOSE,
         DISCLOSE,
-        theme.palette.dim,
-        facing,
     );
+    painter.chevron(box_, theme.palette.dim, facing, 1.25);
 
     let text_x = at.x + metrics.gutter + DISCLOSE + 6.0;
     let room = (at.right() - metrics.gutter - text_x).max(1.0);

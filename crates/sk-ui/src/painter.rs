@@ -2,6 +2,15 @@
 //! Drawing text, hairlines and the two icon shapes, in device pixels.
 
 use sk_gpu::{Color, Direction, DrawList, Rect};
+
+/// How far a chevron's tip reaches from the middle of its box, as a fraction.
+///
+/// **A fifth, not a half.** A chevron whose arms span its whole square is the
+/// `>` character; a shallow one is what a tree's disclosure mark looks like in
+/// every interface a person is using now. Measured against the reference
+/// screenshots this was restyled from: their arms subtend about fifty degrees,
+/// which this reproduces at the 1:2 box the sidebar gives it.
+const REACH: f32 = 0.2;
 use sk_text::{Fonts, GlyphKey, LayoutCache, RunKey, SUBPIXEL_BUCKETS, ShapedRun, Weight};
 
 /// Which end of a box a string is anchored to.
@@ -406,27 +415,90 @@ impl Painter<'_> {
         )
     }
 
+    /// A stroked segment inside a logical rectangle, from `from` to `to` as
+    /// fractions of it.
+    ///
+    /// The one primitive under every mark made of straight strokes — see
+    /// [`sk_gpu::DisplayList::segment`]. `weight` is in logical pixels and is
+    /// snapped to at least one device pixel, so a hairline stays a hairline at
+    /// any scale instead of disappearing at 100% and doubling at 200%.
+    pub fn segment(
+        &mut self,
+        box_rect: Rect,
+        from: (f32, f32),
+        to: (f32, f32),
+        color: Color,
+        weight: f32,
+    ) {
+        self.list.segment(box_rect, from, to, color, self.px(weight).max(1.0));
+    }
+
+    /// A chevron — a tree's disclosure mark — inscribed in a logical rectangle.
+    ///
+    /// **Two strokes and not a filled triangle.** A triangle is what this was,
+    /// and a solid arrowhead is a decade older than every interface a person is
+    /// using now: an IDE's tree, a browser's inspector and a system settings
+    /// panel all draw a thin chevron. Shallower than the box it is given —
+    /// `REACH` of the width — because a chevron that fills its square reads as a
+    /// `>` character.
+    pub fn chevron(&mut self, box_rect: Rect, color: Color, at: Direction, weight: f32) {
+        // The tip, and the two arms it reaches back to, as fractions.
+        let (tip, arms) = match at {
+            Direction::Right => ((0.5 + REACH, 0.5), [(0.5 - REACH, 0.0), (0.5 - REACH, 1.0)]),
+            Direction::Left => ((0.5 - REACH, 0.5), [(0.5 + REACH, 0.0), (0.5 + REACH, 1.0)]),
+            Direction::Down => ((0.5, 0.5 + REACH), [(0.0, 0.5 - REACH), (1.0, 0.5 - REACH)]),
+            Direction::Up => ((0.5, 0.5 - REACH), [(0.0, 0.5 + REACH), (1.0, 0.5 + REACH)]),
+        };
+        for arm in arms {
+            self.segment(box_rect, tip, arm, color, weight);
+        }
+    }
+
+    /// A diagonal cross — the × that closes a tab — inscribed in a rectangle.
+    ///
+    /// **Two strokes.** This was a loop of one-pixel rects stepped along the
+    /// diagonal, which is a staircase at every scale and the reason the ×
+    /// on a tab looked drawn by hand and not in a good way.
+    pub fn cross(&mut self, box_rect: Rect, color: Color, weight: f32) {
+        self.segment(box_rect, (0.0, 0.0), (1.0, 1.0), color, weight);
+        self.segment(box_rect, (0.0, 1.0), (1.0, 0.0), color, weight);
+    }
+
+    /// A plus — the `+` that opens a tab — inscribed in a rectangle.
+    pub fn plus(&mut self, box_rect: Rect, color: Color, weight: f32) {
+        self.segment(box_rect, (0.0, 0.5), (1.0, 0.5), color, weight);
+        self.segment(box_rect, (0.5, 0.0), (0.5, 1.0), color, weight);
+    }
+
     /// The mark for a directory: a folder, from two rounded rectangles.
     ///
     /// Geometric rather than from an icon theme, because icon themes belong to
-    /// `sk-desktop` and arrive in M7. Solid rather than outlined: at sixteen
-    /// logical pixels an outlined folder is four hairlines around a hole, and a
-    /// solid one reads at a glance.
+    /// `sk-desktop` and arrive in M7.
+    ///
+    /// **Two tones and not one.** An outline was tried and is what the objection
+    /// that used to be in this comment described — at fifteen logical pixels it
+    /// is four hairlines around a hole. What an outline was reaching for is the
+    /// *quiet* icon a modern tree draws, and two tones of one colour get that
+    /// without the hairlines: the tab a shade behind the body, which is how a
+    /// folder has been drawn since it stopped being drawn in perspective.
     pub fn folder(&mut self, box_rect: Rect, color: Color) {
         let unit = box_rect.height / 16.0;
         let tab = Rect::new(
             box_rect.x + unit,
             box_rect.y + unit * 2.0,
             box_rect.width * 0.45,
-            unit * 3.5,
+            unit * 4.5,
         );
         let body = Rect::new(
             box_rect.x,
-            box_rect.y + unit * 4.0,
+            box_rect.y + unit * 4.5,
             box_rect.width,
-            box_rect.height - unit * 5.0,
+            box_rect.height - unit * 5.5,
         );
-        self.list.rect(tab, color, unit);
+        // **The tab darker on either palette**, because it sits *behind* the
+        // body: mixing toward black is the one direction that reads as depth
+        // whether the ground is dark or light.
+        self.list.rect(tab, color.mix(Color::hex(0x000000), 0.25), unit * 1.2);
         self.list.rect(body, color, unit * 1.6);
     }
 

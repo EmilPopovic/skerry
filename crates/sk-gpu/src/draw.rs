@@ -148,6 +148,20 @@ pub(crate) const KIND_COLOR: u32 = 2;
 /// direction packed into a field, because a field that means something different
 /// for one kind is a field nobody can read.
 pub(crate) const KIND_TRIANGLE: u32 = 3;
+/// A stroked line segment, whose two endpoints ride in the `uv` field as
+/// fractions of the quad and whose half-width rides in `border`.
+///
+/// **One primitive for every mark made of straight strokes**: a tree's chevron,
+/// a tab's ×, a `+`. Each of those was rects before, and a diagonal made of
+/// one-pixel rects is a staircase — which is what the × on a tab was, drawn as a
+/// loop of dots. The distance function gives round caps for free, which is what
+/// a hand-drawn icon has.
+///
+/// **After the two textured kinds**, so the fragment shader's dispatch stays a
+/// list of equalities rather than an ordering: the triangle branch is bounded
+/// above rather than open, because an open `>=` swallowed every kind added after
+/// it.
+pub(crate) const KIND_SEGMENT: u32 = 9;
 
 /// Which way a triangle points.
 ///
@@ -355,6 +369,37 @@ impl DrawList {
             kind: direction.kind(),
             radius: 0.0,
             border: 0.0,
+        }));
+    }
+
+    /// A stroked segment inside `rect`, from `from` to `to` as fractions of it.
+    ///
+    /// **Fractions and not pixels**, so a caller thinks in the shape's own space
+    /// and the same call draws a mark at any scale: `(0.0, 0.0)` is the top left
+    /// corner of `rect` and `(1.0, 1.0)` the bottom right. `thickness` is in
+    /// device pixels, because a stroke is the one measurement that does not
+    /// scale with the shape — a hairline is a hairline.
+    ///
+    /// The caps are round, which is the distance function's own answer and what
+    /// every icon set draws.
+    pub fn segment(
+        &mut self,
+        rect: Rect,
+        from: (f32, f32),
+        to: (f32, f32),
+        color: Color,
+        thickness: f32,
+    ) {
+        if color.is_invisible() || rect.is_empty() || thickness <= 0.0 {
+            return;
+        }
+        self.items.push(Item::Quad(Quad {
+            rect: [rect.x, rect.y, rect.width, rect.height],
+            uv: [from.0, from.1, to.0, to.1],
+            color: color.packed(),
+            kind: KIND_SEGMENT,
+            radius: 0.0,
+            border: thickness / 2.0,
         }));
     }
 
