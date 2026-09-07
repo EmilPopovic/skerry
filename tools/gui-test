@@ -2074,10 +2074,16 @@ def a_page_turn_does_not_move_the_picture(run: Run, fixture: Path) -> None:
     # that arrived at a different size would be the picture rescaling under
     # somebody reading it.
     run.drive("key down\nsleep 700\n")
+    # **And its box, which is a third thing that lands.** The picture, the words
+    # and the rectangle arrive on their own jobs; `look_page_box` is empty until
+    # the *words* are in, so a wait for the picture alone read a state with no
+    # box in it — and the box has to be there to be compared with.
     turned = holds(
         run,
-        lambda it: it.get("look_page") == f"2/{pages}" and drawn_in_full(it),
-        "page two, fully rendered",
+        lambda it: it.get("look_page") == f"2/{pages}"
+        and drawn_in_full(it)
+        and it.get("look_page_box", "") != "",
+        "page two, fully rendered, with its box",
     )
     after = [float(it) for it in turned["look_page_box"].split(":")]
     moved = max(abs(a - b) for a, b in zip(box, after))

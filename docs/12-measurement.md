@@ -3090,3 +3090,51 @@ them; two timestamps on the same wire chose in one run** — and then a single
 elapsed figure that moved with the deadline said the duration had never been a
 duration. A counter says how much happened. The question here was always *when*,
 and twice the answer was *the moment somebody looked*.
+
+## A field that vanishes from a line reads as a field that was removed
+
+`a-page-turn-does-not-move-the-picture` failed on X11 with `KeyError:
+'look_page_box'`, which reads as somebody having deleted a diagnostic. Nobody
+had. The harness parses the state line with a regular expression that needs
+either quotes or at least one character after the `=`, so a field whose value is
+empty is not a field with no value — **it is not a field at all**, and every
+scenario that reads it fails naming something that looks gone. The same trap is
+already written down beside `name_field`, which is quoted for exactly this
+reason; this one was not.
+
+Quoting it turned the `KeyError` into what it always was: a wait that ran out,
+with the state printed. And the state said the interesting thing. Page two was
+`drafted=false` — fully rendered — and its box was empty, which means its *words*
+were never there.
+
+**The words were a real defect, and a prefetch had caused it.** [ADR
+0024](adr/0024-a-page-arrives-with-its-words.md) puts a page's words in that
+page's own reply. [ADR
+0028](adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md)
+fetches the two neighbours before anybody asks for them. So page two's reply — and
+its words — arrive while page *one* is on screen, and the arrival site dropped
+them for not matching the page being read:
+
+```rust
+if !answer.words.is_empty() && answer.key.page == look.page && look.page_text.is_none()
+```
+
+Nothing brought them back. Turning to page two draws a texture that is already
+held, so no second render is requested, so no second copy of the words is ever
+sent. **A page you turned to had no selectable text, for the rest of the
+document** — and a page you turned *away* from lost its words on the way out, so
+turning back was no better.
+
+Two things about how it hid for as long as it did. It is a race between a
+prefetch landing and a keystroke, so it passed on Wayland and failed on X11 on
+the same commit; and the scenario that would have caught it was reading a field
+that had silently stopped existing. **A missing key is a louder failure than a
+wrong value and a quieter one than either** — it names a symbol, so it reads as a
+refactor, and nobody looks at the state.
+
+The fix keeps a page's words in a small store beside the held textures, bounded
+by the same window 0028 pins, and a turn adopts from it in both directions. The
+selection does not travel with them, because a selection is about the reading
+rather than the page. Watched failing before it was believed: with the store
+removed and the test kept, `a_page_turned_to_has_the_words_its_prefetch_brought`
+fails on *page two's words, kept from its prefetch*.

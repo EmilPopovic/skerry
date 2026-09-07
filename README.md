@@ -4,7 +4,7 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 885 tests, 144 GUI scenarios on both Wayland and X11, eighty-three golden
+helpers, 887 tests, 144 GUI scenarios on both Wayland and X11, eighty-three golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -14,7 +14,9 @@ folder pinned here is pinned in Nautilus; search under a folder or over every lo
 filesystem, first result at **0.7 ms over 817,288 entries**; quick look at pictures,
 PDFs — with selectable text — and source, with a highlighter and an editor; drag and
 drop to and from GTK applications; a command palette and a context menu over one
-registry; and a keymap that is a file you own. **Every action is reachable with the
+registry; a settings panel over `Ctrl ,` that says where each value came from, and
+that can make Skerry the desktop's handler for folders; and a keymap that is a file
+you own. **Every action is reachable with the
 keyboard alone and with the pointer alone**, and a test fails the build for one that
 is not.
 
@@ -54,9 +56,9 @@ method, and the four budget rows that are currently missed are in
 [docs/09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
 
 Three harnesses assert about things a unit test cannot reach, and each of them found a
-defect nothing else could: `tools/golden` compares eighty rendered frames to
+defect nothing else could: `tools/golden` compares eighty-three rendered frames to
 committed references on lavapipe, `tools/gui-test` presses keys and moves a pointer
-through 141 scenarios on two display servers — one of which mounts a filesystem in a
+through 144 scenarios on two display servers — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
 filesystem torture matrix that is a CI job rather than thrown-away spike code. All
 three run on every push, the scenarios under `Xvfb`; the Wayland half of them stays

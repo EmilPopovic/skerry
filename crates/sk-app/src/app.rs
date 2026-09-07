@@ -7525,10 +7525,17 @@ scope_aim={scope_aim:?}",
                 // zoomed in to read. The layer is dropped when the page turns,
                 // which is the only time it stops being about what is on screen.
                 if !answer.words.is_empty()
-                    && answer.key.page == look.page
-                    && look.page_text.is_none()
+                    && let Some(words) = crate::pagetext::Page::of(&answer.words)
                 {
-                    look.page_text = crate::pagetext::Page::of(&answer.words);
+                    if answer.key.page != look.page {
+                        // **A prefetched page's words, kept rather than
+                        // dropped.** They arrive while their page is not the one
+                        // being read, and nothing asks for them a second time —
+                        // see `QuickLook::kept_words`.
+                        look.keep_words(answer.key.page, words);
+                    } else if look.page_text.is_none() {
+                        look.page_text = Some(words);
+                    }
                 }
                 if answer.refusal == sk_preview::Refusal::NoSuchPage {
                     // A `↓` at the last page. The page on screen stays.
@@ -7955,6 +7962,12 @@ scope_aim={scope_aim:?}",
                     crate::view::fitted_box(inner, size, look.drafted, (look.zoom, look.pan));
                 Some(format!("{:.1}:{:.1}:{:.1}:{:.1}", box_.x, box_.y, box_.width, box_.height))
             })
+            // **Quoted on the line, because an empty one is a key that
+            // vanishes.** The harness reads this line with a regular expression
+            // that needs either quotes or a character, so a bare
+            // `look_page_box=` is not a field with no value — it is no field,
+            // and every scenario that reads it fails with a `KeyError` naming
+            // something that looks removed. The same rule `name_field` states.
             .unwrap_or_default();
         // What is typed in the find bar, so a scenario can tell a query that
         // found nothing from a query that never arrived.
@@ -7982,7 +7995,7 @@ scope_aim={scope_aim:?}",
             .unwrap_or_default();
         format!(
             "look_words={look_words} look_picked={look_picked:?} \
-look_page_box={look_page_box} look_found={look_found} look_query={look_query:?}"
+look_page_box={look_page_box:?} look_found={look_found} look_query={look_query:?}"
         )
     }
 

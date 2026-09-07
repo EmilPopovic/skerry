@@ -500,6 +500,15 @@ pub(crate) struct Shot {
     pub(crate) page: u32,
 }
 
+/// How many pages' words to keep beside the one on screen.
+///
+/// Four: the page, its two neighbours — the window [ADR
+/// 0028](../../../docs/adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md)
+/// pins — and one to spare for a reader who turned back. A page's words are a
+/// few thousand rectangles, which is two orders of magnitude less than the
+/// texture beside it.
+const WORDS_KEPT: usize = 4;
+
 /// What is on screen, and what is still coming.
 pub(crate) struct QuickLook {
     /// The file being looked at.
@@ -620,6 +629,18 @@ pub(crate) struct QuickLook {
     /// to one page and arrives with it; keeping the last one across a turn would
     /// draw page three's highlight over page four's text.
     pub(crate) page_text: Option<crate::pagetext::Page>,
+    /// Words that arrived for a page that was not the one on screen.
+    ///
+    /// **Because a prefetched page arrives with its words.** [ADR
+    /// 0024](../../../docs/adr/0024-a-page-arrives-with-its-words.md) puts the
+    /// words in the page's own reply, and [ADR
+    /// 0028](../../../docs/adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md)
+    /// fetches the two neighbours before anybody asks for them — so their words
+    /// arrive while the page they belong to is *not* the page being read, and
+    /// dropping them left a page you turned to with none at all. Nothing brings
+    /// them back either: the texture is already held, so no second render is
+    /// asked for. Bounded by the same window 0028 pins.
+    kept_words: Vec<(u32, crate::pagetext::Page)>,
     /// How much the picture is magnified past the size it was fitted to.
     ///
     /// **One is fitted, not one hundred percent.** What a person zooms *from* is
@@ -680,6 +701,7 @@ impl QuickLook {
             editing: false,
             unsaved: false,
             page_text: None,
+            kept_words: Vec::new(),
             finding: None,
             found: (0, 0),
             zoom: 1.0,
@@ -810,8 +832,15 @@ impl QuickLook {
         let moved = wanted != self.page;
         if moved {
             // The words belong to the page that is going away, and so does what
-            // was found in them.
-            self.page_text = None;
+            // was found in them — but they are *kept*, because turning back to a
+            // page whose texture is still held asks the child for nothing and so
+            // brings no second copy of them. What is dropped is the selection
+            // and the find, which are about the reading rather than the page.
+            if let Some(mut going) = self.page_text.take() {
+                going.clear();
+                self.keep_words(self.page, going);
+            }
+            self.page_text = self.take_words(wanted);
             self.finding = None;
             self.found = (0, 0);
         }
@@ -825,6 +854,24 @@ impl QuickLook {
         // the middle of a loop.
         self.coarse |= moved && self.shows == Shows::Page;
         moved
+    }
+
+    /// Remembers a page's words for when the reader arrives at it.
+    ///
+    /// The oldest goes: this holds the pinned window and one to spare, which is
+    /// as many pages as can be on the GPU at once.
+    pub(crate) fn keep_words(&mut self, page: u32, words: crate::pagetext::Page) {
+        self.kept_words.retain(|(at, _)| *at != page);
+        if self.kept_words.len() >= WORDS_KEPT {
+            self.kept_words.remove(0);
+        }
+        self.kept_words.push((page, words));
+    }
+
+    /// The words kept for `page`, if any, taking them out of the store.
+    fn take_words(&mut self, page: u32) -> Option<crate::pagetext::Page> {
+        let at = self.kept_words.iter().position(|(kept, _)| *kept == page)?;
+        Some(self.kept_words.remove(at).1)
     }
 
     /// Opens the find bar, or closes it. Whether it is open now.
@@ -1717,6 +1764,7 @@ mod tests {
             editing: false,
             unsaved: false,
             page_text: None,
+            kept_words: Vec::new(),
             finding: None,
             found: (0, 0),
             zoom: 1.0,
@@ -1727,6 +1775,63 @@ mod tests {
             as_on_disk: None,
             reading: None,
         }
+    }
+
+    /// A page's words, as a reply would carry them.
+    fn layer(word: &str) -> crate::pagetext::Page {
+        let words = sk_preview::wire::Words {
+            page: (612.0, 792.0),
+            words: vec![sk_preview::wire::Word {
+                at: (10.0, 10.0, 40.0, 12.0),
+                line: 0,
+                text: word.to_owned(),
+            }],
+        };
+        crate::pagetext::Page::of(&words.pack()).expect("a layer")
+    }
+
+    /// **The defect a prefetch created.** [ADR
+    /// 0024](../../../docs/adr/0024-a-page-arrives-with-its-words.md) puts a
+    /// page's words in its own reply and [ADR
+    /// 0028](../../../docs/adr/0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md)
+    /// fetches the neighbours early, so page two's words arrive while page one
+    /// is on screen. They used to be dropped for not matching, and nothing asked
+    /// again — the texture was already held — so a page you turned *to* had no
+    /// selectable text at all, for the rest of the document.
+    #[test]
+    fn a_page_turned_to_has_the_words_its_prefetch_brought() {
+        let mut look = paged(6);
+        look.page_text = Some(layer("first"));
+        look.keep_words(2, layer("second"));
+
+        assert!(look.turn(1));
+        assert_eq!(look.page, 2);
+        let words = look.page_text.as_ref().expect("page two's words, kept from its prefetch");
+        assert_eq!(words.every_word(), "second");
+
+        // And back, which asks the child for nothing at all because page one is
+        // still held — so the words have to have been kept on the way out.
+        assert!(look.turn(-1));
+        assert_eq!(look.page, 1);
+        assert_eq!(
+            look.page_text.as_ref().map(crate::pagetext::Page::every_word).as_deref(),
+            Some("first"),
+        );
+    }
+
+    /// The selection does not travel with them: it is about the reading, not
+    /// about the page.
+    #[test]
+    fn a_selection_does_not_survive_a_page_turn_and_back() {
+        let mut look = paged(6);
+        let mut words = layer("first");
+        words.select_all();
+        assert!(words.has_selection());
+        look.page_text = Some(words);
+        assert!(look.turn(1));
+        assert!(look.turn(-1));
+        let back = look.page_text.as_ref().expect("page one's words");
+        assert!(!back.has_selection(), "the selection came back with the page");
     }
 
     /// **A draft on screen says so, and the finished render says it is not one.**
