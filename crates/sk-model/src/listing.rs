@@ -139,6 +139,7 @@ pub struct Listing {
     home: Vec<u32>,
     /// The directories [`Self::home`] indexes, each stored once.
     homes: Vec<std::path::PathBuf>,
+    raw_names: std::collections::BTreeMap<EntryId, std::ffi::OsString>,
     /// The rows a view walks, in display order.
     order: Vec<EntryId>,
     /// Entries still waiting for `statx`, counted rather than searched for.
@@ -212,6 +213,7 @@ impl Listing {
             recursive: Vec::new(),
             home: Vec::new(),
             homes: Vec::new(),
+            raw_names: std::collections::BTreeMap::new(),
             order: Vec::with_capacity(capacity),
             pending: 0,
         }
@@ -232,6 +234,28 @@ impl Listing {
         self.order.push(id);
         self.pending += 1;
         id
+    }
+
+    /// Appends an operational name without losing bytes that are not UTF-8.
+    pub fn push_os(&mut self, name: &std::ffi::OsStr, flags: Flags) -> EntryId {
+        let id = self.push(&name.to_string_lossy(), flags);
+        self.set_raw_name(id, name);
+        id
+    }
+
+    /// Keeps an exceptional raw name beside its display label.
+    pub fn set_raw_name(&mut self, id: EntryId, name: &std::ffi::OsStr) {
+        if name.to_str().is_none() {
+            self.raw_names.insert(id, name.to_owned());
+        }
+    }
+
+    /// The filename to use for I/O; `name` is only the display label.
+    #[must_use]
+    pub fn raw_name(&self, id: EntryId) -> &std::ffi::OsStr {
+        self.raw_names
+            .get(&id)
+            .map_or_else(|| std::ffi::OsStr::new(self.name(id)), std::ffi::OsString::as_os_str)
     }
 
     /// Appends an entry that lives somewhere other than one directory.

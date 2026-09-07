@@ -320,7 +320,7 @@ fn unpack_zip(
                 central.entry.kind,
                 central.entry.mtime,
                 central.mode,
-                central.entry.size,
+                central.uncompressed,
             )
         };
         if path.is_empty() || !wanted(&path, &request.only) {
@@ -341,13 +341,14 @@ fn unpack_zip(
             }
             Kind::Link | Kind::Other => place.refused(),
             Kind::File => {
-                let Some(mut file) =
+                let Some(file) =
                     place.create(&path, mode & 0o111 != 0).map_err(|it| (it, path.clone()))?
                 else {
                     continue;
                 };
-                let written = zip.extract(which, &mut file).map_err(|it| (it, path.clone()))?;
-                drop(file);
+                let mut output = place.writer(file);
+                let written = zip.extract(which, &mut output).map_err(|it| (it, path.clone()))?;
+                drop(output);
                 place.wrote(&path, mtime, written);
             }
         }
@@ -383,11 +384,12 @@ fn unpack_tar(
             // A device node, a fifo or a socket. Counted, never created.
             Kind::Other => place.refused(),
             Kind::File => match place.create(&item.path, item.mode & 0o111 != 0).map_err(named)? {
-                Some(mut file) => {
+                Some(file) => {
+                    let mut output = place.writer(file);
                     let written = tar
-                        .data(&mut |chunk| file.write_all(chunk).map_err(|_| Refusal::NoRoom))
+                        .data(&mut |chunk| output.write_all(chunk).map_err(|_| Refusal::NoRoom))
                         .map_err(named)?;
-                    drop(file);
+                    drop(output);
                     place.wrote(&item.path, item.mtime, written);
                 }
                 None => continue,
@@ -399,9 +401,10 @@ fn unpack_tar(
 
 fn unpack_single(name: &str, mut bytes: detect::Bytes, place: &mut Place) -> Result<(), Failed> {
     let named = |refusal| (refusal, name.to_owned());
-    let Some(mut file) = place.create(name, false).map_err(named)? else {
+    let Some(file) = place.create(name, false).map_err(named)? else {
         return Ok(());
     };
+    let mut file = place.writer(file);
     let mut buffer = vec![0u8; 64 * 1024];
     let mut total = 0u64;
     loop {

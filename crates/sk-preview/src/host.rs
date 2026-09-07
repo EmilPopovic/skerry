@@ -165,6 +165,7 @@ struct Landed {
     /// `None` where the child died and has to be spawned again.
     child: Option<Child>,
     answers: Vec<Answer>,
+    missing: bool,
 }
 
 /// The preview host: what is wanted, what is in flight, and the children.
@@ -311,20 +312,20 @@ impl Previews {
             if batch.is_empty() {
                 continue;
             }
-            let child = self.take_child(kind);
-            if child.is_none() {
-                // No helper to talk to. The wants are dropped rather than requeued:
-                // asking again every frame for a binary that is not installed is a
-                // spin, and `missing` is how the caller says so once.
-                if !self.missing.contains(&kind) {
-                    self.missing.push(kind);
-                }
+            if self.missing.contains(&kind) {
                 continue;
             }
+            let child = self
+                .children
+                .iter()
+                .position(|(had, _)| *had == kind)
+                .map(|at| self.children.remove(at).1);
+            let beside = self.beside.clone();
             self.busy.push(kind);
             let landed = self.landed.clone();
             let wake = wake.clone();
             pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |cancel| {
+                let child = child.or_else(|| spawn(kind, beside.as_deref()));
                 let _ = landed.send(run_batch(kind, child, &batch, cancel));
                 // The frame loop sleeps on descriptors and this is the descriptor
                 // — rule 1. Without it a thumbnail sits in the channel until
@@ -341,20 +342,15 @@ impl Previews {
         let mut answers = Vec::new();
         while let Ok(batch) = self.arriving.try_recv() {
             self.busy.retain(|kind| *kind != batch.kind);
+            if batch.missing && !self.missing.contains(&batch.kind) {
+                self.missing.push(batch.kind);
+            }
             if let Some(child) = batch.child {
                 self.children.push((batch.kind, child));
             }
             answers.extend(batch.answers);
         }
         answers
-    }
-
-    /// The child of a kind, spawning one where there is none.
-    fn take_child(&mut self, kind: Kind) -> Option<Child> {
-        if let Some(at) = self.children.iter().position(|(had, _)| *had == kind) {
-            return Some(self.children.remove(at).1);
-        }
-        spawn(kind, self.beside.as_deref())
     }
 }
 
@@ -382,7 +378,9 @@ pub(crate) fn helper(program: &str, beside: Option<&Path>) -> Option<Child> {
     }
     tried.push(PathBuf::from(program));
     tried.into_iter().find_map(|program| {
+        use std::os::unix::process::CommandExt as _;
         Command::new(program)
+            .process_group(0)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -400,14 +398,14 @@ pub(crate) fn helper(program: &str, beside: Option<&Path>) -> Option<Child> {
 /// remembered.
 fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util::Cancel) -> Landed {
     let Some(mut child) = child else {
-        return Landed { kind, child: None, answers: Vec::new() };
+        return Landed { kind, child: None, answers: Vec::new(), missing: true };
     };
     let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
-        let _ = child.kill();
-        return Landed { kind, child: None, answers: Vec::new() };
+        terminate(&mut child);
+        return Landed { kind, child: None, answers: Vec::new(), missing: false };
     };
-    let mut writing = BufWriter::new(input);
-    let mut reading = BufReader::new(output);
+    let mut writing = BufWriter::new(crate::pipe::Timed::new(input, cancel.clone(), DEADLINE));
+    let mut reading = BufReader::new(crate::pipe::Timed::new(output, cancel.clone(), DEADLINE));
     let mut answers = Vec::with_capacity(batch.len());
     let mut alive = true;
     let mut abandoned = false;
@@ -423,6 +421,8 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
             path: want.path.as_os_str().as_encoded_bytes().to_vec(),
         };
         let asked = std::time::Instant::now();
+        writing.get_mut().until(asked + DEADLINE);
+        reading.get_mut().until(asked + DEADLINE);
         let answered = request.write_to(&mut writing).and_then(|()| Reply::read_from(&mut reading));
         match answered {
             Ok(reply) if asked.elapsed() < DEADLINE => answers.push(Answer {
@@ -483,18 +483,28 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
     // `BufWriter` that cannot give up its inner writer has a buffered write that
     // never reached the pipe, which is a child mid-request — not one to hand to
     // the next batch.
-    child.stdout = Some(reading.into_inner());
+    child.stdout = Some(reading.into_inner().into_inner());
     match writing.into_inner() {
         Ok(input) if alive => {
-            child.stdin = Some(input);
-            Landed { kind, child: Some(child), answers }
+            child.stdin = Some(input.into_inner());
+            Landed { kind, child: Some(child), answers, missing: false }
         }
         _ => {
-            let _ = child.kill();
+            terminate(&mut child);
             let _ = child.wait();
-            Landed { kind, child: None, answers }
+            Landed { kind, child: None, answers, missing: false }
         }
     }
+}
+
+fn terminate(child: &mut Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: helpers start in their own process group; a negative pid targets it.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 #[cfg(test)]

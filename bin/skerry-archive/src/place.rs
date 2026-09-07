@@ -25,7 +25,7 @@
 
 use std::fs::File;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rustix::fs::{AtFlags, Mode, OFlags, Timespec, Timestamps};
 use sk_preview::archive::{Progress, Refusal};
@@ -45,7 +45,6 @@ const CHECK_EVERY: u64 = 32 * 1024 * 1024;
 
 /// The destination, and what has been put in it.
 pub struct Place {
-    into: PathBuf,
     root: OwnedFd,
     /// The last directory walked to, kept because tar entries arrive grouped.
     at: Option<(String, OwnedFd)>,
@@ -65,14 +64,7 @@ impl Place {
             Mode::empty(),
         )
         .map_err(|_| Refusal::Unreadable)?;
-        Ok(Self {
-            into: into.to_path_buf(),
-            root,
-            at: None,
-            written: Progress::default(),
-            skipped: 0,
-            since_check: 0,
-        })
+        Ok(Self { root, at: None, written: Progress::default(), skipped: 0, since_check: 0 })
     }
 
     /// Makes the directory an entry names, and its parents.
@@ -92,6 +84,7 @@ impl Place {
                 self.written.entries += 1;
                 Ok(())
             }
+            Err(rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT) => Err(Refusal::NoRoom),
             Err(_) => {
                 self.skipped += 1;
                 Ok(())
@@ -121,6 +114,9 @@ impl Place {
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_bits_truncate(mode),
         );
+        if matches!(opened, Err(rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT)) {
+            return Err(Refusal::NoRoom);
+        }
         let Ok(fd) = opened else {
             // A name the filesystem refused: too long, or already taken by the
             // `O_EXCL` that is the point of this line.
@@ -130,11 +126,15 @@ impl Place {
         Ok(Some(File::from(fd)))
     }
 
+    /// Counts bytes and checks capacity while a single entry is being written.
+    pub fn writer(&mut self, file: File) -> Output<'_> {
+        Output { place: self, file }
+    }
+
     /// Records what a file cost and stamps it with the time the archive gave it.
     pub fn wrote(&mut self, path: &str, mtime: i64, bytes: u64) {
         self.written.entries += 1;
-        self.written.bytes += bytes;
-        self.since_check += bytes;
+        let _ = bytes;
         self.stamp(path, mtime);
     }
 
@@ -157,7 +157,11 @@ impl Place {
             self.skipped += 1;
             return Ok(());
         }
-        if rustix::fs::symlinkat(target, self.there(), name.as_str()).is_err() {
+        let linked = rustix::fs::symlinkat(target, self.there(), name.as_str());
+        if matches!(linked, Err(rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT)) {
+            return Err(Refusal::NoRoom);
+        }
+        if linked.is_err() {
             self.skipped += 1;
             return Ok(());
         }
@@ -196,6 +200,9 @@ impl Place {
             name.as_str(),
             AtFlags::empty(),
         );
+        if matches!(linked, Err(rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT)) {
+            return Err(Refusal::NoRoom);
+        }
         if linked.is_err() {
             self.skipped += 1;
             return Ok(());
@@ -230,9 +237,9 @@ impl Place {
             return Ok(());
         }
         self.since_check = 0;
-        let Ok(space) = rustix::fs::statvfs(&self.into) else { return Ok(()) };
+        let space = rustix::fs::fstatvfs(&self.root).map_err(|_| Refusal::NoRoom)?;
         let free = space.f_bavail.saturating_mul(space.f_frsize);
-        if free < KEEP_FREE { Err(Refusal::NoRoom) } else { Ok(()) }
+        if free < KEEP_FREE + CHECK_EVERY { Err(Refusal::NoRoom) } else { Ok(()) }
     }
 
     /// Makes `dir` under the destination and holds a descriptor on it.
@@ -283,6 +290,28 @@ impl Place {
     /// The descriptor [`Place::reach`] left, or the destination itself.
     fn there(&self) -> BorrowedFd<'_> {
         self.at.as_ref().map_or_else(|| self.root.as_fd(), |(_, fd)| fd.as_fd())
+    }
+}
+
+/// A bounded write interval keeps one large entry inside the capacity policy.
+pub struct Output<'a> {
+    place: &'a mut Place,
+    file: File,
+}
+
+impl std::io::Write for Output<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.place.room().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::StorageFull, "archive capacity reserve")
+        })?;
+        let length = bytes.len().min(64 * 1024);
+        let written = self.file.write(&bytes[..length])?;
+        self.place.since_check += written as u64;
+        self.place.written.bytes += written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -393,5 +422,24 @@ mod tests {
         assert!(!outside.join("passwd").exists(), "it landed outside the destination");
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn output_is_counted_and_capacity_rechecked_before_an_entry_finishes() {
+        use std::io::Write as _;
+        let root = std::env::temp_dir().join(format!("skerry-place-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut place = Place::under(&root).unwrap();
+        let file = place.create("file", false).unwrap().unwrap();
+        let mut output = place.writer(file);
+        output.write_all(&[42; 4096]).unwrap();
+        assert_eq!(output.place.written.bytes, 4096);
+        assert_eq!(output.place.written.entries, 0);
+        output.place.since_check = super::CHECK_EVERY;
+        output.write_all(&[42; 4096]).unwrap();
+        assert_eq!(output.place.since_check, 4096);
+        assert_eq!(output.place.written.bytes, 8192);
+        drop(output);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

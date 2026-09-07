@@ -184,7 +184,7 @@ impl Level {
     fn resolve(&mut self, name: &std::ffi::OsStr) {
         self.chosen = (0..self.dir.listing.rows()).find_map(|row| {
             let id = self.dir.listing.at(row)?;
-            (self.dir.listing.name(id) == name.to_string_lossy()).then_some(id)
+            (self.dir.listing.raw_name(id) == name).then_some(id)
         });
     }
 }
@@ -388,11 +388,15 @@ pub(crate) fn animating(levels: &[Level]) -> bool {
 
 /// What the entry at `row` of the column at `depth` is: its directory and its
 /// name.
-pub(crate) fn entry(levels: &[Level], depth: usize, row: usize) -> Option<(PathBuf, String, bool)> {
+pub(crate) fn entry(
+    levels: &[Level],
+    depth: usize,
+    row: usize,
+) -> Option<(PathBuf, std::ffi::OsString, bool)> {
     let level = levels.get(depth)?;
     let id = level.dir.listing.at(row)?;
     let directory = level.dir.listing.flags(id).has(sk_model::Flags::DIR);
-    Some((level.dir.path.clone(), level.dir.listing.name(id).to_owned(), directory))
+    Some((level.dir.path.clone(), level.dir.listing.raw_name(id).to_owned(), directory))
 }
 
 /// Offers a reply to each level in turn, handing it back if none of them wanted it.

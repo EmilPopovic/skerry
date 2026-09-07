@@ -313,7 +313,13 @@ impl Reader<'_> {
     /// A colour table, whose length is three bits of a packed byte.
     fn palette(&mut self, packed: u8) -> Result<Vec<[u8; 3]>, Refusal> {
         let entries = 1usize << ((packed & 7) + 1);
-        Ok(self.take(entries * 3)?.chunks_exact(3).map(|it| [it[0], it[1], it[2]]).collect())
+        Ok(self
+            .take(entries * 3)?
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|it| [it[0], it[1], it[2]])
+            .collect())
     }
 
     /// The sub-block chain at the cursor, concatenated.
@@ -699,7 +705,8 @@ mod tests {
         let bytes = writer.done();
 
         let frames = decode(&bytes, 1).expect("a frame");
-        let rows: Vec<u8> = frames.raster.pixels.chunks_exact(4).map(|it| it[0]).collect();
+        let rows: Vec<u8> =
+            frames.raster.pixels.as_chunks::<4>().0.iter().map(|it| it[0]).collect();
         assert_eq!(rows, [0, 255, 0, 255, 0, 255, 0, 255], "every odd row is white");
     }
 

@@ -19,6 +19,7 @@
 //! in one pass and the list is on screen and scrollable while `statx` is still
 //! running. A row with no size yet is a row a user can already select.
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -56,7 +57,7 @@ pub struct Names {
     /// Shared rather than copied per job: a directory of a million entries is
     /// about 24 MB of names, and handing each of five hundred jobs its own slice
     /// of an `Arc` costs nothing.
-    pub names: Arc<Vec<String>>,
+    pub names: Arc<Vec<std::ffi::OsString>>,
     /// Microseconds the name pass took.
     pub elapsed_us: u64,
 }
@@ -84,8 +85,8 @@ pub fn names(directory: &Path, cancel: &Cancel) -> Result<Names, Problem> {
         }
         // A filename is bytes, not text. An invalid sequence is shown rather than
         // hidden — a file you cannot see is a file you cannot rename.
-        let name = String::from_utf8_lossy(raw).into_owned();
-        listing.push(&name, flags_of(entry.file_type()));
+        let name = std::ffi::OsStr::from_bytes(raw).to_owned();
+        listing.push_os(&name, flags_of(entry.file_type()));
         names.push(name);
     }
 
@@ -99,7 +100,7 @@ pub fn names(directory: &Path, cancel: &Cancel) -> Result<Names, Problem> {
 #[must_use]
 pub fn metadata(
     directory: &Path,
-    names: &[String],
+    names: &[std::ffi::OsString],
     first: EntryId,
     cancel: &Cancel,
 ) -> Vec<MetaRow> {
@@ -132,7 +133,7 @@ fn flags_of(kind: FileType) -> Flags {
     }
 }
 
-fn meta_of(dirfd: impl std::os::fd::AsFd, name: &str, id: EntryId) -> MetaRow {
+fn meta_of(dirfd: impl std::os::fd::AsFd, name: &std::ffi::OsStr, id: EntryId) -> MetaRow {
     let wanted = StatxFlags::TYPE | StatxFlags::MODE | StatxFlags::SIZE | StatxFlags::MTIME;
     // Following the link, because a listing shows what a symlink *is*: a link to
     // a directory opens on a double click and sorts with the directories.
@@ -280,5 +281,26 @@ mod tests {
     fn the_chunk_size_fans_a_real_directory_out_across_a_pool() {
         let jobs = 10_000_usize.div_ceil(META_CHUNK);
         assert!(jobs >= 4, "a 10,000-entry directory becomes {jobs} jobs");
+    }
+
+    #[test]
+    fn two_identical_labels_keep_distinct_operational_names() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let root = fixture("raw-names");
+        let raw = std::ffi::OsString::from_vec(vec![b'x', 255]);
+        std::fs::write(root.join(&raw), "raw").unwrap();
+        std::fs::write(root.join("x�"), "different").unwrap();
+        let found = names(&root, &Cancel::new()).unwrap();
+        let raw_at = found.names.iter().position(|name| *name == raw).unwrap();
+        let text_at = found.names.iter().position(|name| name == "x�").unwrap();
+        let raw_id = EntryId(raw_at as u32);
+        let text_id = EntryId(text_at as u32);
+        assert_eq!(found.listing.name(raw_id), found.listing.name(text_id));
+        assert_ne!(found.listing.raw_name(raw_id), found.listing.raw_name(text_id));
+        assert_eq!(std::fs::read(root.join(found.listing.raw_name(raw_id))).unwrap(), b"raw");
+        let rows = metadata(&root, &found.names, EntryId(0), &Cancel::new());
+        assert_eq!(rows[raw_at].size, 3);
+        assert_eq!(rows[text_at].size, 9);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

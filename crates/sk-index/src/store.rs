@@ -29,6 +29,7 @@
 //! something the user is told about. That is ADR 0008's third constraint and the
 //! one this module could most easily break.
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -45,7 +46,7 @@ const MAGIC: [u8; 4] = *b"SKIX";
 /// A mismatch is a silent rebuild rather than a migration, which is only a
 /// defensible trade while the file is a cache. The moment anything lives here
 /// that the user cannot regenerate, it stops being one.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Bytes before the body.
 const HEADER: usize = 56;
@@ -122,14 +123,13 @@ impl Index {
     /// Written from a `&str`, so the validation cannot fail on a file this build
     /// wrote. Answering an unreadable name with an empty one costs a row rather
     /// than the whole search, which is this module's rule everywhere.
-    fn name_of(&self, entry: usize) -> &str {
+    fn raw_name(&self, entry: usize) -> &std::ffi::OsStr {
         let at = self.u32_at(self.columns_at + column(self.entries, 4) + entry * 4) as usize;
         let len = self.u16_at(self.columns_at + column(self.entries, 8) + entry * 2) as usize;
         let from = self.arena_at + at;
         self.bytes
             .get(from..from.saturating_add(len))
-            .and_then(|it| std::str::from_utf8(it).ok())
-            .unwrap_or("")
+            .map_or_else(|| std::ffi::OsStr::new(""), std::os::unix::ffi::OsStrExt::from_bytes)
     }
 
     fn parent_of(&self, entry: usize) -> u32 {
@@ -151,12 +151,12 @@ impl Index {
     /// rather than a few hundred.
     #[must_use]
     pub fn path_of(&self, entry: usize) -> PathBuf {
-        let mut parts: Vec<&str> = Vec::new();
+        let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
         let mut at = entry;
         // Bounded by the entry count, so a corrupt parent chain that points at
         // itself is a wrong path rather than a hang.
         for _ in 0..=self.entries {
-            parts.push(self.name_of(at));
+            parts.push(self.raw_name(at));
             let parent = self.parent_of(at);
             if parent == NO_PARENT {
                 break;
@@ -197,11 +197,19 @@ impl Rows {
     }
 
     /// Adds one entry. Whether there was room for it.
-    fn push(&mut self, name: &str, owner: u32, flags: u16, size: u64, modified: i64) -> bool {
+    fn push(
+        &mut self,
+        name: impl AsRef<[u8]>,
+        owner: u32,
+        flags: u16,
+        size: u64,
+        modified: i64,
+    ) -> bool {
+        let name = name.as_ref();
         let (Ok(at), Ok(len)) = (u32::try_from(self.names.len()), u16::try_from(name.len())) else {
             return false;
         };
-        self.names.extend_from_slice(name.as_bytes());
+        self.names.extend_from_slice(name);
         self.parent.push(owner);
         self.name_at.push(at);
         self.name_len.push(len);
@@ -331,7 +339,7 @@ fn read_into(
             continue;
         }
         let Ok(here) = u32::try_from(rows.len()) else { return };
-        let name = String::from_utf8_lossy(raw);
+        let name = std::ffi::OsStr::from_bytes(raw);
 
         // A symlink is recorded by its own name and never stated through: its
         // target is somewhere else in the tree or outside it altogether.
@@ -340,14 +348,14 @@ fn read_into(
             None
         } else {
             let at = rustix::fs::AtFlags::SYMLINK_NOFOLLOW;
-            rustix::fs::statx(&fd, name.as_ref(), at, wanted).ok()
+            rustix::fs::statx(&fd, name, at, wanted).ok()
         };
         let is_dir =
             stat.as_ref().is_some_and(|it| u32::from(it.stx_mode) & 0o170_000 == 0o040_000);
         let bits = if is_dir { IS_DIR } else { 0 } | if link { IS_LINK } else { 0 };
         let size = stat.as_ref().map_or(0, |it| it.stx_size);
         let modified = stat.as_ref().map_or(0, |it| it.stx_mtime.tv_sec);
-        if !rows.push(&name, owner, bits, size, modified) {
+        if !rows.push(raw, owner, bits, size, modified) {
             return;
         }
 
@@ -356,7 +364,7 @@ fn read_into(
             // and a different question.
             let on = u64::from(stat.stx_dev_major) << 32 | u64::from(stat.stx_dev_minor);
             if on == device {
-                pending.push((directory.join(name.as_ref()), here));
+                pending.push((directory.join(name), here));
             }
         }
     }
@@ -445,19 +453,19 @@ fn count_one(directory: &Path, device: u64, seen: &mut usize, pending: &mut Vec<
         if kind == FileType::Symlink {
             continue;
         }
-        let name = String::from_utf8_lossy(raw);
+        let name = std::ffi::OsStr::from_bytes(raw);
         let directory_here = match kind {
             FileType::Directory => true,
             // Some filesystems do not fill in `d_type`. Only those pay a `statx`.
             FileType::Unknown => {
                 let at = rustix::fs::AtFlags::SYMLINK_NOFOLLOW;
-                rustix::fs::statx(&fd, name.as_ref(), at, StatxFlags::TYPE)
+                rustix::fs::statx(&fd, name, at, StatxFlags::TYPE)
                     .is_ok_and(|it| u32::from(it.stx_mode) & 0o170_000 == 0o040_000)
             }
             _ => false,
         };
         if directory_here {
-            pending.push(directory.join(name.as_ref()));
+            pending.push(directory.join(name));
         }
     }
 }
@@ -561,7 +569,9 @@ pub fn load_from(file: &Path, root: &Path) -> Option<Index> {
     // Only UTF-8, because these bytes came off a disk somebody else can write and
     // the unchecked conversion is unsafe for exactly that reason. A root whose
     // name is not UTF-8 costs its owner the index and nothing else.
-    let stored = PathBuf::from(std::str::from_utf8(body.get(..root_len)?).ok()?);
+    let stored = PathBuf::from(<std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(
+        body.get(..root_len)?,
+    ));
     if stored != root {
         return None;
     }
@@ -770,7 +780,7 @@ fn shard_of(index: &Index, needle: &str, shard: usize, cancel: &Cancel, size: us
         if entry % 4096 == 0 && cancel.is_cancelled() {
             return out;
         }
-        if sk_model::contains_folded(index.name_of(entry), needle) {
+        if sk_model::contains_folded(&index.raw_name(entry).to_string_lossy(), needle) {
             out.push(entry);
             // **One past the cap, not the cap.** Stopping *at* `MOST` leaves the
             // caller unable to tell a shard that ran out of matches from one that

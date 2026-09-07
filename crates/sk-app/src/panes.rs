@@ -331,10 +331,7 @@ impl Panes {
         for leaf in self.leaves_mut() {
             for pane in &mut leaf.panes {
                 let path = pane.path.clone();
-                match crate::trail::apply(&mut pane.trail, held, &path) {
-                    Some(back) => held = back,
-                    None => return None,
-                }
+                held = crate::trail::apply(&mut pane.trail, held, &path)?;
             }
         }
         Some(held)

@@ -334,7 +334,7 @@ mod tests {
             .collect();
         let small = fit(Raster { pixels, size: (64, 64) }, (8, 8));
         assert_eq!(small.size, (8, 8));
-        for channel in small.pixels.chunks_exact(4) {
+        for channel in small.pixels.as_chunks::<4>().0 {
             assert!(
                 (100..=155).contains(&channel[0]),
                 "a checkerboard averaged to {} rather than to grey",
@@ -386,7 +386,7 @@ mod tests {
         let raster = raster_of(TINY, (128, 128), 1).expect("a valid JPEG was refused");
         assert_eq!(raster.size, (4, 4), "a 4×4 JPEG was not 4×4");
         assert_eq!(raster.pixels.len(), 4 * 4 * 4);
-        for pixel in raster.pixels.chunks_exact(4) {
+        for pixel in raster.pixels.as_chunks::<4>().0 {
             assert_eq!(pixel[3], 255, "a JPEG has no alpha and this one is not opaque");
             assert!(pixel[0] > pixel[1] && pixel[0] > pixel[2], "the colour is not the one saved");
         }
@@ -452,7 +452,9 @@ mod tests {
             let raster = raster_of(source.as_bytes(), (120, 60), 1).expect("an SVG");
             raster
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|pixel| pixel[0] > 40 || pixel[1] > 40 || pixel[2] > 40)
                 .count()
         };
@@ -489,7 +491,7 @@ mod tests {
              <image x=\"4\" y=\"4\" width=\"12\" height=\"12\" xlink:href=\"data:image/png;base64,{white}\"/></svg>"
         );
         let raster = raster_of(source.as_bytes(), (20, 20), 1).expect("an SVG");
-        let lit = raster.pixels.chunks_exact(4).filter(|pixel| pixel[0] > 200).count();
+        let lit = raster.pixels.as_chunks::<4>().0.iter().filter(|pixel| pixel[0] > 200).count();
         assert!(lit > 50, "the embedded image drew {lit} white pixels");
     }
 

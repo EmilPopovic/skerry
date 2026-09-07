@@ -100,7 +100,10 @@ impl Report {
     #[must_use]
     pub fn line(&self) -> String {
         let landlock = match self.landlock {
-            Some(abi) => format!("landlock abi {abi}"),
+            Some(abi) => format!(
+                "landlock abi {abi}, truncation {}",
+                if abi >= 3 { "restricted" } else { "UNRESTRICTED" }
+            ),
             None => "landlock ABSENT".to_owned(),
         };
         let privs = if self.no_new_privs { "no-new-privs" } else { "no-new-privs FAILED" };
@@ -169,16 +172,14 @@ fn abi() -> Option<i32> {
 
 /// Restricts the filesystem to `readable` and `writable`, or reports no Landlock.
 ///
-/// **A ruleset of exactly the rights this build knows how to grant.** The handled
-/// set is capped at ABI 1's rights on purpose: a newer kernel handles more, and
-/// handling a right without granting it anywhere would forbid it everywhere —
-/// including, on ABI 2 and up, the `refer` that a rename needs and on ABI 4 the
-/// network. Nothing here renames or opens a socket, so the cap is conservative in
-/// the direction that keeps the child working rather than in the direction that
-/// looks strictest.
+/// Handles filesystem rights known by this build and supported by the kernel.
+/// ABI 3 adds truncation independently of writes; omitting it leaves `O_TRUNC` open.
+/// Executable paths receive a separate grant from writable output directories.
 fn landlock(readable: &[&Path], executable: &[&Path], writable: &[&Path]) -> Option<i32> {
     let abi = abi()?;
-    let attribute = RulesetAttribute { handled_access_fs: ABI_1_RIGHTS };
+    let rights =
+        ABI_1_RIGHTS | if abi >= 2 { 1 << 13 } else { 0 } | if abi >= 3 { 1 << 14 } else { 0 };
+    let attribute = RulesetAttribute { handled_access_fs: rights };
     // SAFETY: the attribute outlives the call and its size is passed alongside it,
     // which is the syscall's whole contract.
     let ruleset = unsafe {
@@ -189,7 +190,7 @@ fn landlock(readable: &[&Path], executable: &[&Path], writable: &[&Path]) -> Opt
     for (paths, rights) in [
         (readable, READ_RIGHTS),
         (executable, READ_RIGHTS | LANDLOCK_ACCESS_FS_EXECUTE),
-        (writable, ABI_1_RIGHTS),
+        (writable, rights & !LANDLOCK_ACCESS_FS_EXECUTE),
     ] {
         for path in paths {
             allow(ruleset, path, rights);
@@ -268,5 +269,50 @@ mod tests {
         assert!(line.contains("landlock ABSENT"), "{line}");
         assert!(line.contains("no-new-privs FAILED"), "{line}");
         assert!(line.contains("rlimits FAILED"), "{line}");
+    }
+
+    #[test]
+    fn landlock_denies_input_truncation_and_output_execution() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::{Path, PathBuf};
+        const MARKER: &str = "SKERRY_LANDLOCK_REGRESSION_ROOT";
+        if let Some(root) = std::env::var_os(MARKER) {
+            let root = PathBuf::from(root);
+            let out = root.join("out");
+            assert!(super::no_new_privs());
+            let Some(abi) = super::landlock(
+                &[&root, Path::new("/usr"), Path::new("/lib"), Path::new("/lib64")],
+                &[Path::new("/usr"), Path::new("/lib"), Path::new("/lib64")],
+                &[&out],
+            ) else {
+                eprintln!("skerry: skip: Landlock unavailable in this environment");
+                return;
+            };
+            assert_eq!(std::fs::read(root.join("input")).unwrap(), b"valuable");
+            std::fs::write(out.join("allowed"), "output").unwrap();
+            if abi >= 3 {
+                assert!(std::fs::File::create(root.join("input")).is_err());
+                assert_eq!(std::fs::read(root.join("input")).unwrap(), b"valuable");
+            }
+            assert!(std::process::Command::new(out.join("program")).status().is_err());
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("skerry-landlock-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::write(root.join("input"), "valuable").unwrap();
+        std::fs::copy("/bin/true", root.join("out/program")).unwrap();
+        std::fs::set_permissions(root.join("out/program"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sandbox::tests::landlock_denies_input_truncation_and_output_execution",
+                "--nocapture",
+            ])
+            .env(MARKER, &root)
+            .status()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(status.success());
     }
 }

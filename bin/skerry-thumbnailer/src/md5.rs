@@ -33,9 +33,9 @@ fn digest(bytes: &[u8]) -> [u8; 16] {
     }
     message.extend_from_slice(&bits.to_le_bytes());
 
-    for block in message.chunks_exact(64) {
+    for block in message.as_chunks::<64>().0 {
         let mut words = [0u32; 16];
-        for (word, chunk) in words.iter_mut().zip(block.chunks_exact(4)) {
+        for (word, chunk) in words.iter_mut().zip(block.as_chunks::<4>().0.iter()) {
             *word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         let [mut a, mut b, mut c, mut d] = state;
@@ -63,7 +63,7 @@ fn digest(bytes: &[u8]) -> [u8; 16] {
     }
 
     let mut out = [0u8; 16];
-    for (slot, word) in out.chunks_exact_mut(4).zip(state) {
+    for (slot, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(state) {
         slot.copy_from_slice(&word.to_le_bytes());
     }
     out

@@ -26,7 +26,7 @@ pub enum Update {
         /// The listing.
         listing: Box<Listing>,
         /// The names in entry order, for the metadata jobs.
-        names: Arc<Vec<String>>,
+        names: Arc<Vec<std::ffi::OsString>>,
         /// Microseconds the name pass took.
         elapsed_us: u64,
         /// Microseconds the first sort took, on the job rather than on a frame.
@@ -312,7 +312,7 @@ pub struct Pane {
     /// Set by [`Pane::go_up`], because coming out of a folder should leave the
     /// cursor on the folder you came out of — and the listing that contains it
     /// does not exist yet at the moment the decision is made.
-    select_after_load: Option<String>,
+    select_after_load: Option<std::ffi::OsString>,
     /// Where a restored session says the list was, applied when it can be.
     ///
     /// **Not applied at once.** `Scroll::to` clamps to the extent, and the extent
@@ -355,42 +355,49 @@ pub(crate) fn spawn_read(
 ) {
     let sender = jobs.sender.clone();
     let wake = jobs.wake.clone();
-    jobs.pool.spawn(Lane::Parallel, cancel, move |cancel| {
-        let lane = sk_fs::lane_for(&path);
-        let View { sort, show_hidden, filter } = &view;
-        let update = match sk_fs::names(&path, cancel) {
-            Ok(found) => {
-                // The first sort happens **here**, on the job, not when the
-                // listing is applied. At 200,000 entries it costs a quarter of a
-                // second, and a quarter of a second on the frame loop is rule 1's
-                // canonical failure.
-                let mut listing = found.listing;
-                let started = std::time::Instant::now();
-                let kinds = kind_bytes(&listing, sort.bands, mime.as_deref());
-                listing.set_order(listing.compute_order(*sort, *show_hidden, filter, &kinds));
-                Update::Names {
-                    listing: Box::new(listing),
-                    names: found.names,
-                    elapsed_us: found.elapsed_us,
-                    sort_us: started.elapsed().as_micros() as u64,
-                    kinds,
-                    view: view.clone(),
-                    lane,
-                }
+    let pool = Arc::clone(&jobs.pool);
+    jobs.pool.spawn(Lane::Control, cancel, move |cancel| {
+        let key = sk_fs::device::queue_key(&path);
+        pool.spawn(Lane::Device(key), cancel.clone(), move |cancel| {
+            if cancel.is_cancelled() {
+                return;
             }
-            // A cancelled read has nothing to report: the reader has already
-            // moved on, and a failure message would be about a directory nobody
-            // is looking at.
-            Err(_) if cancel.is_cancelled() => return,
-            Err(problem) => Update::Failed(problem),
-        };
-        // A closed channel means the window is gone, and the job should stop
-        // rather than finish reading a million entries for nobody.
-        if sender.send(Message { generation, update }).is_err() {
-            cancel.cancel();
-            return;
-        }
-        wake.wake();
+            let lane = sk_fs::lane_for(&path);
+            let View { sort, show_hidden, filter } = &view;
+            let update = match sk_fs::names(&path, cancel) {
+                Ok(found) => {
+                    // The first sort happens **here**, on the job, not when the
+                    // listing is applied. At 200,000 entries it costs a quarter of a
+                    // second, and a quarter of a second on the frame loop is rule 1's
+                    // canonical failure.
+                    let mut listing = found.listing;
+                    let started = std::time::Instant::now();
+                    let kinds = kind_bytes(&listing, sort.bands, mime.as_deref());
+                    listing.set_order(listing.compute_order(*sort, *show_hidden, filter, &kinds));
+                    Update::Names {
+                        listing: Box::new(listing),
+                        names: found.names,
+                        elapsed_us: found.elapsed_us,
+                        sort_us: started.elapsed().as_micros() as u64,
+                        kinds,
+                        view: view.clone(),
+                        lane,
+                    }
+                }
+                // A cancelled read has nothing to report: the reader has already
+                // moved on, and a failure message would be about a directory nobody
+                // is looking at.
+                Err(_) if cancel.is_cancelled() => return,
+                Err(problem) => Update::Failed(problem),
+            };
+            // A closed channel means the window is gone, and the job should stop
+            // rather than finish reading a million entries for nobody.
+            if sender.send(Message { generation, update }).is_err() {
+                cancel.cancel();
+                return;
+            }
+            wake.wake();
+        });
     });
 }
 
@@ -643,11 +650,11 @@ impl Pane {
     /// which is a navigation and a cursor — and the cursor cannot be set here,
     /// because the listing it would be an index into does not exist yet. Which is
     /// the same reason `go_up` has this hook.
-    pub fn open_at(&mut self, path: PathBuf, name: String, jobs: &Jobs) {
+    pub fn open_at(&mut self, path: PathBuf, name: std::ffi::OsString, jobs: &Jobs) {
         if path == self.path {
             // Already here: no navigation, so nothing will land to hang the
             // cursor off. Put it where it goes now.
-            self.select_named(&name);
+            self.select_named_os(&name);
             return;
         }
         self.open(path, jobs);
@@ -657,8 +664,12 @@ impl Pane {
     /// Puts the cursor and the selection on the entry called `name`, if it is
     /// there.
     pub fn select_named(&mut self, name: &str) {
+        self.select_named_os(std::ffi::OsStr::new(name));
+    }
+
+    fn select_named_os(&mut self, name: &std::ffi::OsStr) {
         let found = (0..self.listing.rows())
-            .find_map(|row| self.listing.at(row).filter(|id| self.listing.name(*id) == name));
+            .find_map(|row| self.listing.at(row).filter(|id| self.listing.raw_name(*id) == name));
         if let Some(id) = found {
             self.selection.replace_with(id);
         }
@@ -671,7 +682,7 @@ impl Pane {
     /// 11.9 s to 1.2 s — and measured here, a 200,000-entry directory went from
     /// 186 ms on one thread to the figure in
     /// [docs/09-performance-budgets.md](../../../docs/09-performance-budgets.md).
-    fn dispatch_metadata(&mut self, names: &Arc<Vec<String>>, jobs: &Jobs) {
+    fn dispatch_metadata(&mut self, names: &Arc<Vec<std::ffi::OsString>>, jobs: &Jobs) {
         let chunks = names.len().div_ceil(META_CHUNK);
         self.meta_expected = chunks;
         self.meta_done = 0;
@@ -736,7 +747,7 @@ impl Pane {
         self.select_after_load = self
             .select_after_load
             .take()
-            .or_else(|| self.selection.cursor().map(|id| self.listing.name(id).to_owned()));
+            .or_else(|| self.selection.cursor().map(|id| self.listing.raw_name(id).to_owned()));
         // The scroll is left exactly as it is. It used to be read and written
         // back, which looks like a no-op and is not: `Scroll::to` sets the
         // animation's *target*, so a refresh arriving mid-fling stopped the
@@ -749,7 +760,7 @@ impl Pane {
     /// Goes to the parent directory, keeping the child selected.
     pub fn go_up(&mut self, jobs: &Jobs) {
         let Some(parent) = self.path.parent().map(Path::to_path_buf) else { return };
-        let leaving = self.path.file_name().map(|name| name.to_string_lossy().into_owned());
+        let leaving = self.path.file_name().map(std::ffi::OsStr::to_owned);
         self.open(parent, jobs);
         // Remembered across the read and applied when the names land, because
         // "up" should leave the cursor on the folder you came out of.
@@ -948,8 +959,8 @@ impl Pane {
     /// What an operation wants: the folder just made, or the thing that just came
     /// back out of the trash. The listing does not contain it yet — the watcher
     /// brings it in — so the answer is remembered rather than looked up.
-    pub fn select_after(&mut self, name: String) {
-        self.select_after_load = Some(name);
+    pub fn select_after(&mut self, name: impl Into<std::ffi::OsString>) {
+        self.select_after_load = Some(name.into());
     }
 
     /// Asks for this scroll offset once there is a listing to scroll.
@@ -1202,7 +1213,7 @@ impl Pane {
     /// per entry; a directory listing has none and falls back to the pane's.
     #[must_use]
     pub(crate) fn path_of(&self, id: sk_model::EntryId) -> PathBuf {
-        let name = self.listing.name(id);
+        let name = self.listing.raw_name(id);
         self.listing.home(id).map_or_else(|| self.path.join(name), |home| home.join(name))
     }
 
@@ -1224,13 +1235,13 @@ impl Pane {
             self.selection.fit(arriving.len());
             return;
         }
-        let kept: std::collections::HashSet<&str> =
-            self.selection.iter().map(|id| self.listing.name(id)).collect();
+        let kept: std::collections::HashSet<&std::ffi::OsStr> =
+            self.selection.iter().map(|id| self.listing.raw_name(id)).collect();
         let mut carried = Selection::default();
         carried.fit(arriving.len());
         for index in 0..arriving.len() {
             let id = EntryId(index as u32);
-            if kept.contains(arriving.name(id)) {
+            if kept.contains(arriving.raw_name(id)) {
                 carried.select(id);
             }
         }
@@ -1242,7 +1253,7 @@ impl Pane {
         let Some(wanted) = self.select_after_load.take() else { return };
         let found = (0..self.listing.rows())
             .filter_map(|row| self.listing.at(row))
-            .find(|id| self.listing.name(*id) == wanted);
+            .find(|id| self.listing.raw_name(*id) == wanted);
         let Some(id) = found else { return };
         if self.selection.is_empty() {
             // Coming out of a folder leaves that folder focused *and* selected,
@@ -1257,8 +1268,8 @@ impl Pane {
 }
 
 /// The final component of a path, for putting a cursor back on it.
-fn leaf_of(path: Option<&PathBuf>) -> Option<String> {
-    path?.file_name().map(|name| name.to_string_lossy().into_owned())
+fn leaf_of(path: Option<&PathBuf>) -> Option<std::ffi::OsString> {
+    path?.file_name().map(std::ffi::OsStr::to_owned)
 }
 
 #[cfg(test)]

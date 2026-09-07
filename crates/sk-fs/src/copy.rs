@@ -15,12 +15,11 @@
 //!   turned a 1 GiB sparse file with 12 KiB of data into a gigabyte of zeros, on
 //!   ext4 *and* tmpfs, and it passes a byte-for-byte comparison.
 //!
-//! And one that is neither: `RENAME_NOREPLACE` is refused by ntfs-3g, so an
-//! engine that stops there copies nothing at all to an external drive. The
-//! placement chain is `renameat2`, then `link`-and-`unlink`, then `stat`-and-
-//! `rename` — and which one was used is reported, because the last has a race and
-//! a caller has to be able to know.
+//! Publication requires an atomic no-replace primitive. Where `renameat2` is
+//! unavailable, hardlink publication is tried; filesystems supporting neither
+//! refuse the operation rather than risking an unrelated destination.
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use rustix::fs::{
@@ -46,8 +45,7 @@ pub enum Strategy {
 
 /// How the finished temporary file was given its final name.
 ///
-/// Recorded because one of the three is not atomic, and a caller that cannot tell
-/// which was used cannot know whether it had a race.
+/// Retained in the result for diagnostics and filesystem capability reporting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Placement {
     /// `renameat2(RENAME_NOREPLACE)` — atomic, and refuses an existing
@@ -56,9 +54,8 @@ pub enum Placement {
     /// `link` then `unlink` — also atomic, because `link` refuses an existing
     /// destination, and it needs no flag a filesystem might not have.
     LinkThenUnlink,
-    /// `stat` then `rename`. **Not atomic**: a file created between the two calls
-    /// is overwritten. Used only where neither of the above works, which on the
-    /// matrix means NTFS through ntfs-3g.
+    /// Legacy diagnostic value. Never emitted: check-then-rename can overwrite
+    /// a concurrently created destination and is no longer a fallback.
     CheckThenRename,
     /// A replacement the caller asked for, which needs no protection.
     Replace,
@@ -161,6 +158,15 @@ impl Default for Options {
 ///
 /// **Runs on a job.**
 pub fn copy_file(source: &Path, destination: &Path, options: Options) -> Result<Copied, Problem> {
+    copy_file_progress(source, destination, options, &mut |_| true)
+}
+
+fn copy_file_progress(
+    source: &Path,
+    destination: &Path,
+    options: Options,
+    checkpoint: &mut dyn FnMut(u64) -> bool,
+) -> Result<Copied, Problem> {
     let cwd = fs::CWD;
     let from = openat(cwd, source, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
         .map_err(|error| at(error, source, "open"))?;
@@ -192,17 +198,18 @@ pub fn copy_file(source: &Path, destination: &Path, options: Options) -> Result<
 
     let size = stat.st_size.cast_unsigned();
     let mut refused = Vec::new();
-    let (strategy, bytes) = match write_contents(&from, &into, size, options, &mut refused) {
-        Ok(written) => written,
-        Err((error, stage)) => return Err(discard(&temp, error, destination, stage)),
-    };
+    let (strategy, bytes) =
+        match write_contents(&from, &into, size, options, &mut refused, checkpoint) {
+            Ok(written) => written,
+            Err((error, stage)) => return Err(discard(&temp, error, destination, stage)),
+        };
 
     let mut unpreserved = Vec::new();
-    if options.xattrs {
-        copy_xattrs(&from, &into, &mut unpreserved);
-    }
     if fchmod(&into, Mode::from_bits_truncate(stat.st_mode & 0o7777)).is_err() {
         unpreserved.push("mode".to_owned());
+    }
+    if options.xattrs {
+        copy_xattrs(&from, &into, &mut unpreserved);
     }
     // Timestamps last. Every write above moves the modification time, so setting
     // it earlier sets it to a value the next write overwrites — which is what
@@ -239,12 +246,22 @@ pub fn move_file(
 ) -> Result<Placement, Problem> {
     let cwd = fs::CWD;
     match place_existing(source, destination, options.replace) {
-        Ok(placement) => return Ok(placement),
+        Ok(placement) => {
+            finish_move(source, placement)?;
+            return Ok(placement);
+        }
         // Different filesystems. Every other error is the caller's answer.
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, destination, "rename")),
     }
     let copied = copy_file(source, destination, options)?;
+    if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
+        return Err(Problem::new(
+            ProblemKind::Preservation,
+            destination.display().to_string(),
+            format!("{:?}", copied.unpreserved),
+        ));
+    }
     unlinkat(cwd, source, AtFlags::empty()).map_err(|error| at(error, source, "unlink"))?;
     Ok(copied.placement)
 }
@@ -274,8 +291,7 @@ pub fn remove(path: &Path) -> Result<(), Problem> {
 pub struct Progress {
     /// Files, symlinks and directories finished.
     pub done: u64,
-    /// Bytes written. A reflink writes none, so this can be far below the size of
-    /// what was copied — which is the truth about what happened.
+    /// Logical source bytes covered, including holes and reflinked contents.
     pub bytes: u64,
 }
 
@@ -426,7 +442,8 @@ pub fn move_into(
         ));
     }
     match place_existing(source, &destination, options.replace) {
-        Ok(_) => {
+        Ok(placement) => {
+            finish_move(source, placement)?;
             progress.done += 1;
             return Ok(destination);
         }
@@ -439,28 +456,102 @@ pub fn move_into(
     Ok(destination)
 }
 
+/// Moves a file or directory to the exact recorded destination.
+pub fn move_to(
+    source: &Path,
+    destination: &Path,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(Progress),
+) -> Result<(), Problem> {
+    match place_existing(source, destination, false) {
+        Ok(placement) => return finish_move(source, placement),
+        Err(Errno::XDEV) => {}
+        Err(error) => return Err(at(error, destination, "rename")),
+    }
+    copy_to(source, destination, cancel, watch)?;
+    remove_tree(source, cancel)
+}
+
+fn finish_move(source: &Path, placement: Placement) -> Result<(), Problem> {
+    if placement == Placement::LinkThenUnlink {
+        unlinkat(fs::CWD, source, AtFlags::empty())
+            .map_err(|error| at(error, source, "unlink moved source"))?;
+    }
+    Ok(())
+}
+
 /// Removes a file, a symlink or a whole directory tree, permanently.
 ///
 /// **Runs on a job.**
 pub fn remove_tree(path: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
-    remove_at(path, cancel, 0)
+    let parent = path.parent().ok_or_else(|| at(Errno::INVAL, path, "no parent"))?;
+    let name = path.file_name().ok_or_else(|| at(Errno::INVAL, path, "no name"))?;
+    let fd = openat(
+        fs::CWD,
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| at(e, parent, "open parent"))?;
+    remove_at(&fd, Path::new(name), path, cancel, 0)
 }
 
-fn remove_at(path: &Path, cancel: &sk_util::Cancel, depth: u32) -> Result<(), Problem> {
+fn remove_at(
+    parent: &impl std::os::fd::AsFd,
+    name: &Path,
+    subject: &Path,
+    cancel: &sk_util::Cancel,
+    depth: u32,
+) -> Result<(), Problem> {
     if cancel.is_cancelled() {
-        return Err(cancelled(path));
+        return Err(cancelled(subject));
     }
     if depth > MAX_DEPTH {
-        return Err(too_deep(path));
+        return Err(too_deep(subject));
     }
-    let stat = statat(fs::CWD, path, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, path, "stat"))?;
+    let stat =
+        statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
     if fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::Directory {
-        return unlinkat(fs::CWD, path, AtFlags::empty()).map_err(|e| at(e, path, "remove"));
+        return unlinkat(parent, name, AtFlags::empty()).map_err(|e| at(e, subject, "remove"));
     }
-    for child in children(path)? {
-        remove_at(&path.join(child), cancel, depth + 1)?;
+    remove_directory(parent, name, subject, cancel, depth, &stat)
+}
+
+fn remove_directory(
+    parent: &impl std::os::fd::AsFd,
+    name: &Path,
+    subject: &Path,
+    cancel: &sk_util::Cancel,
+    depth: u32,
+    observed: &Stat,
+) -> Result<(), Problem> {
+    let fd = openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| at(e, subject, "open directory"))?;
+    let opened = fstat(&fd).map_err(|e| at(e, subject, "stat directory"))?;
+    if !same_file(observed, &opened) {
+        return Err(at(Errno::BUSY, subject, "directory changed"));
     }
-    unlinkat(fs::CWD, path, AtFlags::REMOVEDIR).map_err(|error| at(error, path, "remove"))
+    let dir = fs::Dir::read_from(&fd).map_err(|e| at(e, subject, "read directory"))?;
+    for entry in dir {
+        let entry = entry.map_err(|e| at(e, subject, "read directory"))?;
+        let bytes = entry.file_name().to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        let child = Path::new(std::ffi::OsStr::from_bytes(bytes));
+        remove_at(&fd, child, &subject.join(child), cancel, depth + 1)?;
+    }
+    let current =
+        statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
+    if !same_file(&opened, &current) {
+        return Err(at(Errno::BUSY, subject, "directory changed"));
+    }
+    unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|e| at(e, subject, "remove directory"))
 }
 
 /// One entry, whatever kind it is, at a destination path that must not exist.
@@ -492,9 +583,23 @@ fn copy_any(
                 watch(*progress);
                 return Ok(());
             }
-            let copied = copy_file(source, destination, options)?;
+            let base = *progress;
+            let copied = copy_file_progress(source, destination, options, &mut |bytes| {
+                watch(Progress { bytes: base.bytes + bytes, ..base });
+                !cancel.is_cancelled()
+            })?;
+            if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
+                return Err(Problem::new(
+                    ProblemKind::Preservation,
+                    destination.display().to_string(),
+                    format!(
+                        "not preserved: {:?}; leftover: {:?}",
+                        copied.unpreserved, copied.orphan
+                    ),
+                ));
+            }
             progress.done += 1;
-            progress.bytes += copied.bytes;
+            progress.bytes += stat.st_size.cast_unsigned();
             watch(*progress);
             Ok(())
         }
@@ -565,8 +670,28 @@ fn copy_directory(
     // Mode and times after the contents, for the reason a file's are: writing a
     // child moves the directory's modification time.
     let mode = Mode::from_bits_truncate(stat.st_mode & 0o7777);
-    let _ = fs::chmodat(fs::CWD, destination, mode, AtFlags::empty());
-    let _ = fs::utimensat(fs::CWD, destination, &times_of(stat), AtFlags::empty());
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let from = openat(fs::CWD, source, flags, Mode::empty())
+        .map_err(|error| at(error, source, "metadata"))?;
+    let into = openat(fs::CWD, destination, flags, Mode::empty())
+        .map_err(|error| at(error, destination, "metadata"))?;
+    let mut missing = Vec::new();
+    if fchmod(&into, mode).is_err() {
+        missing.push("mode".to_owned());
+    }
+    if options.xattrs {
+        copy_xattrs(&from, &into, &mut missing);
+    }
+    if futimens(&into, &times_of(stat)).is_err() {
+        missing.push("times".to_owned());
+    }
+    if !missing.is_empty() {
+        return Err(Problem::new(
+            ProblemKind::Preservation,
+            destination.display().to_string(),
+            missing.join(", "),
+        ));
+    }
     progress.done += 1;
     watch(*progress);
     Ok(())
@@ -595,7 +720,8 @@ fn children(directory: &Path) -> Result<Vec<PathBuf>, Problem> {
         .map_err(|error| at(error, directory, "open"))?;
     let dir = fs::Dir::read_from(&fd).map_err(|error| at(error, directory, "read"))?;
     let mut out = Vec::new();
-    for entry in dir.flatten() {
+    for entry in dir {
+        let entry = entry.map_err(|e| at(e, directory, "read"))?;
         let name = entry.file_name().to_bytes();
         if name == b"." || name == b".." {
             continue;
@@ -682,14 +808,8 @@ fn place_existing(from: &Path, to: &Path, replace: bool) -> Result<Placement, Er
         Err(Errno::XDEV) => return Err(Errno::XDEV),
         Err(_) => {}
     }
-    // Neither the flag nor hardlinks. This is the only remaining option and it
-    // has a window; the caller is told which path was taken, so the window is not
-    // a secret.
-    if statat(cwd, to, AtFlags::empty()).is_ok() {
-        return Err(Errno::EXIST);
-    }
-    renameat_with(cwd, from, cwd, to, RenameFlags::empty())?;
-    Ok(Placement::CheckThenRename)
+    // Refuse rather than overwrite an entry created after a userspace check.
+    Err(Errno::OPNOTSUPP)
 }
 
 /// Each strategy in turn, until one writes the bytes.
@@ -699,6 +819,7 @@ fn write_contents(
     size: u64,
     options: Options,
     refused: &mut Vec<(Strategy, i32)>,
+    checkpoint: &mut dyn FnMut(u64) -> bool,
 ) -> Result<(Strategy, u64), (Errno, &'static str)> {
     // Not an error when it fails: most filesystems cannot share extents, which is
     // exactly why the strategy is probed and not assumed.
@@ -709,7 +830,7 @@ fn write_contents(
         }
     }
     if options.kernel_copy {
-        match kernel_copy(from, into, size) {
+        match kernel_copy(from, into, size, checkpoint) {
             Ok(bytes) => return Ok((Strategy::KernelCopy, bytes)),
             // Bytes already moved means a real failure rather than a refusal, and
             // starting over would write them twice.
@@ -717,7 +838,7 @@ fn write_contents(
             Err((error, _)) => refused.push((Strategy::KernelCopy, error.raw_os_error())),
         }
     }
-    read_write(from, into, size).map(|bytes| (Strategy::ReadWrite, bytes))
+    read_write(from, into, size, checkpoint).map(|bytes| (Strategy::ReadWrite, bytes))
 }
 
 /// `copy_file_range`, **per data extent**.
@@ -731,6 +852,7 @@ fn kernel_copy(
     from: &impl std::os::fd::AsFd,
     into: &impl std::os::fd::AsFd,
     size: u64,
+    checkpoint: &mut dyn FnMut(u64) -> bool,
 ) -> Result<u64, (Errno, u64)> {
     let mut total = 0u64;
     let mut cursor = 0u64;
@@ -742,7 +864,10 @@ fn kernel_copy(
         };
         let (mut read_at, mut write_at) = (data, data);
         while read_at < hole {
-            let want = usize::try_from((hole - read_at).min(1 << 30)).unwrap_or(1 << 30);
+            if !checkpoint(read_at) {
+                return Err((Errno::CANCELED, total));
+            }
+            let want = usize::try_from((hole - read_at).min(1 << 20)).unwrap_or(1 << 20);
             match fs::copy_file_range(
                 from.as_fd(),
                 Some(&mut read_at),
@@ -750,7 +875,7 @@ fn kernel_copy(
                 Some(&mut write_at),
                 want,
             ) {
-                Ok(0) => break,
+                Ok(0) => return Err((Errno::IO, total)),
                 Ok(moved) => total += moved as u64,
                 Err(error) => return Err((error, total)),
             }
@@ -767,6 +892,7 @@ fn read_write(
     from: &impl std::os::fd::AsFd,
     into: &impl std::os::fd::AsFd,
     size: u64,
+    checkpoint: &mut dyn FnMut(u64) -> bool,
 ) -> Result<u64, (Errno, &'static str)> {
     let mut buffer = vec![0u8; 1 << 20];
     let mut written = 0u64;
@@ -779,12 +905,15 @@ fn read_write(
         };
         let mut at = data;
         while at < hole {
+            if !checkpoint(at) {
+                return Err((Errno::CANCELED, "cancelled"));
+            }
             let want = usize::try_from(hole - at).unwrap_or(buffer.len()).min(buffer.len());
             seek(from.as_fd(), SeekFrom::Start(at)).map_err(|error| (error, "seek"))?;
             let read = rustix::io::read(from.as_fd(), &mut buffer[..want])
                 .map_err(|error| (error, "read"))?;
             if read == 0 {
-                break;
+                return Err((Errno::IO, "source shortened"));
             }
             seek(into.as_fd(), SeekFrom::Start(at)).map_err(|error| (error, "seek"))?;
             let mut done = 0;
@@ -832,7 +961,7 @@ fn extent(
 /// FAT-family filesystem refuses everything. Both are reported and neither aborts
 /// the copy, because a copy that fails on a `security.selinux` label is a copy
 /// that fails on every file on a Fedora desktop.
-fn copy_xattrs(
+pub(crate) fn copy_xattrs(
     from: &impl std::os::fd::AsFd,
     into: &impl std::os::fd::AsFd,
     out: &mut Vec<String>,
@@ -1387,5 +1516,80 @@ mod tests {
         write(&full.join("inside"), b"x");
         assert!(remove(&full).is_err(), "a directory with something in it was removed");
         assert!(full.join("inside").exists());
+    }
+
+    #[test]
+    fn cancellation_interrupts_one_large_file_and_discards_its_staging() {
+        let root = scratch("mid-file-cancel");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, vec![42u8; 4 << 20]).unwrap();
+        let options =
+            super::Options { reflink: false, kernel_copy: false, ..super::Options::default() };
+        let mut largest = 0;
+        let result = super::copy_file_progress(&source, &destination, options, &mut |bytes| {
+            largest = largest.max(bytes);
+            bytes < 1 << 20
+        });
+        assert!(result.is_err());
+        assert_eq!(largest, 1 << 20);
+        assert!(!destination.exists());
+        assert_eq!(super::children(&root).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_link_published_move_removes_the_source_name() {
+        let root = scratch("link-move");
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::write(&source, "contents").unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        super::finish_move(&source, super::Placement::LinkThenUnlink).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), "contents");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_directory_swapped_after_stat_cannot_redirect_recursive_deletion() {
+        let root = scratch("remove-swap");
+        let selected = root.join("selected");
+        let outside = root.join("outside");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), "valuable").unwrap();
+        let parent = std::fs::File::open(&root).unwrap();
+        let observed =
+            super::statat(&parent, "selected", super::AtFlags::SYMLINK_NOFOLLOW).unwrap();
+        std::fs::rename(&selected, root.join("old")).unwrap();
+        std::os::unix::fs::symlink(&outside, &selected).unwrap();
+        assert!(
+            super::remove_directory(
+                &parent,
+                Path::new("selected"),
+                &selected,
+                &sk_util::Cancel::new(),
+                0,
+                &observed
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(outside.join("sentinel")).unwrap(), "valuable");
+        std::fs::remove_file(&selected).unwrap();
+        std::fs::rename(&outside, &selected).unwrap();
+        assert!(
+            super::remove_directory(
+                &parent,
+                Path::new("selected"),
+                &selected,
+                &sk_util::Cancel::new(),
+                0,
+                &observed
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(selected.join("sentinel")).unwrap(), "valuable");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

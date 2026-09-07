@@ -26,8 +26,6 @@ What is done and what is owed is in
 [08-roadmap.md](docs/08-roadmap.md#m0--6-wk--platform-layer). What an alpha does not
 have yet is [below](#what-this-alpha-does-not-do).
 
-![Skerry](captures/dark.png)
-
 ## Installing
 
 ```

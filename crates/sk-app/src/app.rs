@@ -930,7 +930,7 @@ pub struct App {
     zoom: usize,
     /// The session file as it was last written, so an unchanged one is not
     /// rewritten.
-    session_text: String,
+    session_writer: crate::session::WriteBack,
     /// When it was last considered, which is the floor's clock.
     session_at: Instant,
     /// Where the last layout put the panes, and what the pointer is on.
@@ -1494,8 +1494,12 @@ impl App {
         // because the file holds a line per tab and never touches the listing.
         // Writing it is the expensive half and still happens at most once every
         // `SESSION_FLOOR`.
+        if !self.session_writer.ready(now) {
+            self.session_owed = false;
+            return;
+        }
         let text = crate::session::render(&self.session());
-        if text == self.session_text {
+        if text == self.session_writer.acknowledged() {
             self.session_owed = false;
             return;
         }
@@ -1511,17 +1515,14 @@ impl App {
         self.session_owed = false;
         self.session_at = Instant::now();
         self.saves = self.saves.saturating_add(1);
-        self.session_text.clone_from(&text);
         if now {
             // **Written here rather than on a job**, and only here: this is the
             // last thing the process does, and a job queued now races the pool's
             // shutdown. There is no frame left to block.
-            crate::session::write(&text);
+            self.session_writer.finish(text);
             return;
         }
-        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            crate::session::write(&text);
-        });
+        self.session_writer.start(text, &self.jobs.pool, &self.jobs.wake);
     }
 
     /// Puts the window, the jobs and the renderer together into one `App`.
@@ -1599,7 +1600,7 @@ impl App {
             watching: true,
             capabilities,
             zoom: ZOOM_DEFAULT,
-            session_text: String::new(),
+            session_writer: crate::session::WriteBack::default(),
             session_at: now,
             placement: crate::panes::Placement::default(),
             measurer,
@@ -3192,7 +3193,7 @@ impl App {
         self.panes.focused_mut().scroll.reveal(top, bottom, body);
         self.edits.naming = Some(crate::edit::Naming {
             row,
-            path: self.panes.focused().path.join(&name),
+            path: self.panes.focused().path_of(id),
             // The whole name for a directory, which has no extension to keep, and
             // the part before the extension for a file — the edit a rename almost
             // always is. One gesture either way: a rename opens with something
@@ -5428,7 +5429,7 @@ impl App {
     pub(crate) fn copy_content(&mut self) {
         let Some(id) = self.panes.focused().focused() else { return };
         let name = self.panes.focused().listing.name(id).to_owned();
-        let path = self.panes.focused().path.join(&name);
+        let path = self.panes.focused().path_of(id);
         let sender = self.replies.content_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
@@ -7135,7 +7136,7 @@ scope_aim={scope_aim:?}",
             self.panes.focused_mut().open(parent, &self.jobs);
         }
         if let Some(name) = name {
-            self.panes.focused_mut().select_after(name.to_string_lossy().into_owned());
+            self.panes.focused_mut().select_after(name.clone());
         }
         self.settle_panes();
     }

@@ -19,14 +19,24 @@
 //! itself made. The bytes are `crate::copy`'s, ported from Spike E; what is here
 //! is the part that makes the result undoable.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT: AtomicU64 = AtomicU64::new(0);
+
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{Mode, OFlags};
 use sk_model::{Problem, ProblemKind};
 
 /// What a mutation did, and enough to undo it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
+    /// Completed or partial work with a user-visible problem that must be retained.
+    Noted {
+        /// What can still be undone.
+        change: Box<Change>,
+        /// The problem already translated for the operation result.
+        note: String,
+    },
     /// Several changes made by one gesture, oldest first.
     ///
     /// **One gesture is one undo.** A paste of two hundred files makes two
@@ -88,8 +98,8 @@ pub enum Change {
     ///
     /// **A copy whose source is inside a file** — [ADR
     /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
-    /// The inverse is `Copied`'s and for the same reason: `root` is a directory
-    /// this operation made, so everything in it was put there by the unpack.
+    /// The inverse trashes the current output, preserving files added since
+    /// extraction as well as the files that came from the archive.
     ///
     /// **The one change [`apply`] cannot redo.** Doing it again means a sandboxed
     /// child, which is level 2 and above this crate, so `Edits::redo` routes this
@@ -122,6 +132,16 @@ pub enum Change {
 impl Change {
     /// The path a listing should put its cursor on after this ran.
     ///
+    /// A warning attached to completed work, including the last warned batch item.
+    #[must_use]
+    pub fn warning(&self) -> Option<&str> {
+        match self {
+            Self::Noted { note, .. } => Some(note),
+            Self::Batch(changes) => changes.iter().rev().find_map(Self::warning),
+            _ => None,
+        }
+    }
+
     /// What a person is looking for after an operation: the folder they made,
     /// the new name, or — after an undo — the thing that came back.
     #[must_use]
@@ -129,6 +149,7 @@ impl Change {
         match self {
             // The last one, which is what the gesture finished by doing and
             // therefore where a person is looking.
+            Self::Noted { change, .. } => change.subject(),
             Self::Batch(changes) => changes.last().map_or(Path::new(""), Change::subject),
             // The folder that was made, and the file that was edited: two
             // different changes whose subject happens to be the path they carry.
@@ -165,6 +186,7 @@ impl Change {
             path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
         };
         match self {
+            Self::Noted { change, .. } => change.summary(),
             Self::Batch(changes) => match changes.as_slice() {
                 [] => ("history.nothing", String::new()),
                 [only] => only.summary(),
@@ -196,6 +218,7 @@ impl Change {
         match self {
             // The *first* one, because a batch is undone backwards and the first
             // change is the last to be put back.
+            Self::Noted { change, .. } => change.origin(),
             Self::Batch(changes) => changes.first().and_then(Change::origin),
             // Nothing to point at: undoing a `Created` removes the folder, and
             // an `Erased` is not undone at all.
@@ -269,7 +292,7 @@ pub fn rename(from: &Path, name: &str) -> Result<Change, Problem> {
 ///
 /// **Runs on a job.**
 pub fn trash(path: &Path) -> Result<Change, Problem> {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    let Some(name) = path.file_name() else {
         return Err(Problem::new(ProblemKind::BadName, path.display().to_string(), "no name"));
     };
     let home = trash_home()?;
@@ -298,7 +321,7 @@ pub fn trash(path: &Path) -> Result<Change, Problem> {
     let (stored, info_path) = claim(&files, &info, name)?;
     let record = format!(
         "[Trash Info]\nPath={}\nDeletionDate={}\n",
-        encode_path(&path.to_string_lossy()),
+        encode_path_bytes(path.as_os_str().as_encoded_bytes()),
         deletion_date()
     );
     std::fs::write(&info_path, record).map_err(|error| io_problem(&error, &info_path))?;
@@ -345,12 +368,17 @@ pub fn copy_into(
             Err(_) if cancel.is_cancelled() && destination.exists() => {
                 Ok(Change::Copied { source: source.to_path_buf(), destination })
             }
+            Err(problem) if taken(&destination) => Ok(Change::Noted {
+                change: Box::new(Change::Copied { source: source.to_path_buf(), destination }),
+                note: problem.message(),
+            }),
             Err(problem) => Err(problem),
         };
     }
     let destination = into.join(name);
+    let existed = taken(&destination);
     if conflict == Conflict::Replace && taken(&destination) {
-        return replace_into(name, into, &mut |staging| {
+        return replace_into(name, into, None, &mut |staging| {
             crate::copy::copy_to(source, staging, cancel, watch)
         })
         .map(|displaced| {
@@ -374,6 +402,10 @@ pub fn copy_into(
         Err(_) if cancel.is_cancelled() && destination.exists() => {
             Ok(Change::Copied { source: source.to_path_buf(), destination })
         }
+        Err(problem) if !existed && taken(&destination) => Ok(Change::Noted {
+            change: Box::new(Change::Copied { source: source.to_path_buf(), destination }),
+            note: problem.message(),
+        }),
         Err(problem) => Err(problem),
     }
 }
@@ -449,8 +481,8 @@ pub fn move_into(
         && taken(&into.join(name))
     {
         let destination = into.join(name);
-        let displaced = replace_into(name, into, &mut |staging| {
-            crate::copy::move_file(source, staging, crate::copy::Options::default()).map(|_| ())
+        let displaced = replace_into(name, into, Some(source), &mut |staging| {
+            crate::copy::move_to(source, staging, cancel, watch)
         })?;
         let moved = Change::Renamed { from: source.to_path_buf(), to: destination };
         return Ok(Change::Batch(vec![displaced, moved]));
@@ -479,14 +511,7 @@ pub fn move_into(
 ///
 /// **Runs on a job.**
 pub fn write_text(path: &Path, text: &str) -> Result<(), Problem> {
-    if crate::atomically(path, text) {
-        return Ok(());
-    }
-    Err(Problem::new(
-        ProblemKind::Unreadable,
-        path.display().to_string(),
-        "the file could not be written",
-    ))
+    crate::save::write(path, text).map_err(|error| io_problem(&error, path))
 }
 
 /// Replaces a text file's contents and returns the change that did it.
@@ -497,8 +522,18 @@ pub fn write_text(path: &Path, text: &str) -> Result<(), Problem> {
 /// **Runs on a job.**
 pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
     let before = crate::read_text(path, crate::TEXT_LIMIT)?;
-    write_text(path, after)?;
-    Ok(Change::Edited { path: path.to_path_buf(), before, after: after.to_owned() })
+    let change = Change::Edited { path: path.to_path_buf(), before, after: after.to_owned() };
+    match write_text(path, after) {
+        Ok(()) => Ok(change),
+        // A directory sync can fail after publication. Keep the committed edit
+        // undoable while still reporting that durability was not acknowledged.
+        Err(problem)
+            if crate::read_text(path, crate::TEXT_LIMIT).is_ok_and(|text| text == after) =>
+        {
+            Ok(Change::Noted { change: Box::new(change), note: problem.message() })
+        }
+        Err(problem) => Err(problem),
+    }
 }
 
 /// Whether something is already called that.
@@ -516,35 +551,48 @@ fn taken(path: &Path) -> bool {
 /// Trash, and only then does the arrival take the name. Every other order has a
 /// window where a failure leaves *nothing* at the name: copying over the old one
 /// destroys it before anything knows whether the new one arrives, and trashing
-/// first does the same with an extra step. Here a failure at any point leaves
-/// the directory as it was.
+/// first does the same with an extra step. Rollback restores a moved source;
+/// if recovery itself is refused, the staged bytes remain and the error names
+/// the recovery failure.
 fn replace_into(
     name: &std::ffi::OsStr,
     into: &Path,
+    original: Option<&Path>,
     place: &mut dyn FnMut(&Path) -> Result<(), Problem>,
 ) -> Result<Change, Problem> {
     let destination = into.join(name);
-    let Some(free) = crate::copy::free_name(into, name) else {
-        return Err(Problem::new(
-            ProblemKind::NameTaken,
-            destination.display().to_string(),
-            "no free name to stage a replacement under",
+    let holding = loop {
+        let candidate = into.join(format!(
+            ".skerry-replace-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        match rustix::fs::mkdir(&candidate, Mode::from_bits_truncate(0o700)) {
+            Ok(()) => break candidate,
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(problem(error, &candidate)),
+        }
     };
-    let staging = into.join(&free);
+    let staging = holding.join(name);
     let discard = || {
+        if let Some(source) = original {
+            if taken(&staging) {
+                crate::copy::move_to(&staging, source, &sk_util::Cancel::new(), &mut |_| {})?;
+            }
+            return rustix::fs::rmdir(&holding).map_err(|error| problem(error, &holding));
+        }
         // A fresh token: the staged copy is being removed *because* the
         // operation is over, and the one that stopped it is already cancelled.
-        let _ = crate::copy::remove_tree(&staging, &sk_util::Cancel::new());
+        crate::copy::remove_tree(&holding, &sk_util::Cancel::new())
     };
     if let Err(problem) = place(&staging) {
-        discard();
+        discard()?;
         return Err(problem);
     }
     let displaced = match trash(&destination) {
         Ok(change) => change,
         Err(problem) => {
-            discard();
+            discard()?;
             return Err(problem);
         }
     };
@@ -553,9 +601,10 @@ fn replace_into(
         // and "very close to" is why what was trashed is put back rather than
         // left in the Trash with nothing on the undo stack pointing at it.
         let _ = revert(&displaced);
-        discard();
+        discard()?;
         return Err(problem);
     }
+    let _ = rustix::fs::rmdir(&holding);
     Ok(displaced)
 }
 
@@ -564,6 +613,7 @@ fn replace_into(
 /// **Runs on a job.**
 pub fn revert(change: &Change) -> Result<(), Problem> {
     match change {
+        Change::Noted { change, .. } => revert(change),
         // Backwards, and the first failure stops it: a batch half undone is a
         // state somebody can look at and act on, where carrying on past an
         // error would keep changing a filesystem that has already surprised us.
@@ -584,22 +634,23 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         // one directory can never cross a filesystem, but a *move* between two
         // can, and its undo has to be able to come back the same way it went.
         Change::Renamed { from, to } => {
-            crate::copy::move_file(to, from, crate::copy::Options::default()).map(|_| ())
+            crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})
         }
-        // Recursive, unlike `Created`'s `rmdir`: what the copy made is what is
-        // being taken away, and all of it was made by the copy. Anything added to
-        // it since is inside a directory this operation created, which is the one
-        // case where a recursive remove is still an undo.
-        Change::Copied { destination, .. } => {
-            crate::copy::remove_tree(destination, &sk_util::Cancel::new())
-        }
-        // The same recursive remove, and the same argument for it: the directory
-        // is one this operation made and everything under it came out of the
-        // archive. A *partial* unpack is recorded too — a cancelled one, or one
-        // that ran out of room — and this is the only thing that can take it back.
-        Change::Unpacked { root, .. } => crate::copy::remove_tree(root, &sk_util::Cancel::new()),
+        // Trash preserves files added after the original operation.
+        Change::Copied { destination, .. } => trash(destination).map(|_| ()),
+        // Extraction output gets the same recoverable inverse as a copy.
+        Change::Unpacked { root, .. } => trash(root).map(|_| ()),
         // Straight back to what it held, which is the only way to undo bytes.
-        Change::Edited { path, before, .. } => write_text(path, before).map(|_| ()),
+        Change::Edited { path, before, after } => {
+            if crate::read_text(path, crate::TEXT_LIMIT)? != *after {
+                return Err(Problem::new(
+                    ProblemKind::NameTaken,
+                    path.display().to_string(),
+                    "contents changed after edit",
+                ));
+            }
+            write_text(path, before)
+        }
         Change::Trashed { original, stored, info } => {
             move_no_replace(stored, original)?;
             // The file is back; a leftover `.trashinfo` is the corruption the
@@ -614,11 +665,21 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
 /// **Runs on a job.**
 pub fn apply(change: &Change) -> Result<Change, Problem> {
     match change {
+        Change::Noted { change, .. } => apply(change),
         Change::Batch(changes) => {
             changes.iter().map(apply).collect::<Result<_, _>>().map(Change::Batch)
         }
         // The bytes it held after the edit, put back after an undo took them away.
-        Change::Edited { path, after, .. } => write_text(path, after).map(|()| change.clone()),
+        Change::Edited { path, before, after } => {
+            if crate::read_text(path, crate::TEXT_LIMIT)? != *before {
+                return Err(Problem::new(
+                    ProblemKind::NameTaken,
+                    path.display().to_string(),
+                    "contents changed after undo",
+                ));
+            }
+            edit_text(path, after)
+        }
         // **Redone by the caller, not here** — ADR 0032. Unpacking means a
         // sandboxed child, and this crate is level 1 with no business spawning
         // one; `Edits::redo` recognises this variant and puts it back on the
@@ -642,22 +703,23 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             create_directory(parent, name)
         }
         Change::Renamed { from, to } => {
-            let Some(name) = to.file_name().and_then(|name| name.to_str()) else {
-                return Err(Problem::new(
-                    ProblemKind::BadName,
-                    to.display().to_string(),
-                    "no name",
-                ));
-            };
-            rename(from, name)
+            crate::copy::move_to(from, to, &sk_util::Cancel::new(), &mut |_| {})?;
+            Ok(change.clone())
         }
         // **To the recorded destination, not to one derived from the source.**
         // A copy into the folder its original is in lands under a free name, and
         // re-deriving would send the redo at the taken one — which fails, and
         // would have failed silently differently once the free name changed.
         Change::Copied { source, destination } => {
-            crate::copy::copy_to(source, destination, &sk_util::Cancel::new(), &mut |_| {})?;
-            Ok(Change::Copied { source: source.clone(), destination: destination.clone() })
+            let existed = taken(destination);
+            let fresh = Change::Copied { source: source.clone(), destination: destination.clone() };
+            match crate::copy::copy_to(source, destination, &sk_util::Cancel::new(), &mut |_| {}) {
+                Ok(()) => Ok(fresh),
+                Err(problem) if !existed && taken(destination) => {
+                    Ok(Change::Noted { change: Box::new(fresh), note: problem.message() })
+                }
+                Err(problem) => Err(problem),
+            }
         }
         // Re-trashed from scratch rather than by moving the same bytes back into
         // the same slot: the slot may have been taken, and `trash` is the thing
@@ -672,6 +734,96 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             "a permanent delete cannot be done again",
         )),
     }
+}
+
+/// The exact boundary reached by a batch replay, including a failed step.
+pub struct Replay {
+    /// Work that finished, in original gesture order.
+    pub completed: Option<Change>,
+    /// Work still waiting, in original gesture order.
+    pub remaining: Option<Change>,
+    /// Why replay stopped, if it did.
+    pub problem: Option<Problem>,
+}
+
+/// Undoes one leaf and retains a warning if publication succeeded before sync failed.
+pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
+    if let Change::Edited { path, before, after } = change {
+        if crate::read_text(path, crate::TEXT_LIMIT)? != *after {
+            return Err(Problem::new(
+                ProblemKind::NameTaken,
+                path.display().to_string(),
+                "contents changed after edit",
+            ));
+        }
+        return match edit_text(path, before)? {
+            Change::Noted { note, .. } => {
+                Ok(Change::Noted { change: Box::new(change.clone()), note })
+            }
+            _ => Ok(change.clone()),
+        };
+    }
+    revert(change)?;
+    Ok(change.clone())
+}
+
+/// Replays leaf operations, preserving both sides of the boundary on failure.
+///
+/// The caller supplies the leaf executor so archive replay stays above sk-fs.
+pub fn replay(
+    change: &Change,
+    undo: bool,
+    step: &mut dyn FnMut(&Change) -> Result<Change, Problem>,
+) -> Replay {
+    fn flatten(change: &Change, out: &mut Vec<Change>) {
+        match change {
+            Change::Batch(changes) => {
+                for change in changes {
+                    flatten(change, out);
+                }
+            }
+            Change::Noted { change, .. } => flatten(change, out),
+            change => out.push(change.clone()),
+        }
+    }
+    fn grouped(mut changes: Vec<Change>) -> Option<Change> {
+        match changes.len() {
+            0 => None,
+            1 => changes.pop(),
+            _ => Some(Change::Batch(changes)),
+        }
+    }
+    let mut waiting = Vec::new();
+    flatten(change, &mut waiting);
+    if !undo {
+        waiting.reverse();
+    }
+    let mut completed = Vec::new();
+    let mut problem = None;
+    while let Some(change) = waiting.pop() {
+        match step(&change) {
+            Ok(fresh) => {
+                if let Change::Noted { note, .. } = &fresh {
+                    problem = Some(Problem::plain(ProblemKind::Unreadable, note.clone()));
+                }
+                completed.push(fresh);
+                if problem.is_some() {
+                    break;
+                }
+            }
+            Err(error) => {
+                waiting.push(change);
+                problem = Some(error);
+                break;
+            }
+        }
+    }
+    if undo {
+        completed.reverse();
+    } else {
+        waiting.reverse();
+    }
+    Replay { completed: grouped(completed), remaining: grouped(waiting), problem }
 }
 
 /// `$XDG_DATA_HOME/Trash`, or the specification's fallback.
@@ -692,10 +844,15 @@ fn trash_home() -> Result<PathBuf, Problem> {
 /// The `info` file is created empty with `O_EXCL` — that is the atomic step, and
 /// the specification names it as such. The name is then `name`, `name.2`,
 /// `name.3` and so on until one is free.
-fn claim(files: &Path, info: &Path, name: &str) -> Result<(PathBuf, PathBuf), Problem> {
+fn claim(files: &Path, info: &Path, name: &std::ffi::OsStr) -> Result<(PathBuf, PathBuf), Problem> {
     for attempt in 1..1000u32 {
-        let candidate = if attempt == 1 { name.to_owned() } else { format!("{name}.{attempt}") };
-        let record = info.join(format!("{candidate}.trashinfo"));
+        let mut candidate = name.to_owned();
+        if attempt != 1 {
+            candidate.push(format!(".{attempt}"));
+        }
+        let mut record_name = candidate.clone();
+        record_name.push(".trashinfo");
+        let record = info.join(record_name);
         let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
         match rustix::fs::open(&record, flags, Mode::from_bits_truncate(0o600)) {
             Ok(_) => return Ok((files.join(candidate), record)),
@@ -703,7 +860,11 @@ fn claim(files: &Path, info: &Path, name: &str) -> Result<(PathBuf, PathBuf), Pr
             Err(error) => return Err(problem(error, &record)),
         }
     }
-    Err(Problem::new(ProblemKind::Unreadable, name, "a thousand names in the trash are taken"))
+    Err(Problem::new(
+        ProblemKind::Unreadable,
+        name.to_string_lossy(),
+        "a thousand names in the trash are taken",
+    ))
 }
 
 /// Moves `from` to `to`, and **never over anything**.
@@ -718,11 +879,8 @@ fn move_no_replace(from: &Path, to: &Path) -> Result<(), Problem> {
         // Not every filesystem implements the flag. Falling back to a plain
         // rename would silently replace, so the fallback is a link-and-unlink
         // for a file and a refusal for anything else — and both are honest.
-        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS) => {
-            if rustix::fs::statat(cwd, to, AtFlags::SYMLINK_NOFOLLOW).is_ok() {
-                return Err(problem(rustix::io::Errno::EXIST, to));
-            }
-            rustix::fs::rename(from, to).map_err(|error| problem(error, to))
+        Err(rustix::io::Errno::INVAL | rustix::io::Errno::NOSYS | rustix::io::Errno::OPNOTSUPP) => {
+            Err(problem(rustix::io::Errno::OPNOTSUPP, to))
         }
         Err(error) => Err(problem(error, to)),
     }
@@ -755,10 +913,15 @@ fn deletion_date() -> String {
 /// The specification says the value is the path "with the usual URL encoding",
 /// and the separators stay separators: a restore reads this back and joins it,
 /// so encoding `/` would make every restored path a single filename.
+#[cfg(test)]
 fn encode_path(path: &str) -> String {
+    encode_path_bytes(path.as_bytes())
+}
+
+fn encode_path_bytes(path: &[u8]) -> String {
     const KEEP: &[u8] = b"-_.~/";
     let mut out = String::with_capacity(path.len());
-    for byte in path.as_bytes() {
+    for byte in path {
         if byte.is_ascii_alphanumeric() || KEEP.contains(byte) {
             out.push(char::from(*byte));
         } else {
@@ -814,32 +977,33 @@ mod tests {
     /// Undoing a copy removes what the copy made, and doing it again remakes it.
     #[test]
     fn a_copy_is_undone_by_removing_what_it_made() {
-        let root = scratch("copy-undo");
-        let from = root.join("from");
-        let into = root.join("into");
-        std::fs::create_dir_all(from.join("folder")).unwrap();
-        std::fs::create_dir(&into).unwrap();
-        std::fs::write(from.join("folder/inside.txt"), b"contents").unwrap();
+        with_trash("copy-undo", |root| {
+            let from = root.join("from");
+            let into = root.join("into");
+            std::fs::create_dir_all(from.join("folder")).unwrap();
+            std::fs::create_dir(&into).unwrap();
+            std::fs::write(from.join("folder/inside.txt"), b"contents").unwrap();
 
-        let change = copy_into(
-            &from.join("folder"),
-            &into,
-            Conflict::Refuse,
-            &sk_util::Cancel::new(),
-            &mut |_| {},
-        )
-        .expect("copied");
-        let landed = into.join("folder");
-        assert_eq!(change.subject(), landed);
-        assert!(landed.join("inside.txt").is_file());
+            let change = copy_into(
+                &from.join("folder"),
+                &into,
+                Conflict::Refuse,
+                &sk_util::Cancel::new(),
+                &mut |_| {},
+            )
+            .expect("copied");
+            let landed = into.join("folder");
+            assert_eq!(change.subject(), landed);
+            assert!(landed.join("inside.txt").is_file());
 
-        revert(&change).expect("undone");
-        assert!(!landed.exists(), "the copy survived its undo");
-        assert!(from.join("folder/inside.txt").is_file(), "the source was touched");
+            revert(&change).expect("undone");
+            assert!(!landed.exists(), "the copy survived its undo");
+            assert!(from.join("folder/inside.txt").is_file(), "the source was touched");
 
-        let again = apply(&change).expect("redone");
-        assert_eq!(again.subject(), landed);
-        assert_eq!(std::fs::read(landed.join("inside.txt")).unwrap(), b"contents");
+            let again = apply(&change).expect("redone");
+            assert_eq!(again.subject(), landed);
+            assert_eq!(std::fs::read(landed.join("inside.txt")).unwrap(), b"contents");
+        });
     }
 
     /// An undo leaves the cursor on the source, because that is the only thing
@@ -1250,29 +1414,30 @@ mod tests {
     /// re-`apply`ed here, and says so rather than pretending.
     #[test]
     fn undoing_an_unpack_removes_what_it_unpacked() {
-        let home = scratch("unpacked");
-        let root = home.join("reports");
-        std::fs::create_dir_all(root.join("deep/inner")).expect("the tree");
-        std::fs::write(root.join("notes.txt"), b"out of the archive").expect("a file");
-        std::fs::write(root.join("deep/inner/note.md"), b"nested").expect("another");
-        let archive = home.join("reports.zip");
-        std::fs::write(&archive, b"PK\x03\x04").expect("the archive");
+        with_trash("unpacked", |home| {
+            let root = home.join("reports");
+            std::fs::create_dir_all(root.join("deep/inner")).expect("the tree");
+            std::fs::write(root.join("notes.txt"), b"out of the archive").expect("a file");
+            std::fs::write(root.join("deep/inner/note.md"), b"nested").expect("another");
+            let archive = home.join("reports.zip");
+            std::fs::write(&archive, b"PK\x03\x04").expect("the archive");
 
-        let change =
-            Change::Unpacked { archive: archive.clone(), root: root.clone(), only: Vec::new() };
-        assert_eq!(change.subject(), root, "the cursor goes to the folder it made");
-        assert_eq!(change.origin(), Some(archive.as_path()), "and back to the archive");
-        assert_eq!(change.summary().0, "history.unpacked");
+            let change =
+                Change::Unpacked { archive: archive.clone(), root: root.clone(), only: Vec::new() };
+            assert_eq!(change.subject(), root, "the cursor goes to the folder it made");
+            assert_eq!(change.origin(), Some(archive.as_path()), "and back to the archive");
+            assert_eq!(change.summary().0, "history.unpacked");
 
-        revert(&change).expect("the unpack undoes");
-        assert!(!root.exists(), "undo left the folder behind");
-        assert!(archive.is_file(), "undo took the archive as well");
+            revert(&change).expect("the unpack undoes");
+            assert!(!root.exists(), "undo left the folder behind");
+            assert!(archive.is_file(), "undo took the archive as well");
 
-        // **Redone by the caller, because doing it again needs a child process.**
-        // A `Problem` here is the honest answer for a direct call; `Edits::redo`
-        // never makes one, and a test that let this pass silently would be a
-        // test that let the redo path disappear.
-        assert!(apply(&change).is_err(), "ops::apply pretended to redo an unpack");
+            // **Redone by the caller, because doing it again needs a child process.**
+            // A `Problem` here is the honest answer for a direct call; `Edits::redo`
+            // never makes one, and a test that let this pass silently would be a
+            // test that let the redo path disappear.
+            assert!(apply(&change).is_err(), "ops::apply pretended to redo an unpack");
+        });
     }
 
     #[test]
@@ -1411,5 +1576,110 @@ mod tests {
         assert!(super::edit_text(&missing, "x").is_err());
         assert!(!missing.exists(), "a refused edit created the file");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn replacement_failure_returns_the_moved_source() {
+        with_trash("replace-failure", |root| {
+            let source = root.join("source");
+            let into = root.join("into");
+            std::fs::create_dir(&into).unwrap();
+            std::fs::write(&source, "source").unwrap();
+            std::fs::write(into.join("source"), "destination").unwrap();
+            std::fs::write(root.join("data"), "blocked trash").unwrap();
+            assert!(
+                move_into(&source, &into, Conflict::Replace, &sk_util::Cancel::new(), &mut |_| {})
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(source).unwrap(), "source");
+            assert_eq!(std::fs::read_to_string(into.join("source")).unwrap(), "destination");
+        });
+    }
+
+    #[test]
+    fn move_redo_keeps_the_destination_directory() {
+        let root = scratch("move-redo-parent");
+        let source = root.join("tree");
+        let into = root.join("into");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&into).unwrap();
+        std::fs::write(source.join("leaf"), "contents").unwrap();
+        let change =
+            move_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+                .unwrap();
+        revert(&change).unwrap();
+        apply(&change).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_to_string(into.join("tree/leaf")).unwrap(), "contents");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_undo_keeps_later_work_in_trash() {
+        with_trash("undo-preserves", |root| {
+            let source = root.join("tree");
+            let into = root.join("into");
+            std::fs::create_dir(&source).unwrap();
+            std::fs::create_dir(&into).unwrap();
+            let change =
+                copy_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+                    .unwrap();
+            std::fs::write(into.join("tree/later"), "valuable").unwrap();
+            revert(&change).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(root.join("data/Trash/files/tree/later")).unwrap(),
+                "valuable"
+            );
+        });
+    }
+
+    #[test]
+    fn replay_retains_both_sides_of_a_failed_batch() {
+        let root = scratch("replay-boundary");
+        let folder = root.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("file"), "contents").unwrap();
+        std::fs::write(folder.join("blocker"), "later work").unwrap();
+        let created = Change::Created { path: folder.clone() };
+        let moved = Change::Renamed { from: root.join("file"), to: folder.join("file") };
+        let batch = Change::Batch(vec![created.clone(), Change::Batch(vec![moved.clone()])]);
+        let first =
+            super::replay(&batch, true, &mut |change| revert(change).map(|()| change.clone()));
+        assert!(first.problem.is_some());
+        assert_eq!(first.remaining, Some(created));
+        assert_eq!(first.completed, Some(moved));
+        std::fs::remove_file(folder.join("blocker")).unwrap();
+        let second = super::replay(&first.remaining.unwrap(), true, &mut |change| {
+            revert(change).map(|()| change.clone())
+        });
+        assert!(second.problem.is_none());
+        assert!(!folder.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn a_partial_tree_failure_returns_an_undoable_warning() {
+        let root = scratch("partial-copy");
+        let source = root.join("tree");
+        let into = root.join("into");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&into).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            source.join("fifo"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+            0,
+        )
+        .unwrap();
+        let result =
+            copy_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+                .unwrap();
+        let Change::Noted { change, note } = result else {
+            panic!("partial work was not reported")
+        };
+        assert_eq!(*change, Change::Copied { source, destination: into.join("tree") });
+        assert!(!note.is_empty());
+        assert!(into.join("tree").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -109,7 +109,52 @@ pub fn filesystem_name(path: &Path) -> Option<&'static str> {
 /// The lane a read on `path` belongs on.
 #[must_use]
 pub fn lane_for(path: &Path) -> Lane {
-    probe(path).lane()
+    match probe(path).lane() {
+        Lane::Serial => Lane::Device(queue_key(path)),
+        lane => lane,
+    }
+}
+
+/// Reads mount identity without issuing a syscall against the target mount.
+#[must_use]
+pub fn queue_key(path: &Path) -> u64 {
+    std::fs::read("/proc/self/mountinfo").map_or(0, |bytes| mount_key(path, &bytes))
+}
+
+fn mount_key(path: &Path, bytes: &[u8]) -> u64 {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut best = (0, 0);
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
+        if fields.len() < 6 {
+            continue;
+        }
+        let mut mount = Vec::new();
+        let mut at = 0;
+        while at < fields[4].len() {
+            let rest = &fields[4][at..];
+            if rest.len() >= 4
+                && rest[0] == b'\\'
+                && rest[1..4].iter().all(|b| (b'0'..=b'7').contains(b))
+            {
+                mount.push((rest[1] - b'0') * 64 + (rest[2] - b'0') * 8 + rest[3] - b'0');
+                at += 4;
+            } else {
+                mount.push(rest[0]);
+                at += 1;
+            }
+        }
+        if mount.len() >= best.0 && path.starts_with(std::ffi::OsStr::from_bytes(&mount)) {
+            let number =
+                std::str::from_utf8(fields[2]).ok().and_then(|value| value.split_once(':'));
+            if let Some((major, minor)) =
+                number.and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)))
+            {
+                best = (mount.len(), (u64::from(major) << 32) | u64::from(minor));
+            }
+        }
+    }
+    best.1
 }
 
 fn is_remote(stats: &StatFs) -> bool {
@@ -185,5 +230,13 @@ mod tests {
         assert_eq!(probe(Path::new("/nonexistent-skerry-probe")), Device::Unknown);
         assert_eq!(Device::Unknown.lane(), Lane::Parallel);
         assert_eq!(Device::Remote.lane(), Lane::Serial, "a hung mount gets one worker");
+    }
+
+    #[test]
+    fn mount_identity_uses_the_longest_component_prefix_and_raw_escapes() {
+        let mounts = b"1 0 8:1 / / rw - ext4 /dev/a rw\n2 1 0:7 / /remote rw - fuse peer rw\n3 1 0:8 / /other\\040disk rw - fuse other rw\n";
+        assert_eq!(super::mount_key(Path::new("/remote/file"), mounts), 7);
+        assert_eq!(super::mount_key(Path::new("/remoteish/file"), mounts), (8 << 32) | 1);
+        assert_eq!(super::mount_key(Path::new("/other disk/file"), mounts), 8);
     }
 }

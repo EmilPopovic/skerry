@@ -82,13 +82,12 @@ an API:
   neither is a place — those two were two of the four rows the first version
   showed.
 
-Owed: **nothing watches the mount table.** `/proc/self/mountinfo` is pollable —
-`poll` reports `POLLPRI` on a change — and the frame loop already sleeps on
-descriptors, so the shape of the fix is known. Until then a volume appearing is
-picked up by `F5`.
-
-Also owed, and M2's: the tree, drag-to-reorder, a resizable divider, and writing
-a bookmark back to the file it came from.
+The watcher polls `/proc/self/mountinfo` for `POLLPRI` and wakes the frame loop
+when mounts change. Device events also trigger volume refreshes; see
+[ADR 0030](adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md).
+The sidebar has an expandable tree, pin reordering, a resizable divider, and
+bookmark persistence in GTK's file; see
+[ADR 0021](adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md).
 
 ## The window frame
 

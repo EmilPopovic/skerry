@@ -114,7 +114,7 @@ fn elsewhere(head: &[u8]) -> Option<&'static str> {
     if head.starts_with(b"Rar!\x1a\x07") {
         return Some("rar");
     }
-    Some("cab").filter(|_| head.starts_with(b"MSCF"))
+    head.starts_with(b"MSCF").then_some("cab")
 }
 
 /// Whether a zip's own index is at the end of this file.
@@ -154,7 +154,7 @@ fn filter_of(head: &[u8]) -> Option<Filter> {
     // `0x5d` is what every encoder in practice writes, and the dictionary size is
     // a power of two under 2 GiB — which is three bytes and a zero. It is the
     // weakest test here, and it is last for that reason.
-    Some(Filter::Lzma).filter(|_| head.starts_with(b"\x5d") && head.get(4) == Some(&0))
+    (head.starts_with(b"\x5d") && head.get(4) == Some(&0)).then_some(Filter::Lzma)
 }
 
 /// Whether a 512-byte block is a tar header.

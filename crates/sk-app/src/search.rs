@@ -141,6 +141,7 @@ impl Search {
             };
             let flags = if hit.directory { sk_model::Flags::DIR } else { sk_model::Flags::NONE };
             let id = listing.push_from(parent, &name.to_string_lossy(), flags);
+            listing.set_raw_name(id, name);
             listing.set_meta(id, hit.size, hit.modified, sk_model::Flags::NONE);
         }
         listing

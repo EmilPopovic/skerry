@@ -42,9 +42,9 @@ enum Outcome {
     /// person can say what should happen to it.
     Clashed(Box<Clash>),
     /// An inverse finished.
-    Undid(Result<(), Problem>),
+    Undid(ops::Replay),
     /// A repeat finished, with the change it actually produced.
-    Redid(Result<Change, Problem>),
+    Redid(ops::Replay),
 }
 
 /// A name being typed, and the row it belongs to.
@@ -307,7 +307,7 @@ fn unpack_beside(
             "a thousand folders of that name already exist",
         ));
     };
-    unpack_again(archive, &root, only, cancel, watch)
+    Ok(unpack_owned(archive, &root, only, cancel, watch))
 }
 
 /// Unpacks `archive` into `root`, which is made if it is not there.
@@ -321,13 +321,27 @@ fn unpack_again(
     cancel: &Cancel,
     watch: &mut dyn FnMut(sk_fs::copy::Progress),
 ) -> Result<Change, Problem> {
+    let (Some(parent), Some(name)) =
+        (root.parent(), root.file_name().and_then(|name| name.to_str()))
+    else {
+        return Err(Problem::new(
+            sk_model::ProblemKind::BadName,
+            root.display().to_string(),
+            "no parent or name",
+        ));
+    };
+    ops::create_directory(parent, name)?;
+    Ok(unpack_owned(archive, root, only, cancel, watch))
+}
+
+fn unpack_owned(
+    archive: &Path,
+    root: &Path,
+    only: &[String],
+    cancel: &Cancel,
+    watch: &mut dyn FnMut(sk_fs::copy::Progress),
+) -> Change {
     use sk_preview::archive::Refusal;
-    if !root.exists()
-        && let (Some(parent), Some(name)) =
-            (root.parent(), root.file_name().and_then(|name| name.to_str()))
-    {
-        ops::create_directory(parent, name)?;
-    }
     let done = sk_preview::archive::unpack(archive, root, only, cancel, &mut |progress| {
         watch(sk_fs::copy::Progress { done: progress.entries, bytes: progress.bytes });
     });
@@ -341,17 +355,12 @@ fn unpack_again(
         // does: those files are on disk, and the undo stack is the only thing
         // that can take them away again. So it lands here, beside the one that
         // finished, rather than in the arm below that cleans up.
-        Refusal::None | Refusal::Stopped => Ok(unpacked),
-        // **A failed one does not.** This is the one place the unpack is stricter
-        // than the copy engine, and it is because the folder is *this
-        // operation's own*: nothing was in it before, so removing it loses
-        // nothing and leaves no half-unpacked tree for somebody to mistake for a
-        // finished one. What is reported is the reason, which the copy engine
-        // cannot do because it has no folder of its own to clean up.
-        refusal => {
-            let _ = sk_fs::copy::remove_tree(root, &Cancel::new());
-            Err(refused(refusal, &done.note, archive))
-        }
+        Refusal::None | Refusal::Stopped => unpacked,
+        // Keep partial output undoable, including files added while the helper ran.
+        refusal => Change::Noted {
+            change: Box::new(unpacked),
+            note: refused(refusal, &done.note, archive).message(),
+        },
     }
 }
 
@@ -963,7 +972,12 @@ impl Edits {
     /// Undoes the most recent change.
     pub fn undo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_undo().cloned() else { return };
-        self.start(Pending::Undoing, jobs, move |_| Outcome::Undid(ops::revert(&change)));
+        self.start(Pending::Undoing, jobs, move |_| {
+            Outcome::Undid(ops::replay(&change, true, &mut |leaf| {
+                ops::revert(leaf)?;
+                Ok(leaf.clone())
+            }))
+        });
     }
 
     /// Does the most recently undone change again.
@@ -976,13 +990,15 @@ impl Edits {
     /// where undoing took it from.
     pub fn redo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_redo().cloned() else { return };
-        if let Change::Unpacked { archive, root, only } = change {
-            self.start(Pending::Redoing, jobs, move |cancel| {
-                Outcome::Redid(unpack_again(&archive, &root, &only, cancel, &mut |_| {}))
-            });
-            return;
-        }
-        self.start(Pending::Redoing, jobs, move |_| Outcome::Redid(ops::apply(&change)));
+        self.start(Pending::Redoing, jobs, move |cancel| {
+            Outcome::Redid(ops::replay(&change, false, &mut |leaf| {
+                if let Change::Unpacked { archive, root, only } = leaf {
+                    unpack_again(archive, root, only, cancel, &mut |_| {})
+                } else {
+                    ops::apply(leaf)
+                }
+            }))
+        });
     }
 
     /// Walks the history to the point where `applied` entries have been applied.
@@ -1055,6 +1071,7 @@ impl Edits {
         }
         match outcome {
             Outcome::Did(Ok(change)) => {
+                let warning = change.warning().map(str::to_owned);
                 // **A trashed file has no row to point at.** The cursor moved to
                 // the neighbour when the operation started, which is where a
                 // person deleting several files in a row needs it; asking for the
@@ -1108,39 +1125,52 @@ impl Edits {
                 } else {
                     message
                 };
+                if warning.is_some() {
+                    self.queue.clear();
+                }
                 if self.queue.is_empty() {
                     self.queued = 0;
                     self.finish_the_batch();
                 }
-                Some(Landed::Notice(message, subject))
+                Some(Landed::Notice(warning.unwrap_or(message), subject))
             }
-            Outcome::Undid(Ok(())) => {
+            Outcome::Undid(replay) => {
+                let warning =
+                    replay.completed.as_ref().and_then(Change::warning).map(str::to_owned);
                 let subject =
-                    self.history.peek_undo().and_then(|change| change.origin()).map(Path::to_owned);
-                // The closure does no work: the job already did it, and what is
-                // left is to move the entry to the redo branch.
-                let _ = self.history.undo(|_| true);
-                Some(Landed::Notice(sk_model::i18n::lookup("notice.undone").to_owned(), subject))
+                    replay.completed.as_ref().and_then(Change::origin).map(Path::to_owned);
+                self.history.split_undo(replay.remaining, replay.completed);
+                if let Some(problem) = replay.problem {
+                    self.walking = None;
+                    Some(Landed::Failed(warning.unwrap_or_else(|| problem.message())))
+                } else {
+                    Some(Landed::Notice(
+                        sk_model::i18n::lookup("notice.undone").to_owned(),
+                        subject,
+                    ))
+                }
             }
-            Outcome::Redid(Ok(fresh)) => {
-                let subject = fresh.subject().to_path_buf();
-                let _ = self.history.redo(|_| Some(fresh.clone()));
-                Some(Landed::Notice(
-                    sk_model::i18n::lookup("notice.redone").to_owned(),
-                    Some(subject),
-                ))
+            Outcome::Redid(replay) => {
+                let warning =
+                    replay.completed.as_ref().and_then(Change::warning).map(str::to_owned);
+                let subject =
+                    replay.completed.as_ref().map(|change| change.subject().to_path_buf());
+                self.history.split_redo(replay.remaining, replay.completed);
+                if let Some(problem) = replay.problem {
+                    self.walking = None;
+                    Some(Landed::Failed(warning.unwrap_or_else(|| problem.message())))
+                } else {
+                    Some(Landed::Notice(
+                        sk_model::i18n::lookup("notice.redone").to_owned(),
+                        subject,
+                    ))
+                }
             }
-            Outcome::Did(Err(problem)) | Outcome::Redid(Err(problem)) => {
-                // The rest of a queue goes with the one that failed, and so does
-                // the rest of a walk.
+            Outcome::Did(Err(problem)) => {
                 self.walking = None;
                 self.queue.clear();
                 self.queued = 0;
-                Some(Landed::Failed(problem.message()))
-            }
-            Outcome::Undid(Err(problem)) => {
-                // A refused step ends the walk where it stands — see `take_a_step`.
-                self.walking = None;
+                self.finish_the_batch();
                 Some(Landed::Failed(problem.message()))
             }
             // Taken above, before the queue's bookkeeping runs: a clash is the
@@ -1535,5 +1565,43 @@ mod tests {
         harness.edits.cancel();
         assert!(!harness.edits.resumable());
         assert!(matches!(harness.edits.doing, Queued::Trash));
+    }
+
+    #[test]
+    fn extraction_redo_refuses_an_occupied_root_before_starting_a_helper() {
+        let root = scratch("occupied-unpack");
+        std::fs::write(root.join("later"), "valuable").unwrap();
+        let result = super::unpack_again(
+            &root.join("missing.zip"),
+            &root,
+            &[],
+            &sk_util::Cancel::new(),
+            &mut |_| {},
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(root.join("later")).unwrap(), "valuable");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_queue_error_records_earlier_successes() {
+        let mut harness = Harness::new();
+        let completed = sk_fs::ops::Change::Created { path: "/fixture/created".into() };
+        harness.edits.batch.push(completed.clone());
+        harness.edits.queued = 2;
+        harness
+            .edits
+            .sender
+            .send(super::Outcome::Did(Err(sk_model::Problem::plain(
+                sk_model::ProblemKind::Gone,
+                "missing",
+            ))))
+            .unwrap();
+        assert!(matches!(harness.edits.drain(), Some(super::Landed::Failed(_))));
+        assert_eq!(
+            harness.edits.history.peek_undo(),
+            Some(&sk_fs::ops::Change::Batch(vec![completed]))
+        );
+        assert!(harness.edits.batch.is_empty());
     }
 }

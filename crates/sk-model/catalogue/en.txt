@@ -634,3 +634,5 @@ field.search = Search
 # where it goes rather than where it is.
 action.look_source = Show the source
 action.look_rendered = Show it rendered
+
+error.preservation = {0}: copied contents could not retain all metadata. The source was kept; check permissions and attributes before continuing.

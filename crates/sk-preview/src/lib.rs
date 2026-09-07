@@ -30,3 +30,5 @@ pub mod wire;
 
 pub use host::{Answer, Key, Kind, Previews, Want};
 pub use wire::{Ask, Refusal, Reply, Request};
+
+mod pipe;

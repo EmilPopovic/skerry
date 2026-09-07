@@ -15,6 +15,7 @@
 //! same buffer either way.
 
 use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStringExt as _;
 
 /// Which of the two selections.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,7 +81,8 @@ impl Content {
         let mut uris = String::new();
         for path in paths {
             use std::fmt::Write as _;
-            let _ = writeln!(uris, "file://{}\r", encode_uri(&path.to_string_lossy()));
+            let _ =
+                writeln!(uris, "file://{}\r", encode_bytes(path.as_os_str().as_encoded_bytes()));
         }
         // `x-special/gnome-copied-files`: the verb, then one URI per line, and
         // **no trailing newline** — GTK joins rather than terminates, and a
@@ -90,7 +92,11 @@ impl Content {
         let mut cut_or_copy = String::from(intent.word());
         for path in paths {
             use std::fmt::Write as _;
-            let _ = write!(cut_or_copy, "\nfile://{}", encode_uri(&path.to_string_lossy()));
+            let _ = write!(
+                cut_or_copy,
+                "\nfile://{}",
+                encode_bytes(path.as_os_str().as_encoded_bytes())
+            );
         }
         let text = paths
             .iter()
@@ -160,9 +166,14 @@ impl Content {
 /// A filename may hold anything but `/` and NUL, and `text/uri-list` is a URI
 /// list: a space or a `#` in a name produces something the peer parses as two
 /// entries or as a fragment. Only unreserved characters and `/` survive.
+#[cfg(test)]
 fn encode_uri(path: &str) -> String {
+    encode_bytes(path.as_bytes())
+}
+
+fn encode_bytes(path: &[u8]) -> String {
     let mut out = String::with_capacity(path.len());
-    for byte in path.as_bytes() {
+    for byte in path {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 out.push(*byte as char);
@@ -204,10 +215,7 @@ pub fn decode_uri(uri: &str) -> Option<std::path::PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // `file:///path` has an empty authority; `file://host/path` names another
     // machine and is not ours to open.
-    let rest = match rest.strip_prefix('/') {
-        Some(path) => format!("/{path}"),
-        None => return None,
-    };
+    let rest = format!("/{}", rest.strip_prefix('/')?);
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -221,8 +229,10 @@ pub fn decode_uri(uri: &str) -> Option<std::path::PathBuf> {
             index += 1;
         }
     }
-    let text = String::from_utf8(out).ok()?;
-    (!text.is_empty()).then(|| std::path::PathBuf::from(text))
+    if out.contains(&0) {
+        return None;
+    }
+    (!out.is_empty()).then(|| std::path::PathBuf::from(std::ffi::OsString::from_vec(out)))
 }
 
 /// What the peer is currently offering, on each selection.
@@ -565,5 +575,16 @@ mod tests {
         let offered: Vec<&str> = content.types.iter().map(|(mime, _)| mime.as_str()).collect();
         assert!(offered.contains(&"text/uri-list"), "{offered:?}");
         assert!(offered.iter().any(|mime| mime.starts_with("text/plain")), "{offered:?}");
+    }
+    #[test]
+    fn invalid_bytes_survive_a_clipboard_uri_round_trip() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let path =
+            PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/parent\xff/file\xfe".to_vec()));
+        let content = Content::paths(std::slice::from_ref(&path), Intent::Copy);
+        let bytes = content.bytes_for("text/uri-list").unwrap();
+        let uri = std::str::from_utf8(bytes).unwrap().trim();
+        assert_eq!(super::decode_uri(uri), Some(path));
+        assert!(super::decode_uri("file:///tmp/%00").is_none());
     }
 }

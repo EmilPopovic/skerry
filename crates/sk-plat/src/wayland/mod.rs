@@ -906,7 +906,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
                     can_show_menu: state.incoming.can_show_menu,
                     ..WindowState::default()
                 };
-                for value in states.chunks_exact(4) {
+                for value in states.as_chunks::<4>().0 {
                     let raw = u32::from_ne_bytes([value[0], value[1], value[2], value[3]]);
                     match xdg_toplevel::State::try_from(raw) {
                         Ok(xdg_toplevel::State::Maximized) => state.incoming.maximized = true,
@@ -924,7 +924,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for State {
             }
             xdg_toplevel::Event::WmCapabilities { capabilities } => {
                 let (mut maximize, mut minimize, mut menu) = (false, false, false);
-                for value in capabilities.chunks_exact(4) {
+                for value in capabilities.as_chunks::<4>().0 {
                     let raw = u32::from_ne_bytes([value[0], value[1], value[2], value[3]]);
                     match xdg_toplevel::WmCapabilities::try_from(raw) {
                         Ok(xdg_toplevel::WmCapabilities::Maximize) => maximize = true,

@@ -94,6 +94,35 @@ impl<T> History<T> {
         self.undone.last()
     }
 
+    /// Records the boundary reached by a partially completed undo.
+    pub fn split_undo(&mut self, remaining: Option<T>, completed: Option<T>) {
+        if self.done.pop().is_none() {
+            return;
+        }
+        if let Some(remaining) = remaining {
+            self.done.push(remaining);
+        }
+        if let Some(completed) = completed {
+            self.undone.push(completed);
+        }
+    }
+
+    /// Records the boundary reached by a partially completed redo.
+    pub fn split_redo(&mut self, remaining: Option<T>, completed: Option<T>) {
+        if self.undone.pop().is_none() {
+            return;
+        }
+        if let Some(remaining) = remaining {
+            self.undone.push(remaining);
+        }
+        if let Some(completed) = completed {
+            if self.done.len() >= self.cap {
+                self.done.remove(0);
+            }
+            self.done.push(completed);
+        }
+    }
+
     /// Whether there is anything to undo.
     #[must_use]
     pub fn can_undo(&self) -> bool {

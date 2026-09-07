@@ -18,6 +18,8 @@ use crate::i18n;
 /// What went wrong, at the granularity a user-facing message needs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ProblemKind {
+    /// The copy exists, but some metadata or cleanup could not be preserved.
+    Preservation,
     /// Permission denied, or a mount that will not answer.
     Unreadable,
     /// The path is not there any more.
@@ -110,6 +112,7 @@ pub enum ProblemKind {
 impl ProblemKind {
     const fn catalogue_key(self) -> &'static str {
         match self {
+            Self::Preservation => "error.preservation",
             Self::Unreadable => "error.unreadable",
             Self::Gone => "error.gone",
             Self::NoDisplay => "error.no_display",

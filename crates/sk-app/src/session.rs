@@ -45,6 +45,73 @@ use sk_model::{Sort, SortColumn};
 
 use crate::panes::Axis;
 
+/// One acknowledged snapshot and at most one writer in flight.
+#[derive(Default)]
+pub struct WriteBack {
+    acknowledged: String,
+    flight: Option<std::sync::mpsc::Receiver<(String, bool)>>,
+}
+
+impl WriteBack {
+    /// Drains acknowledgement, optionally waiting during process exit.
+    pub fn ready(&mut self, wait: bool) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        let Some(receiver) = self.flight.take() else { return true };
+        let answer = if wait {
+            receiver.recv().map_err(|_| TryRecvError::Disconnected)
+        } else {
+            receiver.try_recv()
+        };
+        match answer {
+            Ok((text, true)) => self.acknowledged = text,
+            Err(TryRecvError::Empty) => {
+                self.flight = Some(receiver);
+                return false;
+            }
+            Ok((_, false)) | Err(TryRecvError::Disconnected) => {}
+        }
+        true
+    }
+
+    /// The most recent successful write, never merely the most recent request.
+    pub fn acknowledged(&self) -> &str {
+        &self.acknowledged
+    }
+
+    /// Starts a save if no earlier save is still running.
+    pub fn start(&mut self, text: String, pool: &sk_util::Pool, wake: &sk_util::WakeHandle) {
+        self.start_with(text, pool, wake, write);
+    }
+
+    fn start_with(
+        &mut self,
+        text: String,
+        pool: &sk_util::Pool,
+        wake: &sk_util::WakeHandle,
+        save: impl FnOnce(&str) -> bool + Send + 'static,
+    ) {
+        if self.flight.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.flight = Some(receiver);
+        let wake = wake.clone();
+        pool.spawn(sk_util::Lane::Control, sk_util::Cancel::new(), move |_| {
+            let saved = save(&text);
+            let _ = sender.send((text, saved));
+            wake.wake();
+        });
+    }
+
+    /// Finishes older work before publishing the final snapshot on exit.
+    pub fn finish(&mut self, text: String) {
+        self.ready(true);
+        if text != self.acknowledged && write(&text) {
+            self.acknowledged = text;
+        }
+    }
+}
+
 /// The version this build writes and the only one it reads.
 const VERSION: u32 = 1;
 
@@ -752,5 +819,33 @@ mod tests {
         let Node::Leaf { active, tabs } = &read.tree else { panic!("not a leaf") };
         assert_eq!(*active, 0);
         assert_eq!(tabs.len(), 1);
+    }
+    #[test]
+    fn writes_are_serial_and_failed_snapshots_remain_unacknowledged() {
+        let pool = sk_util::Pool::with_width(2);
+        let wake = sk_util::Waker::new().unwrap();
+        let mut writer = super::WriteBack::default();
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        writer.start_with("old".into(), &pool, &wake.handle(), move |_| {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+            true
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        assert!(!writer.ready(false));
+        writer.start_with("must coalesce".into(), &pool, &wake.handle(), |_| {
+            panic!("concurrent save")
+        });
+        assert_eq!(writer.acknowledged(), "");
+        release.send(()).unwrap();
+        assert!(writer.ready(true));
+        assert_eq!(writer.acknowledged(), "old");
+        writer.start_with("new".into(), &pool, &wake.handle(), |_| false);
+        assert!(writer.ready(true));
+        assert_eq!(writer.acknowledged(), "old");
+        writer.start_with("new".into(), &pool, &wake.handle(), |_| true);
+        assert!(writer.ready(true));
+        assert_eq!(writer.acknowledged(), "new");
     }
 }

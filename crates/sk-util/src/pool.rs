@@ -7,12 +7,13 @@
 //! blocking pool — means two schedulers oversubscribing the same cores, which
 //! is a latency bug that only shows up under load.
 //!
-//! Width is `available_parallelism`, not `ncpu - 2`. Spike B measured a
+//! Ordinary worker width is `available_parallelism`, with one additional worker
+//! reserved for control tasks. Spike B measured a
 //! million-file walk at **1.626 s** with `ncpu - 2` on a four-core Raspberry Pi
 //! 5 against **0.91–1.01 s** anywhere from four workers upward; past `ncpu` the
 //! curve is flat enough that the choice is inside the run-to-run noise.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -28,10 +29,14 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 /// for a call that costs 4 ms on a healthy device. A parallel lane for a local
 /// device and a serial lane for anything rotational or networked keeps one sick
 /// device from consuming every worker.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Lane {
     /// Runs as wide as the pool. For local devices that answer concurrent reads.
     Parallel,
+    /// Reserved worker for state writes and admission tasks; no target probes.
+    Control,
+    /// One active job for this mount device, including its initial probe.
+    Device(u64),
     /// At most one job at a time, whatever the pool's width. For rotational
     /// disks, where seeking between concurrent readers is slower than queueing,
     /// and for network mounts, where a stalled request must not take a worker
@@ -138,31 +143,22 @@ struct Job {
 
 #[derive(Default)]
 struct Queues {
-    parallel: VecDeque<Job>,
-    serial: VecDeque<Job>,
-    serial_busy: bool,
+    jobs: VecDeque<Job>,
+    busy: HashSet<Lane>,
     shutdown: bool,
-    /// Workers that have returned. Under the same lock as everything else here,
-    /// so the count and the wait cannot race.
     left: usize,
 }
 
 impl Queues {
-    fn take(&mut self) -> Option<Job> {
-        if let Some(job) = self.parallel.pop_front() {
-            return Some(job);
+    fn take(&mut self, control: bool) -> Option<Job> {
+        let index = self.jobs.iter().position(|job| {
+            (job.lane == Lane::Control) == control && !self.busy.contains(&job.lane)
+        })?;
+        let job = self.jobs.remove(index)?;
+        if matches!(job.lane, Lane::Serial | Lane::Device(_)) {
+            self.busy.insert(job.lane);
         }
-        if !self.serial_busy
-            && let Some(job) = self.serial.pop_front()
-        {
-            self.serial_busy = true;
-            return Some(job);
-        }
-        None
-    }
-
-    fn has_work(&self) -> bool {
-        !self.parallel.is_empty() || (!self.serial.is_empty() && !self.serial_busy)
+        Some(job)
     }
 }
 
@@ -185,7 +181,7 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// Starts a pool one worker per available core.
+    /// Starts one ordinary worker per available core and one control worker.
     #[must_use]
     pub fn new() -> Self {
         Self::with_width(
@@ -193,7 +189,7 @@ impl Pool {
         )
     }
 
-    /// Starts a pool of exactly `width` workers, at least one.
+    /// Starts `width` ordinary workers (at least one) and a reserved control worker.
     #[must_use]
     pub fn with_width(width: usize) -> Self {
         let shared = Arc::new(Shared {
@@ -203,12 +199,12 @@ impl Pool {
             panics: AtomicU64::new(0),
             completed: AtomicU64::new(0),
         });
-        let workers = (0..width.max(1))
+        let workers = (0..=width.max(1))
             .filter_map(|index| {
                 let shared = Arc::clone(&shared);
                 std::thread::Builder::new()
                     .name(format!("skerry-job-{index}"))
-                    .spawn(move || worker(&shared))
+                    .spawn(move || worker(&shared, index == width.max(1)))
                     .ok()
             })
             .collect();
@@ -234,12 +230,9 @@ impl Pool {
                 // job. Dropping the task loses work rather than aborting the UI.
                 return;
             };
-            match lane {
-                Lane::Parallel => queues.parallel.push_back(job),
-                Lane::Serial => queues.serial.push_back(job),
-            }
+            queues.jobs.push_back(job);
         }
-        self.shared.ready.notify_one();
+        self.shared.ready.notify_all();
     }
 
     /// Jobs that finished, and jobs that panicked.
@@ -262,8 +255,7 @@ impl Drop for Pool {
             // Queued-but-unstarted work is abandoned, not run: a pool being
             // dropped is a process exiting, and a listing nobody will see is
             // not worth the exit latency.
-            queues.parallel.clear();
-            queues.serial.clear();
+            queues.jobs.clear();
         }
         self.shared.ready.notify_all();
 
@@ -317,15 +309,15 @@ const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 /// window in which there is anything to compete over.
 ///
 /// Recorded here rather than deleted, so it is not tried a third time.
-fn worker(shared: &Arc<Shared>) {
-    run(shared);
+fn worker(shared: &Arc<Shared>, control: bool) {
+    run(shared, control);
     if let Ok(mut queues) = shared.queues.lock() {
         queues.left += 1;
     }
     shared.left.notify_all();
 }
 
-fn run(shared: &Arc<Shared>) {
+fn run(shared: &Arc<Shared>, control: bool) {
     loop {
         let job = {
             let Ok(mut queues) = shared.queues.lock() else { return };
@@ -333,7 +325,7 @@ fn run(shared: &Arc<Shared>) {
                 if queues.shutdown {
                     return;
                 }
-                if let Some(job) = queues.take() {
+                if let Some(job) = queues.take(control) {
                     break job;
                 }
                 let Ok(next) = shared.ready.wait(queues) else { return };
@@ -351,13 +343,9 @@ fn run(shared: &Arc<Shared>) {
         }
         shared.completed.fetch_add(1, Ordering::Relaxed);
 
-        if lane == Lane::Serial
-            && let Ok(mut queues) = shared.queues.lock()
-        {
-            queues.serial_busy = false;
-            if queues.has_work() {
-                shared.ready.notify_one();
-            }
+        if let Ok(mut queues) = shared.queues.lock() {
+            queues.busy.remove(&lane);
+            shared.ready.notify_all();
         }
     }
 }
@@ -586,5 +574,31 @@ mod tests {
         waker.handle().wake();
         assert!(waker.drain(), "the wake arrived");
         assert!(!waker.drain(), "and was consumed");
+    }
+
+    #[test]
+    fn a_blocked_device_does_not_block_another_device_or_control_work() {
+        let pool = Pool::with_width(2);
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = std::sync::mpsc::channel();
+        pool.spawn(Lane::Device(7), Cancel::new(), move |_| {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        });
+        ready.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let same = sent.clone();
+        pool.spawn(Lane::Device(7), Cancel::new(), move |_| same.send(7).unwrap());
+        let other = sent.clone();
+        pool.spawn(Lane::Device(8), Cancel::new(), move |_| other.send(8).unwrap());
+        pool.spawn(Lane::Control, Cancel::new(), move |_| sent.send(0).unwrap());
+        let mut answers = [
+            received.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+            received.recv_timeout(std::time::Duration::from_secs(1)).unwrap(),
+        ];
+        answers.sort_unstable();
+        assert_eq!(answers, [0, 8]);
+        release.send(()).unwrap();
+        assert_eq!(received.recv_timeout(std::time::Duration::from_secs(1)).unwrap(), 7);
     }
 }

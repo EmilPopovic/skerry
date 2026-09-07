@@ -37,6 +37,7 @@
 //! grammar is the same in every view, and two copies of a substring rule is two
 //! places for "why did that not match" to have different answers.
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -243,30 +244,29 @@ fn look_in(
         if raw == b"." || raw == b".." {
             continue;
         }
-        let name = String::from_utf8_lossy(raw).into_owned();
+        let name = std::ffi::OsStr::from_bytes(raw);
         found.scanned += 1;
         // A symlink is listed if its own name matches and is never walked into:
         // following one is how a walk finds a cycle, and its target is somewhere
         // else in the tree or outside it altogether.
         if entry.file_type() == FileType::Symlink {
-            keep(directory, &name, needle, None, found);
+            keep(directory, name, needle, None, found);
             continue;
         }
-        let stat =
-            rustix::fs::statx(&fd, name.as_str(), rustix::fs::AtFlags::SYMLINK_NOFOLLOW, wanted);
+        let stat = rustix::fs::statx(&fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW, wanted);
         let Ok(stat) = stat else {
             found.partial = true;
             continue;
         };
         let directory_here = u32::from(stat.stx_mode) & 0o170_000 == 0o040_000;
-        keep(directory, &name, needle, Some(&stat), found);
+        keep(directory, name, needle, Some(&stat), found);
         if directory_here {
             // `du -x`, over the set: a mount point inside the tree is a
             // different filesystem, and whether it is a different *question*
             // depends on whether the scope named it.
             let device = u64::from(stat.stx_dev_major) << 32 | u64::from(stat.stx_dev_minor);
             if devices.contains(&device) {
-                pending.push(directory.join(&name));
+                pending.push(directory.join(name));
             } else {
                 found.partial = true;
             }
@@ -277,12 +277,12 @@ fn look_in(
 
 fn keep(
     directory: &Path,
-    name: &str,
+    name: &std::ffi::OsStr,
     needle: &str,
     stat: Option<&rustix::fs::Statx>,
     found: &mut Found,
 ) {
-    if !sk_model::contains_folded(name, needle) {
+    if !sk_model::contains_folded(&name.to_string_lossy(), needle) {
         return;
     }
     if found.hits.len() >= MOST {

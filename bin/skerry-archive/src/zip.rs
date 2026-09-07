@@ -44,6 +44,8 @@ pub struct Central {
     pub method: u16,
     /// How many bytes of them there are.
     pub compressed: u64,
+    /// Actual uncompressed bytes, including a symlink target.
+    pub uncompressed: u64,
     /// Where the local header is.
     pub offset: u64,
     /// What the bytes should hash to.
@@ -129,13 +131,18 @@ impl Zip {
         let taken = (&mut self.file).take(compressed);
         let mut hasher = crc32fast::Hasher::new();
         let written = match method {
-            STORED => drain(taken, out, &mut hasher)?,
-            DEFLATE => drain(flate2::read::DeflateDecoder::new(taken), out, &mut hasher)?,
+            STORED => drain(taken, out, &mut hasher, entry.uncompressed)?,
+            DEFLATE => drain(
+                flate2::read::DeflateDecoder::new(taken),
+                out,
+                &mut hasher,
+                entry.uncompressed,
+            )?,
             // Bzip2, LZMA, zstd and the encrypted methods. Each is a decoder this
             // does not have, and the entry is named rather than written wrong.
             _ => return Err(Refusal::NoUnpacker),
         };
-        if hasher.finalize() != crc {
+        if written != entry.uncompressed || hasher.finalize() != crc {
             return Err(Refusal::Undecodable);
         }
         Ok(written)
@@ -147,6 +154,7 @@ fn drain(
     mut from: impl Read,
     out: &mut dyn Write,
     hasher: &mut crc32fast::Hasher,
+    limit: u64,
 ) -> Result<u64, Refusal> {
     let mut buffer = vec![0u8; 64 * 1024];
     let mut written = 0;
@@ -154,6 +162,9 @@ fn drain(
         let read = from.read(&mut buffer).map_err(|_| Refusal::Undecodable)?;
         if read == 0 {
             return Ok(written);
+        }
+        if written + read as u64 > limit {
+            return Err(Refusal::Undecodable);
         }
         hasher.update(&buffer[..read]);
         out.write_all(&buffer[..read]).map_err(|_| Refusal::NoRoom)?;
@@ -228,6 +239,7 @@ fn walk(file: &mut File, at: u64, count: u64, shift: u64) -> Result<Vec<Central>
             },
             method: word16(&record, 10),
             compressed,
+            uncompressed: size,
             offset,
             crc: word32(&record, 16),
             mode,
@@ -374,5 +386,32 @@ mod tests {
         let (mut size, mut compressed, mut offset) = (0xFFFF_FFFF, 40, 0xFFFF_FFFF);
         wide(&field, &mut size, &mut compressed, &mut offset);
         assert_eq!((size, compressed, offset), (9_000_000_000, 40, 5_000_000_000));
+    }
+
+    #[test]
+    fn a_decoder_cannot_write_past_the_declared_uncompressed_size() {
+        let data = vec![b'x'; 8192];
+        let mut out = Vec::new();
+        let mut hash = crc32fast::Hasher::new();
+        assert!(super::drain(data.as_slice(), &mut out, &mut hash, 4096).is_err());
+        assert!(out.len() <= 4096);
+    }
+
+    #[test]
+    fn central_directory_keeps_a_symlinks_real_decoded_length() {
+        let root = std::env::temp_dir().join(format!("skerry-zip-link-{}", std::process::id()));
+        let mut central = vec![0u8; super::CENTRAL];
+        central[..4].copy_from_slice(b"PK\x01\x02");
+        central[24..28].copy_from_slice(&8192u32.to_le_bytes());
+        central[28..30].copy_from_slice(&1u16.to_le_bytes());
+        central[38..42].copy_from_slice(&(0o120_777u32 << 16).to_le_bytes());
+        central.push(b'l');
+        std::fs::write(&root, central).unwrap();
+        let mut file = std::fs::File::open(&root).unwrap();
+        let entries = super::walk(&mut file, 0, 1, 0).unwrap();
+        assert_eq!(entries[0].entry.kind, Kind::Link);
+        assert_eq!(entries[0].entry.size, 0);
+        assert_eq!(entries[0].uncompressed, 8192);
+        std::fs::remove_file(root).unwrap();
     }
 }
