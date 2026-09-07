@@ -6,6 +6,9 @@ dependency policy the product has, applied to the thing that enforces it.
 | | Decides | Needs |
 | --- | --- | --- |
 | `check` | Runs everything below, then `fmt`, `clippy` and `test` once a workspace exists | — |
+| `test-package.py` | Tests reproducible staging, version/architecture checks, and installation/uninstallation without Cargo | Python 3.11+, make |
+| `package.py --arch x86_64` | Produces a binary tarball, ABI metadata and SHA-256 checksum; `--tag` verifies the release version | Python 3.11+, readelf, four release binaries |
+| `check-archives.py` | Exercises the production archive helper with independently generated tar and ZIP fixtures, including malformed input and traversal | Python 3, release archive helper |
 | `check-links.py` | Every relative link and heading anchor in the markdown resolves | — |
 | `check-layering.py` | Crate dependency edges point strictly downward; `--diagram` prints the level diagram | manifests |
 | `dep-budget.py` | Every dependency has a row in [07-dependencies.md](../docs/07-dependencies.md); transitive counts inside budget, with the GPU stack found by reachability from the `wgpu` edge | manifests, `cargo`, `rustc` |

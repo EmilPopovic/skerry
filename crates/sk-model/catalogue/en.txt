@@ -129,7 +129,7 @@ find.prompt = Filter this folder
 find.count = {0} of {1}
 error.not_text = {0} is not text. Open it to see what it is.
 error.no_unpacker = {0} is not installed, so this archive cannot be opened here. Install it, or open the archive with another program.
-error.damaged = {0} is damaged. What had already been unpacked has been removed.
+error.damaged = {0} is damaged. Partial output has been kept and can be undone.
 error.not_unpackable = Skerry cannot unpack a {0} archive. Open it with another program.
 error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
 
@@ -636,3 +636,6 @@ action.look_source = Show the source
 action.look_rendered = Show it rendered
 
 error.preservation = {0}: copied contents could not retain all metadata. The source was kept; check permissions and attributes before continuing.
+
+error.incomplete = {0}: some entries could not be extracted. The partial output was kept and can be undone.
+archive.partial = Some entries could not be extracted. The partial output was kept.

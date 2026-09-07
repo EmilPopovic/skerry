@@ -19,6 +19,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 # A newer push is asking the same question about better code.
 concurrency:
@@ -36,6 +37,7 @@ env:
   # `rust-version` in Cargo.toml claims this. The `msrv` job is what makes it a
   # claim with a gate behind it.
   MSRV: "1.90"
+  CARGO_DENY: "0.20.2"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
@@ -127,7 +129,9 @@ jobs:
              /usr/share/vulkan/icd.d/lvp_icd.x86_64.json 2>/dev/null | grep -q lvp
           python3 -c "import PIL"
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --workspace --locked
+      - name: Archive interoperability
+        run: python3 tools/check-archives.py
       - name: Golden frames
         run: python3 tools/golden
       - name: Keep what it rendered
@@ -181,7 +185,7 @@ jobs:
           key: scenarios-${{ env.RUST }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: scenarios-${{ env.RUST }}-
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release --workspace --locked
       - name: Scenarios on X11
         # No GPU on a runner, so the renderer falls back to lavapipe — which is
         # what `frames` already renders with, and which the scenarios do not care
@@ -261,11 +265,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cargo/bin/cargo-deny
-          key: supply-${{ env.RUST }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
-          restore-keys: supply-${{ env.RUST }}-
+          key: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          restore-keys: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-
       - name: cargo-deny
         run: |
-          command -v cargo-deny >/dev/null || cargo install cargo-deny --locked
+          if [[ "$(cargo-deny --version 2>/dev/null)" != "cargo-deny $CARGO_DENY" ]]; then
+            cargo install cargo-deny --version "$CARGO_DENY" --locked --force
+          fi
           cargo deny --workspace check
 
   no-c-toolchain:

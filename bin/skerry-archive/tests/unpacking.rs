@@ -307,7 +307,7 @@ fn a_path_that_climbs_out_lands_nowhere() {
         ],
     );
     let (done, _) = unpacked(&at.join("evil.tar"), &into, &[]);
-    assert_eq!(done.refusal, Refusal::None, "an escape is a skip, not a failure");
+    assert_eq!(done.refusal, Refusal::Partial, "skipped entries must be reported");
     assert_eq!(done.progress.entries, 1, "more than the one honest entry was written");
     assert_eq!(std::fs::read(into.join("kept.txt")).unwrap(), b"in\n");
     for escaped in ["escaped.txt", "also.txt"] {
@@ -336,7 +336,7 @@ fn nothing_is_written_through_a_symlink_the_archive_planted() {
         ],
     );
     let (done, _) = unpacked(&at.join("door.tar"), &into, &[]);
-    assert_eq!(done.refusal, Refusal::None);
+    assert_eq!(done.refusal, Refusal::Partial);
     assert!(!outside.join("passwd").exists(), "a file was written through the symlink");
     // The link itself is there — a symlink is a string, and writing one puts
     // nothing anywhere — and the honest entry after it still arrived.

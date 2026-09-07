@@ -170,6 +170,14 @@ fn looks_like_tar(block: &[u8]) -> bool {
     if &block[257..262] == b"ustar" {
         return true;
     }
+    valid_tar_checksum(block)
+}
+
+/// Checks every header, independently of the magic used for format detection.
+pub fn valid_tar_checksum(block: &[u8]) -> bool {
+    if block.len() != BLOCK {
+        return false;
+    }
     let Some(claimed) = octal(&block[148..156]) else { return false };
     // The checksum field is counted as eight spaces, which is the one rule that
     // makes the sum computable at all.
@@ -183,21 +191,27 @@ fn looks_like_tar(block: &[u8]) -> bool {
 
 /// An octal field, which ends at the first byte that is not a digit.
 pub fn octal(field: &[u8]) -> Option<u64> {
-    // GNU's base-256 encoding for a number too big for the field: the high bit of
-    // the first byte is set and the rest is big-endian.
     if field.first().is_some_and(|byte| byte & 0x80 != 0) {
-        return Some(field[1..].iter().fold(0u64, |value, byte| (value << 8) | u64::from(*byte)));
+        if field[0] & 0x40 != 0 {
+            return None;
+        }
+        return field[1..].iter().try_fold(u64::from(field[0] & 0x7f), |value, byte| {
+            value.checked_mul(256)?.checked_add(u64::from(*byte))
+        });
     }
-    let digits = field.iter().take_while(|byte| (b'0'..=b'7').contains(byte));
     let mut value = 0u64;
-    let mut any = false;
-    for digit in digits {
-        any = true;
+    let field = field.trim_ascii();
+    let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
+    if field[end..].iter().any(|byte| *byte != 0 && *byte != b' ') {
+        return None;
+    }
+    for digit in field[..end].trim_ascii() {
+        if !(b'0'..=b'7').contains(digit) {
+            return None;
+        }
         value = value.checked_mul(8)?.checked_add(u64::from(digit - b'0'))?;
     }
-    // An empty field is zero rather than nothing: tar writes one for a directory's
-    // size, and refusing it would refuse every directory.
-    Some(if any { value } else { 0 })
+    Some(value)
 }
 
 /// The name a single compressed file unpacks to.

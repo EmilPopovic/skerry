@@ -290,13 +290,14 @@ pub struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
     little: bool,
+    depth: usize,
 }
 
 impl<'a> Reader<'a> {
     /// A reader over a whole message, in the byte order the header declared.
     #[must_use]
     pub const fn new(bytes: &'a [u8], at: usize, little: bool) -> Self {
-        Self { bytes, at, little }
+        Self { bytes, at, little, depth: 0 }
     }
 
     /// How far in it has got.
@@ -312,7 +313,7 @@ impl<'a> Reader<'a> {
     }
 
     fn pad(&mut self, to: usize) {
-        self.at += padding(self.at, to);
+        self.at = self.at.saturating_add(padding(self.at, to));
     }
 
     fn take(&mut self, count: usize) -> Option<&'a [u8]> {
@@ -332,6 +333,16 @@ impl<'a> Reader<'a> {
     /// `None` for a type this build does not know, which is a message it did not
     /// understand — see the module header.
     pub fn read(&mut self, signature: &str) -> Option<Value> {
+        if self.depth > 64 || !valid_signature(signature, true) {
+            return None;
+        }
+        self.depth += 1;
+        let result = self.read_value(signature);
+        self.depth -= 1;
+        result
+    }
+
+    fn read_value(&mut self, signature: &str) -> Option<Value> {
         let mut kinds = signature.chars();
         let kind = kinds.next()?;
         match kind {
@@ -339,7 +350,11 @@ impl<'a> Reader<'a> {
                 let byte = *self.take(1)?.first()?;
                 Some(Value::Byte(byte))
             }
-            'b' => Some(Value::Bool(self.u32()? != 0)),
+            'b' => match self.u32()? {
+                0 => Some(Value::Bool(false)),
+                1 => Some(Value::Bool(true)),
+                _ => None,
+            },
             'u' => Some(Value::U32(self.u32()?)),
             'i' => Some(Value::I32(self.u32()?.cast_signed())),
             'x' | 't' => {
@@ -351,15 +366,19 @@ impl<'a> Reader<'a> {
             }
             's' | 'o' => {
                 let length = self.u32()? as usize;
-                let text = String::from_utf8_lossy(self.take(length)?).into_owned();
-                self.take(1)?;
+                let text = std::str::from_utf8(self.take(length)?).ok()?.to_owned();
+                if text.contains('\0') || self.take(1)? != [0] {
+                    return None;
+                }
                 Some(if kind == 's' { Value::Str(text) } else { Value::Path(text) })
             }
             'g' => {
                 let length = *self.take(1)?.first()? as usize;
-                let text = String::from_utf8_lossy(self.take(length)?).into_owned();
-                self.take(1)?;
-                Some(Value::Signature(text))
+                let text = std::str::from_utf8(self.take(length)?).ok()?.to_owned();
+                if text.contains('\0') || self.take(1)? != [0] {
+                    return None;
+                }
+                valid_signature(&text, false).then_some(Value::Signature(text))
             }
             'v' => {
                 let Value::Signature(inner) = self.read("g")? else { return None };
@@ -382,38 +401,106 @@ impl<'a> Reader<'a> {
     /// An array, whose elements are all of `element`.
     fn read_array(&mut self, element: &str) -> Option<Value> {
         let length = self.u32()? as usize;
-        let dict = element.starts_with('{');
+        let dict = element == "{sv}";
+        if element.starts_with('{') && !dict {
+            return None;
+        }
         self.pad(if dict { 8 } else { alignment_of(element) });
         let end = self.at.checked_add(length)?;
         if end > self.bytes.len() {
             return None;
         }
+        let mut bounded = Reader {
+            bytes: &self.bytes[..end],
+            at: self.at,
+            little: self.little,
+            depth: self.depth,
+        };
         if dict {
             // `a{sv}` and nothing else: the key is a string in every dictionary
             // this program reads, and a message with another one is a message it
             // did not understand.
             let mut pairs = Vec::new();
-            while self.at < end {
-                self.pad(8);
-                let key = self.read("s")?.text()?.to_owned();
+            while bounded.at < end {
+                bounded.pad(8);
+                let key = bounded.read("s")?.text()?.to_owned();
                 // **Unwrapped.** A dictionary's values are variants by
                 // construction, so holding the wrapper as well would make the
                 // same dictionary two different `Value`s depending on which end
                 // of the wire it came from.
-                let value = match self.read("v")? {
+                let value = match bounded.read("v")? {
                     Value::Variant(inner) => *inner,
                     other => other,
                 };
                 pairs.push((key, value));
             }
+            if bounded.at != end {
+                return None;
+            }
+            self.at = end;
             return Some(Value::Dict(pairs));
         }
         let mut items = Vec::new();
-        while self.at < end {
-            items.push(self.read(element)?);
+        while bounded.at < end {
+            items.push(bounded.read(element)?);
         }
+        if bounded.at != end {
+            return None;
+        }
+        self.at = end;
         Some(Value::Array(items))
     }
+}
+
+/// Validates signature framing before recursive decoding or byte-indexed splitting.
+#[must_use]
+pub fn valid_signature(signature: &str, single: bool) -> bool {
+    fn one(bytes: &[u8], at: &mut usize, arrays: u8, structs: u8, dict: bool) -> bool {
+        let Some(kind) = bytes.get(*at).copied() else { return false };
+        *at += 1;
+        match kind {
+            b'y' | b'b' | b'n' | b'q' | b'i' | b'u' | b'x' | b't' | b'd' | b's' | b'o' | b'g'
+            | b'h' | b'v' => true,
+            b'a' if arrays < 32 => one(bytes, at, arrays + 1, structs, true),
+            b'(' if structs < 32 => {
+                let first = *at;
+                while bytes.get(*at).is_some_and(|byte| *byte != b')') {
+                    if !one(bytes, at, arrays, structs + 1, false) {
+                        return false;
+                    }
+                }
+                if *at == first || bytes.get(*at) != Some(&b')') {
+                    return false;
+                }
+                *at += 1;
+                true
+            }
+            b'{' if dict && structs < 32 => {
+                if !bytes.get(*at).is_some_and(|byte| b"ybnqiuxtdsogh".contains(byte)) {
+                    return false;
+                }
+                *at += 1;
+                if !one(bytes, at, arrays, structs + 1, false) || bytes.get(*at) != Some(&b'}') {
+                    return false;
+                }
+                *at += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+    if signature.len() > 255 || !signature.is_ascii() {
+        return false;
+    }
+    let mut at = 0;
+    let mut count = 0;
+    while at < signature.len() {
+        if !one(signature.as_bytes(), &mut at, 0, 0, false) {
+            return false;
+        }
+        count += 1;
+    }
+    !single || count == 1
 }
 
 /// Every type in one signature, split into the values it names.
@@ -685,5 +772,30 @@ mod tests {
         let bytes = [0, 0, 0, 3, b'f', b'o', b'o', 0];
         let mut reader = Reader::new(&bytes, 0, false);
         assert_eq!(reader.read("s"), Some(Value::Str("foo".to_owned())));
+    }
+    #[test]
+    fn arrays_cannot_consume_a_following_value() {
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&42u32.to_le_bytes());
+        assert!(Reader::new(&bytes, 0, true).read("au").is_none());
+    }
+
+    #[test]
+    fn variants_have_a_runtime_depth_limit() {
+        let mut bytes = Vec::new();
+        for _ in 0..80 {
+            bytes.extend_from_slice(&[1, b'v', 0]);
+        }
+        bytes.extend_from_slice(&[1, b'y', 0, 42]);
+        assert!(Reader::new(&bytes, 0, true).read("v").is_none());
+    }
+
+    #[test]
+    fn malformed_strings_booleans_and_variant_signatures_are_refused() {
+        for bytes in [&[1, 0, 0, 0, b'a', b'x'][..], &[1, 0, 0, 0, 255, 0], &[1, 0, 0, 0, 0, 0]] {
+            assert!(Reader::new(bytes, 0, true).read("s").is_none());
+        }
+        assert!(Reader::new(&2u32.to_le_bytes(), 0, true).read("b").is_none());
+        assert!(Reader::new(&[2, b'y', b'y', 0, 1, 2], 0, true).read("v").is_none());
     }
 }

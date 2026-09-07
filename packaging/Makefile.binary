@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# Install the prebuilt archive without Cargo or a source checkout.
+PREFIX ?= /usr/local
+DESTDIR ?=
+bindir = $(DESTDIR)$(PREFIX)/bin
+datadir = $(DESTDIR)$(PREFIX)/share
+BINARIES = skerry skerry-thumbnailer skerry-preview-doc skerry-archive
+
+.PHONY: all install uninstall
+all: install
+
+install:
+	for binary in $(BINARIES); do \
+		install -Dm755 "usr/bin/$$binary" "$(bindir)/$$binary" || exit 1; \
+	done
+	install -Dm644 usr/share/applications/dev.skerry.Skerry.desktop "$(datadir)/applications/dev.skerry.Skerry.desktop"
+	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
+	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"
+
+uninstall:
+	for binary in $(BINARIES); do rm -f "$(bindir)/$$binary"; done
+	rm -f "$(datadir)/applications/dev.skerry.Skerry.desktop"
+	rm -f "$(datadir)/licenses/skerry/LICENSE" "$(datadir)/licenses/skerry/NOTICE"
+	-rmdir "$(datadir)/licenses/skerry"

@@ -556,9 +556,15 @@ fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
         }
     }
 
+    if !wire::valid_signature(&signature, false) {
+        return None;
+    }
     let mut reader = wire::Reader::new(&bytes[..end], body_at, little);
     for kind in wire::split(&signature) {
         message.body.push(reader.read(&kind)?);
+    }
+    if reader.at() != end {
+        return None;
     }
     Some((message, end))
 }

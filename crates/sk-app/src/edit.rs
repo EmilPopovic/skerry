@@ -383,6 +383,7 @@ fn refused(refusal: sk_preview::archive::Refusal, note: &str, archive: &Path) ->
             if note.is_empty() { "skerry-archive".to_owned() } else { note.to_owned() },
         ),
         Refusal::NoRoom => (ProblemKind::Full, named(archive)),
+        Refusal::Partial => (ProblemKind::Incomplete, named(archive)),
         Refusal::Unreadable => (ProblemKind::Unreadable, named(archive)),
         Refusal::None | Refusal::Stopped | Refusal::NotAnArchive | Refusal::Undecodable => {
             (ProblemKind::Damaged, named(archive))

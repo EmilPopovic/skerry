@@ -1,4 +1,4 @@
-# Installing Skerry: three binaries and one desktop entry.
+# Installing Skerry: four binaries and one desktop entry.
 #
 # `DESTDIR` and `PREFIX` and nothing else, which is what
 # `docs/06-portability.md` promises: no post-install script, no assumption about
@@ -6,7 +6,7 @@
 # `DESTDIR` to a staging root; a person building for themselves sets
 # `PREFIX=$HOME/.local`.
 #
-# The two helpers go in `bindir` beside the binary rather than in `libexec`,
+# The three helpers go in `bindir` beside the binary rather than in `libexec`,
 # because `sk_preview::host` looks beside itself first and treats a helper found
 # on `PATH` as a version it cannot trust. A packager who wants them in libexec
 # can move them there and put that directory on the launcher's `PATH`; both
@@ -31,17 +31,17 @@ build:
 # the paths below.
 install: build
 	for binary in $(BINARIES); do \
-		install -Dm755 target/release/$$binary $(bindir)/$$binary || exit 1; \
+		install -Dm755 "target/release/$$binary" "$(bindir)/$$binary" || exit 1; \
 	done
 	install -Dm644 packaging/dev.skerry.Skerry.desktop \
-		$(datadir)/applications/dev.skerry.Skerry.desktop
-	install -Dm644 LICENSE $(datadir)/licenses/skerry/LICENSE
-	install -Dm644 NOTICE $(datadir)/licenses/skerry/NOTICE
+		"$(datadir)/applications/dev.skerry.Skerry.desktop"
+	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
+	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"
 
 uninstall:
-	for binary in $(BINARIES); do rm -f $(bindir)/$$binary; done
-	rm -f $(datadir)/applications/dev.skerry.Skerry.desktop
-	rm -rf $(datadir)/licenses/skerry
+	for binary in $(BINARIES); do rm -f "$(bindir)/$$binary"; done
+	rm -f "$(datadir)/applications/dev.skerry.Skerry.desktop"
+	rm -f "$(datadir)/licenses/skerry/LICENSE" "$(datadir)/licenses/skerry/NOTICE"
 
 check:
 	./tools/check

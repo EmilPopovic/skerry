@@ -3,8 +3,10 @@
 A file manager for Linux, written in Rust, built on the premise that a file manager
 is a **latency product and an interaction-design product** — not a feature checklist.
 
-Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and three sandboxed
-helpers, 945 tests, 148 GUI scenarios on both Wayland and X11, eighty-six golden
+Status: **`0.1.0-alpha.1` — preparing for public pre-release.** The
+[release checklist](docs/13-release-readiness.md) records remaining checks. Twelve
+crates and three isolated helpers, unit and integration tests, GUI scenarios on
+both Wayland and X11, and golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -14,7 +16,7 @@ folder pinned here is pinned in Nautilus; search under a folder or over every lo
 filesystem, first result at **0.7 ms over 817,288 entries**; quick look at pictures,
 PDFs — with selectable text — and source, with a highlighter and an editor; **looking
 inside a zip or a tar and unpacking one as a single undoable gesture**, in a child
-whose only writable directory is the one the files are going into; drag and
+whose Landlock write restriction, where supported, limits writes to the destination; drag and
 drop to and from GTK applications; a command palette and a context menu over one
 registry; a settings panel over `Ctrl ,` that says where each value came from, and
 that can make Skerry the desktop's handler for folders; and a keymap that is a file
@@ -38,6 +40,8 @@ Four binaries and one desktop entry, and nothing else: no post-install script an
 nothing written outside `DESTDIR` and `PREFIX`. The three helpers install beside the
 binary because that is where it looks for them first. Tagged builds also produce a
 tarball per architecture — see [release.yml](.github/workflows/release.yml).
+Binary tarballs have their own Makefile and need no Rust installation; see the
+[binary installation instructions](packaging/README.binary.md).
 
 Building needs a Rust toolchain at or above the `rust-version` in
 [Cargo.toml](Cargo.toml) and `libxkbcommon`'s development package for the linker

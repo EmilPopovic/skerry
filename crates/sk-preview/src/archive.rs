@@ -263,6 +263,8 @@ pub enum Refusal {
     /// on a machine with 7z on it is a message that sends somebody to install
     /// what they already have.
     Elsewhere = 8,
+    /// Some entries could not be created; completed output is retained.
+    Partial = 9,
 }
 
 impl Refusal {
@@ -279,6 +281,7 @@ impl Refusal {
             6 => Self::Stopped,
             7 => Self::Interrupted,
             8 => Self::Elsewhere,
+            9 => Self::Partial,
             _ => Self::Undecodable,
         }
     }
@@ -295,6 +298,7 @@ impl Refusal {
             Self::Undecodable => Some("archive.undecodable"),
             Self::NoUnpacker => Some("archive.no_unpacker"),
             Self::Elsewhere => Some("archive.elsewhere"),
+            Self::Partial => Some("archive.partial"),
             Self::NoRoom => Some("archive.no_room"),
             Self::Stopped => Some("archive.stopped"),
             Self::Interrupted => Some("archive.interrupted"),

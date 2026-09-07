@@ -15,6 +15,9 @@
 
 ## Conventions
 
+For the current public-alpha gates and packaging procedure, see
+[13-release-readiness.md](13-release-readiness.md).
+
 - **Numbered documents are living.** They describe the current intent and are edited in place.
 - **ADRs are immutable.** An [ADR](adr/) records one decision, its context, and its
   consequences at the moment it was made. Decisions are not edited; they are superseded by

@@ -12,7 +12,7 @@ The complete list. Anything not here is probed.
 | Assumption | Floor | Why this floor |
 | --- | --- | --- |
 | Linux kernel | **5.10** | The oldest LTS still in wide use (Debian 11). Gives `statx`, `copy_file_range`, `FICLONE`, `inotify`, `SEEK_HOLE`. |
-| libc | **glibc 2.28, or musl 1.2** | Debian 10 / RHEL 8 era. `rustix`'s `linux_raw` backend means most syscalls bypass libc entirely, so this floor is mostly about the dynamic loader and the Vulkan loader. |
+| libc | **Target: glibc 2.28, or musl 1.2** | Binary compatibility with this target still needs verification. CI tarballs use their runner's glibc; `BUILD-INFO` records their actual required symbol version. |
 | Architecture | **x86-64 and aarch64** | Both built and tested in CI from the first commit. Adding a third is then a CI line, not a port. |
 | Display server | **Wayland or X11** | Both first-class. Neither is a fallback for the other. |
 | GPU | **anything, including none** | Vulkan where available, GL otherwise, llvmpipe as the floor — which is also what CI runs on. |
@@ -71,14 +71,17 @@ nothing else must produce a working `skerry`.
 
 ## Packaging
 
-- **The primary artifact is one relocatable binary** plus a small data directory
-  (`.desktop` file, icons, MIME associations, catalogues). `make install` honours `DESTDIR`
+- **The current artifact contains four binaries** plus a desktop entry and licence files.
+  The helpers must stay beside `skerry`. `make install` honours `DESTDIR`
   and `PREFIX` and nothing else — no post-install scripts, no assumptions about who owns
   `/usr`.
-- **Generic**: a tarball and an AppImage, both built in CI for both architectures.
+- **Generic**: a glibc tarball for each architecture, built in CI. Its bundled
+  Makefile installs without Rust or source code. AppImage and musl binary artifacts
+  are not implemented. See [release readiness](13-release-readiness.md).
 - **Distro packages** are welcome downstream and the build is designed to make them
-  trivial: no vendored system libraries, no network access during build, reproducible
-  output, a version string from the release tag.
+  straightforward: no vendored system libraries, offline builds after fetching the
+  lockfile, and a version string with the commit. Packaging identical binaries is
+  reproducible; independent binary builds have not been proven reproducible.
 - **Flatpak ships late and is never the primary channel.** A sandbox fights a file
   manager's entire purpose; the portal-mediated build is a compatibility offering, and its
   limitations are documented rather than papered over.

@@ -22,14 +22,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   RUST: "1.96.1"
   CARGO_TERM_COLOR: always
 
 jobs:
+  validate:
+    uses: ./.github/workflows/check.yml
+
   tarball:
+    needs: validate
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +55,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev binutils
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update
@@ -63,31 +69,26 @@ jobs:
       - name: Stage
         id: stage
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          name="skerry-${version}-${{ matrix.arch }}-linux"
-          make install DESTDIR="stage/${name}" PREFIX=/usr
-          cp README.md LICENSE NOTICE Makefile "stage/${name}/"
-          # Sorted, with one timestamp and no ownership, so two builds of the
-          # same commit differ only by what the compiler emitted.
-          tar --sort=name --owner=0 --group=0 --numeric-owner \
-              --mtime="@${SOURCE_DATE_EPOCH:-0}" \
-              -czf "${name}.tar.gz" -C stage "${name}"
-          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
-          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          args=()
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            args+=(--tag "$GITHUB_REF_NAME")
+          fi
+          archive=$(python3 tools/package.py --arch "${{ matrix.arch }}" --output dist "${args[@]}")
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$archive" .tar.gz)" >> "$GITHUB_OUTPUT"
         env:
           SOURCE_DATE_EPOCH: 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.stage.outputs.name }}
           path: |
-            ${{ steps.stage.outputs.name }}.tar.gz
-            ${{ steps.stage.outputs.name }}.tar.gz.sha256
+            ${{ steps.stage.outputs.archive }}
+            ${{ steps.stage.outputs.archive }}.sha256
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "$GITHUB_REF_NAME" \
-            "${{ steps.stage.outputs.name }}.tar.gz" \
-            "${{ steps.stage.outputs.name }}.tar.gz.sha256" \
-            --clobber
+            "${{ steps.stage.outputs.archive }}" \
+            "${{ steps.stage.outputs.archive }}.sha256"

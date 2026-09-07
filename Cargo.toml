@@ -143,7 +143,7 @@ unreadable_literal = "allow"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = "debuginfo"
 
 # The frame budget is 8 ms. A debug build of the renderer cannot hold it, so the

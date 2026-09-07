@@ -287,6 +287,11 @@ fn unpack(request: &Request, out: &mut impl Write) -> Unpacked {
         Opened::Nothing => Err((Refusal::NotAnArchive, String::new())),
     };
     match outcome {
+        Ok(()) if place.skipped > 0 => Unpacked {
+            refusal: Refusal::Partial,
+            note: format!("{} entries skipped", place.skipped),
+            progress: place.written,
+        },
         Ok(()) => Unpacked { refusal: Refusal::None, note: String::new(), progress: place.written },
         Err((refusal, note)) => Unpacked { refusal, note, progress: place.written },
     }

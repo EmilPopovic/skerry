@@ -97,10 +97,10 @@ pub enum ProblemKind {
     /// An archive is not what it says it is, or not all of it arrived.
     ///
     /// Its own kind because it is the only failure whose message has to say what
-    /// happened to the *output*: an unpack that stops half way takes what it
-    /// wrote away again, and a person who is not told that will go looking for a
-    /// folder that is deliberately not there.
+    /// happened to the output: partial files remain available and undoable.
     Damaged,
+    /// An extraction retained output but could not create every entry.
+    Incomplete,
     /// The bytes are not text, so they cannot be treated as text.
     ///
     /// Its own kind because the answer is not "this failed" but "this is not the
@@ -129,6 +129,7 @@ impl ProblemKind {
             Self::NameRefused => "error.name_refused",
             Self::NoUnpacker => "error.no_unpacker",
             Self::Damaged => "error.damaged",
+            Self::Incomplete => "error.incomplete",
             Self::NotUnpackable => "error.not_unpackable",
             Self::NotText => "error.not_text",
         }
