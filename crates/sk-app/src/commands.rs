@@ -170,6 +170,36 @@ fn places(registry: &mut Registry<App>) {
             enabled: App::can_lower_place,
             run: |app: &mut App| app.move_place(true),
         },
+        CommandSpec {
+            id: "volume.mount",
+            name: "action.mount",
+            group: Group::Navigate,
+            // **What the chord acts on is the row a menu was opened over, else
+            // the volume the pane is standing in** — see
+            // `App::volume_in_question`. That fallback is what makes a chord
+            // meaningful rather than a guess: a person browsing a USB stick and
+            // pressing Eject means *this* stick, which is the only volume the
+            // path they are looking at is on.
+            keys: &["ctrl+alt+m"],
+            enabled: App::can_mount,
+            run: App::mount_volume,
+        },
+        CommandSpec {
+            id: "volume.unmount",
+            name: "action.unmount",
+            group: Group::Navigate,
+            keys: &["ctrl+alt+u"],
+            enabled: App::can_unmount,
+            run: App::unmount_volume,
+        },
+        CommandSpec {
+            id: "volume.eject",
+            name: "action.eject",
+            group: Group::Navigate,
+            keys: &["ctrl+alt+e"],
+            enabled: App::can_unmount,
+            run: App::eject_volume,
+        },
     ] {
         registry.add(spec);
     }

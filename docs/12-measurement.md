@@ -3138,3 +3138,58 @@ selection does not travel with them, because a selection is about the reading
 rather than the page. Watched failing before it was believed: with the store
 removed and the test kept, `a_page_turned_to_has_the_words_its_prefetch_brought`
 fails on *page two's words, kept from its prefetch*.
+
+## The bug was in the encoding and the error named the argument
+
+*"A plugged in usb stick is not detected and placed into the sidebar, not even
+with it plugged in before `cargo run`."* The sidebar's Volumes section is built
+from `/proc/self/mountinfo`, which lists **mounts** — so a stick nothing has
+mounted is not in it, and there was nothing to detect. Diagnosed in one reading
+and confirmed by a probe: `lsblk` on the reference machine listed three
+partitions with real filesystems that Skerry showed nothing of, including one
+labelled *DO NOT USE*.
+
+Three mechanisms were measured before any of them was designed around, because
+each would have been an assumption otherwise:
+
+| question | mechanism | measured |
+| --- | --- | --- |
+| what is there | `/run/udev/data/b<major>:<minor>` | world-readable; the **unmounted** ntfs reports `ID_FS_TYPE=ntfs` |
+| that it appeared | a `NETLINK_KOBJECT_UEVENT` socket | binds as uid 1000 on both multicast groups, no capability |
+| how to mount it | `org.freedesktop.UDisks2.Filesystem.Mount` | the service is on the system bus and answers this user |
+
+That third one is worth its own note. [ADR
+0023](adr/0023-d-bus-is-a-socket-we-speak-ourselves.md)'s revisit trigger names
+this exact feature — "udisks2's `InterfacesAdded` for a disk plugged in" — as the
+thing that would need a subscribing D-Bus connection. **It does not.** A netlink
+socket is a descriptor the frame loop can sleep on, so hotplug costs no
+subscription; mounting is a *method* call, which the short-lived connection per
+call already fits. A trigger can name the wrong mechanism for the right feature.
+
+### And then the marshaller lied about whose fault it was
+
+The first call to `Manager.ResolveDevice` came back
+`org.freedesktop.UDisks2.Error.Failed: Invalid device specification provided` —
+for `/dev/nvme1n1p3`, which exists, and for `/dev/sda1`, which was mounted at the
+time, and for `/dev/nope`, which does not. **The same error for all three**, which
+is the tell: an error that does not discriminate between a real argument and a
+nonsense one is not about the argument.
+
+`Value::Dict` marshals `a{sv}` and wraps each value in a variant on the way out,
+because that is what the `v` is. The caller wrapped it too. udisks2 was handed a
+variant holding a variant holding a string, read the outer one's type as `v`
+rather than `s`, and said the device specification was invalid — which it was,
+and not in the way the sentence suggests.
+
+This is the **second** defect a foreign client has found in a marshaller a year
+old, after the array that was aligned to eight bytes where the specification says
+four. Both were invisible to this program's own tests for the same reason: it
+marshals and unmarshals with the same code, so a double-wrap round-trips
+perfectly. The `Dict` variant now says in its own doc comment that its values are
+wrapped for you, with this error quoted, because the next person will reach for
+`Value::Variant` exactly as readily.
+
+The lesson is about reading errors rather than about D-Bus. **An error message
+names the layer that noticed, not the layer that was wrong**, and the way to tell
+them apart is to vary the input: three arguments that should produce three
+different answers and produce one answer are an answer about something else.

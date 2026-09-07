@@ -204,6 +204,18 @@ settings.write = Write
 settings.handler_written = Written to {0}
 error.mimeapps_unreadable = Line {0} of mimeapps.list is not something Skerry can rewrite — it was left alone
 error.mimeapps_refused = mimeapps.list could not be written — check that the config directory can be written
+# Mounting a disk, which is udisks2's job and polkit's permission — ADR 0030.
+# Each says what happened and what to do, and none of them shows the D-Bus chain.
+error.no_system_bus = There is no system bus, so Skerry cannot mount a disk. Mount it from a terminal instead.
+error.no_udisks = udisks2 is not running, so Skerry cannot mount a disk. Install it, or mount from a terminal.
+error.mount_not_allowed = This session is not allowed to mount disks. Ask an administrator, or mount from a terminal.
+error.mount_failed = {0} could not be mounted. It may have been unplugged, or Linux may have no driver for it.
+error.unmount_failed = {0} could not be unmounted. Something may still have a file open on it.
+error.eject_failed = {0} could not be ejected. Unmount it and unplug it instead.
+notice.mounting = Mounting {0}…
+notice.mounted = {0} is at {1}
+notice.unmounted = {0} was unmounted
+notice.ejected = {0} can be unplugged
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
 # What is left on a volume, at the right of its row in the list of places.
@@ -472,6 +484,11 @@ action.index_build = Index this folder
 action.index_build_all = Index every filesystem
 action.config_write = Write the keymap to a file
 action.settings = Settings
+# The three a disk has — ADR 0030. "Eject" is what every desktop calls the one
+# that means "I am about to unplug this".
+action.mount = Mount
+action.unmount = Unmount
+action.eject = Eject
 action.index_forget = Delete this folder's index
 
 # Properties.

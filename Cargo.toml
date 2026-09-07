@@ -50,7 +50,7 @@ sk-preview = { path = "crates/sk-preview" }
 sk-ui = { path = "crates/sk-ui" }
 sk-app = { path = "crates/sk-app" }
 
-rustix = { version = "1.1", default-features = false, features = ["std", "fs", "event", "mm", "pipe", "process", "time"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs", "event", "mm", "net", "pipe", "process", "time"] }
 # `system` selects the libwayland backend, which is what gives us a real
 # `*mut wl_display` for the GPU surface; `dlopen` loads it at run time so the
 # binary still starts on a machine that has X11 and no Wayland.

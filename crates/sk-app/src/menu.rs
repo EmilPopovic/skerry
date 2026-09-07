@@ -83,8 +83,16 @@ pub const IN_A_LOOK: &[&[&str]] = &[
 ///
 /// Pin is deliberately absent: every row of the sidebar is already a place, so
 /// the row would be dimmed every time the menu opened.
-pub const ON_A_PLACE: &[&[&str]] =
-    &[&["place.expand"], &["place.unpin", "place.raise", "place.lower"]];
+pub const ON_A_PLACE: &[&[&str]] = &[
+    &["place.expand"],
+    &["place.unpin", "place.raise", "place.lower"],
+    // **The three a disk has** — [ADR
+    // 0030](../../../docs/adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md).
+    // Dimmed over a row they mean nothing for, which is every place that is not
+    // a volume, rather than absent: a menu that changes shape by row is a menu
+    // whose rows move under a hand.
+    &["volume.mount", "volume.unmount", "volume.eject"],
+];
 
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[

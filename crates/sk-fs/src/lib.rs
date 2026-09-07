@@ -23,6 +23,7 @@ pub mod ops;
 pub mod save;
 pub mod scan;
 pub mod text;
+pub mod volumes;
 pub mod watch;
 
 pub use copy::{Copied, Placement, Strategy, copy_file, move_file};
@@ -31,4 +32,5 @@ pub use mounts::{Mount, mounts};
 pub use save::atomically;
 pub use scan::{META_CHUNK, MetaRow, Names, metadata, names};
 pub use text::{TEXT_LIMIT, read_text};
+pub use volumes::{Volume, volumes};
 pub use watch::{Change, Watcher, can_watch};

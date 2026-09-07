@@ -4,7 +4,7 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 887 tests, 144 GUI scenarios on both Wayland and X11, eighty-three golden
+helpers, 899 tests, 145 GUI scenarios on both Wayland and X11, eighty-three golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -58,7 +58,7 @@ method, and the four budget rows that are currently missed are in
 Three harnesses assert about things a unit test cannot reach, and each of them found a
 defect nothing else could: `tools/golden` compares eighty-three rendered frames to
 committed references on lavapipe, `tools/gui-test` presses keys and moves a pointer
-through 144 scenarios on two display servers — one of which mounts a filesystem in a
+through 145 scenarios on two display servers — one of which mounts a filesystem in a
 namespace of its own to prove the sidebar notices — and `spikes/e-operations` is a
 filesystem torture matrix that is a CI job rather than thrown-away spike code. All
 three run on every push, the scenarios under `Xvfb`; the Wayland half of them stays
@@ -168,8 +168,9 @@ the first bug report on one of them.
 - **No input method or touchpad gestures on X11.** Both work on Wayland;
   `text-input-v3` has no X11 equivalent this program implements, and the capability
   is reported absent rather than pretended.
-- **No mounting.** A volume's label and its free space are drawn without `udisks2`,
-  but mounting and ejecting one are not written yet.
+- **No encrypted volumes.** A disk appears in the sidebar whether or not anything
+  has mounted it, and a press mounts it through udisks2 — but a LUKS container is
+  not offered, because unlocking one is a passphrase field and its own surface.
 - **Six settings, and no more.** `Ctrl ,` opens a panel listing the theme, hidden
   files, the sidebar and its width, what a new folder opens as, and whether Move to
   Trash asks first — each with its value and where that value came from. Everything

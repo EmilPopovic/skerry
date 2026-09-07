@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
 use sk_desktop::{Kind, Place};
-use sk_fs::Mount;
 use sk_util::{Cancel, Lane, WakeHandle};
 
 use crate::pane::Jobs;
@@ -60,6 +59,20 @@ pub struct Entry {
     /// is true today and is not a sentence anybody could rely on
     /// ([ADR 0021](../../../docs/adr/0021-a-pin-is-a-line-in-gtks-bookmarks-file.md)).
     pub pinned: bool,
+    /// The block device behind a volume row: `/dev/sdb1`.
+    ///
+    /// **Present whether it is mounted or not**, because it is what
+    /// [`sk_desktop::udisks`] is given for all three of Mount, Unmount and
+    /// Eject. `None` for a place, and for a network mount, which has no device.
+    pub device: Option<PathBuf>,
+    /// Whether this is a volume nothing has mounted.
+    ///
+    /// **[ADR 0030](../../../docs/adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md).**
+    /// Its `path` is empty, because where a disk *will* be mounted is not known
+    /// until something mounts it — and this is the field that says the emptiness
+    /// is deliberate rather than a path somebody forgot to fill in. A press on
+    /// such a row mounts it and then goes there.
+    pub unmounted: bool,
 }
 
 /// What a write to the list of places was doing.
@@ -120,6 +133,10 @@ pub struct Row {
     pub open: bool,
     /// The section heading this row is the first under, if it is.
     pub heading: Option<&'static str>,
+    /// The block device behind a volume row. See [`Entry::device`].
+    pub device: Option<PathBuf>,
+    /// Whether it is a volume nothing has mounted. See [`Entry::unmounted`].
+    pub unmounted: bool,
 }
 
 /// How wide the sidebar is until somebody drags it.
@@ -277,6 +294,8 @@ impl Sidebar {
                     depth: 0,
                     open,
                     heading: heading.take(),
+                    device: entry.device.clone(),
+                    unmounted: entry.unmounted,
                 });
                 if open {
                     self.push_children(&entry.path, 1, &mut rows);
@@ -308,6 +327,8 @@ impl Sidebar {
                 depth,
                 open,
                 heading: None,
+                device: None,
+                unmounted: false,
             });
             if open {
                 self.push_children(&path, depth + 1, rows);
@@ -491,6 +512,8 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         depth: 0,
         open: false,
         heading: None,
+        device: None,
+        unmounted: false,
     };
     let mut rows = vec![
         Row {
@@ -538,6 +561,24 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         pinned: false,
         depth: 0,
         open: false,
+        device: Some(PathBuf::from("/dev/sda2")),
+        unmounted: false,
+    });
+    // **And one nothing has mounted** — ADR 0030. A row with a device, no path
+    // and no gauge is a shape only this sample can put in a golden frame, and it
+    // is the row the reported defect was about.
+    rows.push(Row {
+        path: PathBuf::new(),
+        label: "Camera".to_owned(),
+        mark: Mark::Volume,
+        remote: false,
+        free: None,
+        pinned: false,
+        depth: 0,
+        open: false,
+        heading: None,
+        device: Some(PathBuf::from("/dev/sdb1")),
+        unmounted: true,
     });
     rows
 }
@@ -551,7 +592,9 @@ pub(crate) fn build() -> Vec<Section> {
     let known: Vec<&PathBuf> = places.iter().map(|place| &place.path).collect();
     let marks: Vec<Place> =
         sk_desktop::bookmarks().into_iter().filter(|place| !known.contains(&&place.path)).collect();
-    let mounts = sk_fs::mounts();
+    // **Volumes and not mounts** — ADR 0030. A USB stick nothing has mounted is
+    // not in the mount table, which is the whole of why one did not appear here.
+    let mounts = sk_fs::volumes();
 
     let mut sections = Vec::with_capacity(3);
     sections.push(Section { title: "sidebar.places", entries: places.iter().map(row).collect() });
@@ -583,36 +626,36 @@ fn row(place: &Place) -> Entry {
         remote: false,
         free: None,
         pinned: false,
+        device: None,
+        unmounted: false,
     }
 }
 
-/// A mount's row. The root filesystem is named rather than shown as `/`, and a
-/// mount point with no useful name falls back to what backs it.
-fn volume(mount: &Mount) -> Entry {
+/// A volume's row. The root filesystem is named rather than shown as `/`, and a
+/// volume nothing has mounted is a row with no path and no bar.
+fn volume(volume: &sk_fs::Volume) -> Entry {
     // **The filesystem's own label first.** It is the name somebody gave the
     // disk, and it is what is printed on the outside of a USB stick; the mount
     // point is where the system happened to put it. The root filesystem keeps its
     // word, because "the filesystem" is what a person calls that one whatever it
     // is labelled.
-    let label = if mount.is_root() {
+    let label = if volume.is_root() {
         sk_model::i18n::lookup("sidebar.root").to_owned()
     } else {
-        mount.label.clone().unwrap_or_else(|| {
-            mount
-                .at
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| mount.source.clone())
-        })
+        volume.name()
     };
     Entry {
-        path: mount.at.clone(),
+        // **Empty for an unmounted volume, and `unmounted` says why.** Where a
+        // disk will land is udisks2's to decide and it decides it at mount time,
+        // so there is no path to put here and nothing to invent one from.
+        path: volume.at.clone().unwrap_or_default(),
         label,
         mark: Mark::Volume,
-        remote: mount.remote,
-        free: mount.free,
+        remote: volume.remote,
+        free: volume.free,
         pinned: false,
+        device: volume.device.clone(),
+        unmounted: !volume.is_mounted(),
     }
 }
 
@@ -661,6 +704,8 @@ mod tests {
                     remote: false,
                     free: None,
                     pinned: false,
+                    device: None,
+                    unmounted: false,
                 })
                 .collect(),
         }]
@@ -688,8 +733,14 @@ mod tests {
         assert_eq!(at(&fake(&["/home/emil"]), "/home/emilia"), None);
     }
 
-    /// This machine's own three sources: whatever they hold, every row points at
-    /// a directory that exists and nothing appears twice.
+    /// This machine's own three sources: whatever they hold, every row a press
+    /// navigates to points at a directory that exists, and nothing appears
+    /// twice.
+    ///
+    /// **Except an unmounted volume, whose path is empty on purpose** — ADR
+    /// 0030. Where a disk will land is udisks2's to decide at mount time, so the
+    /// row carries a device and no path, and a press on it mounts rather than
+    /// navigates. Its own claims are below it.
     #[test]
     fn what_this_machine_offers_is_a_list_of_places_that_exist() {
         let sections = build();
@@ -697,14 +748,28 @@ mod tests {
         let rows: Vec<&Entry> =
             sections.iter().flat_map(|section| section.entries.iter()).collect();
         for entry in &rows {
-            assert!(entry.path.is_dir(), "{entry:?}");
             assert!(!entry.label.is_empty(), "{entry:?}");
+            if entry.unmounted {
+                assert_eq!(entry.path, PathBuf::new(), "an unmounted row has a path: {entry:?}");
+                assert!(entry.device.is_some(), "an unmounted row has no device: {entry:?}");
+                assert!(entry.free.is_none(), "an unmounted row reported room: {entry:?}");
+                continue;
+            }
+            assert!(entry.path.is_dir(), "{entry:?}");
         }
-        let mut paths: Vec<_> = rows.iter().map(|entry| &entry.path).collect();
+        let mut paths: Vec<_> =
+            rows.iter().filter(|entry| !entry.unmounted).map(|entry| &entry.path).collect();
         let count = paths.len();
         paths.sort_unstable();
         paths.dedup();
         assert_eq!(paths.len(), count, "the same place twice: {rows:?}");
+        // And two unmounted volumes are two devices, never two of one.
+        let mut devices: Vec<_> =
+            rows.iter().filter(|entry| entry.unmounted).map(|entry| &entry.device).collect();
+        let devices_count = devices.len();
+        devices.sort_unstable();
+        devices.dedup();
+        assert_eq!(devices.len(), devices_count, "the same device twice: {rows:?}");
     }
 
     /// A volume's row carries a proportion, not just a figure.
@@ -782,6 +847,8 @@ mod tests {
                     remote: false,
                     free: None,
                     pinned: false,
+                    device: None,
+                    unmounted: false,
                 }],
             },
             Section {
@@ -795,6 +862,8 @@ mod tests {
                         remote: false,
                         free: None,
                         pinned: true,
+                        device: None,
+                        unmounted: false,
                     })
                     .collect(),
             },

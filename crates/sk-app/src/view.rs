@@ -3437,16 +3437,23 @@ fn place_row(
     // A triangle rather than a glyph, for the reason the reload button is one:
     // `▸` and `▾` are a font's decision and this machine's chain is missing
     // arrows already.
-    let (width, height, at) =
-        if row.open { (9.0, 5.0, Direction::Down) } else { (5.0, 9.0, Direction::Right) };
-    painter.triangle(
-        twisty.x + (twisty.width - width) / 2.0,
-        twisty.y + (twisty.height - height) / 2.0,
-        width,
-        height,
-        ink,
-        at,
-    );
+    //
+    // **None on a volume nothing has mounted**, because there is nothing under
+    // it to open: its path is empty until something mounts it, so a twisty there
+    // is a control that reads a directory with no name — and a control that does
+    // nothing is worse than no control.
+    if !row.unmounted {
+        let (width, height, at) =
+            if row.open { (9.0, 5.0, Direction::Down) } else { (5.0, 9.0, Direction::Right) };
+        painter.triangle(
+            twisty.x + (twisty.width - width) / 2.0,
+            twisty.y + (twisty.height - height) / 2.0,
+            width,
+            height,
+            ink,
+            at,
+        );
+    }
 
     // **Logical pixels all the way to the draw call.** `Painter::rect` is where
     // the conversion happens, so a device rectangle's `right()` used as the next
@@ -3458,11 +3465,20 @@ fn place_row(
     let icon = painter.rect(mark_at, box_.y + (box_.height - mark) / 2.0, mark, mark);
     let kinds = theme.palette.kinds;
     match row.mark {
+        // **A volume nothing has mounted is drawn in the dim ink** — ADR 0030.
+        // It is a row a press *mounts* rather than opens, and the difference has
+        // to be visible before the press: an identical row that behaves
+        // differently is the thing rule 4 is about.
+        Mark::Volume if row.unmounted => painter.disk(icon, theme.palette.dim),
         Mark::Volume => painter.disk(icon, if row.remote { kinds.audio } else { kinds.unknown }),
         Mark::Place(_) => painter.folder(icon, kinds.folder),
     }
 
-    let ink = if current { theme.palette.selected_text } else { theme.palette.text };
+    let ink = match (current, row.unmounted) {
+        (true, _) => theme.palette.selected_text,
+        (false, true) => theme.palette.dim,
+        (false, false) => theme.palette.text,
+    };
     // **A volume's label rides higher, because its gauge is underneath it.**
     // Three pixels of the row's twenty-six: the bar is two and the third is the
     // air above it. Every other row keeps the middle of its own height, so the

@@ -138,6 +138,34 @@ fn named(commands: &Registry<App>, event: &sk_plat::KeyEvent) -> Option<&'static
         .map(|command| command.id)
 }
 
+/// What a mount, unmount or eject had to say.
+struct Mounted {
+    /// What to put in the status line, already looked up.
+    notice: String,
+    /// Where the volume landed, when it was a mount that worked and the press
+    /// asked to go there.
+    open: Option<PathBuf>,
+    /// The chain, for the log, which is never the sentence — rule 8.
+    detail: String,
+}
+
+/// Which of the two things that are not mounting is being done.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Act {
+    Unmount,
+    Eject,
+}
+
+/// What a mount should do once it has worked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Mounting {
+    /// Go there, which is what a press on the row means.
+    AndOpen,
+    /// Say so and stay put, which is what the command means when it was reached
+    /// from a menu over a row somebody was not looking at.
+    AndSaySo,
+}
+
 /// The type a file manager is the default for.
 const FOLDERS: &str = "inode/directory";
 
@@ -688,6 +716,13 @@ struct Replies {
     /// sentence when there is one to say.
     handler_tx: std::sync::mpsc::Sender<(bool, Option<String>)>,
     handler_rx: Receiver<(bool, Option<String>)>,
+    /// What a mount, unmount or eject did: the sentence, and where to go.
+    ///
+    /// **The sentence rather than the error**, because the job is where the
+    /// catalogue lookup belongs — the frame loop takes delivery of something it
+    /// can put on screen. See [`Mounted`].
+    mounted_tx: std::sync::mpsc::Sender<Mounted>,
+    mounted_rx: Receiver<Mounted>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -716,6 +751,7 @@ impl Replies {
         let (places_tx, places_rx) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::channel();
         let (handler_tx, handler_rx) = mpsc::channel();
+        let (mounted_tx, mounted_rx) = mpsc::channel();
         let (asked_tx, asked_rx) = mpsc::channel();
         Self {
             paste_tx,
@@ -742,6 +778,8 @@ impl Replies {
             opened_rx,
             handler_tx,
             handler_rx,
+            mounted_tx,
+            mounted_rx,
         }
     }
 }
@@ -1716,6 +1754,7 @@ impl App {
             self.drain_facts();
             self.drain_openers();
             self.drain_handler();
+            self.drain_mounted();
             self.drain_found();
             self.drain_index();
             self.drain_places();
@@ -4024,9 +4063,20 @@ impl App {
                     Some(PlaceDrag { from, at: from, started: position, active: false });
             }
             if let Some(entry) = self.sidebar.at(index) {
-                let path = entry.path.clone();
-                if path != self.panes.focused().path {
-                    self.panes.focused_mut().open(path, &self.jobs);
+                // **A volume nothing has mounted is mounted by the press** — ADR
+                // 0030. It has no path to go to yet, and the job that mounts it
+                // navigates when udisks2 says where it landed.
+                if entry.unmounted {
+                    let device = entry.device.clone();
+                    let name = entry.label.clone();
+                    if let Some(device) = device {
+                        self.mount_the_volume(device, name, Mounting::AndOpen);
+                    }
+                } else {
+                    let path = entry.path.clone();
+                    if path != self.panes.focused().path {
+                        self.panes.focused_mut().open(path, &self.jobs);
+                    }
                 }
             }
             self.dirty = true;
@@ -4102,7 +4152,10 @@ impl App {
     fn twisty_at(&self, position: Point) -> Option<PathBuf> {
         let index =
             self.hits.twisties.iter().position(|area| area.contains(position.x, position.y))?;
-        self.sidebar.at(index).map(|row| row.path.clone())
+        // **Nothing for a volume that is not mounted**, which draws no twisty:
+        // its path is empty until something mounts it, and a read of `""` is a
+        // press that fails invisibly.
+        self.sidebar.at(index).filter(|row| !row.unmounted).map(|row| row.path.clone())
     }
 
     /// Whether the place in question is a row the sidebar can open.
@@ -5551,6 +5604,163 @@ impl App {
                 wake.wake();
             }
         });
+    }
+
+    /// The volume the row in question is about, for the three commands.
+    ///
+    /// **The row a menu was opened over, else the row the pane is standing in.**
+    /// The same rule Pin follows, and for the same reason: a command reached from
+    /// a menu acts on what the menu was about, and one reached from the palette
+    /// has to act on something.
+    fn volume_in_question(&self) -> Option<crate::sidebar::Row> {
+        let target = self.place_target.clone();
+        let volumes =
+            || self.sidebar.rows().iter().filter(|row| row.mark == crate::sidebar::Mark::Volume);
+        let over = target.and_then(|path| {
+            volumes()
+                .find(|row| row.path == path || row.device.as_deref() == Some(path.as_path()))
+                .cloned()
+        });
+        over.or_else(|| {
+            let here = self.panes.focused().path.clone();
+            volumes()
+                .filter(|row| !row.unmounted)
+                .filter(|row| here.starts_with(&row.path))
+                // The deepest match, so a volume inside another filesystem wins
+                // over the root it happens to be under.
+                .max_by_key(|row| row.path.as_os_str().len())
+                .cloned()
+        })
+    }
+
+    /// Whether there is a volume to mount.
+    #[must_use]
+    pub(crate) fn can_mount(&self) -> bool {
+        self.volume_in_question().is_some_and(|row| row.unmounted && row.device.is_some())
+    }
+
+    /// Whether there is a mounted volume to unmount, which the root is not.
+    #[must_use]
+    pub(crate) fn can_unmount(&self) -> bool {
+        self.volume_in_question().is_some_and(|row| {
+            !row.unmounted && row.device.is_some() && row.path != std::path::Path::new("/")
+        })
+    }
+
+    /// Mounts the volume in question and says where it went.
+    pub(crate) fn mount_volume(&mut self) {
+        let Some(row) = self.volume_in_question().filter(|row| row.unmounted) else { return };
+        let Some(device) = row.device else { return };
+        self.mount_the_volume(device, row.label, Mounting::AndSaySo);
+    }
+
+    /// Unmounts it.
+    pub(crate) fn unmount_volume(&mut self) {
+        let Some(row) = self.volume_in_question().filter(|row| !row.unmounted) else { return };
+        let Some(device) = row.device else { return };
+        self.act_on_the_volume(device, row.label, Act::Unmount);
+    }
+
+    /// Unmounts it and ejects the drive it is on.
+    pub(crate) fn eject_volume(&mut self) {
+        let Some(row) = self.volume_in_question() else { return };
+        let Some(device) = row.device else { return };
+        self.act_on_the_volume(device, row.label, Act::Eject);
+    }
+
+    /// Mounts `device` on a job, and navigates there if that is what was meant.
+    ///
+    /// **On a job, because it is a connection, an authentication and two round
+    /// trips** — and the mount itself happens in another process and takes as
+    /// long as the filesystem does. Rule 1 has no exemption for a call that is
+    /// usually fast.
+    fn mount_the_volume(&mut self, device: PathBuf, name: String, then: Mounting) {
+        let sender = self.replies.mounted_tx.clone();
+        let wake = self.waker.handle();
+        self.said_it_is_working(&name);
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let reply = match sk_desktop::udisks::mount(&device) {
+                Ok(at) => Mounted {
+                    notice: sk_model::i18n::format("notice.mounted", &[&name, &at.display()]),
+                    open: (then == Mounting::AndOpen).then_some(at),
+                    detail: String::new(),
+                },
+                Err(why) => Mounted {
+                    notice: sk_model::i18n::format(why.label_key(), &[&name]),
+                    open: None,
+                    detail: why.detail().to_owned(),
+                },
+            };
+            if sender.send(reply).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Unmounts or ejects `device` on a job.
+    fn act_on_the_volume(&mut self, device: PathBuf, name: String, act: Act) {
+        let sender = self.replies.mounted_tx.clone();
+        let wake = self.waker.handle();
+        self.said_it_is_working(&name);
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let (done, said, refused) = match act {
+                Act::Unmount => (
+                    sk_desktop::udisks::unmount(&device),
+                    "notice.unmounted",
+                    "error.unmount_failed",
+                ),
+                Act::Eject => {
+                    (sk_desktop::udisks::eject(&device), "notice.ejected", "error.eject_failed")
+                }
+            };
+            let reply = match done {
+                Ok(()) => Mounted {
+                    notice: sk_model::i18n::format(said, &[&name]),
+                    open: None,
+                    detail: String::new(),
+                },
+                Err(why) => Mounted {
+                    // **The refusal's own sentence where it has one that is more
+                    // specific than the verb's.** polkit saying no and a busy
+                    // filesystem are two different things to do about it.
+                    notice: match why {
+                        sk_desktop::udisks::Refused::Failed(_) => {
+                            sk_model::i18n::format(refused, &[&name])
+                        }
+                        ref other => sk_model::i18n::format(other.label_key(), &[&name]),
+                    },
+                    open: None,
+                    detail: why.detail().to_owned(),
+                },
+            };
+            if sender.send(reply).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Says a disk is being worked on, because a mount can take a second.
+    fn said_it_is_working(&mut self, name: &str) {
+        self.notice = Some((sk_model::i18n::format("notice.mounting", &[&name]), Instant::now()));
+        self.dirty = true;
+    }
+
+    /// Takes delivery of what a mount, unmount or eject did.
+    fn drain_mounted(&mut self) {
+        let Ok(reply) = self.replies.mounted_rx.try_recv() else { return };
+        if !reply.detail.is_empty() {
+            // Rule 8: the sentence is on screen and the chain is in the log.
+            eprintln!("skerry: udisks2: {}", reply.detail);
+        }
+        self.notice = Some((reply.notice, Instant::now()));
+        if let Some(at) = reply.open {
+            self.panes.focused_mut().open(at, &self.jobs);
+        }
+        // The mount table changed, so the sidebar has a new row to draw — and
+        // the uevent that says so may not arrive for a mount we asked for
+        // ourselves.
+        self.sidebar.reload(&self.jobs);
+        self.dirty = true;
     }
 
     /// Opens the settings panel, or closes it if it is already open.
@@ -8690,6 +8900,17 @@ pane_body={bodies:?} pane_bar={bars:?}",
             .map(|path| crate::panes::title_of(path).to_owned())
             .collect::<Vec<_>>()
             .join(",");
+        // Every volume row and whether anything has mounted it, so a scenario can
+        // see the row a disk nothing mounted produces — ADR 0030. Machine-
+        // dependent by nature, which is why what is asserted about it is a shape.
+        let volumes = self
+            .sidebar
+            .rows()
+            .iter()
+            .filter(|row| row.mark == crate::sidebar::Mark::Volume)
+            .map(|row| format!("{}:{}", row.label, if row.unmounted { "no" } else { "yes" }))
+            .collect::<Vec<_>>()
+            .join(",");
         let at = self.pinned_run().map_or(-1, |run| i64::try_from(run.start).unwrap_or(-1));
         let menu = self
             .place_target
@@ -8740,7 +8961,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
             "sidebar_w={:.1} sidebar_top={:.1} places={} places_loaded={} \
 place_hover={hover} place_name={name:?} pinned={pinned:?} pinned_at={at} place_menu={menu:?} \
 place_drop={drop} place_aim={aim:?} twisty_aim={twisties:?} place_depths={depths:?} \
-aside_grabbed={}",
+volumes={volumes:?} aside_grabbed={}",
             self.layout.sidebar.width,
             self.layout.sidebar.y,
             self.sidebar.len(),
@@ -10245,7 +10466,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         if self.layout.sidebar.contains(position.x, position.y) {
             let over = self.place_at(position).and_then(|index| self.sidebar.at(index));
             let Some(entry) = over else { return };
-            self.place_target = Some(entry.path.clone());
+            // **A volume nothing has mounted is named by its device.** Its path
+            // is empty on purpose — ADR 0030 — and every unmounted row's is, so
+            // a target of `""` would name all of them at once and Unmount would
+            // act on whichever came first.
+            self.place_target = match (entry.unmounted, entry.device.clone()) {
+                (true, Some(device)) => Some(device),
+                _ => Some(entry.path.clone()),
+            };
             self.menu_wanted = Some((position, crate::menu::ON_A_PLACE));
             return;
         }

@@ -35,6 +35,14 @@ pub enum Value {
     /// `a` of one element type, which every array here has.
     Array(Vec<Value>),
     /// `a{sv}`, which is how every D-Bus interface takes options.
+    ///
+    /// **Each value is wrapped in a variant on the way out**, because that is
+    /// what the `v` in the signature is — so a caller passes the value itself
+    /// and never a [`Value::Variant`] around it. Wrapping it twice is legal
+    /// D-Bus and means something else: udisks2 answered
+    /// `Invalid device specification provided` to a devspec whose one string
+    /// was inside two variants, which reads as a bad device path and was a bad
+    /// encoding.
     Dict(Vec<(String, Value)>),
     /// `v`
     Variant(Box<Value>),

@@ -21,7 +21,7 @@ row is a review blocker.
 
 | Crate | Why | Seam |
 | --- | --- | --- |
-| `rustix` | Raw `getdents64`, `statx`, `copy_file_range`, `inotify`, `fallocate` with a `linux_raw` backend that bypasses libc entirely. Writing this by hand means hand-rolling syscall ABI per architecture — the exact work that makes a project non-portable. | `sk-fs` internals |
+| `rustix` | Raw `getdents64`, `statx`, `copy_file_range`, `inotify`, `fallocate` and a `NETLINK_KOBJECT_UEVENT` socket, with a `linux_raw` backend that bypasses libc entirely. Writing this by hand means hand-rolling syscall ABI per architecture — the exact work that makes a project non-portable. The `net` feature was added for the uevent socket ([ADR 0030](adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md)) and brings **no** new crate: it is a feature of one already here. | `sk-fs` internals |
 | `swash` | Shaping, font introspection and rasterization in one crate with a small tree. Text is the one thing in a file manager that is genuinely hard and genuinely solved. See [ADR 0004](adr/0004-swash-for-text.md). | `sk-text` |
 | `wgpu` | Vulkan and GL behind one API, with the driver-quirk knowledge we would otherwise accumulate by suffering. The heaviest entry in the graph and the one with explicit revisit triggers — [ADR 0003](adr/0003-wgpu-first-backend.md). | `sk-gpu::Renderer` |
 | `xkbcommon` (Rust bindings) | Keyboard mapping is a specification with decades of edge cases. Bindings only; the protocol handling above it is ours. | `sk-plat` |

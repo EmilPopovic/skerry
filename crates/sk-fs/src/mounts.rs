@@ -44,6 +44,15 @@ pub struct Mount {
     /// [`crate::device`] asks, answered from the type rather than by `statfs`,
     /// because this list is read before anything is opened.
     pub remote: bool,
+    /// The device's number, as `major:minor`.
+    ///
+    /// **The only field that joins reliably against `/sys/class/block`** — see
+    /// [`crate::volumes`]. A source string does not: this filesystem is
+    /// `/dev/mapper/ubuntu--vg-ubuntu--lv` in the mount table and `dm-1` in
+    /// sysfs, and the same disk is `/dev/sda1` in one and `sda1` in the other.
+    /// The kernel writes the number in both places and means the same thing by
+    /// it.
+    pub numbers: String,
 }
 
 impl Mount {
@@ -56,9 +65,12 @@ impl Mount {
 
 /// Filesystem types worth showing, and whether each can block.
 ///
+/// Read by [`crate::volumes`] too, which is the point of it being one list: a
+/// filesystem type this program can show is added here and nowhere else.
+///
 /// Ordered by how likely a person is to have one, which is only a comment: the
 /// lookup is linear over twenty entries and runs once per mount.
-const INTERESTING: &[(&str, bool)] = &[
+pub(crate) const INTERESTING: &[(&str, bool)] = &[
     ("ext4", false),
     ("ext3", false),
     ("ext2", false),
@@ -85,6 +97,20 @@ const INTERESTING: &[(&str, bool)] = &[
     ("fuse.rclone", true),
     ("fuse.s3fs", true),
 ];
+
+/// Every device number in the mount table, whatever kind of filesystem it is.
+///
+/// **Every line, not the interesting ones.** `/boot` and `/boot/efi` are real
+/// filesystems that [`is_system`] deliberately keeps out of the sidebar — so
+/// they are absent from [`mounts`] while being very much mounted, and
+/// [`crate::volumes`] listing them as *unmounted* disks somebody could mount is
+/// worse than not listing them at all. Measured: both appeared, as two rows
+/// nobody wants, the first time the two lists were joined.
+#[must_use]
+pub fn mounted_numbers() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else { return Vec::new() };
+    text.lines().filter_map(|line| line.split(' ').nth(2).map(str::to_owned)).collect()
+}
 
 /// Every mount worth showing, root first and then by mount point.
 ///
@@ -141,7 +167,7 @@ const BY_LABEL: &str = "/dev/disk/by-label";
 /// `\xNN`, which is a *different* escape from the octal one `/proc` uses for a
 /// mount point: two directories, two conventions, and a label that arrives with
 /// the escapes still in it reads as `My\x20disk`.
-fn unescape_label(name: &str) -> String {
+pub(crate) fn unescape_label(name: &str) -> String {
     let bytes = name.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
@@ -211,7 +237,7 @@ fn parse(line: &str, seen: &mut Vec<String>) -> Option<Mount> {
     if root != "/" || seen.contains(&device) {
         return None;
     }
-    seen.push(device);
+    seen.push(device.clone());
     Some(Mount {
         label: None,
         free: None,
@@ -219,6 +245,7 @@ fn parse(line: &str, seen: &mut Vec<String>) -> Option<Mount> {
         kind: kind.to_owned(),
         source: unescape(source),
         remote,
+        numbers: device,
     })
 }
 

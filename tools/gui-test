@@ -1311,7 +1311,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 144
+FEWEST_SCENARIOS = 145
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -6226,6 +6226,56 @@ def asking_before_the_trash_is_a_setting(run: Run, fixture: Path) -> None:
         until(own, rows=str(rows))
     finally:
         own.close()
+
+
+@scenario("a-volume-offers-mount-only-where-it-means-something")
+def a_volume_offers_mount_where_it_means_something(run: Run, fixture: Path) -> None:
+    """**[ADR 0030](../docs/adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md)'s
+    three commands, and the half of them that can be asserted on any machine.**
+
+    A USB stick is hardware, and a scenario cannot plug one in — so what is
+    checked here is everything that is *not* the disk: that Mount, Unmount and
+    Eject are on a place's own menu, that all three are dimmed over a row they
+    mean nothing for, and that the sidebar says of every volume whether anything
+    has mounted it.
+
+    **Dimmed rather than absent**, which is the rule every menu here follows: a
+    menu that changes shape by row is a menu whose rows move under a hand. Over
+    Home — a place, not a volume — none of the three can do anything, and the
+    menu says so by drawing them and greying them.
+
+    The row a *mounted* volume produces is asserted here; the row an unmounted
+    one produces is in the golden frames, where `sidebar::sample` can put one on
+    screen without anybody owning the disk.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 150\n")
+    start = run.state()
+    # Every machine that runs this has a root filesystem, and it is a volume.
+    if "volumes" not in start or not start["volumes"]:
+        raise Failure("the sidebar reported no volumes at all")
+    told = dict(
+        field.split(":", 1) for field in start["volumes"].split(",") if ":" in field
+    )
+    if not any(state == "yes" for state in told.values()):
+        raise Failure(f"nothing is mounted, on a machine that booted: {start['volumes']!r}")
+    for name, state in told.items():
+        if state not in ("yes", "no"):
+            raise Failure(f"{name} is {state!r}, which is neither mounted nor not")
+
+    # Home, which is row 0 of the first section in every arrangement, and is a
+    # place rather than a disk.
+    at = place_point(run, start, 0)
+    run.drive(
+        f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nclick right\nsleep 400\nkey f12\nsleep 200\n"
+    )
+    over_home = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+    for command in ("volume.mount", "volume.unmount", "volume.eject"):
+        if command not in over_home["menu_dim"]:
+            raise Failure(
+                f"{command} is offered over a place that is not a disk: "
+                f"dim={over_home['menu_dim']!r}"
+            )
+    run.drive("key escape\nsleep 250\n")
 
 
 @scenario("a-well-known-place-cannot-be-unpinned", fresh=True)

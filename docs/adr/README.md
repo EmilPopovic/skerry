@@ -37,6 +37,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0027](0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md) | A setting is a line in the config; the session remembers what the window changed | Accepted |
 | [0028](0028-the-page-you-are-on-and-its-two-neighbours-are-never-evicted.md) | The page you are on and its two neighbours are never evicted | Accepted |
 | [0029](0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md) | Markdown renders from our own parser, and unknown syntax is its own text | Accepted |
+| [0030](0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md) | A volume is a device udev described, and mounting it is one udisks2 call | Accepted |
 
 ## Triggers that have been answered
 

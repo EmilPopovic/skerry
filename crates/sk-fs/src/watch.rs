@@ -68,11 +68,17 @@ pub enum Change {
     Overflowed,
     /// The directory itself was deleted or unmounted.
     Vanished(PathBuf),
-    /// The mount table changed: something was mounted or unmounted anywhere on
-    /// the machine.
+    /// The list of volumes changed: something was mounted or unmounted anywhere
+    /// on the machine, **or a disk was plugged in or pulled out**.
+    ///
+    /// **One variant for two causes, because the consequence is identical**: the
+    /// caller re-reads [`crate::volumes`], which is both lists. A second variant
+    /// would be a second match arm doing the same thing, and the two causes are
+    /// coalesced against each other anyway — plugging in a stick that then
+    /// mounts is one of each within a few milliseconds.
     ///
     /// Nothing to do with the watched directory, and on this thread because it is
-    /// the same `poll` and the same wake-up. A second thread for one descriptor
+    /// the same `poll` and the same wake-up. A second thread for two descriptors
     /// would be a second thread that sleeps forever.
     Mounts,
 }
@@ -109,6 +115,84 @@ fn mount_table() -> Option<OwnedFd> {
     )
     .ok()
 }
+
+/// Opens a `NETLINK_KOBJECT_UEVENT` socket, bound to udev's own broadcast.
+///
+/// **[ADR 0030](../../../docs/adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md).**
+/// The mount table says nothing when a disk is plugged in and nothing has
+/// mounted it, which is the case the sidebar's unmounted volumes exist for. This
+/// is a descriptor, so it joins the `poll` this thread already sleeps in: no
+/// timer, no library, and no subscribing D-Bus connection.
+///
+/// **Group 2 and not group 1.** Group 1 is the kernel's own broadcast and fires
+/// *before* udev has written `/run/udev/data`, which is the file
+/// [`crate::volumes`] reads to learn what a device holds — so a stick nothing
+/// mounts would be re-read too early, described as nothing, and stay invisible.
+/// Group 2 is udev's, broadcast after it has finished, which is what that group
+/// is for.
+///
+/// `None` where the socket cannot be bound, which is a capability reported
+/// absent per [ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md):
+/// the list is then only as fresh as a mount change makes it. Measured: it binds
+/// as an ordinary user on Linux 7.0 with no capability at all.
+fn uevents() -> Option<OwnedFd> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, netlink};
+    let socket = rustix::net::socket_with(
+        AddressFamily::NETLINK,
+        SocketType::DGRAM,
+        SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+        Some(netlink::KOBJECT_UEVENT),
+    )
+    .ok()?;
+    // A port id of zero asks the kernel to allocate one, which is what every
+    // client that is not routing does.
+    rustix::net::bind(&socket, &netlink::SocketAddrNetlink::new(0, UDEV_GROUP)).ok()?;
+    Some(socket)
+}
+
+/// Reads everything waiting on `socket`. Whether any of it was about a disk.
+///
+/// **Drained to `EAGAIN`, because one plug is several messages.** The socket is
+/// non-blocking and a burst left unread is a descriptor that stays ready, which
+/// would spin the thread that polls it. `Err` where the socket itself failed,
+/// which is the caller's cue to stop polling it.
+fn heard_about_a_disk(socket: std::os::fd::BorrowedFd<'_>) -> Result<bool, ()> {
+    let mut about_a_disk = false;
+    loop {
+        let mut buffer = [0u8; UEVENT];
+        match rustix::io::read(socket, &mut buffer) {
+            // A zero-length read and `EAGAIN` are the same answer here: there is
+            // nothing more waiting, so stop rather than spin.
+            Ok(0) | Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
+                return Ok(about_a_disk);
+            }
+            Ok(count) => about_a_disk |= about_a_block_device(&buffer[..count]),
+            Err(_) => return Err(()),
+        }
+    }
+}
+
+/// Whether a uevent's properties say it is about a block device.
+///
+/// One property's text, looked for in the whole message — see
+/// [`Thread::plugged`] for why that is the parse rather than a shortcut. The
+/// terminator matters: without it `SUBSYSTEM=block` would also match a
+/// hypothetical `SUBSYSTEM=blockdev`, and a property block always ends each
+/// entry with a NUL.
+fn about_a_block_device(message: &[u8]) -> bool {
+    const WANTED: &[u8] = b"SUBSYSTEM=block\0";
+    message.windows(WANTED.len()).any(|window| window == WANTED)
+}
+
+/// udev's multicast group, as the bitmask `nl_groups` is.
+const UDEV_GROUP: u32 = 2;
+
+/// How much of one uevent to read.
+///
+/// A uevent is a device path and a few dozen properties. Two kilobytes is more
+/// than any of them and the buffer is on the stack, read once per plugged-in
+/// disk — so the size is a bound rather than a budget.
+const UEVENT: usize = 2048;
 
 /// Watches a set of directories, on its own thread.
 pub struct Watcher {
@@ -153,6 +237,7 @@ impl Watcher {
                 let mut state = Thread {
                     inotify,
                     mounts: mount_table(),
+                    devices: uevents(),
                     control: thread_control,
                     wanted,
                     armed,
@@ -207,6 +292,9 @@ struct Thread {
     /// cannot be opened, which is a machine with no `procfs` and a sidebar whose
     /// volumes are a snapshot.
     mounts: Option<OwnedFd>,
+    /// udev's uevent broadcast, held open to be polled. `None` where the socket
+    /// could not be bound — see [`uevents`].
+    devices: Option<OwnedFd>,
     control: OwnedFd,
     wanted: Arc<Mutex<Option<Vec<PathBuf>>>>,
     armed: Arc<Mutex<Vec<PathBuf>>>,
@@ -225,12 +313,21 @@ impl Thread {
             self.retarget();
             let inotify = self.inotify.as_fd();
             let control = self.control.as_fd();
-            let mut fds = Vec::with_capacity(3);
+            let mut fds = Vec::with_capacity(4);
             fds.push(PollFd::new(&inotify, PollFlags::IN));
             fds.push(PollFd::new(&control, PollFlags::IN));
             let table = self.mounts.as_ref().map(AsFd::as_fd);
             if let Some(table) = table.as_ref() {
                 fds.push(PollFd::new(table, PollFlags::PRI));
+            }
+            // **Always last, so the index above stays 2.** The mount table may
+            // be absent and the socket may be absent, and a poll set whose
+            // indices depend on which is which is a set that reads the wrong
+            // descriptor's answer on the machine that has only one of them.
+            let plugged = self.devices.as_ref().map(AsFd::as_fd);
+            let socket_at = fds.len();
+            if let Some(plugged) = plugged.as_ref() {
+                fds.push(PollFd::new(plugged, PollFlags::IN));
             }
             // No timeout: the thread sleeps until the kernel has something or the
             // frame loop retargets it. Zero CPU at idle applies here too.
@@ -245,13 +342,19 @@ impl Thread {
             // conditions a read of a proc file does not clear, so treating any
             // of them as a mount would spin this thread and drag the frame loop
             // out of its sleep at the same rate.
-            let remounted = fds.get(2).is_some_and(|fd| fd.revents().contains(PollFlags::PRI));
+            let remounted = self.mounts.is_some()
+                && fds.get(2).is_some_and(|fd| fd.revents().contains(PollFlags::PRI));
+            let unplugged =
+                fds.get(socket_at).is_some_and(|fd| fd.revents().contains(PollFlags::IN));
             let touched = fds[0].revents().contains(PollFlags::IN);
-            // The borrows of the two descriptors end here, which is why the two
-            // answers are taken before either handler runs.
+            // The borrows of the descriptors end here, which is why every answer
+            // is taken before any handler runs.
             drop(fds);
             if remounted {
                 self.mounted();
+            }
+            if unplugged {
+                self.plugged();
             }
             if touched {
                 self.drain();
@@ -281,6 +384,33 @@ impl Thread {
         }
         if self.changes.send(Change::Mounts).is_ok() {
             self.wake.wake();
+        }
+    }
+
+    /// udev broadcast something. Say so if it was about a disk.
+    ///
+    /// **Scanned for `SUBSYSTEM=block`, not decoded.** A message on this group
+    /// carries an eight-byte `libudev` magic and a header whose layout is
+    /// libudev's internal business, followed by the same NUL-separated
+    /// `KEY=value` block the kernel uses. Looking for one property's text needs
+    /// none of the header and cannot be broken by it changing, and the property
+    /// is unambiguous: nothing else on the machine spells that.
+    ///
+    /// A message about anything else — a keyboard, a camera re-enumerating — is
+    /// read and dropped, because re-reading sixty block devices because somebody
+    /// plugged in a mouse is work nobody asked for.
+    fn plugged(&mut self) {
+        let Some(socket) = self.devices.as_ref() else { return };
+        match heard_about_a_disk(socket.as_fd()) {
+            Ok(true) => {
+                if self.changes.send(Change::Mounts).is_ok() {
+                    self.wake.wake();
+                }
+            }
+            Ok(false) => {}
+            // The socket has gone. Dropping it takes it out of the poll set,
+            // which is the same degradation an unreadable mount table gets.
+            Err(()) => self.devices = None,
         }
     }
 
@@ -471,9 +601,99 @@ pub fn can_watch(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Change, Kind, Watcher, can_watch, worse_of};
+    /// The one property a uevent is filtered on, and the terminator that makes
+    /// the match exact.
+    #[test]
+    fn a_uevent_is_about_a_disk_only_when_it_says_so() {
+        let framed = |properties: &[&str]| {
+            let mut out = b"libudev\0\xfe\xed\xca\xfe".to_vec();
+            for property in properties {
+                out.extend_from_slice(property.as_bytes());
+                out.push(0);
+            }
+            out
+        };
+        assert!(super::about_a_block_device(&framed(&[
+            "ACTION=add",
+            "DEVNAME=/dev/sdb1",
+            "SUBSYSTEM=block",
+            "ID_FS_TYPE=vfat",
+        ])));
+        assert!(!super::about_a_block_device(&framed(&[
+            "ACTION=add",
+            "SUBSYSTEM=input",
+            "NAME=keyboard",
+        ])));
+        // **The terminator, which is the whole reason it is in the needle.** A
+        // subsystem whose name merely begins with `block` is not this one, and
+        // an unterminated tail is a message that was cut off.
+        assert!(!super::about_a_block_device(b"SUBSYSTEM=blockdev\0"));
+        assert!(!super::about_a_block_device(b"SUBSYSTEM=block"));
+        assert!(!super::about_a_block_device(b""));
+    }
+
+    /// **The drain, against a socket pair standing in for udev's.** Delivery on
+    /// the multicast group is udev's business and needs a disk to be plugged in;
+    /// what this program owns is reading every message that is waiting, deciding
+    /// from all of them together, and coming back rather than spinning. A
+    /// datagram pair is the same read shape as netlink — one message per read —
+    /// and it needs no capability.
+    #[test]
+    fn every_waiting_message_is_read_and_one_disk_among_them_is_enough() {
+        use rustix::net::{AddressFamily, SocketFlags, SocketType};
+        use std::os::fd::AsFd as _;
+        let (ours, theirs) = rustix::net::socketpair(
+            AddressFamily::UNIX,
+            SocketType::DGRAM,
+            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            None,
+        )
+        .expect("a socket pair");
+        let framed = |properties: &[&str]| {
+            let mut out = b"libudev\0".to_vec();
+            for property in properties {
+                out.extend_from_slice(property.as_bytes());
+                out.push(0);
+            }
+            out
+        };
+
+        // Nothing waiting is not a disk, and it must not block.
+        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(false));
+
+        // Three messages, one of which is a disk, in one burst.
+        for message in [
+            framed(&["ACTION=add", "SUBSYSTEM=input"]),
+            framed(&["ACTION=add", "SUBSYSTEM=block", "DEVNAME=/dev/sdb1"]),
+            framed(&["ACTION=change", "SUBSYSTEM=usb"]),
+        ] {
+            rustix::io::write(&theirs, &message).expect("written");
+        }
+        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(true));
+        // And the burst is *drained*: a message left waiting is a descriptor
+        // that stays ready, which is a thread that spins.
+        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(false));
+
+        // A socket that has gone says so, so the caller can stop polling it.
+        drop(theirs);
+        drop(ours);
+    }
+
+    /// **The socket, on this machine.** ADR 0030 rests on it binding without a
+    /// capability; if that stops being true the sidebar stops noticing a disk
+    /// being plugged in, and this is what says so out loud rather than the
+    /// feature quietly not working.
+    #[test]
+    fn a_uevent_socket_binds_without_a_capability() {
+        assert!(
+            super::uevents().is_some(),
+            "NETLINK_KOBJECT_UEVENT could not be bound as this user — see ADR 0030"
+        );
+    }
     use sk_util::Waker;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
