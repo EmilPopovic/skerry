@@ -113,19 +113,31 @@ pub fn available() -> bool {
 pub fn mount(device: &Path) -> Result<PathBuf, Refused> {
     let mut bus = Bus::system().ok_or(Refused::NoBus)?;
     let object = resolve(&mut bus, device)?;
-    let answer = bus
-        .call_for(Message::call(
-            SERVICE,
-            &object,
-            FILESYSTEM,
-            "Mount",
-            vec![Value::Dict(Vec::new())],
-        ))
-        .map_err(refusal)?;
-    // **The mount point comes back from the call.** Reading the mount table
-    // instead would be a second question with a race in it: the answer is
-    // authoritative and it is already here.
-    answer.text().map(PathBuf::from).ok_or_else(|| Refused::Failed("no mount point".to_owned()))
+    let answer = bus.call_for(Message::call(
+        SERVICE,
+        &object,
+        FILESYSTEM,
+        "Mount",
+        vec![Value::Dict(Vec::new())],
+    ));
+    match answer {
+        // **The mount point comes back from the call.** Reading the mount table
+        // instead would be a second question with a race in it: the answer is
+        // authoritative and it is already here.
+        Ok(reply) => {
+            reply.text().map(PathBuf::from).ok_or_else(|| Refused::Failed("no mount point".into()))
+        }
+        // **Already mounted is not a failure.** Measured against a stick this
+        // machine had mounted: `org.freedesktop.UDisks2.Error.AlreadyMounted`,
+        // naming the device and the mount point. Two quick presses on a row
+        // would otherwise say *could not be mounted* about a disk that is — and
+        // the mount point is read from the table rather than out of the error's
+        // sentence, because a sentence is not an interface.
+        Err(error) if error.contains("AlreadyMounted") => {
+            already_at(device).ok_or(Refused::Failed(error))
+        }
+        Err(error) => Err(refusal(error)),
+    }
 }
 
 /// Unmounts `device`.
@@ -138,15 +150,23 @@ pub fn mount(device: &Path) -> Result<PathBuf, Refused> {
 pub fn unmount(device: &Path) -> Result<(), Refused> {
     let mut bus = Bus::system().ok_or(Refused::NoBus)?;
     let object = resolve(&mut bus, device)?;
-    bus.call_for(Message::call(
+    match bus.call_for(Message::call(
         SERVICE,
         &object,
         FILESYSTEM,
         "Unmount",
         vec![Value::Dict(Vec::new())],
-    ))
-    .map_err(refusal)?;
-    Ok(())
+    )) {
+        Ok(_) => Ok(()),
+        // Not mounted is what was asked for, by the same argument as above.
+        Err(error) if error.contains("NotMounted") => Ok(()),
+        Err(error) => Err(refusal(error)),
+    }
+}
+
+/// Where the mount table says `device` already is.
+fn already_at(device: &std::path::Path) -> Option<PathBuf> {
+    sk_fs::mounts().into_iter().find(|it| it.source == device.to_string_lossy()).map(|it| it.at)
 }
 
 /// Ejects the drive `device` sits on, after unmounting it.
@@ -321,6 +341,21 @@ mod tests {
             assert!(!refused.detail().contains("error."), "the detail is not the sentence");
         }
         assert_eq!(Refused::NoBus.detail(), "", "there is nothing to log about an absent bus");
+    }
+
+    /// **A device nothing knows about is a clean refusal**, which is what a disk
+    /// pulled out between the press and the call produces. Safe to run
+    /// anywhere: it resolves a name that cannot exist and mounts nothing.
+    #[test]
+    fn a_device_that_is_not_there_is_refused_rather_than_mounted() {
+        let nowhere = std::path::Path::new("/dev/skerry-no-such-device");
+        match super::mount(nowhere) {
+            // On a machine with a system bus and udisks2, the resolve fails.
+            Err(Refused::Failed(why)) => assert!(why.contains("skerry-no-such-device"), "{why}"),
+            // And on one without either, it says which is missing.
+            Err(Refused::NoBus | Refused::NoService) => {}
+            other => panic!("a device that does not exist answered {other:?}"),
+        }
     }
 
     /// udisks2 answers `ao` and `Properties.Get` answers a variant around an

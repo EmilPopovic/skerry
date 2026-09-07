@@ -399,7 +399,12 @@ impl Sidebar {
         self.sections
             .iter()
             .flat_map(|section| section.entries.iter())
-            .filter(|entry| entry.mark == Mark::Volume && !entry.remote)
+            // **And mounted**, because a search walks a path and an unmounted
+            // volume has none — ADR 0030. Including one put an empty root into
+            // the walk, which is a walk that starts at `""` and finds nothing:
+            // measured as `a-search-covers-one-folder-or-every-disk` never
+            // leaving the folder it began in.
+            .filter(|entry| entry.mark == Mark::Volume && !entry.remote && !entry.unmounted)
             .map(|entry| entry.path.clone())
             .collect()
     }

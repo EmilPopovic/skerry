@@ -3590,7 +3590,8 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
             "sleep 150\nclick right\nsleep 350\nkey f12\nsleep 150\n"
         )
         over_place = run.state()
-        expect(over_place, menu="4", cursor=wanted)
+        # Seven: Open, the three about a pin, and the three about a disk — ADR 0030.
+        expect(over_place, menu="7", cursor=wanted)
         if "file.new_folder" in over_place["menu_aim"]:
             raise Failure("the sidebar answered with the list's own menu")
         if not over_place["place_menu"]:
@@ -6303,7 +6304,8 @@ def a_default_place_is_not_unpinnable(run: Run, fixture: Path) -> None:
             f"click right\nsleep 400\nkey f12\nsleep 200\n"
         )
         over_home = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        expect(over_home, menu="4")
+        # Seven since ADR 0030 put Mount, Unmount and Eject on this menu.
+        expect(over_home, menu="7")
         # Open is the fourth row and is *not* dimmed: every row of the sidebar is
         # a directory and every one of them opens. What Home has no business
         # offering is the three that change the list.
