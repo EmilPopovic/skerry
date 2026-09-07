@@ -3302,3 +3302,36 @@ The same shape has bitten this program twice before at a different layer — a
 substring test that matched the thing it was testing for, and a p99 over a window
 that had not filled. All three are a condition that happens to be true rather
 than one that says what it means.
+
+## A frame is only as fresh as the binary that is missing from the build
+
+Eighty-three golden frames, and the harness built one binary:
+
+```python
+["cargo", "build", "--release", "--bin", "skerry"]
+```
+
+The comment above that line already says why it is there — a reference blessed
+from a stale binary is a test that asserts the wrong thing for as long as nobody
+looks — and it was written after exactly that happened to a catalogue string. It
+is the right rule and it was applied to a third of what the frames depend on. A
+thumbnail comes from `skerry-thumbnailer`, a page from `skerry-preview-doc`, and
+neither is `--bin skerry`, so every frame that draws one has been compared
+against whatever those two happened to be in `target/release`. On this machine
+that was a build from some earlier afternoon. On a fresh clone it is nothing at
+all.
+
+It surfaced the only way it could: a *new* helper, which had never been built in
+release, so its frame came out saying **"The archive helper stopped before it
+answered"** — the same sentence a person sees when the helper is genuinely
+missing. A stale helper would have said nothing whatsoever; it would have drawn
+a frame, the frame would have matched its equally stale reference, and the gate
+would have been green about code that no longer existed.
+
+The rule the original comment states is right and its scope was wrong: **a build
+step has to build everything the thing under test executes**, and "the thing
+under test" for a golden frame is the whole process tree, not the process the
+harness spawns. The general form is worth stating because it does not look like a
+measurement problem at all: a gate that runs the current code against stale
+*inputs* is as green and as useless as one that runs stale code, and the inputs
+here were executables.

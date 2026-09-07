@@ -78,6 +78,27 @@ pub enum ProblemKind {
     /// raises it, which is what copying to a USB stick is — found by pointing
     /// the Spike E matrix at `sk-fs::copy` instead of at its own fork.
     NameRefused,
+    /// The program that reads this archive's compressor is not installed.
+    ///
+    /// Its own kind because the advice is a package name, which no other kind
+    /// here can carry: `Unreadable` sends somebody to check permissions that are
+    /// fine, and the subject is the *program* rather than the file — the one
+    /// message in this list where that is true.
+    NoUnpacker,
+    /// The archive is a format this program does not read.
+    ///
+    /// Its own kind because the advice is the opposite of [`Self::NoUnpacker`]'s:
+    /// there is nothing to install that would help, and the answer is another
+    /// program. Conflating the two told somebody with 7-Zip installed that 7z
+    /// was not installed.
+    NotUnpackable,
+    /// An archive is not what it says it is, or not all of it arrived.
+    ///
+    /// Its own kind because it is the only failure whose message has to say what
+    /// happened to the *output*: an unpack that stops half way takes what it
+    /// wrote away again, and a person who is not told that will go looking for a
+    /// folder that is deliberately not there.
+    Damaged,
     /// The bytes are not text, so they cannot be treated as text.
     ///
     /// Its own kind because the answer is not "this failed" but "this is not the
@@ -103,6 +124,9 @@ impl ProblemKind {
             Self::Full => "error.full",
             Self::NotCopyable => "error.not_copyable",
             Self::NameRefused => "error.name_refused",
+            Self::NoUnpacker => "error.no_unpacker",
+            Self::Damaged => "error.damaged",
+            Self::NotUnpackable => "error.not_unpackable",
             Self::NotText => "error.not_text",
         }
     }

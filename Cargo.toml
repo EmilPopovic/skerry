@@ -16,6 +16,7 @@ members = [
     "bin/skerry",
     "bin/skerry-thumbnailer",
     "bin/skerry-preview-doc",
+    "bin/skerry-archive",
     "tools/skerry-drive",
     "tools/a11y-registry",
 ]
@@ -84,6 +85,13 @@ png = { version = "0.18", default-features = false }
 # decoders and two `zune-core`s — `raster-images` brought resvg's own — and a
 # sandboxed child with a decoder in it twice is two attack surfaces for one
 # format.
+# **Deflate and CRC-32, and neither costs a crate.** `png` already brings both
+# into every helper's tree, so declaring them here is naming what is there
+# rather than adding to it — see docs/07-dependencies.md. `rust_backend` is not
+# the default by accident: the alternative links zlib and `tools/no-cc` would
+# stop being answerable with "no".
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+crc32fast = "1.5"
 zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
 resvg = { version = "0.48", default-features = false, features = [
     "text",

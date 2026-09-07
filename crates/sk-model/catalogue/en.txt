@@ -58,6 +58,7 @@ notice.deleted = Deleted {0} of {1}
 notice.trashed = Moved {0} of {1} to Trash
 notice.copied_in = Copied {0} of {1}
 notice.moved_in = Moved {0} of {1}
+notice.unpacked = Extracted {0} of {1}
 notice.done = Done
 notice.undone = Undone
 notice.redone = Redone
@@ -104,6 +105,7 @@ verb.copying = Copying
 verb.moving = Moving
 verb.deleting = Deleting
 verb.trashing = Moving to Trash
+verb.extracting = Extracting
 notice.progress = {0}… {1} of {2}
 notice.progress_rate = {0}… {1} of {2}, {3} at {4}/s
 notice.progress_eta = {0}… {1} of {2}, {3} of {4} at {5}/s, {6} left
@@ -126,6 +128,9 @@ action.redo_text = Redo the last edit, in a field
 find.prompt = Filter this folder
 find.count = {0} of {1}
 error.not_text = {0} is not text. Open it to see what it is.
+error.no_unpacker = {0} is not installed, so this archive cannot be opened here. Install it, or open the archive with another program.
+error.damaged = {0} is damaged. What had already been unpacked has been removed.
+error.not_unpackable = Skerry cannot unpack a {0} archive. Open it with another program.
 error.out_of_resources = Out of kernel watches or file descriptors. Raise fs.inotify.max_user_instances or ulimit -n.
 
 # Key names, for the keyboard overlay and anywhere else a chord is shown. As
@@ -302,6 +307,7 @@ action.open_with = Open with…
 action.properties = Properties
 action.terminal = Open a terminal here
 action.duplicate = Duplicate
+action.extract = Extract
 action.delete = Delete permanently
 action.trash = Move to Trash
 action.pause = Pause or continue
@@ -400,6 +406,8 @@ history.renamed = Renamed {0}
 history.renamed_many = Renamed {0} items
 history.copied = Copied {0}
 history.copied_many = Copied {0} items
+history.unpacked = Extracted {0}
+history.unpacked_many = Extracted {0} archives
 history.trashed = Moved {0} to Trash
 history.trashed_many = Moved {0} items to Trash
 history.erased = Deleted {0} for good
@@ -423,6 +431,20 @@ preview.more = …
 # in — a person cannot tell it apart from a program that has stopped.
 preview.unavailable = This file could not be shown.
 preview.interrupted = The preview helper stopped before it answered. Press Space again to retry.
+archive.unreadable = This archive could not be read.
+archive.undecodable = This archive is damaged — these are the entries that could be read before it stopped.
+archive.no_unpacker = {0} is not installed, so what is inside cannot be listed. Install it and press Space again.
+archive.elsewhere = A {0} archive is not something Skerry reads. Open it with another program.
+archive.no_room = There is no room left on this disk for what the archive holds.
+archive.stopped = Stopped.
+archive.interrupted = The archive helper stopped before it answered. Press Space again to retry.
+archive.summary[one]   = {0} entry · {1} unpacked · {2}
+archive.summary[other] = {0} entries · {1} unpacked · {2}
+archive.capped[one]   = the first {0} of {1} entry · {2} unpacked · {3}
+archive.capped[other] = the first {0} of {1} entries · {2} unpacked · {3}
+archive.empty = Nothing inside
+archive.reading = Reading the archive…
+archive.top = In this archive
 # The page control in the quick look's title strip. Two forms because a count of
 # zero means unknown — ADR 0019 — and a total invented from nothing is the one
 # thing rule 7 forbids.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The preview host: what can be previewed, who decodes it, and the wire between.
+//! Sandboxed children: what they answer, and the wire between.
 //!
 //! **This crate decodes nothing.** [ADR
 //! 0006](../../../docs/adr/0006-out-of-process-decoders.md) puts every decoder in a
@@ -23,6 +23,7 @@
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod archive;
 pub mod host;
 pub mod sandbox;
 pub mod wire;

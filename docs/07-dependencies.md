@@ -55,6 +55,22 @@ hang that costs one preview.
 | `zune-jpeg` | JPEG, which is most of the pictures on any machine. Chosen over `jpeg-decoder` for having no `unsafe` in the hot path and a smaller tree; either would do and the exit is the other one. | `skerry-thumbnailer` |
 | `gif`, `image-webp` | Not chosen: they are what `resvg`'s `raster-images` feature pulls in, and that feature is what makes an `<image>` *inside* an SVG draw at all. Without it every diagrams.net export rendered as boxes and arrows with no labels — the words are a rasterised PNG in a `<switch>` beside the `<foreignObject>` a browser would use — and `resvg` said so in a `log::warn!` inside a sandboxed child. PNG and JPEG come from `png` and `zune-jpeg`, which are already here; these two are the price of the same switch. **`zune-jpeg` moved to 0.5** to match the version `resvg` wants, so the helper holds one JPEG decoder rather than two | `skerry-thumbnailer` |
 | `resvg` (with `usvg` and `tiny-skia`) | SVG, which is most of the icons and diagrams. Already named in tier 1 for a purpose it was never used for; this is that entry becoming real, in a helper rather than in the product, which is strictly better than the tier-1 row assumed. | `skerry-thumbnailer` |
+| `flate2` (`rust_backend`) | Deflate, which is every zip in practice and the whole of gzip. **It costs no crate**: `png` already brings it and `miniz_oxide` under it into both other helpers, so this row names something that is there rather than adding to the tree — the same argument the `libc` row in tier 1 makes. Taken with `default-features = false, features = ["rust_backend"]`, because the alternative backend links zlib and the C-toolchain gate below would stop being answerable with "no". The exit is writing inflate, which is six hundred lines of bit-twiddling with a CVE history, and it is not taken. | `skerry-archive` |
+| `crc32fast` | The checksum a zip carries for every entry, which is what says an unpacked file is the file that went in — a corrupt archive otherwise produces something that looks exactly like a file. Also already in the tree through `png`, for the same reason: PNG has a CRC per chunk. | `skerry-archive` |
+
+**A tar reader, a zip reader and the compressors are not here**, and the line
+between them is [ADR
+0032](adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)'s:
+a container this can parse, it parses, and a compressor is the machine's. A tar
+is 512-byte headers and a zip is an index at the end of the file — 550 lines of
+arithmetic between them, which is the GIF trade below made twice — while xz is a
+range coder and zstd is a research project, and both are already installed as
+single-purpose filter programs whose entire contract is `-dc`, stdin to stdout.
+The `zip` crate was priced and refused on the second question in the list above:
+it reads *and writes*, with a compression method per feature flag, where what is
+wanted is a central directory and an inflate. **7z and rar are read by neither
+route** and are refused by name, which is a listing that says which format it is
+rather than a panel with nothing in it.
 
 **A GIF decoder is deliberately not here either**, and that is a different
 argument from the document renderer below: `gif` and `weezl` are small, pure-Rust
@@ -132,6 +148,7 @@ build:
 | --- | --- | --- |
 | `skerry-thumbnailer` | `png`, `zune-jpeg` and `resvg` — by far the largest tree in the workspace, and none of it in the product; GIF is ours, for the reason above | Landlock and rlimits: read-only everywhere, **no execute right anywhere**, and the thumbnail cache the one thing writable. `seccomp` is named by [ADR 0006](adr/0006-out-of-process-decoders.md) and is not written; the child's own report line says so |
 | `skerry-preview-doc` | Nothing but `png`. The renderer is a program on `PATH` — `pdftoppm` or `mutool` — so a machine with neither loses one preview and builds the same | The same, except that execute is granted: a dynamically linked renderer needs it on its loader and every library it maps, so the grant is the root and what is load-bearing is that nothing is writable |
+| `skerry-archive` | `flate2` and `crc32fast`, neither of which is a crate this workspace did not already have. The containers are ours and the compressors are `xz`, `zstd` and `bzip2` on `PATH` | The one helper with something writable: **the destination directory and nothing else**, so an entry called `../../.ssh/authorized_keys` is refused by the kernel — [ADR 0032](adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md). A listing has nothing writable at all |
 | *(external, optional)* | `ffmpeg` for video thumbnails, discovered on `PATH` at first use | Spawned with a timeout and a memory cap |
 
 This is the same boundary that rule 1 and the security model already wanted. Getting

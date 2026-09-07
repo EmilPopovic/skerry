@@ -3,8 +3,8 @@
 A file manager for Linux, written in Rust, built on the premise that a file manager
 is a **latency product and an interaction-design product** — not a feature checklist.
 
-Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and two sandboxed
-helpers, 908 tests, 145 GUI scenarios on both Wayland and X11, eighty-three golden
+Status: **`0.1.0-alpha.1` — a public pre-release.** Twelve crates and three sandboxed
+helpers, 945 tests, 148 GUI scenarios on both Wayland and X11, eighty-six golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a
 column view over a real directory at a **0.34 ms frame p99 with 200,000 entries**,
 live under inotify; tabs and a split tree of panes; copy, cut, paste, duplicate,
@@ -12,7 +12,9 @@ rename, new folder and Move to Trash with **one undo stack over all of it** and 
 visible history; a sidebar whose pins are lines in GTK's `bookmarks` file, so a
 folder pinned here is pinned in Nautilus; search under a folder or over every local
 filesystem, first result at **0.7 ms over 817,288 entries**; quick look at pictures,
-PDFs — with selectable text — and source, with a highlighter and an editor; drag and
+PDFs — with selectable text — and source, with a highlighter and an editor; **looking
+inside a zip or a tar and unpacking one as a single undoable gesture**, in a child
+whose only writable directory is the one the files are going into; drag and
 drop to and from GTK applications; a command palette and a context menu over one
 registry; a settings panel over `Ctrl ,` that says where each value came from, and
 that can make Skerry the desktop's handler for folders; and a keymap that is a file
@@ -34,8 +36,8 @@ sudo make install                      # PREFIX=/usr/local, honours DESTDIR
 make install PREFIX=$HOME/.local       # or into your own prefix
 ```
 
-Three binaries and one desktop entry, and nothing else: no post-install script and
-nothing written outside `DESTDIR` and `PREFIX`. The two helpers install beside the
+Four binaries and one desktop entry, and nothing else: no post-install script and
+nothing written outside `DESTDIR` and `PREFIX`. The three helpers install beside the
 binary because that is where it looks for them first. Tagged builds also produce a
 tarball per architecture — see [release.yml](.github/workflows/release.yml).
 
@@ -140,7 +142,8 @@ skerry/
 ├── bin/
 │   ├── skerry/                    the application
 │   ├── skerry-thumbnailer/        sandboxed image decode, own dependency tree
-│   └── skerry-preview-doc/        optional PDF/document rendering helper
+│   ├── skerry-preview-doc/        optional PDF/document rendering helper
+│   └── skerry-archive/            sandboxed archive listing and unpacking
 ├── spikes/                        throwaway measurement binaries, kept for their numbers
 ├── tools/                         the gates: layering, dependency budget, golden frames, GUI
 ├── .github/workflows/             what runs them on every push, and the matrix nightly
@@ -179,11 +182,16 @@ the first bug report on one of them.
   rather than widened: cold start, the 1M sort, one scroll run in five at a million
   entries, and the resident floor. See
   [09-performance-budgets.md](docs/09-performance-budgets.md#what-m0-measured).
-- **No archive, media or hex previews.** Pictures — the right way up, from the
-  EXIF tag — PDFs, source with a highlighter, and **markdown rendered** are what a
-  quick look shows. The markdown parser is ours and deliberately small: anything
-  it does not recognise, HTML included, draws as its own text rather than
-  disappearing ([ADR 0029](docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md)).
+- **No media or hex previews, and no 7z or rar.** Pictures — the right way up,
+  from the EXIF tag — PDFs, source with a highlighter, **markdown rendered**, and
+  **what is inside an archive** are what a quick look shows. The markdown parser
+  is ours and deliberately small: anything it does not recognise, HTML included,
+  draws as its own text rather than disappearing ([ADR
+  0029](docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md)).
+  A 7z or a rar is listed as a sentence naming the format rather than as an empty
+  panel — the line is that a container Skerry can parse it parses, and a
+  compressor is the machine's ([ADR
+  0032](docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
 
 ## Working on it
 

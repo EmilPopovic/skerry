@@ -10,9 +10,17 @@ review by pointing at this file rather than by re-arguing it.
 - **MTP and phone browsing.** A protocol tar pit. Post-1.0 at the earliest, and only
   through an existing mount.
 - **A plugin API with a stable ABI.** See below.
-- **Virtual filesystems beyond archive listing.** No FUSE layer, no `kio`-style slaves.
+- **Virtual filesystems beyond archive listing.** No FUSE layer, no `kio`-style
+  slaves — and the listing is a *panel*, not a path: no pane navigates into an
+  archive, no breadcrumb names anything inside one, and nothing in one can be
+  renamed, dragged or watched.
 - **An embedded terminal.** See below.
 - **A bundled image editor, media player or archive manager.** Launch the user's.
+  Reading one is not managing one: `Space` lists what is inside an archive and
+  `Extract` unpacks it, which is what a file manager does with a download — while
+  *creating* one, adding to one, encrypting one or repairing one is the program
+  this declines to be
+  ([ADR 0032](adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
 - **A document viewer.** The preview shows a page, selects and copies its words and
   finds text on the one in front of you — [ADR
   0024](adr/0024-a-page-arrives-with-its-words.md) — because the panel already

@@ -139,8 +139,12 @@ The one integration nobody can fake, because it is judged against other applicat
   vocabulary**: XDND has copy, move, link, ask and private; `wl_data_device_manager` has
   copy, move and ask and no link. `sk-plat` exposes the union and the policy above it greys
   out what the display server cannot express.
-- Drop targets that make sense: onto a folder, onto a pane, onto a tab, onto an archive,
-  onto an executable as arguments.
+- Drop targets that make sense: onto a folder, onto a pane, onto a tab, onto an
+  executable as arguments. **Not onto an archive**, which this list used to
+  promise: adding a file to one is *writing* an archive, and
+  [ADR 0032](adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)
+  reads them only — a child that could write into an archive would be a child
+  that needs an encoder and somewhere else to write it.
 - **The primary selection is best-effort and nothing depends on it.** At least one shipping
   compositor discards a primary-selection claim with no protocol error, so the failure
   cannot be detected and the feature cannot even be greyed out.

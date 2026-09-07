@@ -14,6 +14,9 @@ level = 2
 sk-model = { workspace = true }
 sk-util = { workspace = true }
 libc = { workspace = true }
+# For `poll` on a child's pipe, so a cancelled listing does not wait out a
+# decompressor. Already in this crate's tree through `sk-util`.
+rustix = { workspace = true }
 
 [lints]
 workspace = true

@@ -18,7 +18,7 @@ CARGO ?= cargo
 bindir = $(DESTDIR)$(PREFIX)/bin
 datadir = $(DESTDIR)$(PREFIX)/share
 
-BINARIES = skerry skerry-thumbnailer skerry-preview-doc
+BINARIES = skerry skerry-thumbnailer skerry-preview-doc skerry-archive
 
 .PHONY: all build install uninstall check clean
 

@@ -249,6 +249,137 @@ enum Queued {
         /// Where they end up.
         into: PathBuf,
     },
+    /// Unpack this archive, or some of it, into a new folder beside it.
+    ///
+    /// **No destination field.** Every other verb here is told where to put
+    /// things; this one derives it, because the folder is named after the archive
+    /// and must not already exist — [ADR
+    /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
+    /// A destination somebody chose is a file chooser, which this program does
+    /// not have and which the non-goals decline for now.
+    Unpack {
+        /// Which entries to take, or empty for the whole archive.
+        only: Vec<String>,
+    },
+}
+
+/// Unpacks `archive` into a new folder beside it.
+///
+/// **Runs on a job.** The folder is made *before* the child starts, so a stop or
+/// a failure still leaves a root the undo stack can name — the same reason
+/// `copy_into` records a cancelled copy.
+fn unpack_beside(
+    archive: &Path,
+    only: &[String],
+    cancel: &Cancel,
+    watch: &mut dyn FnMut(sk_fs::copy::Progress),
+) -> Result<Change, Problem> {
+    let Some(parent) = archive.parent() else {
+        return Err(Problem::new(
+            sk_model::ProblemKind::BadName,
+            archive.display().to_string(),
+            "an archive with no directory above it",
+        ));
+    };
+    let wanted = crate::archive::folder_name(archive);
+    // **`reports`, then `reports 2`** — the loop `new_directory` uses, and not
+    // `copy::free_name`, which would call the second one `reports (copy)`: a
+    // second extraction of the same archive is not a copy of the first, and a
+    // folder named as though it were is a folder somebody will delete. Making
+    // the directory *is* the check, because `create_directory` refuses a taken
+    // name — a `statx` first would race with whatever else writes here.
+    let mut made = None;
+    for attempt in 1..1000u32 {
+        let name = if attempt == 1 { wanted.clone() } else { format!("{wanted} {attempt}") };
+        match ops::create_directory(parent, &name) {
+            Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
+            Err(problem) => return Err(problem),
+            Ok(_) => {
+                made = Some(parent.join(&name));
+                break;
+            }
+        }
+    }
+    let Some(root) = made else {
+        return Err(Problem::new(
+            sk_model::ProblemKind::NameTaken,
+            wanted,
+            "a thousand folders of that name already exist",
+        ));
+    };
+    unpack_again(archive, &root, only, cancel, watch)
+}
+
+/// Unpacks `archive` into `root`, which is made if it is not there.
+///
+/// The half a redo repeats, and the half `unpack_beside` does once it has chosen
+/// a name.
+fn unpack_again(
+    archive: &Path,
+    root: &Path,
+    only: &[String],
+    cancel: &Cancel,
+    watch: &mut dyn FnMut(sk_fs::copy::Progress),
+) -> Result<Change, Problem> {
+    use sk_preview::archive::Refusal;
+    if !root.exists()
+        && let (Some(parent), Some(name)) =
+            (root.parent(), root.file_name().and_then(|name| name.to_str()))
+    {
+        ops::create_directory(parent, name)?;
+    }
+    let done = sk_preview::archive::unpack(archive, root, only, cancel, &mut |progress| {
+        watch(sk_fs::copy::Progress { done: progress.entries, bytes: progress.bytes });
+    });
+    let unpacked = Change::Unpacked {
+        archive: archive.to_path_buf(),
+        root: root.to_path_buf(),
+        only: only.to_vec(),
+    };
+    match done.refusal {
+        // **A stopped unpack keeps what it wrote**, exactly as a stopped copy
+        // does: those files are on disk, and the undo stack is the only thing
+        // that can take them away again. So it lands here, beside the one that
+        // finished, rather than in the arm below that cleans up.
+        Refusal::None | Refusal::Stopped => Ok(unpacked),
+        // **A failed one does not.** This is the one place the unpack is stricter
+        // than the copy engine, and it is because the folder is *this
+        // operation's own*: nothing was in it before, so removing it loses
+        // nothing and leaves no half-unpacked tree for somebody to mistake for a
+        // finished one. What is reported is the reason, which the copy engine
+        // cannot do because it has no folder of its own to clean up.
+        refusal => {
+            let _ = sk_fs::copy::remove_tree(root, &Cancel::new());
+            Err(refused(refusal, &done.note, archive))
+        }
+    }
+}
+
+/// The refusal a child sent, as the sentence a person reads.
+fn refused(refusal: sk_preview::archive::Refusal, note: &str, archive: &Path) -> Problem {
+    use sk_model::ProblemKind;
+    use sk_preview::archive::Refusal;
+    let named =
+        |path: &Path| path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+    let (kind, subject) = match refusal {
+        // The subject is the *program*, which is the one thing that would fix it.
+        Refusal::NoUnpacker => (ProblemKind::NoUnpacker, note.to_owned()),
+        // And here the subject is the *format*, because nothing this machine
+        // could install would change the answer.
+        Refusal::Elsewhere => (ProblemKind::NotUnpackable, note.to_owned()),
+        // A helper that died and a helper that was never there arrive the same
+        // way, and the useful sentence is the same one: something is missing.
+        Refusal::Interrupted => (
+            ProblemKind::NoUnpacker,
+            if note.is_empty() { "skerry-archive".to_owned() } else { note.to_owned() },
+        ),
+        Refusal::NoRoom => (ProblemKind::Full, named(archive)),
+        Refusal::Unreadable => (ProblemKind::Unreadable, named(archive)),
+        Refusal::None | Refusal::Stopped | Refusal::NotAnArchive | Refusal::Undecodable => {
+            (ProblemKind::Damaged, named(archive))
+        }
+    };
+    Problem::new(kind, subject, format!("{refusal:?} unpacking {}: {note}", archive.display()))
 }
 
 /// A name the queue wants that is already taken, and the two files under it.
@@ -536,6 +667,16 @@ impl Edits {
     /// nothing said, which is the one thing this program does not do — a drop that
     /// silently loses somebody's files looks exactly like a drop that did not
     /// happen, and the caller is the only one who can say which of the two it was.
+    /// Unpacks each archive into a folder of its own beside it.
+    pub fn unpack_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Unpack { only: Vec::new() }, paths, jobs)
+    }
+
+    /// Unpacks one entry — or one folder's worth — out of one archive.
+    pub fn unpack_one(&mut self, archive: PathBuf, inside: String, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Unpack { only: vec![inside] }, vec![archive], jobs)
+    }
+
     fn queue_all(&mut self, doing: Queued, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
         if paths.is_empty() {
             return false;
@@ -576,7 +717,11 @@ impl Edits {
         if let Some(running) = self.counting.take() {
             running.cancel();
         }
-        if matches!(self.doing, Queued::Trash | Queued::Erase) {
+        // **An unpack is not counted either, and for a different reason.** What
+        // it will write is only knowable by decompressing the archive, so a walk
+        // beside it would decompress everything twice to put an estimate on the
+        // line. Rule 7 would rather have no ETA than pay for one.
+        if matches!(self.doing, Queued::Trash | Queued::Erase | Queued::Unpack { .. }) {
             return;
         }
         let paths = self.queue.clone();
@@ -658,6 +803,7 @@ impl Edits {
             Queued::Erase => "verb.deleting",
             Queued::Copy { .. } => "verb.copying",
             Queued::Move { .. } => "verb.moving",
+            Queued::Unpack { .. } => "verb.extracting",
         };
         // Carried across the queue rather than reset per entry, so nine files
         // read as one operation with one rate.
@@ -705,7 +851,9 @@ impl Edits {
             let (into, moving) = match &doing {
                 Queued::Copy { into, .. } => (Some(into.clone()), false),
                 Queued::Move { into } => (Some(into.clone()), true),
-                Queued::Trash | Queued::Erase => (None, false),
+                // An unpack asks nothing about a taken name: the folder it makes
+                // is a free one, chosen on this job a moment from now.
+                Queued::Trash | Queued::Erase | Queued::Unpack { .. } => (None, false),
             };
             // **Asked here, on the job.** Whether a name is taken is a `statx`,
             // and rule 1 has no exemption for a fast one — so the question is
@@ -746,6 +894,7 @@ impl Edits {
                     ops::copy_into(&path, &into, conflict, cancel, &mut watch)
                 }
                 Queued::Move { into } => ops::move_into(&path, &into, conflict, cancel, &mut watch),
+                Queued::Unpack { only } => unpack_beside(&path, &only, cancel, &mut watch),
             })
         });
     }
@@ -818,8 +967,21 @@ impl Edits {
     }
 
     /// Does the most recently undone change again.
+    ///
+    /// **An unpack is redone by unpacking**, which is the one change
+    /// [`ops::apply`] cannot do for itself: it needs a sandboxed child, and
+    /// `sk-fs` is level 1 — [ADR
+    /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
+    /// Into the *recorded* folder rather than a fresh one, so redoing lands
+    /// where undoing took it from.
     pub fn redo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_redo().cloned() else { return };
+        if let Change::Unpacked { archive, root, only } = change {
+            self.start(Pending::Redoing, jobs, move |cancel| {
+                Outcome::Redid(unpack_again(&archive, &root, &only, cancel, &mut |_| {}))
+            });
+            return;
+        }
         self.start(Pending::Redoing, jobs, move |_| Outcome::Redid(ops::apply(&change)));
     }
 
@@ -931,6 +1093,7 @@ impl Edits {
                         Queued::Erase => "notice.deleted",
                         Queued::Copy { .. } => "notice.copied_in",
                         Queued::Move { .. } => "notice.moved_in",
+                        Queued::Unpack { .. } => "notice.unpacked",
                     };
                     sk_model::i18n::format(key, &[&done, &self.queued])
                 } else {
@@ -1043,7 +1206,13 @@ impl Edits {
         // **Kept, not dropped.** What is left includes the item in flight: it is
         // the one that stopped part way, and resuming is exactly the merge
         // `Conflict::Resume` performs — see `Stopped`.
-        if self.cancellable() {
+        // **An unpack offers no resume**, unlike every other queue here. Picking
+        // one up would mean a fresh child merging into a half-written folder,
+        // where `O_EXCL` refuses every name that is already there — including the
+        // file that was half written when the stop landed, which would stay half
+        // written and be reported as skipped. The answer to a stopped unpack is
+        // `Ctrl+Z` and a fresh start, and both are one press.
+        if self.cancellable() && !matches!(self.doing, Queued::Unpack { .. }) {
             let mut owed = std::mem::take(&mut self.queue);
             owed.extend(self.running_path.clone());
             let verb = self.running.as_ref().map_or("verb.copying", |it| it.verb);

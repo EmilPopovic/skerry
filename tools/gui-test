@@ -1311,7 +1311,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 145
+FEWEST_SCENARIOS = 148
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -1628,9 +1628,12 @@ def space_looks_at_a_file_and_space_puts_it_away(run: Run, fixture: Path) -> Non
         + chunk(b"IEND", b"")
     )
     (fixture / "notes.txt").write_text("first line\nsecond line\n")
-    # A file the databases name and this program cannot draw: `application/zip` is
-    # neither a picture, nor a PDF, nor text, which is the fourth claim's subject.
-    (fixture / "bundle.zip").write_bytes(b"PK\x03\x04" + bytes(64))
+    # A file the databases name and this program cannot draw. **It used to be a
+    # zip**, and stopped being one the day an archive got a listing — ADR 0032 —
+    # which is the good kind of test failure: a claim about "nothing can draw
+    # this" has to be about a file that is still true of. An OpenDocument is
+    # neither a picture, nor a PDF, nor text, nor an archive this reads.
+    (fixture / "report.odt").write_bytes(b"PK\x03\x04" + bytes(64))
 
     settled = listed(run)
     if settled["looking"] != "none":
@@ -1684,8 +1687,8 @@ def space_looks_at_a_file_and_space_puts_it_away(run: Run, fixture: Path) -> Non
     # asked `run.state()` whether the cursor had arrived and skipped the check if
     # it had not — and the file it typed for was never in the fixture, so the
     # fourth claim in the docstring above was never once tested.
-    run.drive("key escape\nsleep 200\ntext bundle\nsleep 400\n")
-    until(run, cursor="bundle.zip")
+    run.drive("key escape\nsleep 200\ntext report\nsleep 400\n")
+    until(run, cursor="report.odt")
     run.drive("key space\nsleep 400\n")
     nothing = run.answered(settle=300)
     if nothing is None or nothing["looking"] != "none":
@@ -1772,9 +1775,15 @@ def arrows_walk_the_look_and_a_pdfs_pages(run: Run, fixture: Path) -> None:
         return bytes(out)
 
     # Named so they sort next to each other with the unpreviewable one between:
-    # `look-a.png`, `look-b.zip`, `look-c.png`.
+    # `look-a.png`, `look-b.odt`, `look-c.png`.
+    #
+    # **It was a zip, and a zip stopped being unpreviewable.** ADR 0032 gave an
+    # archive a listing, so the walk began stopping on the file whose whole
+    # purpose here was to be skipped — a premise going stale, which is the one
+    # kind of test failure worth having. An OpenDocument is named by the
+    # databases and drawn by nothing here, which is what this needs.
     png("look-a.png", 220)
-    (fixture / "look-b.zip").write_bytes(b"PK\x03\x04" + bytes(64))
+    (fixture / "look-b.odt").write_bytes(b"PK\x03\x04" + bytes(64))
     png("look-c.png", 40)
     (fixture / "look-d.pdf").write_bytes(three_page_pdf())
 
@@ -1788,8 +1797,8 @@ def arrows_walk_the_look_and_a_pdfs_pages(run: Run, fixture: Path) -> None:
     run.drive("key space\nsleep 600\n")
     until_looking(run, "look-a.png", "picture")
 
-    # **Past the zip, not onto it.** `→` walks to the next file that has a
-    # preview, which is the third of the four and not the second.
+    # **Past the file with no preview, not onto it.** `→` walks to the next file
+    # that has one, which is the third of the four and not the second.
     run.drive("key right\nsleep 700\n")
     until_looking(run, "look-c.png", "picture")
     moved = run.answered(settle=300)
@@ -3375,6 +3384,215 @@ def keyboard_new_folder(run: Run, fixture: Path) -> None:
     expect(until(run, rows="9", undo="false"), redo="true")
     if (fixture / "New folder").exists():
         raise Failure("undo left the folder behind")
+
+
+def an_archive_in(fixture: Path, name: str = "reports.zip") -> Path:
+    """A zip in `fixture`, written by Python and not by anything of ours.
+
+    **Somebody else's encoder**, the same bargain the GIF fixture makes with
+    Pillow. No directory entries in it either, which is what most tools write and
+    the case the panel has to derive its folders for.
+    """
+    import zipfile
+
+    archive = fixture / name
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for entry, body in {
+            "notes.txt": "two lines\nof notes\n",
+            "run.sh": "#!/bin/sh\necho hello\n",
+            "deep/blob.bin": "x" * 4_000,
+            "deep/inner/note.md": "# Nested\n",
+        }.items():
+            record = zipfile.ZipInfo(entry, date_time=(2024, 3, 14, 9, 26, 54))
+            record.external_attr = (0o755 if entry.endswith(".sh") else 0o644) << 16
+            zip_file.writestr(record, body)
+    return archive
+
+
+@scenario("an-archive-lists-what-is-inside-it", fresh=True)
+def an_archive_lists_what_is_inside_it(run: Run, fixture: Path) -> None:
+    """**`Space` on an archive shows what is in it** — ADR 0032.
+
+    Four claims, none of which a golden frame can make: the listing arrives from a
+    sandboxed child at all, the folders are derived from paths that never declared
+    them, `→` goes into one and `←` comes back, and the counts are the archive's
+    rather than the level's.
+    """
+    an_archive_in(fixture)
+    run.drive("sleep 500\nkey f5\nsleep 500\ntext reports\nsleep 400\n")
+    until(run, cursor="reports.zip")
+
+    run.drive("key space\nsleep 900\nkey f12\nsleep 200\n")
+    opened = holds(run, lambda it: it.get("inside", "none") != "none", "a listing")
+    # Four entries, of which two folders exist only because a path implied them.
+    if not opened["inside"].startswith("zip:4:"):
+        raise Failure(f"the child answered {opened['inside']!r}")
+    if opened["inside_rows"] != "deep,notes.txt,run.sh":
+        raise Failure(f"the top of the archive is {opened['inside_rows']!r}")
+    expect(opened, inside_at="", inside_chosen="deep")
+
+    # In, which is the folder nothing in the zip declared.
+    run.drive("key right\nsleep 300\nkey f12\nsleep 200\n")
+    entered = run.state()
+    expect(entered, inside_at="deep", inside_chosen="deep/inner")
+    if entered["inside_rows"] != "inner,blob.bin":
+        raise Failure(f"inside `deep` is {entered['inside_rows']!r}")
+    # The summary counts the archive and not the level, which is what makes it a
+    # summary: four entries are still four from in here.
+    if not entered["inside"].startswith("zip:4:"):
+        raise Failure(f"the count changed on the way in: {entered['inside']!r}")
+
+    # And out, landing back on the folder just left.
+    run.drive("key left\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), inside_at="", inside_chosen="deep")
+
+    # **`Enter` on a file is spent, not passed on.** Falling through would open
+    # the *archive* in whatever the desktop launches for a zip, on the key that
+    # means "open this row" everywhere else — so this asserts the panel is still
+    # there and still where it was.
+    run.drive("key down\nsleep 200\nkey enter\nsleep 600\nkey f12\nsleep 200\n")
+    expect(run.state(), inside_at="", inside_chosen="notes.txt", looking="reports.zip:archive")
+
+    run.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), looking="none")
+
+
+@scenario("extracting-an-archive-is-one-folder-and-one-undo", fresh=True)
+def extracting_an_archive_is_one_folder_and_one_undo(run: Run, fixture: Path) -> None:
+    """**Extract, undo, redo** — rule 3 over a sandboxed child.
+
+    The claims: one archive becomes one folder named after it, the files inside
+    are the archive's own bytes, the whole thing is *one* entry on the undo stack
+    however many files it wrote, `Ctrl+Z` takes the folder away, and the redo puts
+    it back where it was rather than beside it.
+    """
+    an_archive_in(fixture)
+    run.drive("sleep 500\nkey f5\nsleep 500\ntext reports\nsleep 400\n")
+    until(run, cursor="reports.zip")
+
+    run.drive("key ctrl+shift+x\nsleep 1200\nkey f12\nsleep 300\n")
+    done = holds(run, lambda it: it.get("undo") == "true", "an entry on the undo stack")
+    unpacked = fixture / "reports"
+    if not (unpacked / "notes.txt").is_file():
+        raise Failure(f"nothing was unpacked into {unpacked}")
+    if (unpacked / "notes.txt").read_text() != "two lines\nof notes\n":
+        raise Failure("the file that came out is not the file that went in")
+    if not (unpacked / "deep" / "inner" / "note.md").is_file():
+        raise Failure("the folders inside the archive were not made")
+    if not os.access(unpacked / "run.sh", os.X_OK):
+        raise Failure("the execute bit did not come out of the archive")
+    # **One entry for four files.** A gesture is an undo — the same rule a paste
+    # of two hundred files follows.
+    if done.get("history", "").split("/")[0] != "1":
+        raise Failure(f"an extraction left {done.get('history')} on the stack")
+
+    run.drive("key ctrl+z\nsleep 1200\nkey f12\nsleep 300\n")
+    holds(run, lambda it: it.get("redo") == "true", "something to redo")
+    if unpacked.exists():
+        raise Failure("undo left the folder behind")
+
+    # And back again, into the same folder rather than into `reports 2`.
+    run.drive("key ctrl+shift+z\nsleep 1500\nkey f12\nsleep 300\n")
+    holds(run, lambda it: it.get("undo") == "true", "the extraction back on the stack")
+    if not (unpacked / "notes.txt").is_file():
+        raise Failure("redo did not put the folder back")
+    if (fixture / "reports 2").exists():
+        raise Failure("redo unpacked it a second time, beside the first")
+
+
+@scenario("an-archive-answers-a-pointer", fresh=True)
+def an_archive_answers_a_pointer(run: Run, fixture: Path) -> None:
+    """**Rule 5's other half for an archive**: extract from the menu, and walk the
+    listing with clicks.
+
+    Every command is reachable by pointer alone, which for this one means the row
+    menu — and inside the panel a click chooses a row and a double click goes into
+    it, because a list somebody can see is a list they can point at.
+    """
+    an_archive_in(fixture)
+    run.drive("sleep 500\nkey f5\nsleep 600\ntext reports\nsleep 400\n")
+    found = until(run, cursor="reports.zip")
+
+    # **The row the cursor found**, rather than a scan: the fixture sorts folders
+    # first and where `reports.zip` lands is the sort's business, not this test's.
+    pointing = point_at(run, int(found["cursor_row"]))
+    if pointing["hover_name"] != "reports.zip":
+        raise Failure(f"the pointer landed on {pointing['hover_name']!r}")
+
+    run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+    opened = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+    if "file.extract" not in opened["menu_aim"]:
+        raise Failure(f"the row menu has no Extract: {opened['menu_aim']}")
+    aimed = menu_aim(run, opened, "file.extract")
+    run.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 150\nclick\nsleep 1500\n")
+    holds(run, lambda it: it.get("undo") == "true", "an extraction on the stack")
+    if not (fixture / "reports" / "notes.txt").is_file():
+        raise Failure("the menu's Extract unpacked nothing")
+
+    # Now the panel: `Space` over the archive, then a click on a row and a double
+    # click into a folder.
+    run.drive("text reports.z\nsleep 400\n")
+    until(run, cursor="reports.zip")
+    run.drive("key space\nsleep 900\nkey f12\nsleep 200\n")
+    panel = holds(run, lambda it: bool(it.get("inside_aim")), "a drawn listing")
+    where = dict(
+        (entry.split("@")[0], entry.split("@")[1]) for entry in panel["inside_aim"].split(",")
+    )
+    # Row 1 is `notes.txt` — chosen with one click, and *not* entered, because a
+    # file is not somewhere to go.
+    x, _, y = where["1"].partition(":")
+    at = aim(run, panel, float(x), float(y))
+    run.drive(f"move {at[0]:.1f} {at[1]:.1f}\nsleep 150\nclick\nsleep 300\nkey f12\nsleep 200\n")
+    expect(run.state(), inside_chosen="notes.txt", inside_at="")
+
+    # Row 0 is `deep`, and two clicks go into it.
+    x, _, y = where["0"].partition(":")
+    at = aim(run, panel, float(x), float(y))
+    run.drive(
+        f"move {at[0]:.1f} {at[1]:.1f}\nsleep 150\nclick\nsleep 200\nclick\nsleep 400\n"
+        "key f12\nsleep 200\n"
+    )
+    inside = run.state()
+    expect(inside, inside_at="deep")
+
+    # **The wheel belongs to the list under the pointer**, which for an archive
+    # is a different scroll from the text preview's — the panel holds one or the
+    # other, and a wheel that moved the wrong one would move a scroll nothing is
+    # drawing from. Scrolled down and then back, because `deep` has two rows and
+    # what is asserted is that the wheel reached this list at all.
+    run.drive("scroll 3\nsleep 200\nscroll -3\nsleep 200\nkey f12\nsleep 150\n")
+    if not run.state().get("inside_aim"):
+        raise Failure("the wheel over an archive left the list undrawn")
+
+    # **And the strip's own Extract, which is the pointer-only way to take one
+    # entry out.** The command in the registry is the same one; what the panel
+    # changes is its target, so this claim is that the button is *there* and that
+    # it means the row rather than the whole archive.
+    aimed = None
+    for entry in inside["look_aim"].split(","):
+        name, _, point = entry.partition("@")
+        if name == "extract":
+            x, _, y = point.partition(":")
+            aimed = aim(run, inside, float(x), float(y))
+    if aimed is None:
+        raise Failure(f"the strip has no Extract over an archive: {inside['look_aim']!r}")
+    run.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 150\nclick\nsleep 1500\n")
+    # **Two entries, not "something to undo".** The menu's Extract above already
+    # put one on the stack, so waiting for `undo=true` is a wait that was over
+    # before it started — and the assertions below then ran against a folder the
+    # child had not finished writing. The depth is what actually moved.
+    holds(
+        run,
+        lambda it: it.get("history", "").endswith("/2"),
+        "a second entry on the stack",
+    )
+    # `deep/inner` was the row, so that is what came out — and `notes.txt`, which
+    # is at the top of the archive, did not.
+    one = fixture / "reports 2"
+    if not (one / "deep" / "inner" / "note.md").is_file():
+        raise Failure(f"the chosen entry is not in {one}")
+    if (one / "notes.txt").exists():
+        raise Failure("extracting one entry unpacked the whole archive")
 
 
 @scenario("keyboard-rename", fresh=True)

@@ -367,11 +367,20 @@ use std::path::Path;
 /// skew the protocol refuses rather than survives. `PATH` is the fallback for an
 /// installation that splits `bin` from `libexec`.
 fn spawn(kind: Kind, beside: Option<&Path>) -> Option<Child> {
+    helper(kind.program(), beside)
+}
+
+/// Starts `program`, from `beside` first and then from `PATH`.
+///
+/// **One place that knows the rule**, because [`crate::archive`] spawns a helper
+/// too and a second copy of "beside, then `PATH`" is a second chance to get the
+/// version skew wrong.
+pub(crate) fn helper(program: &str, beside: Option<&Path>) -> Option<Child> {
     let mut tried = Vec::new();
     if let Some(directory) = beside {
-        tried.push(directory.join(kind.program()));
+        tried.push(directory.join(program));
     }
-    tried.push(PathBuf::from(kind.program()));
+    tried.push(PathBuf::from(program));
     tried.into_iter().find_map(|program| {
         Command::new(program)
             .stdin(Stdio::piped())

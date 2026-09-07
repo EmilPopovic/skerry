@@ -25,6 +25,7 @@
 
 mod a11y;
 mod app;
+mod archive;
 mod bench;
 mod capture;
 mod cells;

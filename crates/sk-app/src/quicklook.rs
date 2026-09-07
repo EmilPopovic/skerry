@@ -669,6 +669,28 @@ pub(crate) struct QuickLook {
     /// starts and replaced by every save.
     as_on_disk: Option<String>,
     reading: Option<mpsc::Receiver<Option<String>>>,
+    /// What is inside the archive, once the child has said.
+    pub(crate) inside: Option<crate::archive::Inside>,
+    listed: Option<mpsc::Receiver<sk_preview::archive::Listing>>,
+    /// The token that stops a listing, held so closing the panel stops it.
+    ///
+    /// **A compressed tar has no index**, so listing a big one is a whole
+    /// decompression — [ADR
+    /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
+    /// A panel closed half way through would otherwise leave an `xz` working on
+    /// an answer nothing will read.
+    stop: Option<sk_util::Cancel>,
+}
+
+impl Drop for QuickLook {
+    /// **Where the listing is stopped**, rather than in each of the several
+    /// places a panel can close: `Escape`, `Space` again, a click outside, a new
+    /// look, a disk being unplugged. One of those would have been forgotten.
+    fn drop(&mut self) {
+        if let Some(stop) = &self.stop {
+            stop.cancel();
+        }
+    }
 }
 
 impl QuickLook {
@@ -711,9 +733,14 @@ impl QuickLook {
             shown_at: None,
             as_on_disk: None,
             reading: None,
+            inside: None,
+            listed: None,
+            stop: None,
         };
-        if shows == Shows::Text {
-            look.start_reading(jobs);
+        match shows {
+            Shows::Text => look.start_reading(jobs),
+            Shows::Archive => look.start_listing(jobs),
+            Shows::Picture | Shows::Page => {}
         }
         look
     }
@@ -728,6 +755,31 @@ impl QuickLook {
             let _ = done.send(sk_fs::text::read_text(&path, TEXT_LIMIT).ok());
             wake.wake();
         });
+    }
+
+    /// Asks a child what is inside, on a job — rule 1, and the read is a whole
+    /// decompression for anything but a zip.
+    fn start_listing(&mut self, jobs: &crate::pane::Jobs) {
+        let (done, waiting) = mpsc::channel();
+        self.listed = Some(waiting);
+        let path = self.path.clone();
+        let wake = jobs.wake.clone();
+        let stop = sk_util::Cancel::new();
+        self.stop = Some(stop.clone());
+        jobs.pool.spawn(sk_util::Lane::Parallel, stop, move |cancel| {
+            let _ = done.send(sk_preview::archive::list(&path, cancel));
+            wake.wake();
+        });
+    }
+
+    /// Takes delivery of a listing. Whether anything arrived.
+    pub(crate) fn drain_listing(&mut self) -> bool {
+        let Some(waiting) = &self.listed else { return false };
+        let Ok(listing) = waiting.try_recv() else { return false };
+        self.listed = None;
+        self.stop = None;
+        self.inside = Some(crate::archive::Inside::new(listing));
+        true
     }
 
     /// Takes delivery of a text read. Whether anything arrived.
@@ -1187,6 +1239,13 @@ impl QuickLook {
             && page.count() > 0
         {
             return Some(page.every_word());
+        }
+        // **An archive is its rows, one to a line.** A reader that got nothing
+        // here would have no way to know the panel was open at all, let alone
+        // what was in it — and the name and the kind together are what a row
+        // means, the same pair `a11y_row_description` gives the pane's own rows.
+        if let Some(archive) = self.inside.as_ref() {
+            return Some(archive.spoken());
         }
         let text = self.text.as_ref()?;
         Some(text.lines.join("\n"))
@@ -1774,6 +1833,9 @@ mod tests {
             shown_at: None,
             as_on_disk: None,
             reading: None,
+            inside: None,
+            listed: None,
+            stop: None,
         }
     }
 

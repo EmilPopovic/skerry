@@ -3413,9 +3413,14 @@ impl App {
             Some(crate::view::LookControl::Discard) => self.discard_the_look(),
             Some(crate::view::LookControl::Play) => self.toggle_playing(),
             Some(crate::view::LookControl::Source) => self.toggle_the_rendering(),
+            Some(crate::view::LookControl::Extract) => self.extract_selection(),
             None => {
                 let inside = crate::view::quick_look_area(&self.layout);
                 let strip = crate::view::quick_look_strip(&self.layout);
+                if self.press_in_the_archive(position, clicks) {
+                    self.dirty = true;
+                    return true;
+                }
                 if inside.contains(position.x, position.y)
                     && (self.start_choosing_rendered(position, shift, clicks)
                         || self.start_choosing_text(position, shift, clicks)
@@ -4801,9 +4806,20 @@ impl App {
             // rule the palette and a tall menu follow.
             let inner = crate::view::quick_look_area(&self.layout);
             let step = self.theme.metrics.row_height;
-            let rows = look.text.as_ref().map_or(0, |it| it.rows().len());
-            look.scroll.set_extent(rows as f32 * step, inner.height);
-            look.scroll.by(delta.y, precise, time);
+            // **An archive scrolls its own list**, which is a different one from
+            // the text preview's: the panel holds one or the other, and a wheel
+            // that moved `look.scroll` over a listing would move a scroll nothing
+            // was drawing from.
+            let scroll = if let Some(archive) = look.inside.as_mut() {
+                let rows = archive.rows.len();
+                archive.scroll.set_extent(rows as f32 * step, inner.height);
+                &mut archive.scroll
+            } else {
+                let rows = look.text.as_ref().map_or(0, |it| it.rows().len());
+                look.scroll.set_extent(rows as f32 * step, inner.height);
+                &mut look.scroll
+            };
+            scroll.by(delta.y, precise, time);
             self.dirty = true;
         } else if self.history_open && self.layout.history.contains(self.pointer.x, self.pointer.y)
         {
@@ -6165,6 +6181,33 @@ impl App {
         if !event.mods.none() {
             return false;
         }
+        // **Inside an archive the sideways keys mean in and out.** Everywhere
+        // else `←` and `→` walk to the next file with a preview, and they still
+        // do at the top of an archive — where there is no level to leave, so the
+        // key means what it means everywhere else rather than nothing.
+        if self.showing_an_archive() {
+            match event.key {
+                Key::Named(Named::Right) if self.enter_in_the_archive() => {
+                    self.dirty = true;
+                    return true;
+                }
+                Key::Named(Named::Left | Named::Backspace) if self.leave_in_the_archive() => {
+                    self.dirty = true;
+                    return true;
+                }
+                // **`Enter` is spent here whether or not it went anywhere.** On a
+                // folder it goes in; on a file it does nothing, and the thing it
+                // must not do is fall through to Open — which would launch the
+                // *archive* in another program while somebody was reading its
+                // contents, on the key that means "open this row" everywhere
+                // else in the window.
+                Key::Named(Named::Enter) => {
+                    self.dirty |= self.enter_in_the_archive();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match event.key {
             Key::Named(Named::Left) => self.look_at_sibling(-1),
             Key::Named(Named::Right) => self.look_at_sibling(1),
@@ -7482,7 +7525,141 @@ scope_aim={scope_aim:?}",
                     look.turn(delta);
                 }
             }
+            // **The rows, which is what "further through this" means here.** A
+            // whole-page step is a panel's worth of rows, the same arithmetic the
+            // text preview does with its own line height.
+            crate::previews::Shows::Archive => {
+                let rows = if whole { (room / step) as i32 } else { 1 };
+                if let Some(inside) = look.inside.as_mut() {
+                    inside.step((delta * rows.max(1)) as isize);
+                    inside.reveal(room, step);
+                }
+            }
         }
+    }
+
+    /// A press on a row of an archive's listing: one click chooses, two go in.
+    ///
+    /// **The same rule the pane's own rows follow**, so the panel is a list a
+    /// person already knows how to use rather than a viewer with a cursor in it.
+    /// Aimed at the rectangles the frame recorded, because the list scrolls.
+    fn press_in_the_archive(&mut self, position: Point, clicks: u8) -> bool {
+        let found = self
+            .hits
+            .inside
+            .iter()
+            .find(|(_, at)| at.contains(position.x, position.y))
+            .map(|(index, _)| *index);
+        let Some(index) = found else { return false };
+        let Some(archive) = self.quick_look.as_mut().and_then(|look| look.inside.as_mut()) else {
+            return false;
+        };
+        archive.chosen = index;
+        if clicks >= 2 {
+            archive.enter();
+        }
+        true
+    }
+
+    /// Whether the panel is showing what is inside an archive.
+    pub(crate) fn showing_an_archive(&self) -> bool {
+        self.quick_look.as_ref().is_some_and(|look| look.inside.is_some())
+    }
+
+    /// Goes into the folder the archive's cursor is on. Whether it did.
+    fn enter_in_the_archive(&mut self) -> bool {
+        self.quick_look
+            .as_mut()
+            .and_then(|look| look.inside.as_mut())
+            .is_some_and(crate::archive::Inside::enter)
+    }
+
+    /// Comes back out of one. Whether there was one to leave.
+    fn leave_in_the_archive(&mut self) -> bool {
+        self.quick_look
+            .as_mut()
+            .and_then(|look| look.inside.as_mut())
+            .is_some_and(crate::archive::Inside::leave)
+    }
+
+    /// Unpacks everything selected, each into a folder of its own beside it.
+    ///
+    /// **Not into the folder itself** — [ADR
+    /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
+    /// An archive whose entries are not under one directory would otherwise
+    /// scatter forty names across the folder somebody was looking at, and one
+    /// gesture would be forty things to put back.
+    pub(crate) fn extract_selection(&mut self) {
+        // **One entry, where one is being looked at.** The panel is a list
+        // somebody is reading, and Extract while a row is chosen means that row —
+        // the same command, because it is the same action on a smaller target,
+        // and a second registry entry for it would put "Extract this entry" in
+        // the palette where it would mean nothing.
+        if let Some(entry) = self.entry_being_looked_at() {
+            let (archive, inside) = entry;
+            let took = self.edits.unpack_one(archive, inside, &self.jobs);
+            self.said_it_is_busy(took);
+            return;
+        }
+        let paths = self.archives_selected();
+        if paths.is_empty() {
+            return;
+        }
+        let took = self.edits.unpack_all(paths, &self.jobs);
+        self.said_it_is_busy(took);
+    }
+
+    /// The archive being looked at and the entry its cursor is on, if both.
+    fn entry_being_looked_at(&self) -> Option<(std::path::PathBuf, String)> {
+        let look = self.quick_look.as_ref()?;
+        let row = look.inside.as_ref()?.row()?;
+        Some((look.path.clone(), row.path.clone()))
+    }
+
+    /// The selected rows that are archives, in the order they are shown.
+    ///
+    /// **Filtered rather than refused.** A selection of nine files with two zips
+    /// in it means the two zips, the way Copy means every row and not "these are
+    /// not all the same kind".
+    /// Whether anything selected is an archive.
+    ///
+    /// **Short-circuiting and allocation-free, because this is an `enabled`
+    /// predicate**: `settle_menu_state` runs one for every row of an open menu on
+    /// every frame, and the sibling below would be a `PathBuf` per selected entry
+    /// per frame — over a `Ctrl+A` in a folder of two hundred thousand, that is
+    /// the frame budget several times over. The name is enough to decide, and the
+    /// listing already holds it.
+    pub(crate) fn an_archive_is_selected(&self) -> bool {
+        let Some(desktop) = self.desktop.as_ref() else { return false };
+        let pane = self.panes.focused();
+        let listing = &pane.listing;
+        let archive = |id| {
+            crate::previews::shows(
+                listing.name(id),
+                sk_desktop::Category::Unknown,
+                Some(&desktop.mime),
+            ) == Some(crate::previews::Shows::Archive)
+        };
+        if pane.selection.is_empty() {
+            return pane.focused().is_some_and(archive);
+        }
+        pane.selection.in_order(listing.order()).any(archive)
+    }
+
+    pub(crate) fn archives_selected(&self) -> Vec<std::path::PathBuf> {
+        let Some(desktop) = self.desktop.as_ref() else { return Vec::new() };
+        self.selected_paths()
+            .into_iter()
+            .filter(|path| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                // `Unknown` because the category is only the fallback for a
+                // name the database cannot place, and an archive it cannot place
+                // is not one this could unpack either.
+                let kind = sk_desktop::Category::Unknown;
+                crate::previews::shows(&name, kind, Some(&desktop.mime))
+                    == Some(crate::previews::Shows::Archive)
+            })
+            .collect()
     }
 
     /// Zooms the open picture about the pointer. Whether there was one.
@@ -7606,7 +7783,10 @@ scope_aim={scope_aim:?}",
         let helper = match kind {
             crate::previews::Shows::Picture => sk_preview::Kind::Image,
             crate::previews::Shows::Page => sk_preview::Kind::Document,
-            crate::previews::Shows::Text => return,
+            // Neither is a picture, and neither goes through the preview host:
+            // text is read on a job here, and an archive's own child answers a
+            // table rather than pixels — ADR 0032.
+            crate::previews::Shows::Text | crate::previews::Shows::Archive => return,
         };
         // **`shot.within`, not `within`.** The shot is what a reply is matched
         // against, so asking for a different box than the one recorded is an
@@ -7738,6 +7918,11 @@ scope_aim={scope_aim:?}",
     /// wake-up lands, not inside the frame the drain is supposed to cause.
     fn drain_the_look_text(&mut self) {
         if self.quick_look.as_mut().is_some_and(crate::quicklook::QuickLook::drain) {
+            self.dirty = true;
+        }
+        // An archive's listing lands the same way and for the same reason — the
+        // job wakes the loop, and the drain has to be where the wake-up lands.
+        if self.quick_look.as_mut().is_some_and(crate::quicklook::QuickLook::drain_listing) {
             self.dirty = true;
         }
     }
@@ -8181,6 +8366,53 @@ scope_aim={scope_aim:?}",
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
+    /// What an archive's listing says, for the diagnostic line.
+    ///
+    /// **Its own method for the reason [`Self::page_state`] is one**: `look_state`
+    /// is at the hundred-line lint and an archive is one subject — what the child
+    /// answered, where in it the panel is standing, and which rows a pointer
+    /// could aim at.
+    fn inside_state(&self) -> String {
+        /// How many of this level's names go on the line. A scenario asserts on
+        /// the first few; a tar of a million entries would otherwise put a
+        /// megabyte on one line, which the harness reads with an expression.
+        const NAMED: usize = 12;
+        let Some(archive) = self.quick_look.as_ref().and_then(|look| look.inside.as_ref()) else {
+            return "inside=none inside_at=\"\" inside_rows=\"\" inside_chosen=none inside_aim=\"\""
+                .to_owned();
+        };
+        let listing = &archive.listing;
+        let format = listing.format.map_or("none", sk_preview::archive::Format::name);
+        let inside = format!("{format}:{}:{}:{:?}", listing.count, listing.bytes, listing.refusal);
+        let rows = archive
+            .rows
+            .iter()
+            .take(NAMED)
+            .map(|row| row.name.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let chosen = archive.row().map_or_else(|| "none".to_owned(), |row| row.path.clone());
+        // Where each drawn row is, so a scenario clicks one by index rather than
+        // by arithmetic over this panel's own constants.
+        let aim = self
+            .hits
+            .inside
+            .iter()
+            .map(|(index, area)| {
+                format!(
+                    "{index}@{:.0}:{:.0}",
+                    area.x + area.width / 2.0,
+                    area.y + area.height / 2.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let at = archive.at.trim_end_matches('/');
+        format!(
+            "inside={inside} inside_at={at:?} inside_rows={rows:?} inside_chosen={chosen} inside_aim={aim:?}"
+        )
+    }
+
     /// What a page's own text layer says, for the diagnostic line.
     ///
     /// **Its own method for the reason `look_state` is one**: that is at the
@@ -8268,6 +8500,12 @@ look_page_box={look_page_box:?} look_found={look_found} look_query={look_query:?
                     if look.shows == crate::previews::Shows::Page { "page" } else { "picture" }
                 } else if look.text.is_some() {
                     "text"
+                } else if look.inside.is_some() {
+                    // **Its own word, and it had to be.** An archive has no
+                    // image and no text, so it read as `waiting` — a panel full
+                    // of rows reported as one that had not answered yet, which
+                    // is the state a scenario waits *out of*.
+                    "archive"
                 } else if look.refusal.is_some() {
                     "refused"
                 } else {
@@ -8296,6 +8534,7 @@ look_page_box={look_page_box:?} look_found={look_found} look_query={look_query:?
                     crate::view::LookControl::Discard => "discard",
                     crate::view::LookControl::Play => "play",
                     crate::view::LookControl::Source => "source",
+                    crate::view::LookControl::Extract => "extract",
                 };
                 format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
             })
@@ -8339,6 +8578,7 @@ look_page_box={look_page_box:?} look_found={look_found} look_query={look_query:?
         let look_unsaved = self.look_is_unsaved();
         let look_shot = self.look_shot();
         let page = self.page_state();
+        let inside = self.inside_state();
         // The magnification and where the picture has been dragged to, which is
         // the whole of what a pinch and a pan change: a scenario asserting on
         // pixels would be asserting on the machine's filtering.
@@ -8372,7 +8612,7 @@ look_held={look_held} look_editing={look_editing} look_caret={look_caret} \
 look_chosen={look_chosen} look_rows={look_rows} look_unsaved={look_unsaved} \
 look_playing={look_playing} look_mode={look_mode} look_zoom={look_zoom} look_pan={look_pan} \
 look_shot={look_shot} \
-{page}"
+{page} {inside}"
         )
     }
 

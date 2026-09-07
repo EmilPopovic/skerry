@@ -47,7 +47,12 @@ fn main() {
                 // ADR 0006 is about.
                 let out = into.parent().filter(|it| !it.as_os_str().is_empty());
                 let writable: Vec<&Path> = out.into_iter().collect();
-                let report = sk_preview::sandbox::confine(&[Path::new("/")], &[], &writable);
+                let report = sk_preview::sandbox::confine(
+                    sk_preview::sandbox::Limits::PREVIEW,
+                    &[Path::new("/")],
+                    &[],
+                    &writable,
+                );
                 println!("skerry-thumbnailer: sandbox: {}", report.line());
                 write_out(&from, into, cache::SIDE);
             }
@@ -81,7 +86,12 @@ fn confine() {
     // **Nothing executable.** A thumbnailer decodes in-process and has no
     // reason to start a program, so it is granted no execute right anywhere —
     // which means a decoder talked into spawning something cannot.
-    let report = sk_preview::sandbox::confine(&[Path::new("/")], &[], &writable);
+    let report = sk_preview::sandbox::confine(
+        sk_preview::sandbox::Limits::PREVIEW,
+        &[Path::new("/")],
+        &[],
+        &writable,
+    );
     // Rule 7's shape: say what is in force, including what is not.
     let _ = writeln!(std::io::stderr(), "skerry-thumbnailer: {}", report.line());
 }
@@ -175,7 +185,12 @@ fn modified(path: &Path) -> i64 {
 
 /// Decodes one file and says what happened, for a person at a terminal.
 fn probe(path: Option<&Path>) {
-    let report = sk_preview::sandbox::confine(&[Path::new("/")], &[], &[]);
+    let report = sk_preview::sandbox::confine(
+        sk_preview::sandbox::Limits::PREVIEW,
+        &[Path::new("/")],
+        &[],
+        &[],
+    );
     println!("skerry-thumbnailer: sandbox: {}", report.line());
     let Some(path) = path else {
         println!(

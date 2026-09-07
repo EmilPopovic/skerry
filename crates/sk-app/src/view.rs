@@ -203,6 +203,8 @@ pub enum LookControl {
     Play,
     /// Swaps a rendered markdown document for its source, and back.
     Source,
+    /// Unpacks the entry the archive's cursor is on.
+    Extract,
 }
 
 /// Hit regions this frame produced, for the next event to test against.
@@ -312,6 +314,13 @@ pub struct Hits {
     /// Pause and Cancel in the status strip, while an operation is running.
     pub pause: Option<Area>,
     pub cancel: Option<Area>,
+    /// One rectangle per *drawn* row of an archive's listing, with its index.
+    ///
+    /// The index travels with the rectangle for the reason the history strip's
+    /// does: the list is scrolled and clipped, so the first row drawn is not row
+    /// zero and counting back from the order is a rule that breaks the moment
+    /// somebody scrolls.
+    pub inside: Vec<(usize, Area)>,
     /// Every panel drawn this frame, in draw order.
     ///
     /// **What the pointer cannot see through.** A panel over the list used to
@@ -1181,6 +1190,24 @@ fn quick_look(
         quick_look_text(painter, look, text, inner);
         return;
     }
+    if let Some(archive) = look.inside.as_ref() {
+        quick_look_archive(painter, look, archive, inner, hits);
+        return;
+    }
+    // **An archive that has not answered yet says it is reading.** Every other
+    // preview arrives in tens of milliseconds and a spinner would be worse than
+    // nothing; a compressed tar has no index, so listing one is a whole
+    // decompression and can take seconds — [ADR 0032]. Silence there is
+    // indistinguishable from a program that has stopped.
+    //
+    // [ADR 0032]: ../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md
+    if look.shows == crate::previews::Shows::Archive {
+        let baseline = painter.baseline(inner.y + inner.height / 2.0, 0.0, metrics.path_size);
+        let style = TextStyle::new(metrics.path_size, theme.palette.dim).centred();
+        let saying = i18n::lookup("archive.reading");
+        line(painter, saying, style, inner.x + 14.0, inner.width - 28.0, baseline);
+        return;
+    }
     // Neither yet. **A refusal always says something**, its own sentence where it
     // has one and a catch-all where it has not: three of them mean "nothing to
     // say", which is right when it decides whether the panel *opens* and wrong
@@ -1221,60 +1248,41 @@ fn quick_look_controls(
         at += side;
     }
 
-    // **The Edit control, only where there is text.** A picture and a page are
-    // not editable, so the button that says a preview can be typed into is drawn
-    // exactly where that is true — rule 4, which is that a feature reachable only
-    // by knowing the chord is a feature most people never find.
+    // **Four words, right to left, each drawn only where it means something** —
+    // rule 4: a mode reachable only by a chord is a mode most people never find.
+    // The rendering toggle where there is markdown, Extract over an archive's
+    // row, Edit where there is text, and Discard while an edit is unsaved, which
+    // is the one that must be visible because leaving edit mode *writes*.
     let mut right = strip.right() - 8.0;
-    // **The rendering toggle, only where there is markdown.** Rule 4: a mode
-    // reachable only by a chord is a mode most people never find, and this one
-    // changes what the panel *is*.
-    if look.has_markdown() {
+    let source = look.has_markdown().then(|| {
         let key = if look.rendered { "action.look_source" } else { "action.look_rendered" };
-        let label = i18n::lookup(key);
-        let width = text_width(painter, label, metrics.header_size, false) + 16.0;
-        let area = Area { x: right - width, y: strip.y, width, height: side };
         let ink = if look.rendered { theme.palette.dim } else { theme.palette.accent };
-        if hovered == Some(LookControl::Source) {
-            let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
-            painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
-        }
-        let style = TextStyle::new(metrics.header_size, ink).centred();
-        line(painter, label, style, area.x, area.width, baseline);
-        hits.look.push((LookControl::Source, area));
-        right -= width + 4.0;
-    }
-    if look.text.is_some() {
+        (LookControl::Source, i18n::lookup(key), ink)
+    });
+    let extract = look
+        .inside
+        .as_ref()
+        .is_some_and(|archive| archive.row().is_some())
+        .then(|| (LookControl::Extract, i18n::lookup("action.extract"), theme.palette.dim));
+    let edit = look.text.is_some().then(|| {
         let key = if look.editing { "look.done" } else { "look.edit" };
-        let label = i18n::lookup(key);
+        let ink = if look.editing { theme.palette.accent } else { theme.palette.dim };
+        (LookControl::Edit, i18n::lookup(key), ink)
+    });
+    let discard = look
+        .unsaved
+        .then(|| (LookControl::Discard, i18n::lookup("look.discard"), theme.palette.dim));
+    for (control, label, ink) in [source, extract, edit, discard].into_iter().flatten() {
         let width = text_width(painter, label, metrics.header_size, false) + 16.0;
         let area = Area { x: right - width, y: strip.y, width, height: side };
-        let ink = if look.editing { theme.palette.accent } else { theme.palette.dim };
-        if hovered == Some(LookControl::Edit) {
+        if hovered == Some(control) {
             let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
             painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
         }
         let style = TextStyle::new(metrics.header_size, ink).centred();
         line(painter, label, style, area.x, area.width, baseline);
-        hits.look.push((LookControl::Edit, area));
-        right = area.x - 4.0;
-    }
-
-    // **Discard, beside Done, and only while there is something to discard.**
-    // Leaving edit mode writes what was typed — which is what makes not asking
-    // safe — so the way out that writes nothing has to be *visible*, not a chord
-    // in the overlay: rule 4, and the same argument that put Edit here.
-    if look.unsaved {
-        let label = i18n::lookup("look.discard");
-        let width = text_width(painter, label, metrics.header_size, false) + 16.0;
-        let area = Area { x: right - width, y: strip.y, width, height: side };
-        if hovered == Some(LookControl::Discard) {
-            let shape = painter.rect(area.x, area.y + 5.0, area.width, area.height - 10.0);
-            painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
-        }
-        let style = TextStyle::new(metrics.header_size, theme.palette.dim).centred();
-        line(painter, label, style, area.x, area.width, baseline);
-        hits.look.push((LookControl::Discard, area));
+        hits.look.push((control, area));
+        right -= width + 4.0;
     }
 
     // **What the zoom is, where it is not one.** A picture that is magnified and
@@ -1742,6 +1750,160 @@ fn quick_look_text(
         line(painter, i18n::lookup("preview.more"), style, placed.text_x, inner.width, baseline);
     }
 }
+
+/// What is inside an archive: one level of it, with a trail and a summary.
+///
+/// **A list, not a tree** — [ADR
+/// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
+/// One folder at a time, walked with the same keys the panel already uses for a
+/// document's pages, because an archive is a path decomposed and not a place: no
+/// breadcrumb outside this panel names anything in here, and nothing in here can
+/// be dragged, renamed or watched.
+fn quick_look_archive(
+    painter: &mut Painter<'_>,
+    look: &crate::quicklook::QuickLook,
+    archive: &crate::archive::Inside,
+    inner: Area,
+    hits: &mut Hits,
+) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let step = metrics.row_height;
+    let trail = Area { height: step, ..inner };
+    let footer = Area { y: inner.bottom() - step, height: step, ..inner };
+    let list = Area { y: trail.bottom(), height: (footer.y - trail.bottom()).max(0.0), ..inner };
+
+    // The trail: where in the archive this is. Dim, because it is a label rather
+    // than a control — nothing here is clickable, and `←` is how you leave.
+    let where_it_is = archive.trail();
+    let said = if where_it_is.is_empty() {
+        i18n::lookup("archive.top").to_owned()
+    } else {
+        where_it_is.join(" / ")
+    };
+    let baseline = painter.baseline(trail.y, step, metrics.text_size);
+    let style = TextStyle::new(metrics.text_size, theme.palette.dim);
+    line(painter, &said, style, trail.x + ARCHIVE_PAD, trail.width - ARCHIVE_PAD * 2.0, baseline);
+    painter.hairline(inner.x, trail.bottom(), inner.width, theme.palette.divider);
+
+    let first = (archive.scroll.offset() / step).floor().max(0.0) as usize;
+    let room = (list.height / step).ceil() as usize + 1;
+    let clip = painter.rect(list.x, list.y, list.width, list.height);
+    painter.list.push_clip(clip);
+    for (index, row) in archive.rows.iter().enumerate().skip(first).take(room) {
+        let top = list.y + index as f32 * step - archive.scroll.offset();
+        let shape = Area { x: list.x, y: top, width: list.width, height: step };
+        if index == archive.chosen {
+            // The same wash a selected row in the pane gets, at the same alpha:
+            // this is a list of rows and it should read as one.
+            let box_ = painter.rect(shape.x, shape.y, shape.width, shape.height);
+            painter.list.rect(box_, theme.palette.accent.with_alpha(70), painter.px(4.0));
+        }
+        archive_row(painter, row, shape);
+        hits.inside.push((index, shape));
+    }
+    painter.list.pop_clip();
+    let summary = archive_summary(archive, look);
+    // **With no rows, the sentence goes in the middle**, where a person is
+    // looking, rather than along the bottom of an empty box. Which sentence
+    // depends on what happened: "nothing inside" is a claim about the archive,
+    // and one that could not be read is one this has nothing to say about.
+    if archive.rows.is_empty() {
+        let refused = archive.listing.refusal != sk_preview::archive::Refusal::None;
+        let saying = if refused { summary } else { i18n::lookup("archive.empty").to_owned() };
+        let middle = painter.baseline(list.y + list.height / 2.0, 0.0, metrics.path_size);
+        let style = TextStyle::new(metrics.path_size, theme.palette.dim).centred();
+        line(painter, &saying, style, list.x + 14.0, list.width - 28.0, middle);
+        return;
+    }
+
+    painter.hairline(inner.x, footer.y, inner.width, theme.palette.divider);
+    let baseline = painter.baseline(footer.y, step, metrics.text_size);
+    let style = TextStyle::new(metrics.text_size, theme.palette.dim);
+    line(
+        painter,
+        &summary,
+        style,
+        footer.x + ARCHIVE_PAD,
+        footer.width - ARCHIVE_PAD * 2.0,
+        baseline,
+    );
+}
+
+/// One row: its mark, its name, and its size at the right edge.
+fn archive_row(painter: &mut Painter<'_>, row: &crate::archive::Row, shape: Area) {
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let baseline = painter.baseline(shape.y, shape.height, metrics.text_size);
+    let mark = Area {
+        x: shape.x + ARCHIVE_PAD,
+        y: shape.y + (shape.height - ARCHIVE_MARK) / 2.0,
+        width: ARCHIVE_MARK,
+        height: ARCHIVE_MARK,
+    };
+    // **Through the one seam every mark goes through**, so an archive's rows look
+    // like the pane's rows and a per-type badge added later arrives here too
+    // without this function being touched — see [`sk_ui::Icon`].
+    let (icon, tint) = match row.kind {
+        sk_preview::archive::Kind::Directory => (sk_ui::Icon::Folder, theme.palette.kinds.folder),
+        // A link and a device node are drawn as what they are not: a page, dim.
+        // Neither can be unpacked into anything a person opens, and a mark of
+        // their own would be a symbol nobody has been taught.
+        sk_preview::archive::Kind::File => (sk_ui::Icon::Page, theme.palette.dim),
+        sk_preview::archive::Kind::Link | sk_preview::archive::Kind::Other => {
+            (sk_ui::Icon::Page, theme.palette.divider)
+        }
+    };
+    painter.icon(icon, painter.rect(mark.x, mark.y, mark.width, mark.height), tint);
+
+    let size = if row.kind == sk_preview::archive::Kind::File || row.size > 0 {
+        format::size(row.size)
+    } else {
+        String::new()
+    };
+    let numbers = TextStyle::new(metrics.text_size, theme.palette.dim).right();
+    let column = painter.rect(shape.right() - ARCHIVE_PAD - ARCHIVE_SIZE, 0.0, ARCHIVE_SIZE, 0.0);
+    painter.label(&size, numbers, column, baseline);
+
+    let name_from = mark.right() + ARCHIVE_PAD;
+    let room = (shape.right() - ARCHIVE_PAD * 2.0 - ARCHIVE_SIZE - name_from).max(1.0);
+    let style = TextStyle::new(metrics.text_size, theme.palette.text);
+    line(painter, &row.name, style, name_from, room, baseline);
+}
+
+/// The line under the list: what the archive holds, or why it does not say.
+///
+/// **The refusal wins.** An archive that was cut off half way through downloading
+/// lists what it could read, and a footer that only counted those entries would
+/// report a short archive as a whole one.
+fn archive_summary(archive: &crate::archive::Inside, look: &crate::quicklook::QuickLook) -> String {
+    let listing = &archive.listing;
+    if let Some(message) = listing.refusal.message() {
+        return i18n::format(message, &[&listing.note]);
+    }
+    let format = listing.format.map_or_else(
+        || look.title().rsplit('.').next().unwrap_or_default().to_owned(),
+        |format| format.name().to_owned(),
+    );
+    let bytes = format::size(listing.bytes);
+    if listing.truncated() {
+        let shown = listing.entries.len();
+        return i18n::plural(
+            "archive.capped",
+            listing.count,
+            &[&shown, &listing.count, &bytes, &format],
+        );
+    }
+    i18n::plural("archive.summary", listing.count, &[&listing.count, &bytes, &format])
+}
+
+/// The gap around an archive row's contents, and the column its size sits in.
+const ARCHIVE_PAD: f32 = 10.0;
+const ARCHIVE_SIZE: f32 = 78.0;
+
+/// How big a row's mark is. The same 13 logical pixels a pane's row uses, so the
+/// two lists read as the same kind of list.
+const ARCHIVE_MARK: f32 = 13.0;
 
 /// The highlight behind what is selected on a page.
 ///

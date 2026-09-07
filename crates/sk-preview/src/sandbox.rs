@@ -35,20 +35,54 @@
 use std::ffi::CString;
 use std::path::Path;
 
-/// How much address space a child may map, in bytes.
+/// What the kernel will let a child spend on itself.
 ///
-/// A gigabyte. A 4096×4096 RGBA image is 64 MiB and the decoders hold a few
-/// multiples of their output; a gigabyte is far above anything honest and far
-/// below what makes a machine swap.
-const ADDRESS_SPACE: u64 = 1024 * 1024 * 1024;
+/// **A named pair rather than two numbers at the call site**, because the two
+/// jobs a sandboxed child does here have honestly different appetites and the
+/// wrong one is a silent failure in both directions: a preview allowed ten
+/// minutes of CPU is a wedged decoder nobody kills, and an unpack allowed ten
+/// seconds is a four-gigabyte archive that dies two thirds of the way through.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Limits {
+    /// How much address space the child may map, in bytes.
+    pub address_space: u64,
+    /// How many CPU seconds it may burn before the kernel ends it.
+    pub cpu_seconds: u64,
+}
 
-/// How many CPU seconds a child may burn before the kernel ends it.
-///
-/// Ten. The host's per-request deadline is shorter, and this is the case the
-/// deadline cannot see: a child killed for missing a deadline is killed by the
-/// host, and a child that has stopped reading its pipe because it is in a loop
-/// inside a decoder is killed by this.
-const CPU_SECONDS: u64 = 10;
+impl Limits {
+    /// What a decoder answering one request gets.
+    ///
+    /// A gigabyte, because a 4096×4096 RGBA image is 64 MiB and the decoders hold
+    /// a few multiples of their output — far above anything honest and far below
+    /// what makes a machine swap. Ten CPU seconds, which is the case the host's
+    /// own deadline cannot see: a child killed for missing a deadline is killed
+    /// by the host, and a child in a loop inside a decoder is killed by this.
+    pub const PREVIEW: Self = Self { address_space: 1024 * 1024 * 1024, cpu_seconds: 10 };
+
+    /// What a child unpacking an archive gets.
+    ///
+    /// **Two gigabytes, which is headroom rather than a requirement**, and the
+    /// distinction is measured. Decoding the 4.3 GB fixture in [ADR
+    /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md):
+    ///
+    /// * `xz -T0` left to itself peaks at 1.5 GB of RSS and **fails under a
+    ///   gigabyte of address space** — `Cannot allocate memory`, which is what
+    ///   sent the filter its own `-M256MiB` budget in the first place.
+    /// * With that budget it peaks at 329 MB and runs inside a gigabyte fine, on
+    ///   this machine's twenty-four cores.
+    ///
+    /// The doubling is for the machine with a hundred: `-M` bounds the
+    /// dictionary, not the stacks and arenas a thread pool *reserves*, and
+    /// address space counts reservations. A cap that fits here and not there is
+    /// a feature that silently refuses on somebody else's hardware, and the cost
+    /// of the headroom is nothing — it is a ceiling, not an allocation.
+    ///
+    /// **Ten minutes** of CPU: the same archive is 5.6 seconds of it, so this is
+    /// two orders of magnitude of headroom and still a ceiling that ends a
+    /// decoder gone circular.
+    pub const UNPACK: Self = Self { address_space: 2 * 1024 * 1024 * 1024, cpu_seconds: 600 };
+}
 
 /// What ended up in force, for the line a child prints to `stderr`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -95,8 +129,13 @@ impl Report {
 /// it maps as well, so granting it on `PATH` alone is not enough for any real
 /// binary. Neither was guessed — both were a program that would not start.
 #[must_use]
-pub fn confine(readable: &[&Path], executable: &[&Path], writable: &[&Path]) -> Report {
-    let mut report = Report { no_new_privs: no_new_privs(), limits: caps(), landlock: None };
+pub fn confine(
+    limits: Limits,
+    readable: &[&Path],
+    executable: &[&Path],
+    writable: &[&Path],
+) -> Report {
+    let mut report = Report { no_new_privs: no_new_privs(), limits: caps(limits), landlock: None };
     report.landlock = landlock(readable, executable, writable);
     report
 }
@@ -110,13 +149,13 @@ fn no_new_privs() -> bool {
 }
 
 /// The address-space and CPU ceilings.
-fn caps() -> bool {
+fn caps(limits: Limits) -> bool {
     let set = |resource, value: u64| {
         let limit = libc::rlimit { rlim_cur: value, rlim_max: value };
         // SAFETY: `setrlimit` reads the struct and writes nothing.
         unsafe { libc::setrlimit(resource, &raw const limit) == 0 }
     };
-    set(libc::RLIMIT_AS, ADDRESS_SPACE) & set(libc::RLIMIT_CPU, CPU_SECONDS)
+    set(libc::RLIMIT_AS, limits.address_space) & set(libc::RLIMIT_CPU, limits.cpu_seconds)
 }
 
 /// The Landlock ABI this kernel offers, or nothing.

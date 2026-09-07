@@ -84,6 +84,29 @@ pub enum Change {
         /// What it holds now.
         after: String,
     },
+    /// An archive unpacked into a directory of its own.
+    ///
+    /// **A copy whose source is inside a file** — [ADR
+    /// 0032](../../../docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md).
+    /// The inverse is `Copied`'s and for the same reason: `root` is a directory
+    /// this operation made, so everything in it was put there by the unpack.
+    ///
+    /// **The one change [`apply`] cannot redo.** Doing it again means a sandboxed
+    /// child, which is level 2 and above this crate, so `Edits::redo` routes this
+    /// variant back through the queue instead. Nothing else here has that shape,
+    /// and it is the price of the decoder being out of process.
+    Unpacked {
+        /// The archive it came out of.
+        archive: PathBuf,
+        /// The directory that was made for it.
+        root: PathBuf,
+        /// Which entries were taken, or empty for the whole archive.
+        ///
+        /// **Recorded because a redo has to be the same change.** Extracting one
+        /// file out of a listing and then redoing it must not unpack the other
+        /// nine hundred into the folder the first one is in.
+        only: Vec<String>,
+    },
     /// Something moved into the trash, with both files the specification puts
     /// there so the undo can take both away.
     Trashed {
@@ -112,6 +135,9 @@ impl Change {
             Self::Created { path } | Self::Edited { path, .. } => path,
             Self::Renamed { to, .. } => to,
             Self::Copied { destination, .. } => destination,
+            // The folder the files went into, which is what a person is looking
+            // for after an extraction.
+            Self::Unpacked { root, .. } => root,
             // Both are gone, so the cursor goes where they were: the listing
             // finds nothing there and leaves it on the neighbour, which is the
             // row a person deleting several in a row needs it on.
@@ -151,6 +177,7 @@ impl Change {
             Self::Created { path } => ("history.created", named(path)),
             Self::Renamed { to, .. } => ("history.renamed", named(to)),
             Self::Copied { destination, .. } => ("history.copied", named(destination)),
+            Self::Unpacked { root, .. } => ("history.unpacked", named(root)),
             Self::Trashed { original, .. } => ("history.trashed", named(original)),
             Self::Erased { path } => ("history.erased", named(path)),
             Self::Edited { path, .. } => ("history.edited", named(path)),
@@ -176,6 +203,8 @@ impl Change {
             Self::Renamed { from, .. } => Some(from),
             // A copy's source never moved, so an undo leaves the cursor on it.
             Self::Copied { source, .. } => Some(source),
+            // Neither did the archive, and it is the row the folder came from.
+            Self::Unpacked { archive, .. } => Some(archive),
             Self::Trashed { original, .. } => Some(original),
             // An edit moves nothing, so undoing one leaves the cursor where it is.
             Self::Edited { path, .. } => Some(path),
@@ -194,6 +223,7 @@ fn many_key(one: &'static str) -> &'static str {
         "history.created" => "history.created_many",
         "history.renamed" => "history.renamed_many",
         "history.copied" => "history.copied_many",
+        "history.unpacked" => "history.unpacked_many",
         "history.trashed" => "history.trashed_many",
         "history.erased" => "history.erased_many",
         "history.edited" => "history.edited_many",
@@ -563,6 +593,11 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         Change::Copied { destination, .. } => {
             crate::copy::remove_tree(destination, &sk_util::Cancel::new())
         }
+        // The same recursive remove, and the same argument for it: the directory
+        // is one this operation made and everything under it came out of the
+        // archive. A *partial* unpack is recorded too — a cancelled one, or one
+        // that ran out of room — and this is the only thing that can take it back.
+        Change::Unpacked { root, .. } => crate::copy::remove_tree(root, &sk_util::Cancel::new()),
         // Straight back to what it held, which is the only way to undo bytes.
         Change::Edited { path, before, .. } => write_text(path, before).map(|_| ()),
         Change::Trashed { original, stored, info } => {
@@ -584,6 +619,16 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
         }
         // The bytes it held after the edit, put back after an undo took them away.
         Change::Edited { path, after, .. } => write_text(path, after).map(|()| change.clone()),
+        // **Redone by the caller, not here** — ADR 0032. Unpacking means a
+        // sandboxed child, and this crate is level 1 with no business spawning
+        // one; `Edits::redo` recognises this variant and puts it back on the
+        // queue. Reaching this arm means somebody added a second way to redo, so
+        // it says what to do rather than pretending to have done it.
+        Change::Unpacked { archive, .. } => Err(Problem::new(
+            ProblemKind::Unreadable,
+            archive.display().to_string(),
+            "an unpack is redone through the queue, not through ops::apply",
+        )),
         Change::Created { path } => {
             let (Some(parent), Some(name)) =
                 (path.parent(), path.file_name().and_then(|name| name.to_str()))
@@ -1196,6 +1241,38 @@ mod tests {
         revert(&batch).expect("the batch undoes");
         assert_eq!(std::fs::read(home.join("f")).expect("f is back"), b"one");
         assert!(!folder.exists(), "the folder the batch made is still there");
+    }
+
+    /// **Undoing an extraction takes the folder and everything in it** — and
+    /// that is a recursive remove, which is only an undo because every one of
+    /// those files was put there by the operation being undone. The same
+    /// argument `Copied` makes; the difference is that this one cannot be
+    /// re-`apply`ed here, and says so rather than pretending.
+    #[test]
+    fn undoing_an_unpack_removes_what_it_unpacked() {
+        let home = scratch("unpacked");
+        let root = home.join("reports");
+        std::fs::create_dir_all(root.join("deep/inner")).expect("the tree");
+        std::fs::write(root.join("notes.txt"), b"out of the archive").expect("a file");
+        std::fs::write(root.join("deep/inner/note.md"), b"nested").expect("another");
+        let archive = home.join("reports.zip");
+        std::fs::write(&archive, b"PK\x03\x04").expect("the archive");
+
+        let change =
+            Change::Unpacked { archive: archive.clone(), root: root.clone(), only: Vec::new() };
+        assert_eq!(change.subject(), root, "the cursor goes to the folder it made");
+        assert_eq!(change.origin(), Some(archive.as_path()), "and back to the archive");
+        assert_eq!(change.summary().0, "history.unpacked");
+
+        revert(&change).expect("the unpack undoes");
+        assert!(!root.exists(), "undo left the folder behind");
+        assert!(archive.is_file(), "undo took the archive as well");
+
+        // **Redone by the caller, because doing it again needs a child process.**
+        // A `Problem` here is the honest answer for a direct call; `Edits::redo`
+        // never makes one, and a test that let this pass silently would be a
+        // test that let the redo path disappear.
+        assert!(apply(&change).is_err(), "ops::apply pretended to redo an unpack");
     }
 
     #[test]

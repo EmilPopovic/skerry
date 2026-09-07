@@ -42,6 +42,13 @@ pub(crate) enum Shows {
     Page,
     /// Its own text, read here. Preview only.
     Text,
+    /// What is inside it, through `skerry-archive`. Preview only.
+    ///
+    /// **Including the ones nothing here decodes.** A 7z is an archive whose
+    /// listing is a sentence naming the program that would read it, which is a
+    /// better answer than a panel with nothing in it — and it is the same
+    /// degradation a PDF gets on a machine with no `pdftoppm`.
+    Archive,
 }
 
 /// What `name` can be shown as, given what the databases say about it.
@@ -58,12 +65,40 @@ pub(crate) fn shows(name: &str, kind: Category, mime: Option<&MimeDatabase>) -> 
         Some(kind) if kind.starts_with("image/") => Some(Shows::Picture),
         Some("application/pdf") => Some(Shows::Page),
         Some(kind) if kind.starts_with("text/") => Some(Shows::Text),
+        Some(kind) if is_archive(kind) => Some(Shows::Archive),
         // The databases have an opinion and it is none of the three.
         Some(_) => None,
         // They have none. `Code` is a file somebody writes in an editor, which is
         // text whatever it is called — a `Makefile` has no extension at all.
         None => (kind == Category::Code).then_some(Shows::Text),
     }
+}
+
+/// Whether a MIME type names an archive somebody would look inside.
+///
+/// **The list is what shared-mime-info calls them**, which is not one pattern: a
+/// `.tar.gz` is `application/x-compressed-tar` and a `.gz` is
+/// `application/gzip`, so the suffix rule catches the tar family and the list
+/// catches the rest.
+fn is_archive(mime: &str) -> bool {
+    const NAMED: &[&str] = &[
+        "application/zip",
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-tar",
+        "application/x-xz",
+        "application/zstd",
+        "application/x-zstd",
+        "application/x-bzip",
+        "application/x-bzip2",
+        "application/x-lzma",
+        // Neither of these is read here, and both are recognised on purpose: the
+        // panel's answer names the program that would read it.
+        "application/x-7z-compressed",
+        "application/vnd.rar",
+        "application/x-rar-compressed",
+    ];
+    mime.ends_with("-compressed-tar") || NAMED.contains(&mime)
 }
 
 /// The numbers the atlas knows thumbnails by, and what they stand for.

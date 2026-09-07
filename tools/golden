@@ -286,6 +286,25 @@ FRAMES = [
     # read in this process because reading a file is not decoding.
     ("quick-look-image", ["--size", "900x600", "--scale", "125", "--look", "circle.png"],
      "pictures"),
+    # **What is inside an archive** — ADR 0032. The frame is the test for the same
+    # reason the markdown one is: a listing with no picture of it is a listing
+    # whose folder marks, size column and footer could all be somewhere else. The
+    # zip has no directory entries in it, so `deep` and `pictures` being there at
+    # all is the derivation working.
+    ("quick-look-archive",
+     ["--size", "900x600", "--scale", "125", "--look", "reports.zip"], "archives"),
+    # A level down, where the trail says where you are and the rows are a folder
+    # and two files — and at 200%, because the mark is centred in a box whose size
+    # is metrics arithmetic, which is the class of thing that is right at one
+    # scale and wrong at another.
+    ("quick-look-archive-inside",
+     ["--size", "760x500", "--scale", "200", "--look", "reports.zip",
+      "--look-inside", "deep"],
+     "archives"),
+    # And the refusal that names a program, which is the answer for a 7z: a panel
+    # with nothing in it would be indistinguishable from one that had failed.
+    ("quick-look-archive-elsewhere",
+     ["--size", "900x600", "--scale", "125", "--look", "backup.7z"], "archives"),
     # **Markdown, rendered** — ADR 0029. The frame is the test: a parser with no
     # picture of its output is a parser whose headings could all be the same size.
     ("markdown", ["--size", "900x620", "--scale", "125", "--look", "README.md"],
@@ -533,6 +552,7 @@ def build_fixture() -> Path:
         os.truncate(directory / name, size)
     build_pictures()
     build_markdown()
+    build_archives()
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
     return directory
@@ -676,6 +696,49 @@ def build_markdown() -> None:
     )
     for path in sorted(directory.rglob("*")) + [directory]:
         os.utime(path, (FIXED_MTIME, FIXED_MTIME))
+
+
+def build_archives() -> None:
+    """One zip, in a directory of its own, written by Python's own `zipfile`.
+
+    **Somebody else's encoder**, which is the same bargain the GIF fixture in
+    `skerry-thumbnailer` makes with Pillow: an archive written by the code that
+    reads it proves the two agree and nothing more. Its own root for the reason
+    the markdown fixture has one — a file added to a shared directory re-blesses
+    every frame that shows a listing.
+
+    **No directory entries at all**, which is what most tools write and the case
+    the panel derives its folders for: `deep/inner/note.md` is the only record
+    that `deep` exists. Every timestamp is fixed, because a zip carries the
+    modification date and a frame that showed today's would differ every day.
+    """
+    import zipfile
+
+    directory = FIXTURE / "archives"
+    directory.mkdir(parents=True, exist_ok=True)
+    when = (2024, 3, 14, 9, 26, 54)
+    entries = {
+        "notes.txt": "Two lines of notes,\nand a second one.\n",
+        "run.sh": "#!/bin/sh\necho hello\n",
+        "deep/blob.bin": "x" * 20_000,
+        "deep/inner/note.md": "# Nested\n\nA note inside a folder.\n",
+        "deep/inner/table.csv": "one,two\n1,2\n",
+        "pictures/circle.png": "not really a png, and nothing reads it\n",
+    }
+    archive = directory / "reports.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for name, body in entries.items():
+            record = zipfile.ZipInfo(name, date_time=when)
+            # The execute bit on one of them, because the mode is what decides
+            # whether an unpacked file is runnable and the panel shows the mark.
+            record.external_attr = (0o755 if name.endswith(".sh") else 0o644) << 16
+            zip_file.writestr(record, body)
+    os.utime(archive, (1_710_400_000, 1_710_400_000))
+    # A second archive nothing here decodes, so the frame beside it shows the
+    # sentence that names the program which would.
+    seven = directory / "backup.7z"
+    seven.write_bytes(b"7z\xbc\xaf\x27\x1c\x00\x04" + b"\0" * 64)
+    os.utime(seven, (1_710_400_000, 1_710_400_000))
 
 
 def build_pictures() -> None:
@@ -1032,9 +1095,18 @@ def main(argv: list[str]) -> int:
     # string and red on the next run — a reference blessed from stale code is a
     # test that asserts the wrong thing for as long as nobody looks.
     # `tools/gui-test` had the same hole; see its `build_binaries`.
+    # **And the helpers, which the same argument covers and the first version of
+    # this did not build.** A thumbnail, a page and an archive listing each come
+    # from a separate executable, so `--bin skerry` alone blesses a frame against
+    # whatever helper happened to be left in `target/release` — which for a fresh
+    # clone is nothing at all, and for a working tree is the one from before the
+    # change under test. Found by adding a frame of a listing: it came out saying
+    # "The archive helper stopped before it answered", which is exactly what a
+    # missing helper looks like and exactly what a stale one would not.
     built = subprocess.run(
-        ["cargo", "build", "--release", "--bin", "skerry"],
-        cwd=ROOT, capture_output=True, text=True, timeout=600,
+        ["cargo", "build", "--release", "--bin", "skerry", "--bin", "skerry-thumbnailer",
+         "--bin", "skerry-preview-doc", "--bin", "skerry-archive"],
+        cwd=ROOT, capture_output=True, text=True, timeout=900,
     )
     if built.returncode != 0:
         print(f"the workspace would not build:\n{built.stderr.strip()[-2000:]}")

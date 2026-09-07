@@ -923,3 +923,44 @@ p99 over a realistic input trace, not an average over an idle window. The intere
 frames are the ones where a directory finishes loading, a thumbnail batch arrives and the
 user is mid-scroll — so the traces deliberately overlap those. A budget measured on a quiet
 frame loop is a budget that will be met and still feel slow.
+
+
+## What listing an archive costs, and why there is no row for it
+
+**The cost is the decompressor's, and it is a memory choice rather than a
+number.** A zip has an index at the end, so listing one is a seek and a parse —
+under a millisecond for anything on this machine. A tar has no index at all: the
+only way to know what is in one is to read it to the end, and if it is
+compressed that means decompressing all of it.
+
+Measured on the reference machine, warm page cache on tmpfs, against the largest
+archive that could be built here — `/usr/lib/x86_64-linux-gnu` as a 4.3 GB tar,
+`xz -6` to 1.0 GB, 19,082 entries:
+
+| | |
+| --- | --- |
+| `tar -tf` — container **and** filter | 2.46 s, 2.49 s |
+| `xz -dc > /dev/null` — the filter alone | 2.48 s, 2.51 s |
+
+The container walk is free to within the noise. What moves the number is what
+`xz` is allowed to spend on itself:
+
+| `xz` flags | peak RSS | 4.3 GB decoded |
+| --- | --- | --- |
+| `-T1` | 10 MB | 26.5 s |
+| `-T0 -M128MiB` | 167 MB | 9.4 s |
+| **`-T0 -M256MiB`**, which is what ships | **332 MB** | **5.6 s** |
+| `-T0 -M512MiB` | 616 MB | 3.4 s |
+| `-T0`, unbounded | 1.5 GB | 2.2 s |
+
+**No budget row, deliberately.** A row is a gate, and a gate over this would be
+measuring `xz` on the machine running CI — a figure that says nothing about this
+program and fails on a shared runner for reasons no commit caused. What the table
+is for is the *decision*: the row that ships is the one that keeps a sandboxed
+child inside a bound, and the bottom row does not run under the sandbox at all
+([ADR
+0032](adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
+
+What **is** a gate is that none of it happens on the frame loop: the listing is
+an ordinary job with a cancel token, and closing the panel kills the child rather
+than waiting out the rest of a four-gigabyte decompression.

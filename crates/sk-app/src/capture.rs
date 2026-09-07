@@ -194,6 +194,27 @@ fn history_height(request: &Capture, metrics: &sk_ui::Metrics) -> f32 {
         + (SAMPLE_EDITS.min(crate::view::HISTORY_ROWS) as f32) * metrics.row_height
 }
 
+/// Waits for an archive's listing, and stands where `--look-inside` said.
+///
+/// **The same wait `sample_text` makes, for the same reason.** A listing comes
+/// back on a job and a capture has one frame, so a frame taken without waiting
+/// is the panel's "Reading the archive…" every time — a reference that says
+/// nothing about the list it exists to show.
+fn sample_archive(
+    request: &Capture,
+    look: &mut crate::quicklook::QuickLook,
+    deadline: std::time::Instant,
+) {
+    while !look.drain_listing() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    if !request.look_inside.is_empty()
+        && let Some(archive) = look.inside.as_mut()
+    {
+        archive.go_to(&request.look_inside);
+    }
+}
+
 /// Opens a quick look and waits for it, so the one frame that gets taken has it.
 ///
 /// The window does this over frames — `App::settle_quick_look` asks and a later
@@ -217,6 +238,10 @@ fn sample_quick_look(
     let scale = f32::from(u16::try_from(request.scale_120).unwrap_or(120)) / 120.0;
     let within = ((inner.width * scale) as u32, (inner.height * scale) as u32);
     let deadline = std::time::Instant::now() + READ_DEADLINE;
+    if shows == crate::previews::Shows::Archive {
+        sample_archive(request, &mut look, deadline);
+        return Some(look);
+    }
     if shows == crate::previews::Shows::Text {
         while !look.drain() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
@@ -535,6 +560,12 @@ pub struct Capture {
     /// first**, and a capture that could only ever ask for frame one would render
     /// the one case where composing frames in order cannot go wrong.
     pub look_page: u32,
+    /// The folder *inside* an archive the panel should be standing in.
+    ///
+    /// **A path rather than a count of Enter presses**, because that is what the
+    /// panel's own state is: `Inside::at` names one level, and a frame that got
+    /// there by pressing keys would be a frame of the key handling.
+    pub look_inside: String,
     /// How wide the sidebar is, where a frame wants one other than the default.
     ///
     /// **Because the width decides what a volume's row can say.** The figure, the

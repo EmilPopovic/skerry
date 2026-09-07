@@ -6,9 +6,9 @@ your first change; everything else in this file assumes it.
 
 ## Where the project is right now
 
-**M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 908 tests, 145 GUI scenarios **on both Wayland and X11**,
-eighty-three golden frames, every gate green: a Details view
+**M0, in progress, and something you can use for a day.** Twelve crates and three
+sandboxed helpers, 945 tests, 148 GUI scenarios **on both Wayland and X11**,
+eighty-six golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
 drags, and whose pinned rows are a line each in GTK's `bookmarks` file**
@@ -138,6 +138,18 @@ and the point under the pointer stays where it is — and the zoom **asks the ch
 for a bigger picture** rather than magnifying a downscale, because a photograph
 fitted to a thousand pixels has its detail in the file; a drag pans it, clamped
 so its edge never comes inside the panel;
+**an archive opens where it stands**: `Space` on a zip or a tar — behind gzip,
+xz, zstd or bzip2 — lists what is in it, one level at a time, with the folders
+*derived from the paths* because plenty of zips declare none, and `Ctrl+Shift+X`
+unpacks one into a folder of its own as a single entry on the undo stack. The
+reader is a third sandboxed child and the first with anything writable —
+**the destination and nothing else**, so `../../.ssh/authorized_keys` is refused
+by the kernel rather than by a string check
+([ADR 0032](docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)) —
+and the line that record draws is that a container we can parse we parse (tar and
+zip, 550 lines, no crate) while a compressor is the machine's: measured, the
+container walk over a 4.3 GB `tar.xz` is free to within the noise and all 5.6
+seconds of it are `xz`. A 7z is a sentence naming the format, not an empty panel;
 a folder can be **indexed** ([ADR 0012](docs/adr/0012-a-flat-index-file-per-root-rebuilt-whole.md)),
 after which the same complete search costs **6.99 ms instead of 639.9 ms** over
 563,605 entries — one file per root, 45 bytes an entry, rebuilt when asked and

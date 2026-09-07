@@ -1064,6 +1064,7 @@ name = "sk-preview"
 version = "0.1.0-alpha.1"
 dependencies = [
  "libc",
+ "rustix",
  "sk-model",
  "sk-util",
 ]
@@ -1102,6 +1103,17 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "sk-app",
  "sk-plat",
+ "sk-util",
+]
+
+[[package]]
+name = "skerry-archive"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "rustix",
+ "sk-preview",
  "sk-util",
 ]
 

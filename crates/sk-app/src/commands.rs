@@ -594,6 +594,21 @@ fn edit(registry: &mut Registry<App>) {
             run: App::duplicate_selection,
         },
         CommandSpec {
+            id: "file.extract",
+            name: "action.extract",
+            group: Group::File,
+            // **Not `ctrl+e`**, which opens the editor over a quick look, and not
+            // `ctrl+shift+e` either — that is close enough to it to be pressed by
+            // somebody aiming for the editor. `x` is the letter every extractor
+            // in the world uses for this, `tar -x` included.
+            keys: &["ctrl+shift+x"],
+            // **Dimmed on anything that is not an archive**, which is the same
+            // rule the colour commands follow for a folder: an action a person
+            // can see and cannot use has said what it is for.
+            enabled: |app: &App| app.an_archive_is_selected() && !app.busy(),
+            run: App::extract_selection,
+        },
+        CommandSpec {
             id: "file.trash",
             name: "action.trash",
             group: Group::File,

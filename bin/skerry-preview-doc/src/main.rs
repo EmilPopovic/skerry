@@ -87,7 +87,8 @@ fn confine() {
     // restriction, and that is unchanged: this process cannot write a byte
     // anywhere, which was checked rather than assumed.
     let root = [Path::new("/")];
-    let report = sk_preview::sandbox::confine(&root, &root, &[]);
+    let report =
+        sk_preview::sandbox::confine(sk_preview::sandbox::Limits::PREVIEW, &root, &root, &[]);
     let _ = writeln!(std::io::stderr(), "skerry-preview-doc: {}", report.line());
 }
 

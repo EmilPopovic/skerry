@@ -510,12 +510,24 @@ what `Change::Edited` is — one entry on the one stack, carrying both sides,
 because after the write there is nowhere else the old bytes could come from. The
 write itself is `sk_fs::atomically`, so a text file is never half replaced.
 
-Owed here: **syntax highlighting**, whose seam is written and whose highlighter is
-not — every line is already cut into runs carrying a tone, there is one tone, and
-adding real ones replaces one function. Then EXIF orientation, zoom, a *docked*
-inspector rather than an overlay, archive contents, media metadata, hex, and
-navigable folder listings. `seccomp` is named by ADR 0006 and is not written; the
-child's own report line says so.
+**Archive contents came early, and they brought extraction with them.**
+`Space` on a zip, a tar or a tar behind any compressor the machine has lists what
+is in it — folders derived from the paths, because plenty of zips declare none — and
+`Ctrl+Shift+X` unpacks one into a folder of its own as a single undoable gesture.
+The reader is `skerry-archive`, a third sandboxed helper, and it is the first one
+with anything writable: **the destination and nothing else**, which turns a
+path-traversal entry into a refusal by the kernel
+([ADR 0032](adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
+The line the record draws is that a container this can parse it parses — tar and
+zip, 550 lines and no crate — and a compressor is the machine's: `xz`, `zstd` and
+`bzip2` as filters, gzip through a `flate2` that `png` already brought. **7z and
+rar are listed as refusals that name the format**, which is the honest answer and
+not a panel with nothing in it.
+
+Owed here: EXIF orientation, a *docked* inspector rather than an overlay, media
+metadata, hex, and navigable folder listings — and, on the archive side, 7z and
+rar, and a listing that streams rather than arriving whole. `seccomp` is named by
+ADR 0006 and is not written; the child's own report line says so.
 
 ### M6 · 3 wk — Command palette and keymap
 The registry made visible: fuzzy palette over every action and setting, inline hotkey

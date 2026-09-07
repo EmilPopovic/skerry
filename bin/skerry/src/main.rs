@@ -153,6 +153,8 @@ struct Shape {
     look_zoom: f32,
     /// What `--look-find` asked the page's find bar to look for.
     look_find: String,
+    /// Which folder inside an archive `--look-inside` named.
+    look_inside: String,
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
@@ -214,6 +216,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         look_page: shape.look_page,
         look_zoom: shape.look_zoom,
         look_find: shape.look_find.clone(),
+        look_inside: shape.look_inside.clone(),
         pinned: overlays.pinned,
         tree: overlays.tree,
         coloured: overlays.coloured,
@@ -250,6 +253,7 @@ fn main() -> std::process::ExitCode {
     let mut look_page = 0;
     let mut look_zoom = 1.0;
     let mut look_find = String::new();
+    let mut look_inside = String::new();
     let mut capture = None;
     let mut bench = None;
     let mut logical = (1100, 720);
@@ -278,6 +282,10 @@ fn main() -> std::process::ExitCode {
             "--size" => match arguments.next().as_deref().and_then(parse_size) {
                 Some(size) => logical = size,
                 None => return usage_error("--size needs WIDTHxHEIGHT"),
+            },
+            "--look-inside" => match arguments.next() {
+                Some(path) => look_inside = path,
+                None => return usage_error("--look-inside needs a folder inside the archive"),
             },
             "--look-find" => match arguments.next() {
                 Some(text) => look_find = text,
@@ -354,6 +362,7 @@ fn main() -> std::process::ExitCode {
                 sidebar: !no_sidebar,
                 aside,
                 look_page,
+                look_inside,
                 look_zoom,
                 look_find,
                 at,
@@ -466,6 +475,7 @@ skerry [OPTIONS] [PATH]
   --look-page <n>  which page or animation frame the quick look is on
   --look-zoom <f>  how much the quick look's picture is magnified
   --look-find <s>  open the page's find bar looking for this
+  --look-inside <p> stand in this folder inside the archive being looked at
   --aside <px>     how wide the sidebar is, which decides what a volume's row fits
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree
