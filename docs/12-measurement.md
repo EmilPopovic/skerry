@@ -3193,3 +3193,35 @@ The lesson is about reading errors rather than about D-Bus. **An error message
 names the layer that noticed, not the layer that was wrong**, and the way to tell
 them apart is to vary the input: three arguments that should produce three
 different answers and produce one answer are an answer about something else.
+
+## A retry that aims at the same point is not a retry
+
+Two sidebar scenarios failed on Wayland after the Volumes section grew, and the
+message named the wrong thing twice over. First `menu is '40', wanted '7'` — a
+place's menu has seven rows and the list's background menu has forty, so the
+secondary click had landed in the *list*. Then, after a first fix, `the pointer
+would not settle on sidebar row 0: hover='-1'` — on nothing at all.
+
+The coordinate is right and the conversion has two moving parts. A point comes
+out of the frame's own rectangle, in the window's logical pixels; the driver moves
+a virtual pointer in the *output's* device pixels; and `aim` bridges them with the
+window's box asked of the compositor and the logical size read from a state dump.
+Two reads of two different things, and what is left after the arithmetic is a
+sub-pixel disagreement that lands a press on the boundary between a row and
+nothing.
+
+`point_at` has known this since it was written and says so: *"the nudge could
+never recover it: the error is proportional, not an offset"* — and then it nudges
+anyway, half a row up and down over six attempts, for exactly the residue. The
+new sidebar helper checked `place_hover` and retried **the same point four
+times**, which turned an intermittent miss into a reliable one: three runs in
+three, all four attempts identical, all four landing on nothing.
+
+Two things worth keeping. **A check without a correction is a slower failure**:
+reading back where the pointer actually is turned a wrong click into an honest
+error, which is progress, but a loop that cannot change its input is a loop with
+one iteration. And **the reason it only bit in company** is that running three
+scenarios in one invocation maps and unmaps three windows in the nested
+compositor, so the tile the third one gets is not the tile the first one got — the
+same reason [a suite is a load test of whatever else is
+running](#a-suite-is-a-load-test-of-whatever-else-is-running), one region over.

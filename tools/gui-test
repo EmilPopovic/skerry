@@ -3584,11 +3584,8 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
     # about is what `place_menu` reports; the three rows are
     # `a-well-known-place-cannot-be-unpinned`'s subject.
     if float(opened["sidebar_w"]) > 0.0:
-        aside = place_point(run, opened, 0)
-        run.drive(
-            f"move {aside[0]:.1f} {aside[1]:.1f}\n"
-            "sleep 150\nclick right\nsleep 350\nkey f12\nsleep 150\n"
-        )
+        hover_place(run, 0)
+        run.drive("click right\nsleep 350\nkey f12\nsleep 150\n")
         over_place = run.state()
         # Seven: Open, the three about a pin, and the three about a disk — ADR 0030.
         expect(over_place, menu="7", cursor=wanted)
@@ -5703,6 +5700,42 @@ def place_point(run: Run, state: dict[str, str], index: int) -> tuple[float, flo
     return aim(run, state, *place_logical(state, index))
 
 
+def hover_place(run: Run, index: int) -> dict[str, str]:
+    """Puts the pointer on sidebar row `index` and checks it landed there.
+
+    **Checked, because the conversion has two moving parts.** A point comes out
+    of the frame's own rectangle, and turning it into the driver's percentages
+    needs the window's box from the compositor and its logical size from the
+    state — so a window that was retiled between the two reads gives a point
+    that is arithmetic on two different windows. Measured: one Wayland sweep in
+    several, this landed in the *list* and the secondary click opened its
+    forty-row menu, and the failure read as a place menu with the wrong number
+    of rows.
+
+    `place_hover` is the window saying which row the pointer is actually over,
+    which is the same check `point_at` does for a listing's rows and for the same
+    reason.
+    """
+    start = run.state()
+    for attempt in range(6):
+        # **Nudged, the same way `point_at` is.** What is left once the geometry
+        # is right is a sub-pixel disagreement, and a retry that aims at the same
+        # point cannot recover it — measured, four identical attempts in a row
+        # all landing on nothing.
+        nudge = 0.0 if attempt == 0 else float(start["row_h"]) / 2 * attempt
+        offset = nudge * (1 if attempt % 2 else -1)
+        across, down = place_logical(start, index)
+        at = aim(run, start, across, down + offset)
+        run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nkey f12\nsleep 150\n")
+        landed = run.state()
+        if landed.get("place_hover") == str(index):
+            return landed
+    raise Failure(
+        f"the pointer would not settle on sidebar row {index}: "
+        f"hover={run.state().get('place_hover')!r}"
+    )
+
+
 @scenario("a-screen-reader-can-read-the-window", fresh=True)
 def a_screen_reader_can_read_the_window(run: Run, fixture: Path) -> None:
     """**The accessibility tree, read by somebody else's D-Bus client.**
@@ -6265,10 +6298,8 @@ def a_volume_offers_mount_where_it_means_something(run: Run, fixture: Path) -> N
 
     # Home, which is row 0 of the first section in every arrangement, and is a
     # place rather than a disk.
-    at = place_point(run, start, 0)
-    run.drive(
-        f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\nclick right\nsleep 400\nkey f12\nsleep 200\n"
-    )
+    hover_place(run, 0)
+    run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
     over_home = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
     for command in ("volume.mount", "volume.unmount", "volume.eject"):
         if command not in over_home["menu_dim"]:
@@ -6297,12 +6328,12 @@ def a_default_place_is_not_unpinnable(run: Run, fixture: Path) -> None:
         own.drive("key ctrl+b\nsleep 500\nkey f12\nsleep 200\n")
         state = until(own, pinned="alpha")
 
-        # Home, which is row 0 of the first section in every arrangement.
-        at = place_point(own, state, 0)
-        own.drive(
-            f"move {at[0]:.2f} {at[1]:.2f}\nsleep 150\n"
-            f"click right\nsleep 400\nkey f12\nsleep 200\n"
-        )
+        # Home, which is row 0 of the first section in every arrangement — and
+        # the pointer is checked onto it before the click, because a click that
+        # missed the sidebar opens the list's own menu and reads as this one
+        # having the wrong number of rows.
+        hover_place(own, 0)
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         over_home = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
         # Seven since ADR 0030 put Mount, Unmount and Eject on this menu.
         expect(over_home, menu="7")
