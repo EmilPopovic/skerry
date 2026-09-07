@@ -470,6 +470,21 @@ impl Painter<'_> {
         self.segment(box_rect, (0.5, 0.0), (0.5, 1.0), color, weight);
     }
 
+    /// Draws `icon` inside `box_rect`, in `color`.
+    ///
+    /// **The one call every mark in the window goes through** — see [`Icon`] for
+    /// why that is a value rather than four call sites.
+    pub fn icon(&mut self, icon: Icon, box_rect: Rect, color: Color) {
+        match icon {
+            Icon::Folder => self.folder(box_rect, color),
+            Icon::Page => self.file(box_rect, color),
+            Icon::Disk => self.disk(box_rect, color),
+            // The tint carries only its alpha, so a caller can fade a thumbnail
+            // in without a second code path — see [`Self::image`].
+            Icon::Picture(key) => self.image(key, box_rect, color),
+        }
+    }
+
     /// The mark for a directory: a folder, from two rounded rectangles.
     ///
     /// Geometric rather than from an icon theme, because icon themes belong to
@@ -606,6 +621,56 @@ impl Painter<'_> {
             self.list.rect(rect, color, 0.0);
         }
     }
+}
+
+/// What a mark is, as a value rather than as a call.
+///
+/// **Four shapes and one draw.** Each of these was a method called directly from
+/// four places in the view — a row, a grid cell, a sidebar row, a tab — so which
+/// shape an entry gets was a decision spread across the file, and every place
+/// that took it had to be found again to change it. The decision is now one
+/// value, made where the entry is known, and [`Painter::icon`] is the only thing
+/// that draws.
+///
+/// # Adding a per-type badge
+///
+/// The obvious next kind is what an IDE draws: a rounded square in the type's
+/// colour with two letters in it — `JS`, `MD`, `PY`. It is **a fifth variant and
+/// a fifth arm**, and nothing else in the view moves:
+///
+/// * `Badge(&'static str)` here, or a small inline string where the letters come
+///   from an extension rather than a table;
+/// * one arm in [`Painter::icon`] drawing a rounded rect and a centred run in
+///   the bold face;
+/// * one line in `view::icon_of`, which is where an entry already becomes an
+///   `Icon` and already has the listing and the type database in hand.
+///
+/// **What makes it a judgement rather than a task** is the size. A row's mark is
+/// **13 logical pixels**, so two letters are about seven pixels tall at 100% and
+/// fourteen at 200% — legible at the second and marginal at the first. Whoever
+/// takes it should render `scale-100` and `scale-200` and look at both before
+/// blessing anything, which is the same rule
+/// [12-measurement.md](../../../docs/12-measurement.md#some-defects-are-only-visible-to-a-person-looking)
+/// already states.
+///
+/// The other future kind is M7's icon theme, which is a `Themed` variant looked
+/// up from the desktop's own `index.theme` — and it arrives through this seam
+/// rather than around it, which is the other reason this is a value.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Icon {
+    /// A directory.
+    Folder,
+    /// A file with nothing more specific to say: a page with two lines on it.
+    Page,
+    /// A filesystem, mounted or not: a stack of platters.
+    Disk,
+    /// A thumbnail the atlas already holds, which stands in for the file itself.
+    ///
+    /// **Only where the atlas has it.** `Pane::thumbs` holds keys the renderer
+    /// has confirmed, so a picture here needs no shape drawn underneath — and one
+    /// with transparency shows the row behind rather than a page glyph through
+    /// the middle of it.
+    Picture(sk_gpu::ImageKey),
 }
 
 /// Where a shaped run comes from: a listing cell, or a string of chrome.

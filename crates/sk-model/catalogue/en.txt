@@ -216,6 +216,10 @@ notice.mounting = Mounting {0}…
 notice.mounted = {0} is at {1}
 notice.unmounted = {0} was unmounted
 notice.ejected = {0} can be unplugged
+# A disk went away and the tabs standing on it went with it — ADR 0030. Named,
+# because a person who unplugged one stick wants to know it was that one.
+notice.drive_gone[one]   = {1} was removed — {0} tab closed
+notice.drive_gone[other] = {1} was removed — {0} tabs closed
 sidebar.volumes = Volumes
 sidebar.root = Filesystem
 # What is left on a volume, at the right of its row in the list of places.

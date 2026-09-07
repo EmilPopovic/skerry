@@ -1767,8 +1767,9 @@ impl App {
             self.drain_edits();
             self.drain_previews();
             self.drain_the_look_text();
-            if self.sidebar.drain() {
+            if let Some(gone) = self.sidebar.drain() {
                 self.dirty = true;
+                self.leave_the_drives_that_went(&gone);
             }
             self.drain_sizes();
             self.advance();
@@ -5604,6 +5605,45 @@ impl App {
                 wake.wake();
             }
         });
+    }
+
+    /// Closes every tab standing on a disk that has just gone.
+    ///
+    /// **What a USB stick being unplugged does to the window.** A tab whose
+    /// directory has been removed from under it has nothing to show, and a
+    /// listing that reports the folder missing is a worse answer than not
+    /// offering it — so it goes, and the status line says how many did and which
+    /// disk it was.
+    ///
+    /// Also closes a quick look at a file on it, for the same reason: a preview
+    /// of a file that is not there is a panel nothing can refresh.
+    fn leave_the_drives_that_went(&mut self, gone: &[PathBuf]) {
+        if gone.is_empty() {
+            return;
+        }
+        // `/` where there is no `$HOME`: it is always mounted, so the last tab of
+        // a leaf lands somewhere rather than on an empty listing.
+        let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+        if self
+            .quick_look
+            .as_ref()
+            .is_some_and(|look| gone.iter().any(|at| look.path.starts_with(at)))
+        {
+            self.quick_look = None;
+        }
+        let went = self.panes.close_under(gone, &home, &self.jobs);
+        self.settle_panes();
+        self.dirty = true;
+        if went == 0 {
+            return;
+        }
+        // The disk's own name, which is the mount point's last component — the
+        // label somebody gave it, because that is where udisks2 mounts it.
+        let name = gone.first().map(|at| crate::panes::title_of(at).to_owned()).unwrap_or_default();
+        self.notice = Some((
+            sk_model::i18n::plural("notice.drive_gone", went as u64, &[&went, &name]),
+            Instant::now(),
+        ));
     }
 
     /// The volume the row in question is about, for the three commands.

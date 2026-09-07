@@ -421,6 +421,50 @@ impl Panes {
         true
     }
 
+    /// Closes every tab standing on or under `gone`. How many went.
+    ///
+    /// **What a disk being unplugged does to the window.** A tab whose directory
+    /// has been removed from under it is a tab with nothing to show, and a
+    /// listing that reports the folder is missing is a worse answer than not
+    /// offering it — so the tab goes.
+    ///
+    /// **A leaf never ends up empty**, which is the invariant this file exists to
+    /// keep: where every tab of a leaf was on the disk that went, the last one is
+    /// sent to `fallback` rather than closed. The alternative is closing the pane
+    /// and rearranging a split because somebody pulled out a memory stick.
+    ///
+    /// **They do not go on the reopen stack.** It is bounded, and filling it with
+    /// paths that no longer exist would push out the tabs somebody closed on
+    /// purpose — while a disk that comes back is one press on its own sidebar row
+    /// away, which both mounts it and goes there.
+    pub(crate) fn close_under(&mut self, gone: &[PathBuf], fallback: &Path, jobs: &Jobs) -> usize {
+        let doomed = |pane: &Pane| gone.iter().any(|at| pane.path.starts_with(at));
+        let mut went = 0;
+        for leaf in self.leaves_mut() {
+            let before = leaf.panes.len();
+            let showing = leaf.showing().path.clone();
+            leaf.panes.retain(|pane| !doomed(pane));
+            went += before - leaf.panes.len();
+            if leaf.panes.is_empty() {
+                let mut pane = Pane::new(fallback.to_path_buf());
+                pane.reload(jobs);
+                leaf.panes.push(pane);
+                leaf.active = 0;
+                continue;
+            }
+            // **The tab that was showing keeps showing where it survived**, so a
+            // disk coming out of one half of a split does not move the other
+            // half's attention. Where it did not, the nearest surviving index is
+            // where the eye already was.
+            leaf.active = leaf
+                .panes
+                .iter()
+                .position(|pane| pane.path == showing)
+                .unwrap_or_else(|| leaf.active.min(leaf.panes.len() - 1));
+        }
+        went
+    }
+
     fn trim_closed(&mut self) {
         while self.closed.len() > REOPENABLE {
             self.closed.remove(0);
@@ -1160,6 +1204,83 @@ mod tests {
     fn tree() -> (Panes, Waker, Jobs, mpsc::Receiver<crate::pane::Message>) {
         let (waker, jobs, updates) = idle();
         (Panes::new(Pane::new(PathBuf::from("/tmp"))), waker, jobs, updates)
+    }
+
+    /// **A disk unplugged takes its tabs and leaves the rest alone.** Four
+    /// claims in one tree, because they interact: a tab elsewhere survives, a
+    /// tab *under* the mount point goes as well as one on it, the tab that was
+    /// showing keeps showing, and a leaf whose every tab was on the disk keeps
+    /// one — the invariant this file exists for.
+    #[test]
+    fn a_disk_that_goes_takes_its_tabs_and_no_others() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        // The first leaf: one tab at home and two on the stick, showing the one
+        // at home.
+        panes.open_tab(PathBuf::from("/run/media/emil/STICK"), &jobs);
+        panes.open_tab(PathBuf::from("/run/media/emil/STICK/photos"), &jobs);
+        panes.reveal_tab(panes.focused_leaf().id, 0);
+        // A second leaf, every tab of which is on the stick.
+        panes.split(Axis::Beside, &jobs);
+        panes.focused_mut().open(PathBuf::from("/run/media/emil/STICK/notes"), &jobs);
+
+        let went = panes.close_under(
+            &[PathBuf::from("/run/media/emil/STICK")],
+            Path::new("/home/emil"),
+            &jobs,
+        );
+        assert_eq!(went, 3, "three tabs were on it");
+
+        let leaves: Vec<Vec<PathBuf>> = panes
+            .leaves()
+            .map(|leaf| leaf.panes.iter().map(|pane| pane.path.clone()).collect())
+            .collect();
+        assert_eq!(leaves.len(), 2, "a leaf was closed, and none should have been");
+        assert_eq!(leaves[0], vec![PathBuf::from("/tmp")], "the tab elsewhere went");
+        assert_eq!(
+            leaves[1],
+            vec![PathBuf::from("/home/emil")],
+            "a leaf with nothing left is not empty, it is at the fallback"
+        );
+        for leaf in panes.leaves() {
+            assert!(leaf.active < leaf.panes.len(), "{:?} indexes nothing", leaf.id);
+        }
+    }
+
+    /// **The showing tab keeps showing where it survived.** A stick coming out
+    /// of the *end* of a strip must not move the eye to a different directory.
+    #[test]
+    fn the_tab_that_was_showing_still_is() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.open_tab(PathBuf::from("/home/emil"), &jobs);
+        panes.open_tab(PathBuf::from("/run/media/emil/STICK"), &jobs);
+        panes.reveal_tab(panes.focused_leaf().id, 1);
+        assert_eq!(panes.focused().path, Path::new("/home/emil"));
+
+        let went =
+            panes.close_under(&[PathBuf::from("/run/media/emil/STICK")], Path::new("/tmp"), &jobs);
+        assert_eq!(went, 1);
+        assert_eq!(panes.focused().path, Path::new("/home/emil"), "the eye moved");
+    }
+
+    /// **A mount point is matched by component, not by prefix.** A stick at
+    /// `/run/media/emil/STICK` must not take a tab in `/run/media/emil/STICK2`,
+    /// which is a different disk that is still there.
+    #[test]
+    fn a_sibling_with_a_longer_name_is_not_on_the_disk_that_went() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.open_tab(PathBuf::from("/run/media/emil/STICK2"), &jobs);
+        let went =
+            panes.close_under(&[PathBuf::from("/run/media/emil/STICK")], Path::new("/tmp"), &jobs);
+        assert_eq!(went, 0, "a different disk lost a tab");
+    }
+
+    /// Nothing gone is nothing closed, which is every read at start-up.
+    #[test]
+    fn nothing_removed_closes_nothing() {
+        let (mut panes, _waker, jobs, _updates) = tree();
+        panes.open_tab(PathBuf::from("/home/emil"), &jobs);
+        assert_eq!(panes.close_under(&[], Path::new("/tmp"), &jobs), 0);
+        assert_eq!(panes.leaves().next().map(|leaf| leaf.panes.len()), Some(2));
     }
 
     #[test]

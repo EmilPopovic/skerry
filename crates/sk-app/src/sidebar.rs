@@ -244,19 +244,31 @@ impl Sidebar {
         });
     }
 
-    /// Takes delivery of a completed read. Returns whether anything arrived.
-    pub fn drain(&mut self) -> bool {
-        let mut any = false;
-        while let Ok(sections) = self.loaded.try_recv() {
-            self.sections = sections;
+    /// Takes delivery of a completed read.
+    ///
+    /// `None` where nothing arrived. Otherwise the mount points that **were**
+    /// mounted before this read and are not now — a disk unplugged, or one
+    /// unmounted from anywhere on the machine. Empty where the list only grew,
+    /// which is every read at start-up.
+    ///
+    /// **Returned rather than kept**, because what to do about it is the
+    /// window's: a tab standing on a disk that has gone is a tab with no
+    /// directory, and this module draws a list rather than deciding what a pane
+    /// shows.
+    pub fn drain(&mut self) -> Option<Vec<PathBuf>> {
+        // **The first read decides whether to look at all.** This runs every
+        // frame, and comparing two lists of mount points on a frame that has no
+        // answer waiting is an allocation per frame for nothing.
+        let Ok(first) = self.loaded.try_recv() else { return None };
+        let before = std::mem::replace(&mut self.sections, first);
+        self.loads += 1;
+        while let Ok(more) = self.loaded.try_recv() {
+            self.sections = more;
             self.loads += 1;
-            any = true;
         }
-        if any {
-            self.hover = None;
-            self.settle();
-        }
-        any
+        self.hover = None;
+        self.settle();
+        Some(vanished(&before, &self.sections))
     }
 
     /// Every drawn row, in display order.
@@ -618,6 +630,28 @@ pub(crate) fn build() -> Vec<Section> {
     sections
 }
 
+/// The mount points that were mounted in `before` and are not in `after`.
+///
+/// **A volume that is still listed but is no longer mounted counts too.** A disk
+/// unplugged vanishes from the list; one unmounted stays as a row with no path.
+/// Either way the directory a tab was standing in has gone, which is the only
+/// thing the caller is asking about.
+///
+/// A place is not a volume and never counts: a bookmark whose directory was
+/// deleted is a row that fails to open, not a disk that left.
+fn vanished(before: &[Section], after: &[Section]) -> Vec<PathBuf> {
+    let mounted = |sections: &[Section]| -> Vec<PathBuf> {
+        sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .filter(|entry| entry.mark == Mark::Volume && !entry.unmounted)
+            .map(|entry| entry.path.clone())
+            .collect()
+    };
+    let now = mounted(after);
+    mounted(before).into_iter().filter(|at| !now.contains(at)).collect()
+}
+
 fn row(place: &Place) -> Entry {
     let label = if place.kind == Kind::Home {
         sk_model::i18n::lookup("sidebar.home").to_owned()
@@ -775,6 +809,62 @@ mod tests {
         devices.sort_unstable();
         devices.dedup();
         assert_eq!(devices.len(), devices_count, "the same device twice: {rows:?}");
+    }
+
+    /// **What a disk leaving looks like from here**, and the three things that
+    /// are not one: a volume that only became unmounted still counts, because
+    /// the directory a tab was standing in has gone either way; a volume that
+    /// appeared counts for nothing; and a *place* that went is a bookmark whose
+    /// directory was deleted, which is a row that fails to open rather than a
+    /// disk that left.
+    #[test]
+    fn a_volume_that_stops_being_mounted_is_one_that_went() {
+        let volume = |at: &str, mounted: bool| Entry {
+            path: if mounted { PathBuf::from(at) } else { PathBuf::new() },
+            label: at.to_owned(),
+            mark: Mark::Volume,
+            remote: false,
+            free: None,
+            pinned: false,
+            device: Some(PathBuf::from("/dev/sdb1")),
+            unmounted: !mounted,
+        };
+        let place = |at: &str| Entry {
+            path: PathBuf::from(at),
+            label: at.to_owned(),
+            mark: Mark::Place(Kind::Other),
+            remote: false,
+            free: None,
+            pinned: true,
+            device: None,
+            unmounted: false,
+        };
+        let sections = |entries: Vec<Entry>| vec![Section { title: "sidebar.volumes", entries }];
+
+        let before = sections(vec![
+            volume("/", true),
+            volume("/run/media/emil/STICK", true),
+            volume("/run/media/emil/CARD", true),
+            place("/home/emil/repos"),
+        ]);
+        // The stick was unplugged, the card was unmounted and is still listed, a
+        // new disk appeared, and the bookmark is gone.
+        let after = sections(vec![
+            volume("/", true),
+            volume("/run/media/emil/CARD", false),
+            volume("/run/media/emil/NEW", true),
+        ]);
+        let mut gone = super::vanished(&before, &after);
+        gone.sort();
+        assert_eq!(
+            gone,
+            vec![PathBuf::from("/run/media/emil/CARD"), PathBuf::from("/run/media/emil/STICK"),]
+        );
+
+        // And nothing changing is nothing gone, which is every read but the
+        // interesting one.
+        assert!(super::vanished(&before, &before).is_empty());
+        assert!(super::vanished(&[], &after).is_empty(), "the first read of all");
     }
 
     /// A volume's row carries a proportion, not just a figure.

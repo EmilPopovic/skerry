@@ -2991,11 +2991,8 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     );
     let colour =
         if carrying.directory { theme.palette.kinds.folder } else { theme.palette.kinds.unknown };
-    if carrying.directory {
-        painter.folder(icon, colour);
-    } else {
-        painter.file(icon, colour);
-    }
+    let mark = if carrying.directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
+    painter.icon(mark, icon, colour);
 
     let baseline = painter.baseline(area.y, CARD_HEIGHT, metrics.text_size);
     let x = area.x + CARD_INSET * 2.0 + CARD_ICON;
@@ -3478,9 +3475,13 @@ fn place_row(
         // It is a row a press *mounts* rather than opens, and the difference has
         // to be visible before the press: an identical row that behaves
         // differently is the thing rule 4 is about.
-        Mark::Volume if row.unmounted => painter.disk(icon, theme.palette.dim),
-        Mark::Volume => painter.disk(icon, if row.remote { kinds.audio } else { kinds.unknown }),
-        Mark::Place(_) => painter.folder(icon, kinds.folder),
+        Mark::Volume if row.unmounted => painter.icon(sk_ui::Icon::Disk, icon, theme.palette.dim),
+        Mark::Volume => painter.icon(
+            sk_ui::Icon::Disk,
+            icon,
+            if row.remote { kinds.audio } else { kinds.unknown },
+        ),
+        Mark::Place(_) => painter.icon(sk_ui::Icon::Folder, icon, kinds.folder),
     }
 
     let ink = match (current, row.unmounted) {
@@ -3946,7 +3947,8 @@ fn tab_strip(
         let mark = 13.0;
         let icon = painter.rect(area.x + 9.0, shape.y + (shape.height - mark) / 2.0, mark, mark);
         let folder = theme.palette.kinds.folder;
-        painter.folder(icon, if active || marked { folder } else { folder.with_alpha(150) });
+        let ink = if active || marked { folder } else { folder.with_alpha(150) };
+        painter.icon(sk_ui::Icon::Folder, icon, ink);
         let text_x = area.x + 9.0 + mark + 6.0;
         let close = crate::panes::tab_close(area);
         let room = close.map_or(area.right() - 10.0 - text_x, |it| it.x - 6.0 - text_x);
@@ -4352,11 +4354,11 @@ fn column_row(
     let mark = mark_of(Mode::Columns, layout, cell, &metrics);
     let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
     let ink = kind_colour_of(&theme, types, listing, id, directory, broken);
-    if directory {
-        painter.folder(icon_box, ink);
-    } else {
-        painter.file(icon_box, ink);
-    }
+    // **No thumbnail here, and that is ADR 0015 rather than an omission**: a
+    // column fetches no metadata, and a thumbnail is keyed on when the file
+    // changed. See `mark_at`.
+    let mark = if directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
+    painter.icon(mark, icon_box, ink);
 
     let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
     let colour = if broken { theme.palette.dim } else { theme.palette.text };
@@ -4764,25 +4766,37 @@ fn mark_at(
 ) {
     let theme = *painter.theme;
     let box_ = painter.rect(mark.x, mark.y, mark.width, mark.height);
+    let (icon, colour) = icon_of(&theme, pane, id, state, types);
+    painter.icon(icon, box_, colour);
+}
+
+/// Which mark an entry gets, and what colour to draw it in.
+///
+/// **The one place that decision is taken** — [`sk_ui::Icon`], which is also
+/// where the note on adding a per-type badge lives: it is a variant there and a
+/// line here, and nothing between them moves.
+fn icon_of(
+    theme: &sk_ui::Theme,
+    pane: &Pane,
+    id: sk_model::EntryId,
+    state: MarkState,
+    types: Option<&MimeDatabase>,
+) -> (sk_ui::Icon, Color) {
     if let Some(image) = pane.thumbs.get(&id) {
         // The tint carries only its alpha, which is opaque here: a dimmed
         // thumbnail would be a second meaning for the colour a broken link uses.
-        painter.image(*image, box_, theme.palette.text);
-        return;
+        return (sk_ui::Icon::Picture(*image), theme.palette.text);
     }
     // **A colour somebody chose beats the colour of what the thing is.** A folder
     // is blue because it is a folder; one that is red is red because a person
     // said so, and the whole point of saying so is that it stops looking like the
     // others — see `crate::colours`.
     let colour = pane.colour_of(id).filter(|_| !state.broken).map_or_else(
-        || kind_colour_of(&theme, types, &pane.listing, id, state.directory, state.broken),
+        || kind_colour_of(theme, types, &pane.listing, id, state.directory, state.broken),
         |chosen| chosen.ink(&theme.palette),
     );
-    if state.directory {
-        painter.folder(box_, colour);
-    } else {
-        painter.file(box_, colour);
-    }
+    let icon = if state.directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
+    (icon, colour)
 }
 
 /// The colour of an entry's mark.
