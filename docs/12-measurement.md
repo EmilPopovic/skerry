@@ -3225,3 +3225,54 @@ scenarios in one invocation maps and unmaps three windows in the nested
 compositor, so the tile the third one gets is not the tile the first one got — the
 same reason [a suite is a load test of whatever else is
 running](#a-suite-is-a-load-test-of-whatever-else-is-running), one region over.
+
+## The rule that agreed with the reference on three devices and not the fourth
+
+*"I think DO_NOT_USE and the other one should not be shown here, they are not
+really actual volumes someone would want to access from a file manager."* [ADR
+0030](adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md)
+had said the opposite in as many words — "that is correct — they are filesystems
+a person can open" — so this is a decision reversed and it needed a record, and
+the record is where the interesting part happened.
+
+The first answer was the GPT attribute flag. Bit 63 is the UEFI specification's
+*no drive letter*, which is what Windows sets on partitions it does not want a
+person to see, and on this machine it is set on exactly the two rows that were
+not wanted and absent from the two that were:
+
+| partition | flags | wanted |
+| --- | --- | --- |
+| Microsoft reserved, labelled *DO_NOT_USE* | `0x8000000000000000` | no |
+| the Windows Recovery `ntfs` | `0x8000000000000001` | no |
+| *SHARED* | absent | yes |
+| the USB stick | `0x80`, scheme `dos` | yes |
+
+Four for four. It was implemented, and then — because udisks2 computes the same
+kind of answer and every desktop's sidebar follows it — a test was written that
+walks every block device on the machine and compares the new rule against
+`HintIgnore` read over the bus.
+
+**It disagreed on the first device it asked about.** The EFI System Partition has
+no attributes at all and udisks2 ignores it anyway, because the flag is one of
+several inputs and not the rule. A rule that is right about every case you
+thought of is not the same as a rule that is right.
+
+What the disagreement then bought was the better answer. udisks2 ships udev rules
+that compute this at boot and write `UDISKS_IGNORE=1` into
+`/run/udev/data/b<major>:<minor>` — the same file already being read for the type
+and the label. It is `HintIgnore` *by construction* rather than by agreement, it
+costs no round trip, and it needs no D-Bus, which is the whole reason ADR 0030
+reads that file instead of asking udisks2 in the first place. The flag stayed as
+the fallback for a machine with udev and no udisks2 rules, which is where it is
+the best available answer rather than a reimplementation of a better one.
+
+`UDISKS_AUTO` was there too and is the wrong property: it is `0` on `/` and on
+`/boot`. It means *do not mount this at login*, and a rule that read it would
+have hidden the root filesystem.
+
+Two things to keep. **A test against the reference implementation is worth more
+than a test against the cases you can think of** — four hand-picked devices all
+agreed, and the fifth, which nobody would have picked, did not. And **write the
+record before the code**: the ADR had been drafted around the flag, the
+comparison test was written because the record's revisit trigger asked for one,
+and the decision changed before it was committed rather than after it shipped.

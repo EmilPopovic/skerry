@@ -7,7 +7,7 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and two
-sandboxed helpers, 899 tests, 145 GUI scenarios **on both Wayland and X11**,
+sandboxed helpers, 903 tests, 145 GUI scenarios **on both Wayland and X11**,
 eighty-three golden frames, every gate green: a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
@@ -21,7 +21,10 @@ is red past nine tenths because a figure is not a proportion — **and a disk
 nothing has mounted is a row too**, described by what udev wrote down, arriving on
 a `NETLINK_KOBJECT_UEVENT` socket in the watcher's own `poll`, mounted by one
 udisks2 call on a press ([ADR
-0030](docs/adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md)) — **tabs and a
+0030](docs/adr/0030-a-volume-is-a-device-udev-described-and-mounting-it-is-one-udisks2-call.md)) —
+unless udev was told to ignore it, which is how a Windows recovery partition
+stays out of the list and out of every other desktop's ([ADR
+0031](docs/adr/0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md)) — **tabs and a
 binary split tree** ([ADR 0010](docs/adr/0010-a-split-tree-of-tab-strips.md))
 where a tab dragged to a pane's edge splits it, **each pane carrying its own
 tab strip and, under it, its own Back / Forward / Parent / Reload and its own

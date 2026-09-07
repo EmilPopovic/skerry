@@ -111,6 +111,12 @@ pub fn volumes() -> Vec<Volume> {
         }
         found.push(spare);
     }
+    // **And the partition table has the last word** — [ADR
+    // 0031](../../../docs/adr/0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md).
+    // Applied to both halves and not only to the unmounted candidates: the
+    // Windows Recovery partition that produced that record was mounted at the
+    // time, by a press on the very row it exists to remove.
+    found.retain(|volume| !ignored(&volume.numbers));
     // Root first, then everything else mounted, then the rest — because a row a
     // press opens is worth more than a row a press mounts, and the order has to
     // be stable or the sidebar reshuffles under a pointer.
@@ -184,6 +190,62 @@ fn described(name: &str) -> Option<Volume> {
             || value(&told, "ID_BUS") == Some("usb"),
     })
 }
+
+/// Whether udev has been told to ignore this device.
+///
+/// **[ADR 0031](../../../docs/adr/0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md).**
+/// `UDISKS_IGNORE=1` is written into the udev database by udisks2's own rules at
+/// boot, so reading it is how this sidebar agrees with every other desktop's
+/// about the same disk — `HintIgnore` by construction rather than by agreement,
+/// and with no D-Bus, which is the whole shape ADR 0030 chose.
+///
+/// **Not `UDISKS_AUTO`**, which is `0` on `/` and on `/boot` on the reference
+/// machine: it means *do not mount this at login*, which the root filesystem
+/// plainly does not need and which says nothing about whether anybody goes
+/// there.
+///
+/// Nothing to read is not a statement: a machine with no udev answers `false`,
+/// which is the behaviour that existed before any of this.
+fn ignored(numbers: &str) -> bool {
+    let Some(told) = udev_said(numbers) else { return false };
+    if value(&told, "UDISKS_IGNORE") == Some("1") {
+        return true;
+    }
+    hidden_by_the_partition_table(&told)
+}
+
+/// The fallback for a machine with udev and no udisks2 rules to have written
+/// that property.
+///
+/// Bit 63 of a GPT partition's attributes is the UEFI specification's *no drive
+/// letter* — the table's own way of saying this partition is not to be
+/// automounted, and what Windows sets on the ones it does not want anybody to
+/// see. Bit 62 is *hidden*. Either one hides the row.
+///
+/// **Only under GPT.** In the `dos` scheme the field is one byte and `0x80`
+/// means *bootable*, which the USB stick on the reference machine has. Read as a
+/// GPT attribute that is bit 7 and means nothing — but a rule that did not check
+/// the scheme would be a rule that is right by luck.
+///
+/// **It is a fallback and not the rule**, because it is one of udisks2's several
+/// inputs: the EFI System Partition has no attributes at all and udisks2 ignores
+/// it anyway. Measured, by asking udisks2 about every device on this machine and
+/// finding the disagreement on the first one.
+fn hidden_by_the_partition_table(told: &str) -> bool {
+    if value(told, "ID_PART_ENTRY_SCHEME") != Some("gpt") {
+        return false;
+    }
+    let Some(text) = value(told, "ID_PART_ENTRY_FLAGS") else { return false };
+    let Ok(flags) = u64::from_str_radix(text.trim().trim_start_matches("0x"), 16) else {
+        return false;
+    };
+    flags & (NO_DRIVE_LETTER | HIDDEN) != 0
+}
+
+/// GPT attribute bit 63: no drive letter, which is *do not automount*.
+const NO_DRIVE_LETTER: u64 = 1 << 63;
+/// GPT attribute bit 62: hidden.
+const HIDDEN: u64 = 1 << 62;
 
 /// What udev wrote about the device numbered `numbers`.
 ///
@@ -280,6 +342,126 @@ mod tests {
         assert!(!made("8:1", None, None).is_mounted());
     }
 
+    /// **The four cases from [ADR
+    /// 0031](../../../docs/adr/0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md)'s
+    /// own table**, as udev wrote them on the reference machine — against the
+    /// *fallback*, which is what a machine with no udisks2 rules gets. Two are
+    /// hidden, two are not, and the USB stick is the one that says why the scheme
+    /// has to be checked: `0x80` under `dos` is *bootable*, and read as a GPT
+    /// attribute it is bit 7 and means nothing.
+    #[test]
+    fn the_partition_table_hides_what_it_says_not_to_automount() {
+        let told = |scheme: &str, flags: &str| {
+            let entry = if flags.is_empty() {
+                String::new()
+            } else {
+                format!("E:ID_PART_ENTRY_FLAGS={flags}\n")
+            };
+            format!("E:ID_FS_TYPE=ntfs\nE:ID_PART_ENTRY_SCHEME={scheme}\n{entry}")
+        };
+        let hidden =
+            |scheme: &str, flags: &str| super::hidden_by_the_partition_table(&told(scheme, flags));
+
+        // A Microsoft reserved partition: bit 63 alone.
+        assert!(hidden("gpt", "0x8000000000000000"));
+        // Windows Recovery: bit 63 and bit 0, which is *required partition*.
+        assert!(hidden("gpt", "0x8000000000000001"));
+        // Hidden, which is bit 62.
+        assert!(hidden("gpt", "0x4000000000000000"));
+        // A basic data partition with no attributes at all.
+        assert!(!hidden("gpt", ""));
+        // **The USB stick.** `0x80` in the MBR scheme is the active flag, and a
+        // rule that did not check the scheme would read bit 7 and still say no —
+        // right by luck. The same value with bit 63 set under `dos` is the case
+        // that separates the two, and it must be ignored.
+        assert!(!hidden("dos", "0x80"));
+        assert!(!hidden("dos", "0x8000000000000000"), "a dos flags byte read as GPT");
+        // Bit 0 on its own is *required partition*, which is true of the ESP and
+        // says nothing about whether a person goes there.
+        assert!(!hidden("gpt", "0x1"));
+        // Something unreadable is not a statement either.
+        assert!(!hidden("gpt", "wat"));
+    }
+
+    /// **`UDISKS_IGNORE` decides where it is there, and never `UDISKS_AUTO`.**
+    /// The second is `0` on the root filesystem on the reference machine, so a
+    /// rule that read it would hide `/`.
+    #[test]
+    fn udisks_ignore_decides_and_udisks_auto_is_not_it() {
+        let flag = |told: &str| {
+            if super::value(told, "UDISKS_IGNORE") == Some("1") {
+                return true;
+            }
+            super::hidden_by_the_partition_table(told)
+        };
+        assert!(flag("E:UDISKS_AUTO=0\nE:UDISKS_IGNORE=1\n"));
+        assert!(flag("E:UDISKS_IGNORE=1\n"));
+        assert!(!flag("E:UDISKS_AUTO=0\n"), "UDISKS_AUTO=0 is set on the root filesystem");
+        assert!(!flag("E:UDISKS_IGNORE=0\n"));
+        assert!(!flag(""));
+        // And the fallback still applies underneath it, for a machine whose udev
+        // has no udisks2 rules to have written the property at all.
+        assert!(flag("E:ID_PART_ENTRY_SCHEME=gpt\nE:ID_PART_ENTRY_FLAGS=0x8000000000000000\n"));
+    }
+
+    /// **This machine, against udisks2's own answer** — ADR 0031's revisit
+    /// trigger. The property is read the way the reference implementation
+    /// computes it, or this sidebar disagrees with every other desktop's about
+    /// the same disk — which is how the flag-only version was caught, on the
+    /// first device it asked about.
+    /// Skipped where there is no `udisksctl` to ask, which is most CI.
+    #[test]
+    fn what_this_rule_hides_is_what_udisks2_ignores() {
+        let Ok(names) =
+            crate::scan::names(std::path::Path::new(super::BLOCK), &sk_util::Cancel::new())
+        else {
+            return;
+        };
+        let listing = &names.listing;
+        let mut asked = 0;
+        for row in 0..listing.rows() {
+            let Some(id) = listing.at(row) else { continue };
+            let name = listing.name(id);
+            let Ok(numbers) =
+                std::fs::read_to_string(std::path::Path::new(super::BLOCK).join(name).join("dev"))
+            else {
+                continue;
+            };
+            let ours = super::ignored(numbers.trim());
+            let Some(theirs) = udisks_ignores(name) else { continue };
+            asked += 1;
+            assert_eq!(
+                ours, theirs,
+                "{name}: this rule says ignored={ours} and udisks2 says HintIgnore={theirs}"
+            );
+        }
+        // Nothing asked is a machine with no udisks2, which is a machine this
+        // says nothing about rather than a machine that passed.
+        let _ = asked;
+    }
+
+    /// udisks2's own `HintIgnore` for a block device, or nothing where there is
+    /// no udisks2 to ask. Read through `busctl` rather than through this
+    /// workspace's own client, which is a level above this crate.
+    fn udisks_ignores(name: &str) -> Option<bool> {
+        let out = std::process::Command::new("busctl")
+            .args([
+                "--system",
+                "get-property",
+                "org.freedesktop.UDisks2",
+                &format!("/org/freedesktop/UDisks2/block_devices/{name}"),
+                "org.freedesktop.UDisks2.Block",
+                "HintIgnore",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let said = String::from_utf8_lossy(&out.stdout);
+        Some(said.trim() == "b true")
+    }
+
     /// **The one assertion about this machine**, and it is the regression this
     /// module must not cause: every mount that was a row is still a row, with
     /// the same mount point, and nothing appears twice.
@@ -287,6 +469,14 @@ mod tests {
     fn every_mount_is_still_a_volume_and_no_device_appears_twice() {
         let found = volumes();
         for mount in crate::mounts::mounts() {
+            // **Except one udev says to ignore** — [ADR
+            // 0031](../../../docs/adr/0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md).
+            // A Windows Recovery partition somebody mounted is still a partition
+            // nobody wants listed, and the filter is deliberately not restricted
+            // to unmounted candidates.
+            if super::ignored(&mount.numbers) {
+                continue;
+            }
             assert!(
                 found.iter().any(|it| it.at.as_deref() == Some(mount.at.as_path())),
                 "{:?} was a row and is not one now",
