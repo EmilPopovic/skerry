@@ -2678,10 +2678,26 @@ def double_click_a_file(run: Run, fixture: Path) -> None:
         pointing = point_at(own, 3)
         if not pointing["hover_name"].endswith(".txt"):
             raise Failure(f"row 3 is {pointing['hover_name']!r}, which is not a document")
-        own.drive("double\nsleep 600\nkey f12\nsleep 200\n")
-        state = own.state()
-        if not state.get("notice"):
-            raise Failure("double clicking a document did nothing and said nothing")
+        # **Waited for, not slept through.** What answers a double click here is a
+        # job — resolve the type, then look for a handler across every XDG data
+        # directory — and 600 ms was a guess at it. Measured: this failed once in
+        # a full X11 sweep and passed six times in six under twelve spinning
+        # processes, which is the signature of a wait that ran out rather than a
+        # click that missed.
+        own.drive("double\nsleep 250\nkey f12\nsleep 150\n")
+        try:
+            state = holds(own, lambda it: bool(it.get("notice")), "a notice about no handler")
+        except Failure:
+            # **And the failure says which of the two it was.** A click that
+            # never landed leaves the cursor where it was; one that landed and
+            # opened nothing leaves the row selected with nothing said. Without
+            # this the message named neither and the next round starts over.
+            last = own.state()
+            raise Failure(
+                f"double clicking a document said nothing: cursor={last.get('cursor')!r} "
+                f"selected={last.get('selected')!r} hover={last.get('hover_name')!r} "
+                f"jobs={last.get('jobs')!r}"
+            ) from None
         expect(state, path=str(fixture))
     finally:
         own.close()
