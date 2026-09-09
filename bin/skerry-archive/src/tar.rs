@@ -91,12 +91,20 @@ impl<R: Read> Tar<R> {
     pub fn next(&mut self) -> Result<Option<Item>, Refusal> {
         self.skip_data()?;
         loop {
-            let Some(block) = self.block()? else { return Ok(None) };
-            // A block of zeros is the end. The format says two of them; stopping
-            // at the first costs nothing, because a tar with a zero block in the
-            // middle of it is a tar whose next header is unreadable anyway.
+            let Some(block) = self.block()? else { return self.finished() };
             if block.iter().all(|byte| *byte == 0) {
-                return Ok(None);
+                // Drain padding so compressed trailers and filter exit status are
+                // validated even when the last member was already complete.
+                let mut tail = vec![0; 64 * 1024];
+                loop {
+                    let read = self.source.read(&mut tail).map_err(|_| Refusal::Undecodable)?;
+                    if read == 0 {
+                        return self.finished();
+                    }
+                    if tail[..read].iter().any(|byte| *byte != 0) {
+                        return Err(Refusal::Undecodable);
+                    }
+                }
             }
             if !crate::detect::valid_tar_checksum(&block) {
                 return Err(Refusal::Undecodable);
@@ -105,20 +113,28 @@ impl<R: Read> Tar<R> {
             self.data = size;
             self.pad = (BLOCK as u64 - size % BLOCK as u64) % BLOCK as u64;
             match block[156] {
-                b'L' => self.long_name = Some(self.extra()?),
-                b'K' => self.long_link = Some(self.extra()?),
+                b'L' => self.long_name = Some(self.extra(true)?),
+                b'K' => self.long_link = Some(self.extra(true)?),
                 b'x' | b'X' => {
-                    let records = self.extra()?;
+                    let records = self.extra(false)?;
                     self.pax.merge(pax_of(&records)?);
                 }
                 // Global defaults persist; a per-entry header overrides them.
                 b'g' => {
-                    let records = self.extra()?;
+                    let records = self.extra(false)?;
                     self.global.merge(pax_of(&records)?);
                 }
-                b'S' => return Err(Refusal::NoUnpacker),
+                b'S' => return Err(Refusal::Unsupported),
                 _ => return self.item(&block, size).map(Some),
             }
+        }
+    }
+
+    fn finished(&self) -> Result<Option<Item>, Refusal> {
+        if self.long_name.is_some() || self.long_link.is_some() || self.pax.present() {
+            Err(Refusal::Undecodable)
+        } else {
+            Ok(None)
         }
     }
 
@@ -132,7 +148,7 @@ impl<R: Read> Tar<R> {
             .take()
             .or(long_name)
             .or_else(|| self.global.path.clone())
-            .unwrap_or_else(|| joined(block));
+            .map_or_else(|| joined(block), Ok)?;
         let kind = match flag {
             b'5' => Kind::Directory,
             b'2' => Kind::Link,
@@ -151,7 +167,7 @@ impl<R: Read> Tar<R> {
             .take()
             .or(long_link)
             .or_else(|| self.global.link.clone())
-            .unwrap_or_else(|| text(&block[157..257]));
+            .map_or_else(|| text(&block[157..257]), Ok)?;
         let item = Item {
             path: crate::place::tidy(&name),
             link,
@@ -237,7 +253,7 @@ impl<R: Read> Tar<R> {
     }
 
     /// The data of an `L`, `K` or `x` block, as text.
-    fn extra(&mut self) -> Result<String, Refusal> {
+    fn extra(&mut self, nul_terminated: bool) -> Result<String, Refusal> {
         if self.data > MOST_EXTRA {
             return Err(Refusal::Undecodable);
         }
@@ -247,23 +263,25 @@ impl<R: Read> Tar<R> {
             Ok(())
         })?;
         let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+        if end < bytes.len() && (!nul_terminated || bytes[end..].iter().any(|byte| *byte != 0)) {
+            return Err(Refusal::Undecodable);
+        }
         String::from_utf8(bytes[..end].to_vec()).map_err(|_| Refusal::Undecodable)
     }
 }
 
 /// The `prefix` and `name` fields, joined the way `ustar` defines.
-fn joined(block: &[u8; BLOCK]) -> String {
-    let name = text(&block[0..100]);
-    let prefix = text(&block[345..500]);
-    if prefix.is_empty() { name } else { format!("{prefix}/{name}") }
+fn joined(block: &[u8; BLOCK]) -> Result<String, Refusal> {
+    let name = text(&block[0..100])?;
+    let prefix =
+        if &block[257..263] == b"ustar\0" { text(&block[345..500])? } else { String::new() };
+    Ok(if prefix.is_empty() { name } else { format!("{prefix}/{name}") })
 }
 
-/// A NUL-padded field as text. Not UTF-8 by specification, and lossy here for the
-/// same reason every path in this program is: a name that does not decode still
-/// has to be shown.
-fn text(field: &[u8]) -> String {
+/// Refuse names the string-based archive protocol cannot represent losslessly.
+fn text(field: &[u8]) -> Result<String, Refusal> {
     let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
-    String::from_utf8_lossy(&field[..end]).into_owned()
+    String::from_utf8(field[..end].to_vec()).map_err(|_| Refusal::Unsupported)
 }
 
 /// The four pax records that matter, out of `length key=value\n` repeated.
@@ -285,21 +303,19 @@ fn pax_of(records: &str) -> Result<Pax, Refusal> {
         let pair =
             std::str::from_utf8(&bytes[space + 1..length - 1]).map_err(|_| Refusal::Undecodable)?;
         let (key, value) = pair.split_once('=').ok_or(Refusal::Undecodable)?;
-        if key.starts_with("GNU.sparse.") || key == "SCHILY.realsize" {
-            return Err(Refusal::NoUnpacker);
+        if key.starts_with("GNU.sparse.")
+            || key == "SCHILY.realsize"
+            || (matches!(key, "path" | "linkpath" | "size" | "mtime") && value.is_empty())
+            || (key == "hdrcharset" && value != "ISO-IR 10646 2000 UTF-8")
+        {
+            return Err(Refusal::Unsupported);
         }
         match key {
             "path" => pax.path = Some(value.to_owned()),
             "linkpath" => pax.link = Some(value.to_owned()),
             "size" => pax.size = Some(value.parse().map_err(|_| Refusal::Undecodable)?),
             "mtime" => {
-                pax.mtime = Some(
-                    value
-                        .split_once('.')
-                        .map_or(value, |(whole, _)| whole)
-                        .parse()
-                        .map_err(|_| Refusal::Undecodable)?,
-                );
+                pax.mtime = Some(pax_seconds(value)?);
             }
             _ => {}
         }
@@ -308,7 +324,27 @@ fn pax_of(records: &str) -> Result<Pax, Refusal> {
     Ok(pax)
 }
 
+// The protocol carries whole Unix seconds, rounded down like filesystem times.
+fn pax_seconds(value: &str) -> Result<i64, Refusal> {
+    let (whole, fraction) = value.split_once('.').map_or((value, None), |(a, b)| (a, Some(b)));
+    if fraction
+        .is_some_and(|digits| digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(Refusal::Undecodable);
+    }
+    let seconds: i64 = whole.parse().map_err(|_| Refusal::Undecodable)?;
+    if whole.starts_with('-') && fraction.is_some_and(|digits| digits.bytes().any(|b| b != b'0')) {
+        seconds.checked_sub(1).ok_or(Refusal::Undecodable)
+    } else {
+        Ok(seconds)
+    }
+}
+
 impl Pax {
+    fn present(&self) -> bool {
+        self.path.is_some() || self.link.is_some() || self.size.is_some() || self.mtime.is_some()
+    }
+
     fn merge(&mut self, next: Self) {
         if next.path.is_some() {
             self.path = next.path;
@@ -335,6 +371,17 @@ mod tests {
     /// key: `30 path=…` has the length before a space, and a key that came out as
     /// `30 path` would silently lose every long name in the archive.
     #[test]
+    fn pax_fractional_seconds_are_validated_and_floor_negative_times() {
+        assert_eq!(pax_seconds("-0.5"), Ok(-1));
+        assert_eq!(pax_seconds("-1.25"), Ok(-2));
+        assert_eq!(pax_seconds("1.25"), Ok(1));
+        assert_eq!(pax_seconds("-1.000"), Ok(-1));
+        for bad in ["1.", "1.no", "1.2.3", "-9223372036854775808.1"] {
+            assert!(pax_seconds(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn a_pax_record_is_read_past_its_own_length() {
         let pax =
             pax_of(&(record("path", "deep/name.txt") + &record("mtime", "1700000000.5"))).unwrap();
@@ -349,10 +396,12 @@ mod tests {
         let mut block = [0u8; BLOCK];
         block[0..8].copy_from_slice(b"name.txt");
         block[345..350].copy_from_slice(b"a/b/c");
-        assert_eq!(joined(&block), "a/b/c/name.txt");
+        block[257..263].copy_from_slice(b"ustar\0");
+        assert_eq!(joined(&block).unwrap(), "a/b/c/name.txt");
         block[345] = 0;
         block[346..350].copy_from_slice(&[0, 0, 0, 0]);
-        assert_eq!(joined(&block), "name.txt");
+        block[257..263].copy_from_slice(b"ustar\0");
+        assert_eq!(joined(&block).unwrap(), "name.txt");
     }
     fn header(name: &str, size: u64, kind: u8) -> [u8; BLOCK] {
         let mut header = [0; BLOCK];

@@ -42,6 +42,10 @@ def package(binaries: Path, output: Path, arch: str, tag: str | None = None) -> 
         symbols = subprocess.check_output(["readelf", "--version-info", str(binaries / name)], text=True)
         versions.update(re.findall(r"\bGLIBC_(\d+(?:\.\d+)+)\b", symbols))
     floor = max(versions, key=lambda value: tuple(map(int, value.split("."))), default="none")
+    toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
+    rust_notices = toolchain / "share/doc/rust/COPYRIGHT-library.html"
+    if not rust_notices.is_file():
+        raise ValueError("missing Rust standard-library distribution notices")
     epoch = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
     if epoch < 0:
         raise ValueError("SOURCE_DATE_EPOCH must be nonnegative")
@@ -61,8 +65,10 @@ def package(binaries: Path, output: Path, arch: str, tag: str | None = None) -> 
             ("packaging/README.binary.md", "README.md"),
             ("packaging/dev.skerry.Skerry.desktop", "usr/share/applications/dev.skerry.Skerry.desktop"),
             ("LICENSE", "LICENSE"), ("NOTICE", "NOTICE"),
+            ("packaging/THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"),
         ):
             shutil.copyfile(ROOT / source, root / target)
+        shutil.copyfile(rust_notices, root / "RUST-COPYRIGHT.html")
         (root / "BUILD-INFO").write_text(f"{identity}\narchitecture: {arch}\nglibc-symbol-floor: {floor}\n")
         with archive.open("wb") as raw, gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=epoch) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as tar:

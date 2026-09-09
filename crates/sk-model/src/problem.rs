@@ -101,6 +101,8 @@ pub enum ProblemKind {
     Damaged,
     /// An extraction retained output but could not create every entry.
     Incomplete,
+    /// A container variant cannot be extracted safely by this reader.
+    UnsupportedArchive,
     /// The bytes are not text, so they cannot be treated as text.
     ///
     /// Its own kind because the answer is not "this failed" but "this is not the
@@ -130,6 +132,7 @@ impl ProblemKind {
             Self::NoUnpacker => "error.no_unpacker",
             Self::Damaged => "error.damaged",
             Self::Incomplete => "error.incomplete",
+            Self::UnsupportedArchive => "error.unsupported_archive",
             Self::NotUnpackable => "error.not_unpackable",
             Self::NotText => "error.not_text",
         }

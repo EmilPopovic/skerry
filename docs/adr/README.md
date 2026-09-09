@@ -41,6 +41,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0031](0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md) | A partition udev has flagged to be ignored is not a volume | Accepted |
 | [0032](0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md) | An archive is unpacked by a child that can only write where the files go | Accepted |
 | [0033](0033-operation-failures-retain-the-work-that-already-happened.md) | Operation failures retain the work that already happened | Accepted |
+| [0034](0034-helper-execution-and-network-rights-are-explicit.md) | Helper execution and network rights are explicit | Accepted |
 
 ## Triggers that have been answered
 

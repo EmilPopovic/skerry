@@ -59,9 +59,11 @@ fn main() -> std::process::ExitCode {
     let mut ime: Option<Vec<String>> = None;
     let mut globals = false;
     let mut path = None;
+    let mut streaming = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "--stream" => streaming = true,
             "--display" => display = arguments.next(),
             "--x11" => backend = Some(Backend::X11),
             "--paste" => paste = arguments.next(),
@@ -131,9 +133,17 @@ fn main() -> std::process::ExitCode {
         return code;
     }
 
-    let source = match path {
-        Some(path) => std::fs::read_to_string(&path).unwrap_or_default(),
-        None => std::io::read_to_string(std::io::stdin()).unwrap_or_default(),
+    run_script(backend, path, streaming)
+}
+
+fn run_script(backend: Backend, path: Option<String>, streaming: bool) -> std::process::ExitCode {
+    let source = if streaming {
+        String::new()
+    } else {
+        match path {
+            Some(path) => std::fs::read_to_string(&path).unwrap_or_default(),
+            None => std::io::read_to_string(std::io::stdin()).unwrap_or_default(),
+        }
     };
     let actions = match script::parse(&source) {
         Ok(actions) => actions,
@@ -149,7 +159,14 @@ fn main() -> std::process::ExitCode {
     };
     match connected {
         Ok(mut input) => {
-            play(input.as_mut(), &actions);
+            if streaming {
+                if let Err(problem) = stream(input.as_mut()) {
+                    eprintln!("skerry-drive: {problem}");
+                    return std::process::ExitCode::FAILURE;
+                }
+            } else {
+                play(input.as_mut(), &actions);
+            }
             std::process::ExitCode::SUCCESS
         }
         Err(problem) => {
@@ -223,6 +240,7 @@ window a person was using.
 The backend is guessed from --display — a name starting with a colon is an X
 display — and can be said outright.
 
+  --stream              keep input devices alive; `sync` plays and acknowledges a batch
   --paste MIME          print the X11 clipboard as MIME and exit
   --close               ask the X11 window to close, the way a title bar would
   --resize WxH          resize the X11 window, as a window manager would
@@ -276,6 +294,29 @@ trait Input {
     fn flush(&mut self);
     /// A last round trip before the process exits.
     fn finish(&mut self) {}
+}
+
+/// Keep a Wayland seat and an in-progress drag alive between harness batches.
+fn stream(input: &mut dyn Input) -> Result<(), String> {
+    use std::io::{BufRead as _, Write as _};
+    let mut batch = String::new();
+    for line in std::io::stdin().lock().lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line == "sync" {
+            let actions = script::parse(&batch)?;
+            play(input, &actions);
+            batch.clear();
+            println!("skerry-drive: synced");
+            std::io::stdout().flush().map_err(|error| error.to_string())?;
+        } else {
+            batch.push_str(&line);
+            batch.push('\n');
+        }
+    }
+    if !batch.is_empty() {
+        return Err("unacknowledged input batch".to_owned());
+    }
+    Ok(())
 }
 
 /// Replays a script through any backend.

@@ -34,3 +34,15 @@ confinement depends on the host kernel; `--probe` on a helper reports its status
 version referenced by these binaries. This does not establish compatibility with
 every distribution: shared libraries and GPU drivers have their own requirements.
 The tarball is not a static musl build or an AppImage.
+
+`THIRD-PARTY-NOTICES.txt` and `RUST-COPYRIGHT.html` contain distribution notices
+for the bundled Rust dependencies and standard library. The installer keeps them
+with Skerry's LICENSE and NOTICE.
+
+Helpers require seccomp, no-new-privileges and resource limits. Their syscall
+filter denies networking and selected process/kernel interfaces. Landlock adds
+filesystem restrictions where supported: output directories are writable, and
+only resolved external tools and their ELF interpreters can execute. Kernels
+without usable Landlock retain the syscall and resource restrictions but have
+reduced filesystem isolation. Helpers can read ordinary user-readable files;
+this is not a confidentiality boundary against everything in your home folder.

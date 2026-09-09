@@ -27,6 +27,7 @@ on:
       - "crates/sk-fs/**"
       - ".github/workflows/torture.yml"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -80,6 +81,9 @@ jobs:
           # actually prints: `^counts` matches nothing, and a pattern that cannot
           # match is a gate that can only fail.
           grep -qE '^[[:space:]]*counts .*[[:space:]]fail=0[[:space:]]' /tmp/matrix.log
+          for fault in enospc eio no-xattr short-write enospc-tree; do
+            grep -qE "PASS[[:space:]]+$fault[[:space:]]" /tmp/matrix.log
+          done
       - name: What it counted
         if: always()
         run: |

@@ -71,24 +71,11 @@ fn main() {
 /// renderer it spawns inherits the restriction, which is the point of applying it
 /// here rather than around each spawn.
 fn confine() {
-    // **Execute at the root, and nothing writable at all.**
-    //
-    // The precise version — execute on the directories in `PATH` and nowhere else
-    // — does not work, and the reason is worth the four lines: running a
-    // dynamically linked program needs Landlock's execute right on its *loader and
-    // every shared library it maps*, not only on the binary. `ld-linux` lives in
-    // `/lib64` and poppler's libraries in `/usr/lib`, neither of which is on
-    // `PATH`, so the exact grant refused every PDF on a machine with poppler
-    // installed — measured, as `Refusal::NoRenderer` from a helper whose `--probe`
-    // said the renderer was there.
-    //
-    // Chasing the library paths would mean tracking one distribution's layout, so
-    // the grant is the root. What is actually load-bearing here is the *write*
-    // restriction, and that is unchanged: this process cannot write a byte
-    // anywhere, which was checked rather than assumed.
     let root = [Path::new("/")];
+    let tools = sk_preview::sandbox::executables(&["pdftoppm", "pdftotext", "pdfinfo", "mutool"]);
+    let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
     let report =
-        sk_preview::sandbox::confine(sk_preview::sandbox::Limits::PREVIEW, &root, &root, &[]);
+        sk_preview::sandbox::confine(sk_preview::sandbox::Limits::PREVIEW, &root, &executable, &[]);
     let _ = writeln!(std::io::stderr(), "skerry-preview-doc: {}", report.line());
 }
 

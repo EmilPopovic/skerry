@@ -830,7 +830,9 @@ pub fn fault_eio(report: &mut Report, mount: &Path, dest_dir: &Path, limit: u64)
     // `EIO` has no kind of its own — a disk that will not read is `Unreadable`,
     // which is exactly what it is — so the errno is asked for by name in the
     // chain the `Problem` carries for the log.
-    let ok = matches!(&result, Err(problem) if problem.detail().contains("Input/output error"))
+    let expected = std::io::Error::from_raw_os_error(libc::EIO).to_string();
+    let ok = matches!(&result, Err(problem)
+        if problem.kind() == sk_model::ProblemKind::Unreadable && problem.detail().contains(&expected))
         && !dest.exists();
     report.record(
         "eio",

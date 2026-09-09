@@ -944,6 +944,9 @@ def render(name: str, arguments: list[str], into: Path, root: str = "fixture") -
     with Image.open(raw) as image:
         image.convert("RGB").save(into, optimize=True)
     raw.unlink()
+    # PDF Base-14 substitution is independent of the application's font chain.
+    pdf_font = subprocess.check_output(["fc-match", "-f", "%{file}", "Helvetica"], text=True).strip()
+    chain.append(pdf_font)
     return chain
 
 
@@ -1115,7 +1118,10 @@ def main(argv: list[str]) -> int:
         print(f"missing {SKERRY}; run `cargo build --release` first")
         return 2
     try:
-        import PIL  # noqa: F401
+        from PIL import ImageMath
+        if not hasattr(ImageMath, "lambda_eval"):
+            print("  FAIL  golden frames need Pillow with ImageMath.lambda_eval (10.3 or newer)")
+            return 1
     except ImportError:
         print("  skip  golden frames: Pillow is not installed")
         return 0

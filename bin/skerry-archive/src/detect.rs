@@ -303,7 +303,13 @@ impl Bytes {
         match &mut self.rest {
             Rest::Plain(file) => file.read(into),
             Rest::Gzip(gzip) => gzip.read(into),
-            Rest::Piped(_, out) => out.read(into),
+            Rest::Piped(child, out) => {
+                let read = out.read(into)?;
+                if read == 0 && !into.is_empty() && !child.wait()?.success() {
+                    return Err(std::io::Error::other("decompressor failed"));
+                }
+                Ok(read)
+            }
         }
     }
 }

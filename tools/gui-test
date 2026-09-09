@@ -34,6 +34,7 @@ import contextlib
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -454,6 +455,106 @@ class WaylandServer(Server):
         )
 
 
+class SwayServer(WaylandServer):
+    """A private headless wlroots compositor for seatless Wayland validation."""
+
+    def start(self, work: Path, scale: str) -> None:
+        self.work = work
+        self.runtime = work / "runtime"
+        self.runtime.mkdir(mode=0o700)
+        config = work / "sway.conf"
+        config.write_text(
+            "xwayland disable\nfont pango:Noto Sans 10\ndefault_border none\n"
+            "focus_follows_mouse no\nseat seat0 fallback true\n"
+            f"output HEADLESS-1 mode 1600x1000 scale {float(scale)}\n"
+        )
+        self.log = (work / "sway.log").open("w")
+        self.process = subprocess.Popen(
+            ["sway", "--config", str(config)], stdout=self.log, stderr=self.log,
+            env={**os.environ, "XDG_RUNTIME_DIR": str(self.runtime),
+                 "WLR_BACKENDS": "headless", "WLR_LIBINPUT_NO_DEVICES": "1",
+                 "WLR_RENDERER": "pixman", "DISPLAY": "", "WAYLAND_DISPLAY": ""},
+        )
+        until = time.monotonic() + PATIENCE
+        while time.monotonic() < until:
+            sockets = list(self.runtime.glob("sway-ipc.*.sock"))
+            displays = [path for path in self.runtime.glob("wayland-*") if path.is_socket()]
+            if sockets and displays:
+                self.socket = str(sockets[0])
+                self.display = str(displays[0])
+                # Keep seat capabilities across short-lived driver connections.
+                self.device = subprocess.Popen(
+                    [str(DRIVE), "--wayland", "--display", self.display, "--stream"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True,
+                )
+                self.send_script("")
+                return
+            if self.process.poll() is not None:
+                raise Failure(f"Sway exited: {(work / 'sway.log').read_text()[-1200:]}")
+            time.sleep(0.05)
+        raise Failure("headless Sway never came up")
+
+    def stop(self) -> None:
+        if hasattr(self, "device") and self.device.poll() is None:
+            self.device.terminate()
+            self.device.wait(timeout=PATIENCE)
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            self.process.wait(timeout=PATIENCE)
+        if hasattr(self, "log"):
+            self.log.close()
+
+    def send_script(self, script: str) -> None:
+        self.device.stdin.write(script + "\nsync\n")
+        self.device.stdin.flush()
+        if not select.select([self.device.stdout], [], [], PATIENCE)[0]:
+            raise Failure("persistent input driver did not acknowledge its batch")
+        if self.device.stdout.readline().strip() != "skerry-drive: synced":
+            raise Failure("persistent input driver stopped")
+
+    def _sway(self, kind: str, command: str | None = None):
+        args = ["swaymsg", "-s", self.socket, "-r", "-t", kind]
+        if command is not None:
+            args.append(command)
+        return json.loads(subprocess.check_output(args, text=True, timeout=PATIENCE))
+
+    def _command(self, action: str, app_id: str = "dev.skerry.Skerry") -> None:
+        self._sway("command", f'[app_id="^{re.escape(app_id)}$"] {action}')
+
+    def _window(self, app_id: str):
+        pending = [self._sway("get_tree")]
+        while pending:
+            node = pending.pop()
+            if node.get("app_id") == app_id:
+                return node
+            pending.extend(node.get("nodes", []) + node.get("floating_nodes", []))
+        raise Failure(f"Sway does not know about {app_id}")
+
+    def box_of(self, app_id: str) -> tuple[int, int, int, int]:
+        node = self._window(app_id)
+        rect, content = node["rect"], node["window_rect"]
+        return rect["x"] + content["x"], rect["y"] + content["y"], content["width"], content["height"]
+
+    def output_size(self) -> tuple[int, int]:
+        rect = self._sway("get_outputs")[0]["rect"]
+        return rect["width"], rect["height"]
+
+    def output_scale(self) -> float:
+        return float(self._sway("get_outputs")[0]["scale"])
+
+    def ask_to_close(self) -> None:
+        self._command("kill")
+
+    def resize(self, width: int, height: int) -> None:
+        self._command(f"resize set width {width} px height {height} px")
+
+    def make_floating(self) -> None:
+        self._command("floating enable")
+
+    def focus(self, app_id: str) -> None:
+        self._command("focus", app_id)
+
+
 class X11Server(Server):
     """A private Xvfb, driven through XTEST.
 
@@ -556,12 +657,9 @@ class X11Server(Server):
         return [str(DRIVE), "--x11", "--paste", mime]
 
     def copy_command(self, mime: str) -> list[str] | None:
-        # Nothing here is somebody else's: `xclip` and `xsel` are not a given on
-        # a machine, and `skerry-drive` is this repository's own clipboard code,
-        # which would make the test a conversation with itself. `wl-copy` is on
-        # most machines that have either, and it speaks Wayland.
-        del mime
-        return None
+        if shutil.which("xclip") is None:
+            return None
+        return ["xclip", "-selection", "clipboard", "-in", "-target", mime, "-quiet"]
 
     def ask_to_close(self) -> None:
         subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True, timeout=PATIENCE)
@@ -820,16 +918,20 @@ class Run:
         keyboard came back, so an answer that never comes is one of the results
         there rather than a failure.
         """
-        done = subprocess.run(
-            [str(DRIVE), SERVER.driver_flag()],
-            input=script,
-            text=True,
-            env=with_server(),
-            capture_output=True,
-            timeout=PATIENCE,
-        )
-        if done.returncode != 0:
-            raise Failure(f"the driver refused the script: {done.stderr.strip()}")
+        wanted = max(self.owed, self.reported()) + script.count("key f12")
+        if isinstance(SERVER, SwayServer):
+            SERVER.send_script(script)
+        else:
+            done = subprocess.run(
+                [str(DRIVE), SERVER.driver_flag()],
+                input=script,
+                text=True,
+                env=with_server(),
+                capture_output=True,
+                timeout=PATIENCE,
+            )
+            if done.returncode != 0:
+                raise Failure(f"the driver refused the script: {done.stderr.strip()}")
         if answering:
             # **Recorded, not waited on here.** A ceiling short enough to be worth
             # having is one a cold window misses — the first drive of a scenario
@@ -837,7 +939,7 @@ class Run:
             # raised on it failed six scenarios that had never once been wrong.
             # `state` is where the answer is *used*, so that is where the wait
             # belongs, and there it costs time rather than a verdict.
-            self.owed += script.count("key f12")
+            self.owed = wanted
 
     def reported(self) -> int:
         """How many state lines the window has printed so far.
@@ -875,9 +977,7 @@ class Run:
         deadline = time.time() + patience
         while self.reported() < wanted and time.time() < deadline:
             if self.process.poll() is not None:
-                # A window on its way out owes nothing: `clean-close` and the
-                # last-tab scenarios both drive a window that is meant to end.
-                return True
+                return self.reported() >= wanted
             time.sleep(0.05)
         return self.reported() >= wanted
 
@@ -921,7 +1021,7 @@ class Run:
         """
         if not self.reports_reached(self.owed, patience=PATIENCE):
             raise Failure(
-                f"the window answered {self.reported()} of {self.owed} F12s in {PATIENCE}s"
+                f"the window answered {self.reported()} of {self.owed} F12s in {PATIENCE}s; exit={self.process.poll()}"
             )
         found = []
         for line in self.log.read_text().splitlines():
@@ -1854,21 +1954,11 @@ def arrows_walk_the_look_and_a_pdfs_pages(run: Run, fixture: Path) -> None:
 
 @scenario("a-text-preview-appears-without-being-prodded", fresh=True)
 def a_text_preview_appears_without_being_prodded(run: Run, fixture: Path) -> None:
-    """**The window draws the text when the read lands, not when it is next asked.**
+    """The preview must paint before another input asks it to refresh.
 
-    This is the one scenario here that cannot assert what it wants directly, and
-    the reason is worth writing down: every observation this harness makes drives
-    an `F12`, and a keystroke marks the window dirty — so a preview that only
-    draws when prodded looks identical to one that draws on its own, and the bug
-    survived two rounds of testing because *asking about it fixed it*.
-
-    What is observable is the **frame counter** across an interval with no input
-    at all: the text arriving draws a frame only if something marked the window
-    dirty when it did. Measured on this fixture, three runs each way: **four
-    frames with the drain in the loop and three with it in the frame**, and the
-    first version of this assertion said "at least three" — which passed against
-    the bug it was written for, three times, and was decoration until the numbers
-    were taken rather than guessed.
+    Capture pixels before F12, then compare them with the settled preview. Counting
+    frames is insufficient: coalescing a completed read into the first paint is
+    correct and can reduce the count without leaving anything undrawn.
     """
     (fixture / "notes.txt").write_text("first line\nsecond line\n")
     settled = listed(run)
@@ -1878,19 +1968,15 @@ def a_text_preview_appears_without_being_prodded(run: Run, fixture: Path) -> Non
     run.drive("text notes\nsleep 400\n")
     quiet = until(run, cursor="notes.txt")
 
-    # **One script, and nothing in it but the key and a wait.** Two `drive` calls
-    # would be two processes, and starting one is input.
-    run.drive("key space\nsleep 900\nkey f12\nsleep 200\n")
+    run.drive("key space\nsleep 900\n", answering=False)
+    first = photograph(run, quiet, run.log.parent / "preview-before-input.png")
+    run.drive("key f12\nsleep 200\n")
     after = run.state()
-    if after["looking"] != "notes.txt:text":
-        raise Failure(f"the look is {after['looking']!r}")
-    drawn = int(after["frames"]) - int(quiet["frames"])
-    if drawn < 4:
-        raise Failure(
-            f"only {drawn} frames between opening the look and reading it back, where "
-            "four is the window drawing the text as it landed and three is it waiting "
-            "to be asked"
-        )
+    expect(after, looking="notes.txt:text")
+    settled = photograph(run, quiet, run.log.parent / "preview-after-input.png")
+    from PIL import ImageChops
+    if ImageChops.difference(first, settled).getbbox() is not None:
+        raise Failure("the preview changed after F12; its text was not painted without input")
 
 
 @scenario("a-text-preview-selects-and-copies", fresh=True)
@@ -3304,8 +3390,9 @@ def folder_size_without_a_refresh(run: Run, fixture: Path) -> None:
     has a total in it and the dash is never shaped. Twenty thousand files take
     long enough that the dash is drawn, which is the whole bug.
     """
-    if shutil.which("grim") is None:
-        raise Skipped("grim is not installed")
+    capture = "import" if isinstance(SERVER, X11Server) else "grim"
+    if shutil.which(capture) is None:
+        raise Skipped(f"{capture} is not installed")
     try:
         import PIL  # noqa: F401
     except ImportError:
@@ -3892,6 +3979,11 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
     if not state.get("menu_aim"):
         state = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
     for attempt in range(8):
+        # F12 can observe the model after a wheel event but before its paint.
+        # Aim only when the hit rectangles represent that same scroll position.
+        if state.get("menu_scroll") != state.get("menu_drawn"):
+            state = holds(run, lambda it: it.get("menu_scroll") == it.get("menu_drawn"),
+                          "the menu's current scroll position to be painted")
         for entry in state.get("menu_aim", "").split(","):
             name, _, point = entry.partition("@")
             if name == command:
@@ -3990,8 +4082,13 @@ def palette_by_pointer(run: Run, fixture: Path) -> None:
     # that is not drawn — and a pre-check here made this scenario fail whenever
     # the menu grew, which it did the day two commands were added to it.
     at = menu_aim(run, menu, "view.palette")
-    run.drive(f"move {at[0]:.1f} {at[1]:.1f}\nsleep 150\nclick\nsleep 400\nkey f12\nsleep 150\n")
-    opened = run.state()
+    run.drive(f"move {at[0]:.1f} {at[1]:.1f}\nkey f12\n")
+    until(run, menu_id="view.palette")
+    run.drive("click\nkey f12\n")
+    opened = holds(
+        run, lambda state: int(state["palette"]) >= 20 and "go.open@" in state["palette_aim"],
+        "the painted command palette",
+    )
     if int(opened["palette"]) < 20:
         raise Failure(f"clicking the menu row opened {opened['palette']} results")
 
@@ -9840,7 +9937,7 @@ def main(argv: list[str]) -> int:
     work = Path(tempfile.mkdtemp(prefix="skerry-gui-"))
     passed, failed = 0, []
     global SERVER
-    SERVER = X11Server() if x11 else WaylandServer()
+    SERVER = X11Server() if x11 else SwayServer() if "--sway" in argv else WaylandServer()
     try:
         SERVER.start(work, scale)
         display = SERVER.display
@@ -9866,6 +9963,14 @@ def main(argv: list[str]) -> int:
             announce(name)
             try:
                 own = getattr(function, "fresh", False)
+                if isinstance(SERVER, SwayServer) and name in {
+                    "a-pane-under-a-drag-is-ringed-and-its-own-pane-is-not",
+                    "a-drag-held-over-a-folder-opens-it",
+                    "passing-over-a-folder-does-not-open-it",
+                    "a-drag-held-on-a-tab-switches-to-it",
+                    "the-carried-card-follows-the-pointer",
+                }:
+                    raise Skipped("Sway's drag keyboard grab suppresses the in-progress F12 observation; covered on X11")
                 path = make_fixture(work, f"fixture-{name}") if own else fixture
                 data = work / "data" / name
                 # See `STATE`: one session file per scenario, always, because the
@@ -9929,6 +10034,12 @@ def main(argv: list[str]) -> int:
                 # reports a dozen failures for one cause: a `grim` that timed out
                 # once produced fourteen, of which one was real. Rebuilding costs
                 # a few milliseconds and only on the way out of a failure.
+                if name in failed:
+                    evidence = work / "failures" / name
+                    evidence.mkdir(parents=True, exist_ok=True)
+                    for log in ("app.log", "app.err"):
+                        if (work / log).exists():
+                            shutil.copyfile(work / log, evidence / log)
                 if name in failed and not own:
                     fixture = make_fixture(work)
     except Failure as problem:

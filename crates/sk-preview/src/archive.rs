@@ -265,6 +265,8 @@ pub enum Refusal {
     Elsewhere = 8,
     /// Some entries could not be created; completed output is retained.
     Partial = 9,
+    /// A supported container uses a variant this reader cannot represent safely.
+    Unsupported = 10,
 }
 
 impl Refusal {
@@ -282,6 +284,7 @@ impl Refusal {
             7 => Self::Interrupted,
             8 => Self::Elsewhere,
             9 => Self::Partial,
+            10 => Self::Unsupported,
             _ => Self::Undecodable,
         }
     }
@@ -299,6 +302,7 @@ impl Refusal {
             Self::NoUnpacker => Some("archive.no_unpacker"),
             Self::Elsewhere => Some("archive.elsewhere"),
             Self::Partial => Some("archive.partial"),
+            Self::Unsupported => Some("archive.unsupported"),
             Self::NoRoom => Some("archive.no_room"),
             Self::Stopped => Some("archive.stopped"),
             Self::Interrupted => Some("archive.interrupted"),

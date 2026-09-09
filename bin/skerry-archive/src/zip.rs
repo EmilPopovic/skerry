@@ -74,10 +74,16 @@ impl Zip {
         if end.len() < 22 {
             return Err(Refusal::Undecodable);
         }
+        if end.len() < 22 + usize::from(word16(end, 20)) {
+            return Err(Refusal::Undecodable);
+        }
+        if word16(end, 4) != 0 || word16(end, 6) != 0 {
+            return Err(Refusal::Unsupported);
+        }
         let mut count = u64::from(word16(end, 10));
         let mut directory = u64::from(word32(end, 16));
         let mut size = u64::from(word32(end, 12));
-        if count == 0xFFFF || directory == 0xFFFF_FFFF {
+        if count == 0xFFFF || directory == 0xFFFF_FFFF || size == 0xFFFF_FFFF {
             let (wide_count, wide_size, wide_directory) = zip64(&mut file, &tail, at)?;
             count = wide_count;
             size = wide_size;
@@ -96,17 +102,22 @@ impl Zip {
         // unconditionally read that one, and `test-badbase.zip`, and both zip64
         // files as empty. So the recorded offset is tried first and this is what
         // happens when there is nothing there.
-        let mut entries = walk(&mut file, directory, count, 0)?;
-        if entries.is_empty() && count > 0 {
-            let ends_at = from + at as u64;
-            let shift = ends_at
+        if count > sk_preview::archive::MOST_ENTRIES as u64 {
+            return Err(Refusal::Unsupported);
+        }
+        if count == 0 && size != 0 {
+            return Err(Refusal::Undecodable);
+        }
+        let entries = walk(&mut file, directory, count, 0).or_else(|error| {
+            let shift = (from + at as u64)
                 .checked_sub(size)
                 .and_then(|actual| actual.checked_sub(directory))
                 .unwrap_or(0);
-            if shift > 0 {
-                entries = walk(&mut file, directory + shift, count, shift)?;
+            if shift == 0 {
+                return Err(error);
             }
-        }
+            walk(&mut file, directory.checked_add(shift).ok_or(Refusal::Undecodable)?, count, shift)
+        })?;
         Ok(Self { file, entries })
     }
 
@@ -140,7 +151,7 @@ impl Zip {
             )?,
             // Bzip2, LZMA, zstd and the encrypted methods. Each is a decoder this
             // does not have, and the entry is named rather than written wrong.
-            _ => return Err(Refusal::NoUnpacker),
+            _ => return Err(Refusal::Unsupported),
         };
         if written != entry.uncompressed || hasher.finalize() != crc {
             return Err(Refusal::Undecodable);
@@ -199,25 +210,27 @@ fn walk(file: &mut File, at: u64, count: u64, shift: u64) -> Result<Vec<Central>
     for _ in 0..count.min(sk_preview::archive::MOST_ENTRIES as u64) {
         let mut record = [0u8; CENTRAL];
         if reading.read_exact(&mut record).is_err() {
-            break;
+            return Err(Refusal::Undecodable);
         }
         if &record[0..4] != b"PK\x01\x02" {
-            break;
+            return Err(Refusal::Undecodable);
         }
         let (names, extras, comments) =
             (word16(&record, 28), word16(&record, 30), word16(&record, 32));
         let mut rest = vec![0u8; usize::from(names) + usize::from(extras) + usize::from(comments)];
-        if reading.read_exact(&mut rest).is_err() {
-            break;
-        }
-        let name = String::from_utf8_lossy(&rest[..usize::from(names)]).into_owned();
+        reading.read_exact(&mut rest).map_err(|_| Refusal::Undecodable)?;
+        let raw = &rest[..usize::from(names)];
         let extra = &rest[usize::from(names)..usize::from(names) + usize::from(extras)];
+        if word16(&record, 8) & 1 != 0 {
+            return Err(Refusal::Unsupported);
+        }
+        let name = name_of(raw, word16(&record, 8), extra)?;
         let mut size = u64::from(word32(&record, 24));
         let mut compressed = u64::from(word32(&record, 20));
         let mut offset = u64::from(word32(&record, 42));
         wide(extra, &mut size, &mut compressed, &mut offset);
         // The same prefix the directory itself was found past.
-        offset += shift;
+        offset = offset.checked_add(shift).ok_or(Refusal::Undecodable)?;
         // The high sixteen bits of the external attributes are a unix mode, where
         // the archive was made on a system that has one. Zero everywhere else,
         // which is why the execute bit is a bonus rather than the rule.
@@ -246,6 +259,25 @@ fn walk(file: &mut File, at: u64, count: u64, shift: u64) -> Result<Vec<Central>
         });
     }
     Ok(entries)
+}
+
+fn name_of(raw: &[u8], flags: u16, extra: &[u8]) -> Result<String, Refusal> {
+    if flags & 0x800 != 0 {
+        return std::str::from_utf8(raw).map(str::to_owned).map_err(|_| Refusal::Undecodable);
+    }
+    if let Some(field) = field_of(extra, 0x7075)
+        && field.len() >= 5
+        && field[0] == 1
+        && word32(field, 1) == crc32fast::hash(raw)
+    {
+        return std::str::from_utf8(&field[5..])
+            .map(str::to_owned)
+            .map_err(|_| Refusal::Undecodable);
+    }
+    Ok(raw
+        .iter()
+        .map(|byte| if *byte < 128 { char::from(*byte) } else { CP437[usize::from(*byte - 128)] })
+        .collect())
 }
 
 /// Replaces whatever the Zip64 extra field carries.
@@ -343,6 +375,17 @@ fn word64(bytes: &[u8], at: usize) -> u64 {
     eight.copy_from_slice(&bytes[at..at + 8]);
     u64::from_le_bytes(eight)
 }
+
+// ZIP legacy names use IBM code page 437 unless the UTF-8 flag is set.
+const CP437: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å', 'É', 'æ', 'Æ',
+    'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ', 'á', 'í', 'ó', 'ú', 'ñ', 'Ñ',
+    'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»', '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕',
+    '╣', '║', '╗', '╝', '╜', '╛', '┐', '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦',
+    '╠', '═', '╬', '╧', '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐',
+    '▀', 'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩', '≡', '±',
+    '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
+];
 
 #[cfg(test)]
 mod tests {

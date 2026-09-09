@@ -8898,8 +8898,10 @@ sizes={known}/{running} jobs={jobs}/{panics}",
                 .collect::<Vec<_>>()
                 .join(",")
         });
+        let scroll = menu.map_or(0, |menu| menu.scroll);
+        let drawn = self.hits.menu.iter().position(|area| area.width > 0.0).unwrap_or(0);
         format!(
-            "menu={rows} menu_active={active} menu_id={id:?} menu_aim={aim:?} menu_dim={dimmed:?}"
+            "menu={rows} menu_active={active} menu_id={id:?} menu_aim={aim:?} menu_dim={dimmed:?} menu_scroll={scroll} menu_drawn={drawn}"
         )
     }
 

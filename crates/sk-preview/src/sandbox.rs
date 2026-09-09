@@ -26,14 +26,12 @@
 //! which is ADR 0006's "reduced isolation is logged — never silently accepted".
 //! The three caps above it need no kernel feature and are applied regardless.
 //!
-//! What is not here is `seccomp`. ADR 0006 names it and it is not written: a
-//! syscall filter is a BPF program, and a wrong one is a child that dies on a
-//! syscall its decoder needed on somebody else's libc. It is the next layer and it
-//! is absent rather than pretended — `report()` says so, so the log names what is
-//! actually in force.
+//! A seccomp filter also denies networking and process/kernel inspection. Its
+//! native-ABI policy is recorded in ADR 0034; it is not a syscall allowlist.
 
 use std::ffi::CString;
-use std::path::Path;
+use std::io::{Read as _, Seek as _};
+use std::path::{Path, PathBuf};
 
 /// What the kernel will let a child spend on itself.
 ///
@@ -93,6 +91,8 @@ pub struct Report {
     pub limits: bool,
     /// The Landlock ABI in force, or `None` where the kernel has none.
     pub landlock: Option<i32>,
+    /// Whether the inherited syscall restrictions took.
+    pub seccomp: bool,
 }
 
 impl Report {
@@ -108,29 +108,17 @@ impl Report {
         };
         let privs = if self.no_new_privs { "no-new-privs" } else { "no-new-privs FAILED" };
         let limits = if self.limits { "rlimits" } else { "rlimits FAILED" };
-        format!("{privs}, {limits}, {landlock}, seccomp not implemented")
+        let seccomp = if self.seccomp { "seccomp" } else { "seccomp FAILED" };
+        format!("{privs}, {limits}, {landlock}, {seccomp}")
     }
 }
 
 /// Locks this process down to reading `readable`, running `executable` and writing
 /// `writable`.
 ///
-/// Called once, before the first request is read. Never fails: every layer that
-/// cannot be applied is reported instead, because a child that refuses to start
-/// is a preview kind that silently does not exist.
-///
-/// **`executable` is separate from `readable`, and the separation is load-bearing.**
-/// `skerry-thumbnailer` decodes in-process and passes none: with no execute right
-/// anywhere it cannot start a program at all, which is the strongest thing this
-/// can say about a process that handles hostile input. `skerry-preview-doc` drives
-/// `pdftoppm` and passes the root, for a reason recorded there.
-///
-/// Learned twice by the sandbox working, both times as `NoRenderer` from a helper
-/// whose `--probe` said the renderer was installed. First: `execve` needs its own
-/// Landlock right, which the original ruleset granted nowhere. Then: a
-/// *dynamically linked* program needs that right on its loader and every library
-/// it maps as well, so granting it on `PATH` alone is not enough for any real
-/// binary. Neither was guessed — both were a program that would not start.
+/// Called before decoding. Mandatory restrictions fail closed; unavailable
+/// Landlock is reported as reduced isolation, following ADR 0006. Execute grants
+/// name files, never directories; callers resolve tools before confinement.
 #[must_use]
 pub fn confine(
     limits: Limits,
@@ -138,9 +126,93 @@ pub fn confine(
     executable: &[&Path],
     writable: &[&Path],
 ) -> Report {
-    let mut report = Report { no_new_privs: no_new_privs(), limits: caps(limits), landlock: None };
-    report.landlock = landlock(readable, executable, writable);
+    let mut report = Report {
+        no_new_privs: no_new_privs(),
+        limits: caps(limits),
+        landlock: None,
+        seccomp: false,
+    };
+    let outputs: Vec<_> = writable.iter().filter_map(|path| path.canonicalize().ok()).collect();
+    let executable: Vec<_> = executable
+        .iter()
+        .copied()
+        .filter(|path| {
+            path.is_file()
+                && outputs.len() == writable.len()
+                && !outputs.iter().any(|output| path.starts_with(output))
+        })
+        .collect();
+    report.landlock = landlock(readable, &executable, writable);
+    report.seccomp = crate::seccomp::install();
+    if !report.no_new_privs || !report.limits || !report.seccomp {
+        eprintln!("skerry: mandatory helper confinement failed: {}", report.line());
+        std::process::exit(1);
+    }
     report
+}
+
+/// Known PATH tools and their ELF interpreters, resolved before restricting exec.
+#[must_use]
+pub fn executables(names: &[&str]) -> Vec<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut paths = Vec::new();
+    let search = std::env::var_os("PATH").unwrap_or_default();
+    for name in names {
+        let found = std::env::split_paths(&search).map(|dir| dir.join(name)).find(|path| {
+            path.metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        });
+        let Some(path) = found.and_then(|path| path.canonicalize().ok()) else { continue };
+        let Ok(loader) = interpreter(&path) else { continue };
+        paths.push(path);
+        if let Some(loader) = loader.and_then(|path| path.canonicalize().ok()) {
+            paths.push(loader);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn interpreter(path: &Path) -> std::io::Result<Option<PathBuf>> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let invalid = || std::io::Error::other("unsupported external executable");
+    let mut file = std::fs::File::open(path)?;
+    let mut header = [0; 64];
+    file.read_exact(&mut header)?;
+    if &header[..6] != b"\x7fELF\x02\x01" {
+        return Err(invalid());
+    }
+    let word = |at: usize| u16::from_le_bytes([header[at], header[at + 1]]);
+    let offset = u64::from_le_bytes(header[32..40].try_into().map_err(|_| invalid())?);
+    if word(54) != 56 || word(56) > 1024 {
+        return Err(invalid());
+    }
+    for index in 0..u64::from(word(56)) {
+        file.seek(std::io::SeekFrom::Start(offset.checked_add(index * 56).ok_or_else(invalid)?))?;
+        let mut program = [0; 56];
+        file.read_exact(&mut program)?;
+        if program[..4] != [3, 0, 0, 0] {
+            continue;
+        }
+        let at = u64::from_le_bytes(program[8..16].try_into().map_err(|_| invalid())?);
+        let size = u64::from_le_bytes(program[32..40].try_into().map_err(|_| invalid())?);
+        if !(2..=4096).contains(&size) {
+            return Err(invalid());
+        }
+        file.seek(std::io::SeekFrom::Start(at))?;
+        let mut bytes = vec![0; size as usize];
+        file.read_exact(&mut bytes)?;
+        if bytes.pop() != Some(0) || bytes.contains(&0) {
+            return Err(invalid());
+        }
+        let loader = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+        if !loader.is_absolute() {
+            return Err(invalid());
+        }
+        return Ok(Some(loader));
+    }
+    Ok(None)
 }
 
 /// `prctl(PR_SET_NO_NEW_PRIVS, 1)`.
@@ -211,6 +283,11 @@ fn allow(ruleset: i32, path: &Path, rights: u64) {
     if fd < 0 {
         return;
     }
+    let rights = if path.is_file() {
+        rights & (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | (1 << 1) | (1 << 14))
+    } else {
+        rights
+    };
     let rule = PathBeneath { allowed_access: rights, parent_fd: fd };
     // SAFETY: the rule outlives the call and its type tag says what it is.
     unsafe {
@@ -258,10 +335,10 @@ mod tests {
     /// difference between a log and a reassurance.
     #[test]
     fn the_report_says_what_is_not_in_force() {
-        let full = Report { no_new_privs: true, limits: true, landlock: Some(8) };
+        let full = Report { no_new_privs: true, limits: true, landlock: Some(8), seccomp: true };
         let line = full.line();
         assert!(line.contains("landlock abi 8"), "{line}");
-        assert!(line.contains("seccomp not implemented"), "{line}");
+        assert!(line.contains("seccomp"), "{line}");
         assert!(!line.contains("FAILED"), "{line}");
 
         let none = Report::default();
@@ -280,14 +357,17 @@ mod tests {
             let root = PathBuf::from(root);
             let out = root.join("out");
             assert!(super::no_new_privs());
-            let Some(abi) = super::landlock(
-                &[&root, Path::new("/usr"), Path::new("/lib"), Path::new("/lib64")],
-                &[Path::new("/usr"), Path::new("/lib"), Path::new("/lib64")],
-                &[&out],
-            ) else {
+            let tools = super::executables(&["true"]);
+            let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
+            let Some(abi) = super::landlock(&[Path::new("/")], &executable, &[&out]) else {
+                assert!(
+                    std::env::var_os("SKERRY_REQUIRE_LANDLOCK").is_none(),
+                    "Landlock is required by this test environment"
+                );
                 eprintln!("skerry: skip: Landlock unavailable in this environment");
                 return;
             };
+            assert!(std::process::Command::new("true").status().unwrap().success());
             assert_eq!(std::fs::read(root.join("input")).unwrap(), b"valuable");
             std::fs::write(out.join("allowed"), "output").unwrap();
             if abi >= 3 {
@@ -314,5 +394,44 @@ mod tests {
             .unwrap();
         std::fs::remove_dir_all(root).unwrap();
         assert!(status.success());
+    }
+    #[test]
+    fn seccomp_denies_networking_but_preserves_threads_and_tools() {
+        const MARKER: &str = "SKERRY_SECCOMP_REGRESSION";
+        if std::env::var_os(MARKER).is_some() {
+            assert!(super::no_new_privs());
+            assert!(crate::seccomp::install());
+            for family in [libc::AF_INET, libc::AF_INET6, libc::AF_UNIX] {
+                // SAFETY: socket has no pointer arguments. On regression, close
+                // the unexpected descriptor before reporting the failed denial.
+                let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
+                let error = std::io::Error::last_os_error().raw_os_error();
+                if fd >= 0 {
+                    unsafe {
+                        libc::close(fd);
+                    }
+                }
+                assert_eq!((fd, error), (-1, Some(libc::EPERM)));
+            }
+            // SAFETY: null clone3 arguments are rejected before dereferencing;
+            // the filter must return ENOSYS for the libc fallback.
+            assert_eq!(unsafe { libc::syscall(libc::SYS_clone3, 0usize, 0usize) }, -1);
+            assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ENOSYS));
+            assert_eq!(std::thread::spawn(|| 42).join().unwrap(), 42);
+            assert!(std::process::Command::new("true").status().unwrap().success());
+            return;
+        }
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sandbox::tests::seccomp_denies_networking_but_preserves_threads_and_tools",
+                    "--nocapture"
+                ])
+                .env(MARKER, "1")
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 }

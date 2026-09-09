@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the real archive helper with Python-generated archives and wire requests."""
 import argparse
+import bz2
+import gzip
 import io
+import lzma
 from pathlib import Path
 import struct
 import subprocess
@@ -88,6 +91,15 @@ def check(binary):
         assert (root / "override/override").read_bytes() == b"x" * 513
         cases += 1
         original = tar_bytes(tarfile.USTAR_FORMAT, {"first": b"x", "second": b"y"})
+        for label, compress in (("gzip", gzip.compress), ("xz", lzma.compress), ("bzip2", bz2.compress)):
+            compressed = compress(original)
+            for suffix, data, valid in (("good", compressed, True), ("truncated", compressed[:-4], False),
+                                        ("corrupt", compressed[:-8] + bytes([compressed[-8] ^ 1]) + compressed[-7:], False)):
+                path = root / f"{label}-{suffix}"
+                path.write_bytes(data)
+                result = unpack(binary, path, root / f"out-{label}-{suffix}")
+                assert (result[0] == 0) == valid, (label, suffix, result)
+                cases += 1
         corrupt = bytearray(original)
         corrupt[1024] ^= 1
         for label, data in (("bad-header", corrupt), ("short-payload", original[:512]), ("short-padding", original[:513]), ("short-header", original[:1024] + b"broken")):
@@ -102,6 +114,40 @@ def check(binary):
             assert unpack(binary, path, root / label)[0] == 0
             assert (root / label / "folder/file").read_bytes() == b"payload" * 100
             cases += 1
+        path = root / "zip-directory.zip"
+        with zipfile.ZipFile(path, "w") as zip:
+            zip.writestr("first", b"first")
+            zip.writestr("second", b"second")
+        original_zip = path.read_bytes()
+        first = original_zip.index(b"PK\x01\x02")
+        second = original_zip.index(b"PK\x01\x02", first + 4)
+        for label, offset in (("zip-bad-directory", second), ("zip-invalid-utf8", first + 46)):
+            data = bytearray(original_zip)
+            data[offset] = 255
+            if label == "zip-invalid-utf8":
+                struct.pack_into("<H", data, first + 8, 0x800)
+            path = root / label
+            path.write_bytes(data)
+            assert unpack(binary, path, root / (label + "-out"))[0] != 0, label
+            cases += 1
+        data = bytearray(original_zip)
+        for start, flag, name in ((0, 6, 30), (first, 8, 46)):
+            data[start + name] = 0x82
+            struct.pack_into("<H", data, start + flag, 0)
+        path = root / "legacy.zip"
+        path.write_bytes(data)
+        assert unpack(binary, path, root / "legacy")[0] == 0
+        assert (root / "legacy/éirst").read_bytes() == b"first"
+        cases += 1
+        data = bytearray(original)
+        data[0] = 0xff
+        data[148:156] = b" " * 8
+        data[148:156] = f"{sum(data[:512]):06o}\0 ".encode()
+        path = root / "raw-name.tar"
+        path.write_bytes(data)
+        assert unpack(binary, path, root / "raw-name")[0] == 10
+        assert not list((root / "raw-name").iterdir())
+        cases += 1
         outside = root / "sentinel"
         outside.write_text("valuable")
         path = root / "traversal.tar"

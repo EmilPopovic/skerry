@@ -178,3 +178,65 @@ a number that was not wrong so much as about the wrong thing:
   and five more were `bytemuck_derive` and the `syn` chain beneath it — which was
   also the source of a reported `syn` duplicate that exists only because `swash`
   and `wgpu` pin different major versions of a compile-time crate.
+
+## Release validation additions
+
+`tools/notices.py` walks the locked Linux dependency graphs for both shipped
+architectures and writes `packaging/THIRD-PARTY-NOTICES.txt`. Run it after changing
+Cargo.lock; `--check` verifies the result without writing. Upstream license
+supplements record their source commit. Packaging also includes the active Rust
+toolchain's `COPYRIGHT-library.html`; do not package binaries with an unrelated
+toolchain selected.
+
+Golden comparisons require Pillow with `ImageMath.lambda_eval` (10.3 or newer),
+fontconfig, Poppler, and the exact faces in `tests/golden/faces.txt`. The PDF
+fixtures use the Base-14 Helvetica substitute from `fonts-urw-base35`; that font
+is fingerprinted too. Install the recorded fonts rather than blessing differences
+caused by another font package. The suite currently contains 86 frames.
+
+`./tools/gui-test --sway` starts a private headless Sway compositor using software
+rendering. It requires Sway, swaymsg, grim and wl-clipboard. Like `--x11`, it accepts
+`--scale=1.25` and `--keep`. The latter preserves per-scenario failure logs.
+`skerry-drive --stream` keeps virtual input devices alive across batches; a `sync`
+line executes the batch and receives a `skerry-drive: synced` acknowledgement.
+The harness waits for fresh F12 reports and painted menu geometry before aiming.
+Five tests that inspect a drag *while it is held* abstain on Sway: its drag grab
+suppresses the diagnostic F12 key. Completed drag/drop and GTK interoperation
+still run. These five state inspections run on X11 and Hyprland.
+
+### Disposable kernels
+
+Where the host cannot expose Landlock or FUSE, test inside a networkless QEMU
+TCG guest. Neither tool mounts anything on the host or needs host device changes.
+Install QEMU's x86 system emulator and add Rust's `x86_64-unknown-linux-musl` target.
+For confinement, supply a Linux kernel with Landlock enabled and static BusyBox:
+
+```sh
+python3 tools/sandbox-vm.py --kernel /path/to/vmlinuz --busybox /path/to/busybox
+```
+
+This builds the tests and requires actual denial assertions, including execution
+of a dynamically linked tool through its exact ELF interpreter grant. An
+unavailable Landlock implementation fails this guest check.
+
+For filesystem faults, extract Ubuntu 24.04 amd64 packages into a temporary
+package root with `dpkg-deb -x`; do not install them over the host. Required
+packages are `busybox-static`, `fuse3`, `btrfs-progs`, `xfsprogs`, `dosfstools`,
+`zstd`, `libinih1`, `liburcu8t64`, and matching `linux-image` / `linux-modules`
+packages. The host supplies `mkfs.ext4`, `ldd`, and util-linux `umount` plus its
+libraries. The tested kernel is 6.8.0-139-generic. Then run:
+
+```sh
+cargo build --release --locked --target x86_64-unknown-linux-musl \
+  --manifest-path spikes/e-operations/Cargo.toml
+python3 tools/filesystem-vm.py --packages /path/to/extracted-packages \
+  --kernel /path/to/extracted-packages/boot/vmlinuz-6.8.0-139-generic
+```
+
+The tool creates four temporary 1 GiB sparse images, mounts ext4, btrfs, XFS and
+FAT inside the guest, and runs the matrix as UID 1000. It requires every injected
+fault to pass and removes its images afterward. Allow about 2 GiB of host disk
+space and 2 GiB of guest RAM. NTFS and network filesystems are outside this guest
+harness. Reflink checks on filesystems without reflinks remain explicitly owed;
+FAT's absent POSIX metadata is an explicit limitation, not a successful metadata
+preservation test. Guest wall-clock measurements are not performance benchmarks.

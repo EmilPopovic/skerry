@@ -12,3 +12,4 @@ b76b04332030  NotoSansCJK-Regular.ttc
 dfbd5ed0f1e6  NotoSansThai-Regular.ttf
 876598db5f1e  NotoSansSymbols2-Regular.ttf
 9fd0a3d0ce84  NotoColorEmoji.ttf
+7c25be4d7815  NimbusSans-Regular.otf

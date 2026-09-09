@@ -384,6 +384,7 @@ fn refused(refusal: sk_preview::archive::Refusal, note: &str, archive: &Path) ->
         ),
         Refusal::NoRoom => (ProblemKind::Full, named(archive)),
         Refusal::Partial => (ProblemKind::Incomplete, named(archive)),
+        Refusal::Unsupported => (ProblemKind::UnsupportedArchive, named(archive)),
         Refusal::Unreadable => (ProblemKind::Unreadable, named(archive)),
         Refusal::None | Refusal::Stopped | Refusal::NotAnArchive | Refusal::Undecodable => {
             (ProblemKind::Damaged, named(archive))

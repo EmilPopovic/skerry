@@ -76,7 +76,9 @@ fn main() {
         if request.ask == Ask::Unpack { vec![&request.into] } else { Vec::new() };
     let limits = if request.ask == Ask::Unpack { Limits::UNPACK } else { Limits::PREVIEW };
     let root = [Path::new("/")];
-    let report = sandbox::confine(limits, &root, &root, &writable);
+    let tools = sandbox::executables(&["xz", "zstd", "bzip2"]);
+    let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
+    let report = sandbox::confine(limits, &root, &executable, &writable);
     eprintln!("skerry-archive: {}", report.line());
 
     let mut out = std::io::stdout().lock();
@@ -97,7 +99,9 @@ fn main() {
 /// What `--probe` prints: whether the filters this machine has cover the formats.
 fn probe() {
     let root = [Path::new("/")];
-    let report = sandbox::confine(Limits::PREVIEW, &root, &root, &[]);
+    let tools = sandbox::executables(&["xz", "zstd", "bzip2"]);
+    let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
+    let report = sandbox::confine(Limits::PREVIEW, &root, &executable, &[]);
     println!("skerry-archive: {}", report.line());
     for filter in [
         sk_preview::archive::Filter::Xz,
@@ -141,7 +145,7 @@ fn list(archive: &Path) -> Listing {
                     .map(|central| central.entry)
                     .filter(|entry| !entry.path.is_empty())
                     .collect();
-                let bytes = all.iter().map(|entry| entry.size).sum();
+                let bytes = all.iter().fold(0u64, |total, entry| total.saturating_add(entry.size));
                 let count = all.len() as u64;
                 // **Counted whole and sent bounded**, which is the same bargain
                 // the tar walk makes: what a panel draws is forty rows, and what
@@ -199,7 +203,7 @@ fn walk_tar(format: sk_preview::archive::Format, bytes: detect::Bytes) -> Listin
             Ok(Some(item)) if item.path.is_empty() => {}
             Ok(Some(item)) => {
                 listing.count += 1;
-                listing.bytes += item.size;
+                listing.bytes = listing.bytes.saturating_add(item.size);
                 if listing.entries.len() < MOST_ENTRIES && table < ROOM {
                     // Twenty-one bytes of record and the path, which is what
                     // `Listing::write_to` puts on the wire for one entry.

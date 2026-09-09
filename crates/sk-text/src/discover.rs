@@ -164,11 +164,12 @@ const STYLE_WORDS: &[&str] = &[
 #[must_use]
 pub fn pick<'a>(candidates: &'a [Candidate], wanted: &[&str]) -> Option<&'a Candidate> {
     wanted.iter().find_map(|needle| {
-        if let Some(exact) = candidates.iter().find(|it| it.token == *needle) {
+        if let Some(exact) = candidates.iter().rev().find(|it| it.token == *needle) {
             return Some(exact);
         }
         candidates
             .iter()
+            .rev()
             .filter(|it| it.token.contains(needle))
             .filter(|it| {
                 STYLE_WORDS.iter().all(|word| needle.contains(word) || !it.token.contains(word))
@@ -296,5 +297,15 @@ mod tests {
     fn the_closest_token_wins_when_several_contain_the_needle() {
         let found = candidates(&["notosansdisplayregular", "notosansregular"]);
         assert_eq!(pick(&found, &["notosansregular"]).unwrap().token, "notosansregular");
+    }
+    #[test]
+    fn user_fonts_override_equal_system_matches() {
+        let found = vec![
+            Candidate { path: PathBuf::from("/system/font.ttf"), token: "familyregular".into() },
+            Candidate { path: PathBuf::from("/user/font.ttf"), token: "familyregular".into() },
+        ];
+        for wanted in ["familyregular", "family"] {
+            assert_eq!(pick(&found, &[wanted]).unwrap().path, PathBuf::from("/user/font.ttf"));
+        }
     }
 }

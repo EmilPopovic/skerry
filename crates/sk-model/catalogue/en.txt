@@ -639,3 +639,6 @@ error.preservation = {0}: copied contents could not retain all metadata. The sou
 
 error.incomplete = {0}: some entries could not be extracted. The partial output was kept and can be undone.
 archive.partial = Some entries could not be extracted. The partial output was kept.
+
+error.unsupported_archive = {0} uses an unsupported archive variant. Use another archive tool. Any partial output was kept and can be undone.
+archive.unsupported = This archive uses a variant Skerry cannot read safely. Use another archive tool.

@@ -105,7 +105,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev mesa-vulkan-drivers python3-pil \
             fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fonts-noto-mono \
-            poppler-utils
+            poppler-utils fonts-urw-base35
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update
@@ -157,6 +157,11 @@ jobs:
     # latent since it was written — see
     # docs/12-measurement.md#a-helper-can-be-correct-only-because-of-the-fixture-it-grew-up-in.
     runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [x11, sway]
+        scale: [1, 1.25]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -170,7 +175,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libxkbcommon-dev mesa-vulkan-drivers xvfb x11-utils imagemagick \
-            python3-pil fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+            python3-pil fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
+            poppler-utils fonts-urw-base35 libglib2.0-bin python3-gi gir1.2-gtk-3.0 xclip sway grim wl-clipboard
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update
@@ -186,16 +192,8 @@ jobs:
           restore-keys: scenarios-${{ env.RUST }}-
       - name: Build
         run: cargo build --release --workspace --locked
-      - name: Scenarios on X11
-        # No GPU on a runner, so the renderer falls back to lavapipe — which is
-        # what `frames` already renders with, and which the scenarios do not care
-        # about: they assert on the state the window reports, not on its pixels,
-        # apart from the one that needs Pillow.
-        run: ./tools/gui-test --x11
-      - name: Scenarios on X11 at 125%
-        # A fractional scale, which on X11 means `Xft.dpi` in the root resource
-        # database. At 100% the scale assertions cannot fail.
-        run: ./tools/gui-test --x11 --scale=1.25
+      - name: GUI scenarios
+        run: ./tools/gui-test --${{ matrix.backend }} --scale=${{ matrix.scale }}
 
   aarch64:
     # **The second architecture.** [06-portability.md](../../docs/06-portability.md)
@@ -326,3 +324,29 @@ jobs:
           restore-keys: msrv-${{ env.MSRV }}-
       - name: Build with the oldest supported toolchain
         run: cargo check --workspace --all-targets --locked
+
+  sandbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Disposable kernel and VM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 busybox-static
+          mkdir -p /tmp/skerry-kernel
+          cd /tmp/skerry-kernel
+          kernel_package=$(apt-cache depends linux-image-generic | awk '$2 ~ /^linux-image-[0-9]/ {print $2; exit}')
+          test -n "$kernel_package"
+          apt-get download "$kernel_package"
+          dpkg-deb -x ./*.deb extracted
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+          rustup target add x86_64-unknown-linux-musl
+      - name: Landlock and seccomp on an enabled kernel
+        run: |
+          python3 tools/sandbox-vm.py \
+            --kernel /tmp/skerry-kernel/extracted/boot/vmlinuz-* \
+            --busybox "$(command -v busybox)"

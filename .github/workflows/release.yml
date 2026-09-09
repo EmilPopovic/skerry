@@ -32,8 +32,11 @@ jobs:
   validate:
     uses: ./.github/workflows/check.yml
 
+  validate-filesystems:
+    uses: ./.github/workflows/torture.yml
+
   tarball:
-    needs: validate
+    needs: [validate, validate-filesystems]
     permissions:
       contents: write
     strategy:
@@ -62,6 +65,8 @@ jobs:
           rustup default "$RUST"
       - name: Build
         run: cargo build --release --workspace --locked
+      - name: Dependency notices
+        run: python3 tools/notices.py --check
       - name: What it says it is
         # A binary that cannot name its own version is a binary no bug report can
         # identify, and this is the cheapest possible test of `build.rs`.

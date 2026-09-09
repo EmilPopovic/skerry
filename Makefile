@@ -37,11 +37,14 @@ install: build
 		"$(datadir)/applications/dev.skerry.Skerry.desktop"
 	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
 	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"
+	install -Dm644 packaging/THIRD-PARTY-NOTICES.txt "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt"
+	install -Dm644 "$$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html" "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
 
 uninstall:
 	for binary in $(BINARIES); do rm -f "$(bindir)/$$binary"; done
 	rm -f "$(datadir)/applications/dev.skerry.Skerry.desktop"
 	rm -f "$(datadir)/licenses/skerry/LICENSE" "$(datadir)/licenses/skerry/NOTICE"
+	rm -f "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt" "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
 
 check:
 	./tools/check
