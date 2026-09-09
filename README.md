@@ -4,7 +4,9 @@ A file manager for Linux, written in Rust, built on the premise that a file mana
 is a **latency product and an interaction-design product** — not a feature checklist.
 
 Status: **`0.1.0-alpha.1` — preparing for public pre-release.** The
-[release checklist](docs/13-release-readiness.md) records remaining checks. Twelve
+[release checklist](docs/13-release-readiness.md) records test evidence and remaining
+publication checks. See the [security policy](SECURITY.md) for reporting and helper
+isolation limits. Twelve
 crates and three isolated helpers, unit and integration tests, GUI scenarios on
 both Wayland and X11, and golden
 frames. It is a file manager you can use for a day: a Details view, a grid and a

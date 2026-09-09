@@ -107,10 +107,11 @@ chown 1000:1000 /home/test
         command += ['-drive', f'file={disk},format=raw,if=virtio']
     result = subprocess.run(command, capture_output=True, text=True, timeout=600)
     print(result.stdout)
-    required = ('enospc', 'eio', 'no-xattr', 'short-write', 'enospc-tree')
+    required = ('enospc', 'eio', 'no-xattr', 'short-write', 'enospc-tree',
+                'reflink/btrfs→btrfs', 'reflink/xfs→xfs')
     if (result.returncode or 'SKERRY_FILESYSTEM_VM_PASS' not in result.stdout
             or any(not re.search(r'PASS\s+' + name + r'\s', result.stdout) for name in required)):
-        raise SystemExit(result.stderr + '\nFilesystem VM did not pass every injected fault')
+        raise SystemExit(result.stderr + '\nFilesystem VM did not pass every required fault and reflink check')
 
 
 def main():

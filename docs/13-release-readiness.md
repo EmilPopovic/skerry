@@ -1,94 +1,145 @@
 # Public alpha release readiness
 
-This is the release record for `0.1.0-alpha.1`, updated 2026-09-07. The working
-tree has passed the checks described below; that is not evidence that artifacts
-have been published or that the outstanding host-dependent checks have passed.
-The scope is a first public alpha, not completion of every roadmap milestone.
+Release scope: `0.1.0-alpha.1`, with the current feature set. Updated 2026-09-09.
+This record describes local evidence; it does not claim that remote CI, a tag,
+or publication has occurred. The unfinished roadmap is outside this alpha.
 
-## Changes made during release preparation
+## Fixes completed
 
-- Release builds unwind panics so the worker pool can recover as its contract
-  promises. `tools/check` runs a real release executable which panics in a worker
-  and then proves another job on the same device runs. A release test harness
-  alone would not verify the production panic strategy.
-- Tar parsing checks each header checksum, rejects truncated blocks and payloads,
-  frames PAX records by byte length, and uses PAX size overrides for both payload
-  and padding. Unsupported sparse formats are refused. Extraction reports skipped
-  entries as partial output; its warning accurately says that output is retained
-  and can be undone.
-- D-Bus decoding bounds nested variants and arrays, validates signatures, and
-  rejects malformed strings, booleans and unconsumed message bodies. The relevant
-  protocol constraints are in the [D-Bus specification](https://dbus.freedesktop.org/doc/dbus-specification.html).
-  Tar header checks follow the [GNU tar format documentation](https://www.gnu.org/s/tar/manual/html_node/Standard.html).
-- Binary distributions have a source-independent installer, exact-file uninstall,
-  SHA-256 sidecar, build identity and measured GLIBC symbol requirement. Packaging
-  rejects missing helpers and mismatched versions, tags or ELF architectures.
-  Identical binary inputs produce identical archives; independent compiler/linker
-  builds have not been shown to produce identical binaries.
-- Release packaging depends on the reusable check workflow. GUI and frame jobs
-  build all helpers, and the frame job runs independent archive fixtures. The
-  dependency auditor is pinned to the tested cargo-deny 0.20.2. Its permissive
-  allowlist now includes the BSD-3-Clause license of the existing tiny-skia crates.
+The initial review fixes cover filesystem replacement and symlink safety, undo
+and replay recovery, bounded protocol decoding, helper separation and accurate
+partial-operation reporting. Release builds now unwind worker panics so recovery
+works in the production profile, verified by a real release executable.
 
-## Reproducing the local checks
+Archive parsing validates tar checksums, payload/padding lengths, PAX framing,
+and compression trailers. Piped decompressors must exit successfully. ZIP
+central-directory corruption cannot silently truncate the reported member list;
+legacy ZIP names use CP437 and flagged UTF-8 is validated. Archive byte totals
+saturate rather than overflow. Unsupported tar name encodings, sparse/PAX
+variants and ZIP compression/encryption variants are explicitly refused instead
+of being extracted under a misleading name or reported as a missing program.
+Malformed PAX fractional times are refused and negative times round down.
 
-Run from the repository root with Python 3.11+, make, readelf and the Rust
-toolchain available:
+Helpers require seccomp, resource limits and no-new-privileges. The syscall
+filter denies networking and selected process/kernel interfaces. Landlock
+executable grants now name only resolved external tools and their ELF
+interpreters, excluding writable output trees. The live-kernel tests prove both
+successful dynamic execution and denied output execution/input truncation.
+The exact policy and its limits are in [ADR 0034](adr/0034-helper-execution-and-network-rights-are-explicit.md)
+and [SECURITY.md](../SECURITY.md). Landlock absence still means reduced filesystem
+isolation; helpers can read ordinary user-readable files even with Landlock.
+
+User-installed fonts now win equal matches over system fonts, as documented.
+The golden harness fingerprints the PDF Base-14 substitute as well as UI fonts.
+GUI tests retain failure logs, count every diagnostic response, and wait for
+painted menu/palette hit targets. Headless Sway provides a reproducible Wayland
+backend alongside Xvfb; its virtual input devices persist between script batches.
+No golden reference images were changed to accommodate these fixes. Fractional
+Wayland testing also exposed a first-frame scale race: the transparent startup
+probe now commits the configured logical size and waits for a real preferred-scale
+event, bounded at 100 ms for compositors which never answer. Two sync replies
+were not evidence that Sway had completed its layout transaction.
+
+Distribution archives include dependency and Rust standard-library notices,
+build identity, measured GLIBC requirements, checksums and exact-file installers.
+The generated notice graph covers 141 external packages across both Linux
+architectures. Packaging rejects missing helpers and mismatched versions or ELF
+architectures. Reusable release gates now include the filesystem workflow,
+mandatory injected-fault results, live-kernel confinement, and GUI backend/scale
+matrices. The standalone filesystem spike's stale lockfile is repaired.
+
+## Local validation
+
+The tested environment is x86-64 Ubuntu 24.04 userspace, llvmpipe/Vulkan software
+rendering, private Xvfb and headless Sway sessions. Rust 1.96.1 is the CI pin;
+Rust 1.90 is the declared minimum. Tests were run outside the tool sandbox when
+sockets or process isolation were required.
+
+| Check | Result |
+| --- | --- |
+| `tools/check` | All gates passed: 980 tests, five explicitly ignored; formatting, clippy with warnings denied, repository rules, package/notice checks, release panic recovery and 86 golden frames. |
+| ARM cross-check | All workspace targets compiled for aarch64 Linux with Rust 1.96.1; native execution remains a CI check. |
+| Minimum Rust | `cargo check --workspace --all-targets --locked` passed on 1.90. |
+| Supply audit | cargo-deny 0.20.2: advisories, licenses, bans and sources passed against the fetched database on 2026-09-09. |
+| Independent archives | 24 valid/malformed fixtures, including damaged gzip/xz/bzip2 trailers, ZIP directory corruption and legacy names. |
+| Real D-Bus | Private-daemon integration test passed separately. |
+| Kernel confinement | Linux 6.8.0-139 guest: mandatory Landlock and seccomp tests passed, including a dynamically linked executable. |
+| Filesystem guest | 80 passes, zero failures, five FAT limitations, five explicitly owed checks across rootfs/tmpfs/ext4/btrfs/XFS/FAT. All five injected faults passed. |
+
+The filesystem VM runs as UID 1000 after guest-only mount setup. Disk-full and
+read-error cases leave no incomplete final file or temporary file; the partial
+tree case preserves eight byte-exact completed files and reports twelve failures.
+Short writes and metadata refusals are verified. Both btrfs and XFS reflinks
+passed, and the release gate requires those results rather than accepting skips. Four owed checks are reflinks on filesystems without that facility; the
+fifth is NTFS, which this guest does not provide. FAT cannot preserve POSIX
+symlinks, hardlinks, xattrs or all names. These are explicit limitations.
+
+| Desktop run | Result and follow-up |
+| --- | --- |
+| X11, 100% | 145 passed, zero failed, three explicit skips. |
+| X11, 125% | 145 passed, zero failed, three explicit skips. |
+| Sway, 100% | 140 passed, one palette test synchronization failure, seven skips. The corrected palette scenario passed separately. |
+| Sway, 125% | 141 passed, one first-frame scale failure, six skips. The startup fix passed the scale/palette/keyboard/close checks; ten consecutive warm-start scale checks also passed. |
+
+The full-run failures above were investigated and corrected, not discarded or
+converted into skips. Follow-up runs target the changed behavior; they are not
+represented as a fresh full-suite run.
+The host cannot expose FUSE to the GUI, so its hung-mount scenario is explicitly
+skipped. Five Sway scenarios inspect state during a held drag; Sway suppresses
+F12 during that grab, so those diagnostic inspections abstain. They run on X11;
+completed Wayland drags and GTK drag/clipboard interoperation still run.
+
+The real x86-64 tarball passed checksum verification, installation into a prefix
+containing spaces, executable/helper probes, byte comparison of all binaries and
+notices, and uninstall preserving an unrelated file. Its measured GLIBC floor
+is 2.39. Identical binary inputs produce identical archives; independent compiler
+builds have not been shown to produce identical binaries.
+
+## Reproduction
+
+See [tools documentation](../tools/README.md#release-validation-additions) for
+package/font prerequisites and disposable-kernel instructions. Core commands:
 
 ```sh
+cargo build --release --workspace --locked
 ./tools/check
 cargo deny --workspace check
-cargo build --release --workspace --locked
 python3 tools/check-archives.py
-dbus-run-session -- cargo test -p sk-desktop bus::tests::talks_to_a_real_bus -- --ignored --exact --nocapture
+./tools/gui-test --x11
+./tools/gui-test --x11 --scale=1.25
+./tools/gui-test --sway
+./tools/gui-test --sway --scale=1.25
 python3 tools/package.py --arch x86_64 --output /tmp/skerry-artifacts
 ```
 
-The local run used Rust 1.98.1 on x86-64 Linux. Formatting, clippy with warnings
-denied, repository invariants, 976 passing workspace tests (five ignored), the production panic-recovery
-example, three packaging tests and eleven independent archive cases passed.
-The real D-Bus daemon test passed separately. A full cargo-deny run passed
-advisories, licenses, bans and sources against the fetched RustSec database.
-This is a dated audit result, not a guarantee about future advisories.
+Select Rust 1.96.1 for the pinned gates. Golden frames require the recorded font
+bytes, including the Ubuntu 26.04 emoji face and Nimbus Sans; a different font
+package is not a reason to bless new reference pixels. Guest timing and shared
+host timings do not establish the interactive performance budgets.
 
-The actual release tarball was checksummed, installed into a temporary prefix
-containing spaces, and its executable ran `--version`. All four installed binary
-contents matched the archive. Uninstall preserved an unrelated license-directory
-file. This host's binaries require GLIBC symbols through **2.39**; they do not
-establish the portability document's intended 2.28 floor.
+## Publication checks and declared limits
 
-Local omissions were explicit: no Pillow for golden frames, no Xvfb for GUI
-scenarios, no usable FUSE rig, and no enabled Landlock for live denial tests.
-The Rust toolchains pinned by CI and the ARM runner were not available locally.
-An `ok` test that internally skips a missing facility does not close that check.
+- Run the reusable release workflows on the exact committed revision. Native ARM
+  tests and both packaged architectures still need their CI results; local x86
+  evidence is not ARM validation.
+- Verify downloaded package checksums and installation on each advertised distro.
+  Local binaries require GLIBC **2.39**. No claim of a 2.28 binary floor is made;
+  achieving that floor requires an older build baseline and runtime testing.
+- Confirm a private security-reporting channel before publication. The policy
+  describes a safe fallback without inventing a contact address.
+- Perform the final hardware/desktop smoke pass, including Orca and a real task.
+  Software-rendered automated tests do not substitute for every compositor,
+  driver, network filesystem or removable device. NTFS/NFS and the GUI hung-mount
+  case are not covered by this local VM evidence.
 
-## Remaining work before publication
+Known feature limits remain in the [README](../README.md#what-this-alpha-does-not-do):
+accessibility actions/tables are incomplete, X11 lacks input-method/touchpad
+protocols, encrypted volumes and some archive/preview formats are unsupported,
+and recorded performance budget misses remain. AppImage, automatic updates and
+musl distribution artifacts are later work. These limits must accompany the
+alpha release; they are not claims of completed roadmap functionality.
 
-| Requirement | Completion evidence still needed |
-| --- | --- |
-| Validate the exact release commit | Green reusable check workflow: pinned Rust, MSRV, ARM, golden frames, normal/fractional X11 scenarios and supply audit. Run the filesystem torture workflow on that same commit as well. |
-| Validate supported desktop sessions | Wayland scenarios and real desktop smoke tests: opening, clipboard/drag interop, document previews, keyboard use and accessibility. Record compositor, GPU/driver and scale. |
-| Exercise real filesystem failures | Cross-filesystem move/undo, unavailable trash, full disk, permissions, interrupted operations and stalled FUSE/NFS mounts on disposable fixtures. Retained partial work is not a transactional rollback guarantee. |
-| Finish the helper threat model | Run denial tests on a Landlock-enabled host. Archive and document helpers currently grant executable access from `/` to support external programs and loaders; writable-output exclusion alone does not prevent execution there. Narrow the effective grants and validate distro loader compatibility. Network/syscall confinement also needs an explicit policy and implementation; process separation is not a complete sandbox. |
-| Expand archive integrity coverage | Test damaged compression trailers and external decompressor failure after a complete tar payload. The current tar walker stops at its end marker and piped readers do not validate child exit status. Also cover remaining PAX/global-header semantics and non-UTF-8 member names before claiming broad tar compatibility. |
-| Include dependency distribution notices | The license audit checks allowability, not completeness of redistributed copyright/license notices. The tarball currently includes only Skerry's LICENSE and NOTICE. Generate and verify notices for the shipped dependency graph and bundled assets before publication. |
-| Establish binary compatibility | Test each packaged architecture on the oldest distro actually advertised. Build on an appropriately old baseline if claiming glibc 2.28; otherwise publish the measured requirement. Test runtime libraries and helper discovery from the extracted package. |
-| Publish accurate alpha notes | Carry forward the known limits in the README and performance budgets. Record tested systems, unresolved defects and a confirmed private security-reporting route. Do not describe reduced helper isolation as complete confinement. |
-
-AppImage, automatic updates, musl binary artifacts and the unfinished roadmap are
-not implied by the tarball release. They can remain later work if the release
-notes state that scope. The security, integrity and distribution requirements
-above remain open; this document does not authorize publishing around them.
-
-## Preparing and attaching artifacts
-
-Update the workspace version and release notes, commit the changes, and run the
-checks on that commit. The tag must be exactly `v` followed by the workspace
-version. The release workflow validates that relation before packaging.
-
-A manual workflow run validates and uploads workflow artifacts without attaching
-them to a public release. A tag run uses `gh release upload`, so the corresponding
-GitHub release must already exist (a draft is suitable while reviewing assets).
-Existing assets are not overwritten. Download and verify both architectures and
-their checksums before publishing the draft. Tagging, uploading and publication
-are separate release actions; none were performed during this local preparation.
+Tagging, uploading and publication remain separate actions. A manual release
+workflow builds reviewable artifacts; a tag must exactly match `v` plus the
+workspace version. Existing release assets are not overwritten. Nothing in this
+record authorizes publishing without the final checks above.

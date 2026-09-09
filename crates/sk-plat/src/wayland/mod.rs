@@ -12,8 +12,8 @@
 //! was a silent failure that looked like a compositor bug:
 //!
 //! * The fractional-scale object and the viewport are created **before the
-//!   first commit**, so the first configure already carries the scale and there
-//!   is never a frame at the wrong size.
+//!   first commit**. A transparent mapping probe then negotiates the preferred
+//!   scale before the first real frame.
 //! * A selection may only be set with a serial from a real input event, so the
 //!   serials are kept per device rather than one "latest" value.
 
@@ -27,7 +27,7 @@ use text::TextInput;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::fd::AsFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags};
 use sk_model::{Problem, ProblemKind};
@@ -241,6 +241,8 @@ struct State {
     /// Kept as the integer the compositor sent rather than as an `f32`: 1.25 is
     /// exact and 1.1 is not, and every buffer dimension is derived from this.
     scale_120: u32,
+    /// A real preferred-scale event has arrived, including a valid 100% scale.
+    scale_received: bool,
     /// The integer scale, used only when there is no fractional-scale manager.
     fallback_scale: u32,
     logical: (u32, u32),
@@ -365,9 +367,9 @@ impl Window {
             clipboard::open(&handle, &wl_seat, data_manager.as_ref(), primary_manager.as_ref());
         let surface = compositor.create_surface(&handle, ());
         // The order below is the invariant, not a style: both objects exist
-        // before the first commit, so the first configure already carries the
-        // scale. Creating them after it produces one frame at the wrong size,
-        // which is the bug Spike A spent a day on.
+        // before the first commit, so scale negotiation can precede real drawing.
+        // Some compositors send scale only after mapping; probe_scale handles
+        // that phase with a transparent buffer.
         let viewport = viewporter.as_ref().map(|it| it.get_viewport(&surface, &handle, ()));
         if let Some(manager) = &fractional {
             manager.get_fractional_scale(&surface, &handle, ());
@@ -416,6 +418,7 @@ impl Window {
             pending_primary_types: Vec::new(),
             drags: Drags::default(),
             scale_120: 120,
+            scale_received: false,
             fallback_scale: 1,
             logical: config.logical,
             reported: None,
@@ -959,6 +962,7 @@ impl Dispatch<wp_fractional_scale_v1::WpFractionalScaleV1, ()> for State {
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             state.scale_120 = scale.max(1);
+            state.scale_received = true;
         }
     }
 }
@@ -1042,7 +1046,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 /// which is the colour wanted.
 ///
 /// Best effort throughout. A compositor with no `wl_shm`, or one that refuses the
-/// pool, leaves the scale where it was and the second frame corrects it — which
+/// pool, or fails to send scale within 100 ms, leaves the scale where it was
+/// and a later frame corrects it — which
 /// is the behaviour this replaces, not a regression on it.
 fn probe_scale(
     globals: &GlobalList,
@@ -1050,7 +1055,7 @@ fn probe_scale(
     queue: &mut EventQueue<State>,
     state: &mut State,
 ) {
-    if !state.capabilities.fractional_scale {
+    if !state.capabilities.fractional_scale || state.scale_received {
         return;
     }
     let Some(shm): Option<wl_shm::WlShm> = bind(globals, handle, 1..=2) else { return };
@@ -1067,21 +1072,43 @@ fn probe_scale(
     let buffer = pool.create_buffer(0, 1, 1, 4, wl_shm::Format::Argb8888, handle, ());
     state.surface.attach(Some(&buffer), 0, 0);
     state.surface.damage_buffer(0, 0, 1, 1);
-    state.surface.commit();
+    settle_probe(queue, state);
+    buffer.destroy();
+    pool.destroy();
+}
 
-    // Two round trips rather than a wait: the scale arrives on the first one that
-    // follows the map, and a client that blocks until it does is a client that
-    // never starts on a compositor that does not send it.
-    for _ in 0..2 {
-        if queue.roundtrip(state).is_err() {
+/// A sync reply is not a scale reply. Sway sends scale after its layout
+/// transaction completes, which also needs a buffer at the configured size.
+/// Stretch the transparent pixel to that size and commit again on configure.
+fn settle_probe(queue: &mut EventQueue<State>, state: &mut State) {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut committed = None;
+    while !state.scale_received && Instant::now() < deadline {
+        if queue.dispatch_pending(state).is_err() {
             break;
         }
-        if state.reported.is_some() {
+        if committed != Some(state.logical) {
+            if let Some(viewport) = &state.viewport {
+                viewport
+                    .set_destination(state.logical.0.cast_signed(), state.logical.1.cast_signed());
+            }
+            state.surface.commit();
+            committed = Some(state.logical);
+        }
+        if state.scale_received || queue.flush().is_err() {
+            break;
+        }
+        let Some(guard) = queue.prepare_read() else { continue };
+        let display = guard.connection_fd();
+        let mut fds = [PollFd::new(&display, PollFlags::IN)];
+        let remaining = to_timespec(deadline.saturating_duration_since(Instant::now()));
+        let ready = rustix::event::poll(&mut fds, Some(&remaining)).unwrap_or(0);
+        if ready == 0 || !fds[0].revents().contains(PollFlags::IN) || guard.read().is_err() {
             break;
         }
     }
-    buffer.destroy();
-    pool.destroy();
+    // Include a scale delivered by the final readable batch at the deadline.
+    let _ = queue.dispatch_pending(state);
 }
 
 macro_rules! ignore_events {
