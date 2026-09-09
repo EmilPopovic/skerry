@@ -273,3 +273,6 @@ it is a gate and not a paragraph.
 The budgets are deliberately tight enough to hurt occasionally. That is the mechanism: a
 dependency that is worth breaking a budget for is worth an ADR, and one that is not gets
 declined without a debate.
+
+Runtime degradation overrides use the existing level-0 `sk-util` crate, including
+from `sk-desktop` for the udisks2 probe (ADR 0037). This adds no external crate.

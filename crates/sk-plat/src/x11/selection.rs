@@ -590,6 +590,7 @@ pub(super) struct Types {
     plain: xproto::Atom,
     plain_utf8: xproto::Atom,
     gnome: xproto::Atom,
+    kde: xproto::Atom,
     targets: xproto::Atom,
 }
 
@@ -601,6 +602,7 @@ impl Types {
             plain: atoms.text_plain,
             plain_utf8: atoms.text_plain_utf8,
             gnome: atoms.gnome_copied_files,
+            kde: atoms.kde_cutselection,
             targets: atoms.TARGETS,
         }
     }
@@ -615,6 +617,7 @@ impl Types {
             "text/plain;charset=utf-8" | "text/plain;charset=UTF-8" => self.utf8,
             "text/plain" => self.plain,
             "x-special/gnome-copied-files" => self.gnome,
+            "application/x-kde-cutselection" => self.kde,
             "TARGETS" => self.targets,
             _ => return None,
         })
@@ -628,6 +631,8 @@ impl Types {
             Some("text/plain;charset=utf-8")
         } else if atom == self.plain || atom == xproto::Atom::from(xproto::AtomEnum::STRING) {
             Some("text/plain")
+        } else if atom == self.kde {
+            Some("application/x-kde-cutselection")
         } else if atom == self.gnome {
             Some("x-special/gnome-copied-files")
         } else {
@@ -640,8 +645,15 @@ impl Types {
 mod tests {
     use super::*;
 
-    const TYPES: Types =
-        Types { uri_list: 100, utf8: 101, plain: 102, plain_utf8: 103, gnome: 104, targets: 105 };
+    const TYPES: Types = Types {
+        uri_list: 100,
+        utf8: 101,
+        plain: 102,
+        plain_utf8: 103,
+        gnome: 104,
+        targets: 105,
+        kde: 106,
+    };
 
     /// A round trip has to land on the same MIME type, or a `TARGETS` reply
     /// lists a type a peer can ask for and never receive.
@@ -652,6 +664,7 @@ mod tests {
             "text/plain;charset=utf-8",
             "text/plain",
             "x-special/gnome-copied-files",
+            "application/x-kde-cutselection",
         ] {
             let Some(atom) = TYPES.atom(mime) else { panic!("{mime} has no atom") };
             assert_eq!(TYPES.mime(atom), Some(mime), "{mime} did not survive");

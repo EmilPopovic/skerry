@@ -92,6 +92,8 @@ pub enum Edit {
 /// What kind of thing a row points at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
+    /// Persistent recoverable items on a mounted filesystem.
+    Trash,
     /// One of the well-known user directories, or a bookmark.
     Place(Kind),
     /// A mounted filesystem.
@@ -614,7 +616,24 @@ pub(crate) fn build() -> Vec<Section> {
     let mounts = sk_fs::volumes();
 
     let mut sections = Vec::with_capacity(3);
-    sections.push(Section { title: "sidebar.places", entries: places.iter().map(row).collect() });
+    let mut entries: Vec<Entry> = places.iter().map(row).collect();
+    if let Ok(path) = sk_fs::trash::home_files() {
+        entries.push(trash_row(path, sk_model::i18n::lookup("sidebar.trash").to_owned()));
+    }
+    for mount in &mounts {
+        if mount.remote {
+            continue;
+        }
+        if let Some(at) = &mount.at {
+            for path in sk_fs::trash::locations(at) {
+                if !entries.iter().any(|entry| entry.path == path) {
+                    let label = sk_model::i18n::format("sidebar.volume_trash", &[&at.display()]);
+                    entries.push(trash_row(path, label));
+                }
+            }
+        }
+    }
+    sections.push(Section { title: "sidebar.places", entries });
     if !marks.is_empty() {
         sections.push(Section {
             title: "sidebar.pinned",
@@ -650,6 +669,19 @@ fn vanished(before: &[Section], after: &[Section]) -> Vec<PathBuf> {
     };
     let now = mounted(after);
     mounted(before).into_iter().filter(|at| !now.contains(at)).collect()
+}
+
+fn trash_row(path: PathBuf, label: String) -> Entry {
+    Entry {
+        path,
+        label,
+        mark: Mark::Trash,
+        remote: false,
+        free: None,
+        pinned: false,
+        device: None,
+        unmounted: false,
+    }
 }
 
 fn row(place: &Place) -> Entry {

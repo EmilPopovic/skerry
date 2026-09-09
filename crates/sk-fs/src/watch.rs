@@ -83,6 +83,32 @@ pub enum Change {
     Mounts,
 }
 
+/// Why a listing cannot receive filesystem change notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// Forced absence during a degradation check.
+    Disabled,
+    /// The filesystem does not report remote changes through inotify.
+    Remote,
+    /// The per-user watch quota is exhausted.
+    Limit,
+    /// Registration failed, including vanished paths and access denial.
+    Unavailable,
+}
+
+impl Failure {
+    /// Persistent, actionable status text.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Disabled => "watch.disabled",
+            Self::Remote => "watch.remote",
+            Self::Limit => "watch.limit",
+            Self::Unavailable => "watch.unavailable",
+        }
+    }
+}
+
 /// The events worth waking a listing for.
 ///
 /// `IN_MODIFY` is deliberately absent: a file being written does not change the
@@ -204,6 +230,7 @@ pub struct Watcher {
     /// The directories a watch was actually established on. Written by the
     /// thread, read by the caller.
     armed: Arc<Mutex<Vec<PathBuf>>>,
+    failures: Arc<Mutex<Vec<(PathBuf, Failure)>>>,
     /// Wakes the thread out of `poll` when the target changes or it should stop.
     control: OwnedFd,
     stopping: Arc<AtomicBool>,
@@ -218,7 +245,7 @@ impl Watcher {
         // empty — which is every read at the end of a burst — waits with no
         // deadline, and the thread never comes back to notice anything again.
         let inotify =
-            inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK)?;
+            inotify::init(inotify::CreateFlags::CLOEXEC | inotify::CreateFlags::NONBLOCK).ok();
         let control = rustix::event::eventfd(
             0,
             rustix::event::EventfdFlags::CLOEXEC | rustix::event::EventfdFlags::NONBLOCK,
@@ -228,11 +255,13 @@ impl Watcher {
         let wanted = Arc::new(Mutex::new(None));
         let armed = Arc::new(Mutex::new(Vec::new()));
         let stopping = Arc::new(AtomicBool::new(false));
+        let failures = Arc::new(Mutex::new(Vec::new()));
 
         let thread = std::thread::Builder::new().name("skerry-watch".to_owned()).spawn({
             let wanted = Arc::clone(&wanted);
             let armed = Arc::clone(&armed);
             let stopping = Arc::clone(&stopping);
+            let failures = Arc::clone(&failures);
             move || {
                 let mut state = Thread {
                     inotify,
@@ -241,6 +270,7 @@ impl Watcher {
                     control: thread_control,
                     wanted,
                     armed,
+                    failures,
                     stopping,
                     changes,
                     wake,
@@ -250,7 +280,7 @@ impl Watcher {
             }
         })?;
 
-        Ok(Self { wanted, armed, control, stopping, thread: Some(thread) })
+        Ok(Self { wanted, armed, failures, control, stopping, thread: Some(thread) })
     }
 
     /// Watches exactly `paths`, dropping every watch not in it.
@@ -271,6 +301,17 @@ impl Watcher {
         self.armed.lock().is_ok_and(|armed| armed.iter().any(|it| it == path))
     }
 
+    /// Last registration failure; refresh retries it explicitly.
+    #[must_use]
+    pub fn failure(&self, path: &Path) -> Option<Failure> {
+        self.failures
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(failed, _)| failed == path)
+            .map(|(_, reason)| *reason)
+    }
+
     fn poke(&self) {
         let _ = rustix::io::write(self.control.as_fd(), &1u64.to_ne_bytes());
     }
@@ -280,14 +321,16 @@ impl Drop for Watcher {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Release);
         self.poke();
-        if let Some(thread) = self.thread.take() {
+        // A registration can be blocked in a mount syscall. Exiting the window
+        // must not wait for that filesystem; the worker owns all its state.
+        if let Some(thread) = self.thread.take().filter(std::thread::JoinHandle::is_finished) {
             let _ = thread.join();
         }
     }
 }
 
 struct Thread {
-    inotify: OwnedFd,
+    inotify: Option<OwnedFd>,
     /// `/proc/self/mountinfo`, held open only to be polled. `None` where it
     /// cannot be opened, which is a machine with no `procfs` and a sidebar whose
     /// volumes are a snapshot.
@@ -298,6 +341,7 @@ struct Thread {
     control: OwnedFd,
     wanted: Arc<Mutex<Option<Vec<PathBuf>>>>,
     armed: Arc<Mutex<Vec<PathBuf>>>,
+    failures: Arc<Mutex<Vec<(PathBuf, Failure)>>>,
     stopping: Arc<AtomicBool>,
     changes: Sender<Change>,
     wake: WakeHandle,
@@ -311,11 +355,14 @@ impl Thread {
     fn run(&mut self) {
         while !self.stopping.load(Ordering::Acquire) {
             self.retarget();
-            let inotify = self.inotify.as_fd();
+            let inotify = self.inotify.as_ref().map(AsFd::as_fd);
             let control = self.control.as_fd();
             let mut fds = Vec::with_capacity(4);
-            fds.push(PollFd::new(&inotify, PollFlags::IN));
             fds.push(PollFd::new(&control, PollFlags::IN));
+            if let Some(inotify) = &inotify {
+                fds.push(PollFd::new(inotify, PollFlags::IN));
+            }
+            let mount_at = fds.len();
             let table = self.mounts.as_ref().map(AsFd::as_fd);
             if let Some(table) = table.as_ref() {
                 fds.push(PollFd::new(table, PollFlags::PRI));
@@ -334,7 +381,7 @@ impl Thread {
             if rustix::event::poll(&mut fds, None).is_err() {
                 continue;
             }
-            if fds[1].revents().contains(PollFlags::IN) {
+            if fds[0].revents().contains(PollFlags::IN) {
                 let mut buffer = [0u8; 8];
                 let _ = rustix::io::read(self.control.as_fd(), &mut buffer);
             }
@@ -343,10 +390,11 @@ impl Thread {
             // of them as a mount would spin this thread and drag the frame loop
             // out of its sleep at the same rate.
             let remounted = self.mounts.is_some()
-                && fds.get(2).is_some_and(|fd| fd.revents().contains(PollFlags::PRI));
+                && fds.get(mount_at).is_some_and(|fd| fd.revents().contains(PollFlags::PRI));
             let unplugged =
                 fds.get(socket_at).is_some_and(|fd| fd.revents().contains(PollFlags::IN));
-            let touched = fds[0].revents().contains(PollFlags::IN);
+            let touched = inotify.is_some()
+                && fds.get(1).is_some_and(|fd| fd.revents().contains(PollFlags::IN));
             // The borrows of the descriptors end here, which is why every answer
             // is taken before any handler runs.
             drop(fds);
@@ -422,26 +470,38 @@ impl Thread {
 
         self.watches.retain(|(descriptor, path)| {
             let keep = paths.contains(path);
-            if !keep {
-                let _ = inotify::remove_watch(self.inotify.as_fd(), *descriptor);
+            if !keep && let Some(inotify) = &self.inotify {
+                let _ = inotify::remove_watch(inotify, *descriptor);
             }
             keep
         });
+        if let Ok(mut failures) = self.failures.lock() {
+            failures.clear();
+        }
         for path in paths {
             if self.watches.iter().any(|(_, it)| *it == path) {
                 continue;
             }
-            // The one syscall in this file that can block on a hung mount, which
-            // is why it happens here and not on the frame loop.
-            //
-            // A directory inotify cannot cover — NFS, or one that vanished
-            // between the read and the watch — is left out of the set rather
-            // than reported as an error, because the listing is still valid and
-            // `armed` is how a caller asks.
-            if let Ok(descriptor) =
-                inotify::add_watch(self.inotify.as_fd(), &path, watched_events())
+            let refusal = if sk_util::disabled("watch") {
+                Some(Failure::Disabled)
+            } else if !can_watch(&path) {
+                Some(Failure::Remote)
+            } else if let Some(inotify) = &self.inotify {
+                match inotify::add_watch(inotify, &path, watched_events()) {
+                    Ok(descriptor) => {
+                        self.watches.push((descriptor, path.clone()));
+                        None
+                    }
+                    Err(rustix::io::Errno::NOSPC) => Some(Failure::Limit),
+                    Err(_) => Some(Failure::Unavailable),
+                }
+            } else {
+                Some(Failure::Unavailable)
+            };
+            if let Some(reason) = refusal
+                && let Ok(mut failures) = self.failures.lock()
             {
-                self.watches.push((descriptor, path));
+                failures.push((path, reason));
             }
         }
         self.publish();
@@ -450,13 +510,16 @@ impl Thread {
     /// Drops every watch. Only the way out: the thread is stopping.
     fn disarm(&mut self) {
         for (descriptor, _) in self.watches.drain(..) {
-            let _ = inotify::remove_watch(self.inotify.as_fd(), descriptor);
+            if let Some(inotify) = &self.inotify {
+                let _ = inotify::remove_watch(inotify, descriptor);
+            }
         }
         self.publish();
     }
 
     /// Copies the armed set out for [`Watcher::armed`] to read.
     fn publish(&self) {
+        self.wake.wake();
         if let Ok(mut armed) = self.armed.lock() {
             armed.clear();
             armed.extend(self.watches.iter().map(|(_, path)| path.clone()));
@@ -466,6 +529,7 @@ impl Thread {
     /// Reads everything queued, gathers a coalescing window, and sends one
     /// notification per directory the burst touched.
     fn drain(&mut self) {
+        let Some(inotify) = self.inotify.as_ref() else { return };
         // Uninitialized because `Reader` fills it from the kernel and hands back
         // only the bytes it wrote. 8 KiB is about 250 events per read.
         let mut buffer = [std::mem::MaybeUninit::<u8>::uninit(); 8192];
@@ -474,7 +538,7 @@ impl Thread {
         let deadline = std::time::Instant::now() + COALESCE;
 
         loop {
-            let mut reader = inotify::Reader::new(self.inotify.as_fd(), &mut buffer);
+            let mut reader = inotify::Reader::new(inotify.as_fd(), &mut buffer);
             // `Errno::AGAIN` on a non-blocking descriptor is the end of the
             // queue, and it is the only way out of this loop.
             while let Ok(event) = reader.next() {
@@ -500,7 +564,7 @@ impl Thread {
             if remaining.is_zero() {
                 break;
             }
-            let inotify = self.inotify.as_fd();
+            let inotify = inotify.as_fd();
             let mut fds = [PollFd::new(&inotify, PollFlags::IN)];
             let spec = rustix::fs::Timespec {
                 tv_sec: i64::try_from(remaining.as_secs()).unwrap_or(0),
@@ -843,6 +907,14 @@ mod tests {
             settle(&watcher, &missing, false),
             "a watch on a missing directory looked established"
         );
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while watcher.failure(&missing).is_none() && std::time::Instant::now() < until {
+            std::thread::yield_now();
+        }
+        assert_eq!(watcher.failure(&missing), Some(super::Failure::Unavailable));
+        watcher.watch(vec![root.clone()]);
+        assert!(settle(&watcher, &root, true));
+        assert!(watcher.failure(&root).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 

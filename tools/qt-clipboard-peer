@@ -1,0 +1,41 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: Apache-2.0
+"""A real Qt clipboard peer for the alpha interoperability scenarios."""
+import json
+import sys
+from PyQt6.QtCore import QMimeData, Qt, QUrl
+from PyQt6.QtWidgets import QApplication, QWidget
+
+app = QApplication(["skerry-qt-peer"])
+app.setApplicationName("skerry-qt-peer")
+app.setDesktopFileName("skerry-qt-peer")
+paths = sys.argv[1:]
+
+
+class Peer(QWidget):
+    def keyPressEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.key() in (Qt.Key.Key_C, Qt.Key.Key_X) and paths:
+                data = QMimeData()
+                data.setUrls([QUrl.fromLocalFile(path) for path in paths])
+                data.setData("application/x-kde-cutselection", b"1" if event.key() == Qt.Key.Key_X else b"0")
+                app.clipboard().setMimeData(data)
+                print("published", flush=True)
+                return
+            if event.key() == Qt.Key.Key_V:
+                data = app.clipboard().mimeData()
+                print("received " + json.dumps({
+                    "cut": bytes(data.data("application/x-kde-cutselection")).decode("ascii", "replace"),
+                    "paths": [url.toLocalFile() for url in data.urls()],
+                }), flush=True)
+                return
+        super().keyPressEvent(event)
+
+
+window = Peer()
+window.setWindowTitle("skerry-qt-peer")
+window.resize(280, 180)
+window.move(1150, 120)
+window.show()
+print("ready", flush=True)
+sys.exit(app.exec())

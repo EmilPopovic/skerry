@@ -121,6 +121,12 @@ pub fn take_the_name(path: Option<&std::path::Path>) -> (Standing, Option<Bus>) 
     }
 }
 
+/// An independent window retains a unique bus connection without owning global names.
+#[must_use]
+pub fn independent_bus() -> Option<Bus> {
+    Bus::session()
+}
+
 /// The name is ours, so ask for the desktop's one too and keep the connection.
 ///
 /// Best effort, and its own answer: a desktop with Nautilus running has an owner
@@ -148,6 +154,9 @@ fn ours(mut bus: Bus) -> (Standing, Option<Bus>) {
 /// who cares presses `Ctrl+Shift+D`.
 #[must_use]
 pub fn desktop_prefers_dark(bus: &mut Bus) -> Option<bool> {
+    if sk_util::disabled("portal") {
+        return None;
+    }
     let call = Message::call(
         "org.freedesktop.portal.Desktop",
         "/org/freedesktop/portal/desktop",

@@ -246,6 +246,7 @@ fn main() -> std::process::ExitCode {
     let mut path = None;
     let mut dark = true;
     let mut stats = false;
+    let mut new_window = false;
     let mut overlays = Overlays::default();
     let mut own_frame = false;
     let mut no_sidebar = false;
@@ -269,6 +270,7 @@ fn main() -> std::process::ExitCode {
         match argument.as_str() {
             "--light" => dark = false,
             "--stats" => stats = true,
+            "--new-window" => new_window = true,
             "--own-frame" => own_frame = true,
             "--no-sidebar" => no_sidebar = true,
             "--capture" => match arguments.next() {
@@ -377,11 +379,23 @@ fn main() -> std::process::ExitCode {
         }
         (None, None) => {
             // Before the window, which is the only place it can be: ADR 0023.
-            let (standing, bus) = sk_app::take_the_name(named_path.as_deref());
+            let (standing, bus) = if new_window {
+                (sk_app::Standing::Alone, sk_app::independent_bus())
+            } else {
+                sk_app::take_the_name(named_path.as_deref())
+            };
             if standing == sk_app::Standing::Second {
                 return std::process::ExitCode::SUCCESS;
             }
+            sk_app::install_panic_log(concat!(
+                "skerry ",
+                env!("CARGO_PKG_VERSION"),
+                " (",
+                env!("SKERRY_COMMIT"),
+                ")"
+            ));
             window(Options {
+                new_window,
                 bus,
                 // A named directory is an explicit request for one directory,
                 // so the saved layout stays saved and is not opened over it.
@@ -450,6 +464,7 @@ const USAGE: &str = "\
 skerry [OPTIONS] [PATH]
 
   PATH             the directory to open, defaulting to $HOME
+  --new-window     open independently with a separate saved session
   --light          use the light palette
   --stats          show the frame statistics overlay
   --keys           show the keyboard overlay

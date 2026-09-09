@@ -14,14 +14,20 @@ install:
 		install -Dm755 "usr/bin/$$binary" "$(bindir)/$$binary" || exit 1; \
 	done
 	install -Dm644 usr/share/applications/dev.skerry.Skerry.desktop "$(datadir)/applications/dev.skerry.Skerry.desktop"
+	install -Dm644 usr/share/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg "$(datadir)/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg"
 	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
 	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"
 	install -Dm644 THIRD-PARTY-NOTICES.txt "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt"
 	install -Dm644 RUST-COPYRIGHT.html "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
+	install -Dm644 RELEASE-NOTES.md "$(datadir)/doc/skerry/RELEASE-NOTES.md"
+	install -Dm644 SECURITY.md "$(datadir)/doc/skerry/SECURITY.md"
 
 uninstall:
 	for binary in $(BINARIES); do rm -f "$(bindir)/$$binary"; done
 	rm -f "$(datadir)/applications/dev.skerry.Skerry.desktop"
+	rm -f "$(datadir)/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg"
 	rm -f "$(datadir)/licenses/skerry/LICENSE" "$(datadir)/licenses/skerry/NOTICE"
 	rm -f "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt" "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
+	rm -f "$(datadir)/doc/skerry/RELEASE-NOTES.md" "$(datadir)/doc/skerry/SECURITY.md"
 	-rmdir "$(datadir)/licenses/skerry"
+	-rmdir "$(datadir)/doc/skerry"

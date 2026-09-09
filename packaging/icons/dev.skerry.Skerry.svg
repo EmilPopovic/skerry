@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Skerry</title>
+  <path fill="#347fa6" d="M12 30a10 10 0 0 1 10-10h29l13 14h42a10 10 0 0 1 10 10v56a10 10 0 0 1-10 10H22a10 10 0 0 1-10-10z"/>
+  <path fill="#68b9d5" d="M12 48a10 10 0 0 1 10-10h84a10 10 0 0 1 10 10v52a10 10 0 0 1-10 10H22a10 10 0 0 1-10-10z"/>
+  <path fill="#f1f6e9" d="m38 82 19-31 13 19 11-10 15 22z"/>
+  <path fill="none" stroke="#e6f6fa" stroke-linecap="round" stroke-width="5" d="M33 91h62"/>
+</svg>

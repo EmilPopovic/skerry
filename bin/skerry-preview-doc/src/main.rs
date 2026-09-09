@@ -32,6 +32,10 @@ use std::process::Command;
 use sk_preview::wire::{Refusal, Reply, Request};
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("skerry-preview-doc {} ({})", env!("CARGO_PKG_VERSION"), env!("SKERRY_COMMIT"));
+        return;
+    }
     if std::env::args().any(|it| it == "--probe") {
         // **The same confinement the served process gets**, or the probe answers
         // a question nobody asked: its first version granted no execute right, so

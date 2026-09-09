@@ -84,6 +84,9 @@ const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 /// rather than drawn and then failing when it is pressed.
 #[must_use]
 pub fn available() -> bool {
+    if sk_util::disabled("udisks2") {
+        return false;
+    }
     // **Its version, not a device.** The first version of this asked
     // `ResolveDevice` about `/` and read the refusal as "no udisks2" — and `/`
     // is a mount point rather than a device, so the answer was

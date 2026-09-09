@@ -430,7 +430,7 @@ preview.more = …
 # with neither a picture nor a sentence in it is the one state it must never be
 # in — a person cannot tell it apart from a program that has stopped.
 preview.unavailable = This file could not be shown.
-preview.interrupted = The preview helper stopped before it answered. Press Space again to retry.
+preview.interrupted = The preview helper is unavailable or stopped before answering. Check that Skerry and its helpers are installed together; reopen the preview to retry.
 archive.unreadable = This archive could not be read.
 archive.undecodable = This archive is damaged — these are the entries that could be read before it stopped.
 archive.no_unpacker = {0} is not installed, so what is inside cannot be listed. Install it and press Space again.
@@ -642,3 +642,35 @@ archive.partial = Some entries could not be extracted. The partial output was ke
 
 error.unsupported_archive = {0} uses an unsupported archive variant. Use another archive tool. Any partial output was kept and can be undone.
 archive.unsupported = This archive uses a variant Skerry cannot read safely. Use another archive tool.
+
+error.trash_unavailable = Cannot use Trash for {0}. The file has been kept. Check the volume is mounted and its trash is writable, then try again.
+history.restored = Restored {0}
+history.restored_many[one] = Restored {0} item
+history.restored_many[other] = Restored {0} items
+action.restore = Restore from Trash
+notice.restored = Restored {0} of {1}
+verb.restoring = Restoring
+sidebar.trash = Trash
+sidebar.volume_trash = Trash — {0}
+notice.trash_metadata = {0}: the move completed, but its recovery metadata could not be fully saved or cleaned up. Check the trash permissions before continuing.
+notice.queue_failed = {0} — {1} items waiting. Pick up to retry, or use Skip failed item / Dismiss operation in the menu.
+action.skip_failed = Skip failed item and continue
+action.dismiss_issue = Dismiss operation and discard pending work
+
+properties.original = Restore to
+
+drag.copy = Copy {0}
+drag.move = Move {0}
+
+watch.disabled = Automatic refresh disabled. Listing may be stale — F5 to refresh.
+watch.remote = Remote changes are not reported. Listing may be stale — F5 to refresh.
+watch.limit = Watch limit reached. Listing may be stale — F5 to refresh and retry.
+watch.unavailable = Cannot watch this folder. Listing may be stale — F5 to refresh and retry.
+
+action.new_window = New window
+notice.new_window = Opening a new window
+error.new_window = Could not start a new window. Check that the Skerry executable is still installed.
+
+error.clipboard_changed = The clipboard changed during Paste. Copy the intended files again and retry.
+
+preview.thumbnails_unavailable = Thumbnails unavailable. Built-in icons are shown; check the installed helpers.

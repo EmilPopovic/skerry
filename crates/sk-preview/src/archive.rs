@@ -574,7 +574,7 @@ impl Record {
 #[must_use]
 pub fn list(archive: &Path, cancel: &sk_util::Cancel) -> Listing {
     let Some(mut child) = spawn() else {
-        return Listing::refused(Refusal::Interrupted, "skerry-archive".to_owned());
+        return Listing::refused(Refusal::NoUnpacker, "skerry-archive".to_owned());
     };
     let request = Request {
         ask: Ask::List,

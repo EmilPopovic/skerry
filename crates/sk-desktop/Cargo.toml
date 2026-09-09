@@ -11,6 +11,7 @@ publish.workspace = true
 level = 2
 
 [dependencies]
+sk-util = { workspace = true }
 sk-model = { workspace = true }
 sk-fs = { workspace = true }
 rustix = { workspace = true }

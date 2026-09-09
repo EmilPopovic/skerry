@@ -3,7 +3,9 @@
 A file manager for Linux, written in Rust, built on the premise that a file manager
 is a **latency product and an interaction-design product** — not a feature checklist.
 
-Status: **`0.1.0-alpha.1` — preparing for public pre-release.** The
+Status: **`0.1.0-alpha.1` — preparing for public pre-release.**
+[RELEASE-NOTES.md](RELEASE-NOTES.md) is the user-facing summary: compatibility,
+recovery behaviour and known limits. The
 [release checklist](docs/13-release-readiness.md) records test evidence and remaining
 publication checks. See the [security policy](SECURITY.md) for reporting and helper
 isolation limits. Twelve
@@ -196,6 +198,50 @@ the first bug report on one of them.
   panel — the line is that a container Skerry can parse it parses, and a
   compressor is the machine's ([ADR
   0032](docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
+- **No icon themes.** An application icon ships and the desktop entry names it,
+  but nothing is resolved out of `index.theme`: the window draws its own built-in
+  glyphs, and a file's mark is a page coloured by its MIME category rather than
+  the themed icon the rest of the desktop would draw for it.
+- **Creating things is thin.** New folder and a single rename. No new file, no
+  Templates, no symlinks, and no batch rename — which M3 names and this is not.
+- **Properties is read-only**, and it shows owners as numeric ids rather than
+  account names. Nothing about a file's permissions can be changed from it.
+- **Rebinding means editing the config file.** Every command and its chords are
+  written to `$XDG_CONFIG_HOME/skerry/config` and a line rebinds one
+  ([ADR 0025](docs/adr/0025-the-config-file-is-the-keymap-written-out.md)), but
+  there is no panel that does it, no hot reload, and no sequences, aliases or vim
+  layer. Rule 4 is not fully met, and saying so is better than a caveat that
+  claims it is.
+- **English only.** The catalogue is keyed from the first commit and every string
+  goes through `t!()`, which is the groundwork — but it is compiled in, there is
+  no `LANG` lookup, and the plural rule is English's. A contributed translation
+  cannot be dropped in today.
+- **Sorting, columns and selection are the basics.** Name, size and modified,
+  three fixed columns with no picker, no sort by type or extension, and no invert
+  or select-by-pattern.
+- **The clipboard speaks GNOME and KDE, not the portal.** Both conventions are
+  published and read, so a cut stays a cut in either direction
+  ([ADR 0039](docs/adr/0039-file-clipboard-intent-belongs-to-one-offer.md)) —
+  tested against a real GTK peer and a real Qt peer, which is not the same as
+  testing against Nautilus and Dolphin themselves. Portal file transfers are not
+  implemented, so a sandboxed Flatpak peer receives nothing.
+- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag says
+  whether it will move or copy, but there is no right-drag menu, no link action
+  and no drop onto an executable.
+- **No "always open with this."** Open With opens once. The only default this
+  writes is the folder handler, from the settings panel.
+- **No recents, no path completion.** `Ctrl+L` takes a path and that is all it does.
+- **Search has no ignore rules**, so a search over a checkout walks `.git`, and
+  there are no extension facets. Both are M4.
+- **No desktop notification** when a copy finishes with the window unfocused. The
+  result and its warnings stay in the app.
+- **Fuzzing covers tar, ZIP and the D-Bus wire only**, as bounded mutation
+  campaigns rather than coverage-guided fuzzing
+  ([ADR 0040](docs/adr/0040-bounded-parser-mutation-campaigns.md)). The markdown,
+  `.desktop`, MIME and keymap parsers have adversarial unit tests and no campaign.
+- **The binaries need glibc 2.39.** That is measured from the artifacts, not a
+  target — it excludes Debian 12 and Ubuntu 22.04. Building from source on an
+  older distribution is unaffected. See [RELEASE-NOTES.md](RELEASE-NOTES.md).
 
 ## Working on it
 

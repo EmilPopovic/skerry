@@ -55,7 +55,15 @@ const ROOM: usize = MOST_TABLE - MOST_TABLE / 8;
 /// this should allocate, and the answer is to skip it.
 const MOST_LINK: u64 = 4096;
 
+#[cfg(test)]
+#[path = "../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("skerry-archive {} ({})", env!("CARGO_PKG_VERSION"), env!("SKERRY_COMMIT"));
+        return;
+    }
     if std::env::args().any(|it| it == "--probe") {
         probe();
         return;

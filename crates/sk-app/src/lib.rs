@@ -75,3 +75,9 @@ pub use groups::Grouping;
 // calls them has to be able to name what they fail with.
 pub use pane::Pane;
 pub use sk_model::Problem;
+
+/// An independent window's bus connection, without global name ownership.
+pub use service::independent_bus;
+
+/// Install the local diagnostic hook before opening a window.
+pub use session::install_panic_log;

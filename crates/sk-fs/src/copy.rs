@@ -354,6 +354,16 @@ pub fn copy_to(
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(Progress),
 ) -> Result<(), Problem> {
+    copy_to_options(source, destination, Options::default(), cancel, watch)
+}
+
+pub(crate) fn copy_to_options(
+    source: &Path,
+    destination: &Path,
+    options: Options,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(Progress),
+) -> Result<(), Problem> {
     if let Some(into) = destination.parent()
         && (into == source || into.starts_with(source))
     {
@@ -364,7 +374,7 @@ pub fn copy_to(
         ));
     }
     let mut progress = Progress::default();
-    copy_any(source, destination, Options::default(), cancel, &mut progress, watch, 0)
+    copy_any(source, destination, options, cancel, &mut progress, watch, 0)
 }
 
 /// A name nothing in `into` is called, from `name`.
@@ -588,6 +598,9 @@ fn copy_any(
                 watch(Progress { bytes: base.bytes + bytes, ..base });
                 !cancel.is_cancelled()
             })?;
+            progress.done += 1;
+            progress.bytes += stat.st_size.cast_unsigned();
+            watch(*progress);
             if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
                 return Err(Problem::new(
                     ProblemKind::Preservation,
@@ -598,9 +611,6 @@ fn copy_any(
                     ),
                 ));
             }
-            progress.done += 1;
-            progress.bytes += stat.st_size.cast_unsigned();
-            watch(*progress);
             Ok(())
         }
         // Recreated rather than followed. A link is 40 bytes and what it points at
@@ -656,8 +666,11 @@ fn copy_directory(
         Err(Errno::EXIST) if options.replace || options.resume => {}
         Err(error) => return Err(at(error, destination, "mkdir")),
     }
+    // Keep the first warning bounded in memory, but finish every child. A
+    // preservation warning describes published data; other errors stop the walk.
+    let mut warning = None;
     for child in children(source)? {
-        copy_any(
+        let result = copy_any(
             &source.join(&child),
             &destination.join(&child),
             options,
@@ -665,7 +678,13 @@ fn copy_directory(
             progress,
             watch,
             depth + 1,
-        )?;
+        );
+        if let Err(problem) = result {
+            if problem.kind() != ProblemKind::Preservation {
+                return Err(problem);
+            }
+            warning.get_or_insert(problem);
+        }
     }
     // Mode and times after the contents, for the reason a file's are: writing a
     // child moves the directory's modification time.
@@ -686,15 +705,17 @@ fn copy_directory(
         missing.push("times".to_owned());
     }
     if !missing.is_empty() {
-        return Err(Problem::new(
-            ProblemKind::Preservation,
-            destination.display().to_string(),
-            missing.join(", "),
-        ));
+        warning.get_or_insert_with(|| {
+            Problem::new(
+                ProblemKind::Preservation,
+                destination.display().to_string(),
+                missing.join(", "),
+            )
+        });
     }
     progress.done += 1;
     watch(*progress);
-    Ok(())
+    warning.map_or(Ok(()), Err)
 }
 
 /// Whether `path` is a regular file of exactly `bytes`.
@@ -955,6 +976,11 @@ fn extent(
     Ok(Some((data, hole)))
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static REFUSE_NEXT_XATTR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Copies extended attributes, reporting each one that will not go.
 ///
 /// `security.*` and `trusted.*` need privilege this process does not have, and a
@@ -966,6 +992,11 @@ pub(crate) fn copy_xattrs(
     into: &impl std::os::fd::AsFd,
     out: &mut Vec<String>,
 ) {
+    #[cfg(test)]
+    if REFUSE_NEXT_XATTR.with(|refuse| refuse.replace(false)) {
+        out.push("injected unsupported extended attribute".to_owned());
+        return;
+    }
     let mut names = vec![0u8; 64 * 1024];
     let length = match fs::flistxattr(from.as_fd(), &mut names[..]) {
         Ok(length) => length,
@@ -1342,6 +1373,34 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    #[test]
+    fn a_metadata_warning_finishes_the_entire_tree() {
+        let root = scratch("tree-warning");
+        let source = tree(&root);
+        let into = root.join("elsewhere");
+        std::fs::create_dir(&into).unwrap();
+        super::REFUSE_NEXT_XATTR.with(|refuse| refuse.set(true));
+        let mut progress = super::Progress::default();
+        let problem = super::copy_into(
+            &source,
+            &into,
+            Options::default(),
+            &sk_util::Cancel::new(),
+            &mut progress,
+            &mut |_| {},
+        )
+        .expect_err("metadata warning remains visible");
+        assert_eq!(problem.kind(), sk_model::ProblemKind::Preservation);
+        assert_eq!(walk(&source), walk(&into.join("tree")));
+        assert_eq!(progress.done, 7);
+        for file in ["top.txt", "inner/middle.txt", "inner/deeper/bottom.txt"] {
+            assert_eq!(
+                std::fs::read(source.join(file)).unwrap(),
+                std::fs::read(into.join("tree").join(file)).unwrap()
+            );
+        }
     }
 
     #[test]

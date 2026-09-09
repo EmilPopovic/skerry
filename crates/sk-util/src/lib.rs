@@ -23,3 +23,12 @@
 pub mod pool;
 
 pub use pool::{Cancel, Lane, Pause, Pool, WakeHandle, Waker};
+
+/// Whether an optional runtime facility was disabled for a degradation check.
+///
+/// This never authorizes bypassing mandatory confinement.
+#[must_use]
+pub fn disabled(capability: &str) -> bool {
+    std::env::var("SKERRY_DISABLE")
+        .is_ok_and(|value| value.split(',').any(|name| name.trim() == capability))
+}

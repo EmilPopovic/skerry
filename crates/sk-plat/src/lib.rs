@@ -387,6 +387,9 @@ impl Window {
     }
 }
 
+/// A bounded worker-side clipboard read.
+pub use clipboard::receive as receive_selection;
+
 #[cfg(test)]
 mod tests {
     use super::*;

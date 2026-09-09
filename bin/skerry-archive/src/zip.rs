@@ -387,6 +387,38 @@ const CP437: [char; 128] = [
     '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', '\u{a0}',
 ];
 
+#[test]
+#[allow(clippy::unwrap_used, reason = "test fixture I/O must succeed")]
+fn parser_campaign_zip() {
+    struct Limited(usize);
+    impl std::io::Write for Limited {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::ErrorKind::FileTooLarge.into());
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let path = std::env::temp_dir().join(format!("skerry-fuzz-zip-{}", std::process::id()));
+    crate::fuzz_support::campaign(
+        "zip",
+        &[include_bytes!("../../../tests/fuzz/valid.zip")],
+        |bytes| {
+            std::fs::write(&path, bytes).unwrap();
+            if let Ok(mut zip) = Zip::read(File::open(&path).unwrap()) {
+                for index in 0..zip.entries.len().min(1024) {
+                    let _ = zip.extract(index, &mut Limited(8 * 1024 * 1024));
+                }
+            }
+        },
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -117,6 +117,9 @@ impl Renderer {
 
         let mut refused = None;
         for backends in BACKENDS {
+            if backends == wgpu::Backends::VULKAN && sk_util::disabled("vulkan") {
+                continue;
+            }
             // SAFETY: the caller's contract, restated: the handles name live
             // objects owned by the `sk_plat::Window` that produced them, and the
             // window outlives this renderer.
@@ -178,6 +181,9 @@ impl Renderer {
     pub fn offscreen(physical: (u32, u32)) -> Result<Self, Problem> {
         let mut refused = None;
         for backends in BACKENDS {
+            if backends == wgpu::Backends::VULKAN && sk_util::disabled("vulkan") {
+                continue;
+            }
             let instance = instance(backends);
             match open_device(&instance, None, None) {
                 Ok((adapter, device, queue)) => {

@@ -313,6 +313,8 @@ impl Previews {
                 continue;
             }
             if self.missing.contains(&kind) {
+                let _ = self.landed.send(unavailable(kind, &batch));
+                wake.wake();
                 continue;
             }
             let child = self
@@ -372,6 +374,9 @@ fn spawn(kind: Kind, beside: Option<&Path>) -> Option<Child> {
 /// too and a second copy of "beside, then `PATH`" is a second chance to get the
 /// version skew wrong.
 pub(crate) fn helper(program: &str, beside: Option<&Path>) -> Option<Child> {
+    if sk_util::disabled("helpers") || sk_util::disabled(program) {
+        return None;
+    }
     let mut tried = Vec::new();
     if let Some(directory) = beside {
         tried.push(directory.join(program));
@@ -396,9 +401,25 @@ pub(crate) fn helper(program: &str, beside: Option<&Path>) -> Option<Child> {
 /// fresh child, and the wants that were lost come back the next time a frame asks
 /// for them, because a want is derived from what is on screen rather than
 /// remembered.
+fn unavailable(kind: Kind, batch: &[Want]) -> Landed {
+    let answers = batch
+        .iter()
+        .map(|want| Answer {
+            key: want.key(),
+            refusal: Refusal::Interrupted,
+            size: (0, 0),
+            pages: 0,
+            delay_ms: 0,
+            pixels: Vec::new(),
+            words: Vec::new(),
+        })
+        .collect();
+    Landed { kind, child: None, answers, missing: true }
+}
+
 fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util::Cancel) -> Landed {
     let Some(mut child) = child else {
-        return Landed { kind, child: None, answers: Vec::new(), missing: true };
+        return unavailable(kind, batch);
     };
     let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
         terminate(&mut child);
@@ -655,6 +676,23 @@ mod tests {
         let waker = sk_util::Waker::new().unwrap();
         previews.pump(&pool, &waker.handle());
         assert!(previews.missing.is_empty());
+    }
+
+    #[test]
+    fn an_unavailable_helper_answers_every_request_including_later_previews() {
+        let batch = vec![want("/a/one.png"), want("/a/two.png")];
+        let result = super::run_batch(Kind::Image, None, &batch, &sk_util::Cancel::new());
+        assert!(result.missing);
+        assert_eq!(result.answers.len(), batch.len());
+        assert!(result.answers.iter().all(|answer| answer.refusal == Refusal::Interrupted));
+        let mut host = Previews::new();
+        host.missing.push(Kind::Image);
+        host.want(batch[0].clone());
+        let pool = sk_util::Pool::with_width(1);
+        let waker = sk_util::Waker::new().unwrap();
+        host.pump(&pool, &waker.handle());
+        assert_eq!(host.drain().len(), 1);
+        assert_eq!(host.waiting(), 0);
     }
 
     /// The same file wanted twice is one want: a grid redraws every frame and each

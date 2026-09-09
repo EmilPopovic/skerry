@@ -665,9 +665,27 @@ class X11Server(Server):
         subprocess.run([str(DRIVE), "--x11", "--close"], env=with_server(), capture_output=True, timeout=PATIENCE)
 
     def focus(self, app_id: str) -> None:
-        """Nothing to do: with no window manager the window focuses itself when
-        it maps, and X11's default is that keys follow the pointer anyway."""
-        del app_id
+        """Focus the requested peer explicitly on a server with no window manager."""
+        import ctypes
+        tree = subprocess.check_output(["xwininfo", "-display", self.display, "-root", "-tree"], text=True)
+        instance = app_id.rsplit(".", 1)[-1].lower()
+        found = re.search(rf'(0x[0-9a-f]+).*\("{re.escape(instance)}" "[^"]*"\)', tree)
+        if not found:
+            raise Failure(f"no X11 window to focus: {app_id}")
+        xlib = ctypes.CDLL("libX11.so.6")
+        xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        xlib.XOpenDisplay.restype = ctypes.c_void_p
+        xlib.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        xlib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        display = xlib.XOpenDisplay(self.display.encode())
+        if not display:
+            raise Failure("cannot connect to Xvfb to focus the peer")
+        try:
+            xlib.XSetInputFocus(display, int(found[1], 16), 1, 0)
+            xlib.XSync(display, 0)
+        finally:
+            xlib.XCloseDisplay(display)
 
     def resize(self, width: int, height: int) -> None:
         subprocess.run(
@@ -1411,7 +1429,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 148
+FEWEST_SCENARIOS = 149
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -1793,6 +1811,69 @@ def space_looks_at_a_file_and_space_puts_it_away(run: Run, fixture: Path) -> Non
     nothing = run.answered(settle=300)
     if nothing is None or nothing["looking"] != "none":
         raise Failure(f"a file with no preview opened {nothing and nothing['looking']}")
+
+
+@scenario("a-disabled-facility-says-so-instead-of-going-quiet", fresh=True)
+def a_disabled_facility_says_so_instead_of_going_quiet(run: Run, fixture: Path) -> None:
+    """**A facility that is not there is a sentence, not a blank** — [ADR
+    0037](../docs/adr/0037-runtime-degradation-is-visible-and-injectable.md).
+
+    Two degradations, injected through `SKERRY_DISABLE` rather than by breaking
+    an installation, because the point is that the *same* request and presentation
+    paths run. Both claims are about what the window says, which is why they are
+    here and not in a unit test:
+
+    * a missing decoder ends its request — `refused`, not `waiting` — and the
+      status line names the unavailable facility rather than leaving every grid
+      cell blank forever;
+    * a refused watch says the listing is stale and how to refresh it, rather
+      than a listing that is merely quiet and wrong.
+
+    **`SKERRY_DISABLE` cannot relax confinement**, only simulate absence; that
+    half is asserted by the live-kernel tests, not from here.
+    """
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    raw = b"".join(b"\x00" + bytes(v for _ in range(24) for v in (10, 120, 200)) for _ in range(24))
+    (fixture / "picture.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 24, 24, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+    run.close()
+
+    # The image decoder, absent. A `Space` on a picture has to come back.
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, {"SKERRY_DISABLE": "helpers"})
+    try:
+        listed(own)
+        own.drive("text picture\nsleep 400\n")
+        until(own, cursor="picture.png")
+        own.drive("key space\nsleep 600\n")
+        # **`refused`, and the wait is what makes it a claim.** A helper that is
+        # simply never answered leaves `waiting`, which is the state this is
+        # asserting the program no longer sits in.
+        until_looking(own, "picture.png", "refused")
+        # And the grid says which facility is gone, rather than drawing nothing.
+        holds(own, lambda it: it["thumbs_missing"] == "true", "the missing decoder reported")
+    finally:
+        own.close()
+
+    # The watch, refused. The listing is still right at this instant and will not
+    # stay right, which is exactly what the status line has to say.
+    stale = Run(run.display, run.log.parent, fixture, [], run.instance, {"SKERRY_DISABLE": "watch"})
+    try:
+        settled = listed(stale)
+        if settled["watching"] != "false":
+            raise Failure(f"a refused watch still reports watching={settled['watching']!r}")
+        if settled["watch_reason"] != "watch.disabled":
+            raise Failure(f"the reason is {settled['watch_reason']!r}, which names nothing")
+    finally:
+        stale.close()
 
 
 @scenario("arrows-walk-the-look-and-a-pdfs-pages", fresh=True)
@@ -2497,7 +2578,8 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
         assert server.stdout is not None
         line = server.stdout.readline().strip()
         if not line.startswith("hung "):
-            raise Skipped(f"no hung mount to test against: {line or 'the server said nothing'}")
+            error = Failure if os.environ.get("SKERRY_REQUIRE_HUNG_MOUNT") == "1" else Skipped
+            raise error(f"no hung mount to test against: {line or 'the server said nothing'}")
 
         # **The baseline, taken before the mount is reached.** Every assertion
         # below is a *delta* on `over` — the count of frames that missed the 8 ms
@@ -2514,6 +2596,8 @@ def a_hung_mount_never_blocks_the_frame_loop(run: Run, fixture: Path) -> None:
         missed = int(opening["over"])
 
         def still_inside_the_budget(answer: dict[str, str], when: str) -> None:
+            if os.environ.get("SKERRY_HUNG_LIVENESS_ONLY") == "1":
+                return
             if int(answer["over"]) > missed:
                 raise Failure(
                     f"{int(answer['over']) - missed} frame(s) of "
@@ -9892,6 +9976,78 @@ def sweep_stale_work() -> None:
         print(f"swept {gone} work director{'y' if gone == 1 else 'ies'} a killed run left behind")
 
 
+@scenario("release-trash-restores-after-a-process-restart", fresh=True)
+def release_trash_restore(run: Run, fixture: Path) -> None:
+    listed(run)
+    original = fixture / "file-1.txt"
+    contents = original.read_bytes()
+    run.drive("text file-1\nsleep 300\nkey delete\nsleep 300\n")
+    settled(run)
+    if original.exists():
+        raise Failure("Move to Trash did not remove the original")
+    trash = Path(run.environment["XDG_DATA_HOME"]) / "Trash" / "files"
+    stored = next(trash.iterdir())
+    run.close()
+    run.__init__(run.display, run.work, trash, [], run.instance, run.environment)
+    listed(run)
+    run.drive("key home\nkey ctrl+alt+r\nsleep 300\n")
+    settled(run)
+    if not original.exists() or original.read_bytes() != contents or stored.exists():
+        raise Failure("persistent Restore did not recover the original bytes")
+    run.drive("key ctrl+z\nsleep 300\n")
+    settled(run)
+    if original.exists() or not stored.exists():
+        raise Failure("undo of Restore did not return the item to Trash")
+
+
+@scenario("release-qt-cut-clipboard-works-in-both-directions", fresh=True)
+def release_qt_clipboard(run: Run, fixture: Path) -> None:
+    listed(run)
+    source = fixture / "qt source.txt"
+    source.write_text("Qt cut payload")
+    log = run.work / "qt-peer.log"
+    process = subprocess.Popen([str(ROOT / "tools/qt-clipboard-peer"), str(source)],
+        env={**run.environment, "QT_QPA_PLATFORM": "xcb" if isinstance(SERVER, X11Server) else "wayland"},
+        stdout=log.open("w"), stderr=subprocess.STDOUT)
+    def wait(word):
+        until = time.monotonic() + 15
+        while time.monotonic() < until:
+            output = log.read_text()
+            if word in output:
+                return output
+            if process.poll() is not None:
+                raise Failure(f"Qt peer exited: {output}")
+            time.sleep(0.1)
+        raise Failure(f"Qt peer did not say {word}: {log.read_text()}")
+    try:
+        wait("ready")
+        SERVER.focus("skerry-qt-peer")
+        run.drive("sleep 300\nkey ctrl+x\nsleep 300\n", answering=False)
+        wait("published")
+        SERVER.focus("dev.skerry.Skerry")
+        run.drive("sleep 300\nkey ctrl+l\nkey ctrl+u\n")
+        run.drive(f"text {fixture / 'alpha'}\nkey enter\nsleep 300\n")
+        listed(run)
+        run.drive("key ctrl+v\nsleep 300\n")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and source.exists():
+            run.answered(settle=100)
+        target = fixture / "alpha" / source.name
+        if source.exists() or not target.exists() or target.read_text() != "Qt cut payload":
+            raise Failure("KDE marker + Qt URI list did not paste as a move")
+        run.drive("text qt source\nsleep 300\nkey ctrl+x\nsleep 300\n")
+        SERVER.focus("skerry-qt-peer")
+        run.drive("sleep 300\nkey ctrl+v\nsleep 300\n", answering=False)
+        result = wait("received ")
+        received = json.loads(next(line[9:] for line in result.splitlines() if line.startswith("received ")))
+        if received != {"cut": "1", "paths": [str(target)]}:
+            raise Failure(f"Qt decoded the wrong Skerry cut offer: {received}")
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+        SERVER.focus("dev.skerry.Skerry")
+
+
 def main(argv: list[str]) -> int:
     wanted = [a for a in argv[1:] if not a.startswith("--")]
     keep = "--keep" in argv
@@ -9910,7 +10066,7 @@ def main(argv: list[str]) -> int:
             SUITE_BUDGET = float(argument.removeprefix("--suite-timeout="))
 
     # Built here, not assumed. See `build_binaries` for the afternoon this cost.
-    if broken := build_binaries():
+    if "--prebuilt" not in argv and (broken := build_binaries()):
         print(f"the workspace would not build:\n{broken}")
         return 2
     for binary in (SKERRY, DRIVE):

@@ -938,6 +938,7 @@ fn sample_properties() -> crate::properties::Properties {
     )]);
     panel.facts.push(sk_fs::facts::Facts {
         path: std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
+        original: None,
         size: 12_582_912,
         on_disk: 12_587_008,
         mode: 0o644,
@@ -1051,6 +1052,7 @@ fn sample_overlays(
             name: "quarterly-report.pdf".to_owned(),
             count: 3,
             directory: false,
+            copying: false,
         }),
     }
 }
@@ -1225,6 +1227,8 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         typed: None,
         band: None,
         watching: true,
+        preview_missing: false,
+        watch_failure: None,
         // A capture has no queue, so the sentence a copy would be writing is
         // stated — the same trade `sample_properties` makes, and for the same
         // reason: a frame has to be the same on every machine.

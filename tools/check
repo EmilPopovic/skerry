@@ -6,6 +6,12 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 
 status=0
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate packaging/dev.skerry.Skerry.desktop || status=1
+else
+    echo "  FAIL  desktop-file-validate missing: install desktop-file-utils"
+    status=1
+fi
 python3 tools/test-package.py || status=1
 python3 tools/notices.py --check || status=1
 for check in check-links check-layering dep-budget check-invariants; do

@@ -19,6 +19,8 @@ use rustix::fs::{AtFlags, StatxFlags};
 pub struct Facts {
     /// The path itself.
     pub path: PathBuf,
+    /// Validated original location for a direct trash entry.
+    pub original: Option<PathBuf>,
     /// Bytes, as the file claims.
     pub size: u64,
     /// Bytes it actually occupies. Smaller than `size` for a sparse file or a
@@ -112,6 +114,9 @@ pub fn describe(path: &Path) -> Option<Facts> {
 
     Some(Facts {
         path: path.to_path_buf(),
+        original: crate::trash::contains(path)
+            .then(|| crate::trash::read(path).ok().map(|entry| entry.original))
+            .flatten(),
         size: stat.stx_size,
         // 512-byte blocks, which is what `statx` reports whatever the
         // filesystem's own block size is.

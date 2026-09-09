@@ -68,6 +68,8 @@ const SESSION_FLOOR: Duration = Duration::from_secs(2);
 /// moves or does not. Deciding on the press is what makes dragging three files
 /// drag one of them.
 struct FilesDrag {
+    copying: bool,
+    directory: bool,
     /// Where the press was, in logical pixels.
     from: Point,
     /// What would be dragged, captured at the press.
@@ -292,6 +294,8 @@ pub(crate) const ZOOM_DEFAULT: usize = 2;
 
 /// How to start.
 pub struct Options {
+    /// Open independently with a separately locked session checkpoint.
+    pub new_window: bool,
     /// The bus this process took its name on, where there was one.
     ///
     /// **Taken before the window** — `sk_app::take_the_name` — because a second
@@ -661,7 +665,8 @@ enum Pasted {
     /// Read on a job like everything else that touches the clipboard: the peer
     /// writes into a pipe at its own pace, and a read on the frame loop is a
     /// frame loop waiting on another process.
-    Files(Vec<PathBuf>, bool),
+    Files(Vec<PathBuf>, bool, u64, PathBuf),
+    KdeIntent(bool, u64, PathBuf),
     /// Paths dropped by another application, and the directory to put them in.
     ///
     /// Always a copy: a peer that asked for a move removes its own originals,
@@ -845,6 +850,7 @@ pub struct App {
     mounts_owed: bool,
     /// Whether the watcher managed to arm on the current directory.
     watching: bool,
+    watch_failure: Option<sk_fs::watch::Failure>,
     /// The platform capabilities found at start-up, as one line.
     capabilities: String,
     /// Folder totals, kept by path so they survive every listing.
@@ -931,6 +937,7 @@ pub struct App {
     /// The session file as it was last written, so an unchanged one is not
     /// rewritten.
     session_writer: crate::session::WriteBack,
+    session_lock: Option<std::fs::File>,
     /// When it was last considered, which is the floor's clock.
     session_at: Instant,
     /// Where the last layout put the panes, and what the pointer is on.
@@ -1218,7 +1225,13 @@ impl App {
         // file every time; the *layout* — the tree, the columns, the window —
         // comes out of it only when nobody asked for a particular folder, which
         // is what `restore` means.
-        let session = crate::session::load();
+        let slot = crate::session::claim(options.new_window).map_err(|error| {
+            Problem::new(sk_model::ProblemKind::Unreadable, "session".to_owned(), error.to_string())
+        })?;
+        let session = slot
+            .as_ref()
+            .and_then(|(file, _)| std::fs::read_to_string(file).ok())
+            .and_then(|text| crate::session::parse(&text));
         // **Beside the session read and for the same reason** — ADR 0025. One
         // `openat` and a few hundred bytes, before there is a frame loop for it
         // to be a rule 1 violation of; and it has to be before the first registry
@@ -1245,6 +1258,10 @@ impl App {
         let background = Background::start(options.path.clone())?;
         let drawing = open_drawing(&window)?;
         let mut app = Self::assemble(options, window, window_us, background, drawing);
+        if let Some((file, lock)) = slot {
+            app.session_writer = crate::session::WriteBack::at(file);
+            app.session_lock = Some(lock);
+        }
         // **The file's values before the session's**, which is ADR 0027's
         // precedence rule in the order the two reads happen: this is what a
         // fresh window does, and the session below moves only what this window
@@ -1598,9 +1615,11 @@ impl App {
             remounted: Instant::now(),
             mounts_owed: false,
             watching: true,
+            watch_failure: None,
             capabilities,
             zoom: ZOOM_DEFAULT,
             session_writer: crate::session::WriteBack::default(),
+            session_lock: None,
             session_at: now,
             placement: crate::panes::Placement::default(),
             measurer,
@@ -1977,13 +1996,20 @@ impl App {
                     Instant::now(),
                 ));
             }
-            Pasted::Files(paths, moving) => {
+            Pasted::KdeIntent(moving, generation, into) => {
+                if self.paste_offer_is_current(generation) {
+                    self.read_file_paste("text/uri-list", moving, generation, into);
+                }
+            }
+            Pasted::Files(paths, moving, generation, into) => {
+                if !self.paste_offer_is_current(generation) {
+                    return;
+                }
                 // Cleared here rather than where the cut was made: a paste is
                 // what consumes it, and a second paste of the same clipboard has
                 // to copy — the originals are not where the clipboard says any
                 // more.
                 self.cutting = false;
-                let into = self.panes.focused().path.clone();
                 let took = self.edits.paste_all(paths, into, moving, &self.jobs);
                 self.said_it_is_busy(took);
             }
@@ -2100,7 +2126,10 @@ impl App {
             self.watch_target = self.panes.focused().path.clone();
         }
         self.retarget_watches();
-        if self.watched.iter().any(|path| !self.watcher.armed(path))
+        if self
+            .watched
+            .iter()
+            .any(|path| !self.watcher.armed(path) && self.watcher.failure(path).is_none())
             && !self.panes.focused().loading
             && self.panes.focused().problem.is_none()
         {
@@ -2118,6 +2147,11 @@ impl App {
         // Read every pass rather than once at arm time: the thread establishes the
         // watch asynchronously, so the answer is not known when `watch` returns.
         let armed = self.watcher.armed(&self.watch_target);
+        let failure = self.watcher.failure(&self.watch_target);
+        if failure != self.watch_failure {
+            self.watch_failure = failure;
+            self.dirty = true;
+        }
         if armed != self.watching {
             self.watching = armed;
             self.dirty = true;
@@ -2142,8 +2176,15 @@ impl App {
             }
             Event::CloseRequested => self.closing = true,
             Event::Focused(_) => self.dirty = true,
-            Event::KeyDown(key) => self.key(key, commands),
-            Event::PointerMoved { position, .. } => self.moved(*position),
+            Event::KeyDown(key) => {
+                self.drag_modifier(key.mods.ctrl);
+                self.key(key, commands);
+            }
+            Event::KeyUp(key) => self.drag_modifier(key.mods.ctrl),
+            Event::PointerMoved { position, mods } => {
+                self.drag_modifier(mods.ctrl);
+                self.moved(*position);
+            }
             // A drag from somewhere else — or from here, because a drag that
             // starts in this window and stays in it comes back through the same
             // events as anybody else's.
@@ -2249,7 +2290,7 @@ impl App {
                     self.zoom_by(if *out { 1 } else { -1 });
                 }
             }
-            Event::Swiped { .. } | Event::KeyUp(_) | Event::Woken => {}
+            Event::Swiped { .. } | Event::Woken => {}
         }
         self.settle_menu(commands);
     }
@@ -3781,6 +3822,31 @@ impl App {
     /// `Ctrl+Z` and a confirmation for something reversible is friction rather
     /// than protection. It is a setting because a person who wants it is not
     /// wrong — ADR 0027.
+    pub(crate) fn restore_selection(&mut self) {
+        let paths = self.selected_paths();
+        let took = self.edits.restore_all(paths, &self.jobs);
+        self.said_it_is_busy(took);
+    }
+
+    /// Whether every selected item is a direct child of a trash listing.
+    pub(crate) fn can_restore(&self) -> bool {
+        let paths = self.selected_paths();
+        !self.busy()
+            && !paths.is_empty()
+            && paths.iter().all(|path| {
+                sk_fs::trash::contains(path)
+                    && path.parent().and_then(std::path::Path::file_name)
+                        == Some(std::ffi::OsStr::new("files"))
+            })
+    }
+
+    /// Prevent ordinary mutations from separating trash data from its metadata.
+    pub(crate) fn trash_context(&self) -> bool {
+        sk_fs::trash::contains(&self.panes.focused().path)
+            || self.selected_paths().iter().any(|p| sk_fs::trash::contains(p))
+    }
+
+    /// Moves selected items into trash.
     pub(crate) fn trash_selection(&mut self) {
         let paths = self.selected_paths();
         if paths.is_empty() {
@@ -5252,6 +5318,25 @@ impl App {
         self.edits.resumable()
     }
 
+    pub(crate) fn can_skip_failed_operation(&self) -> bool {
+        self.edits.can_skip_failed()
+    }
+
+    pub(crate) fn has_operation_issue(&self) -> bool {
+        !self.busy() && (self.edits.issue.is_some() || self.can_resume())
+    }
+
+    pub(crate) fn skip_failed_operation(&mut self) {
+        self.edits.skip_failed(&self.jobs);
+        self.dirty = true;
+    }
+
+    pub(crate) fn dismiss_operation_issue(&mut self) {
+        self.edits.dismiss_issue();
+        self.notice = None;
+        self.dirty = true;
+    }
+
     /// Picks up what a stopped queue left.
     pub(crate) fn resume_operation(&mut self) {
         self.edits.resume(&self.jobs);
@@ -5348,26 +5433,65 @@ impl App {
             ));
             return;
         };
-        // **Not a silent return.** The display server can refuse a conversion —
-        // the owner went away between the offer and the ask, or the type it
-        // advertised is one it will not actually serve — and a paste that does
-        // nothing with nothing to show for it is indistinguishable from a key
-        // that never arrived.
+        let generation = self.window.clipboard().generation();
+        let into = self.panes.focused().path.clone();
+        if mime != "x-special/gnome-copied-files"
+            && offered.iter().any(|mime| mime == "application/x-kde-cutselection")
+        {
+            let Some(fd) = self
+                .window
+                .request_selection(Selection::Clipboard, "application/x-kde-cutselection")
+            else {
+                self.clipboard_failed();
+                return;
+            };
+            let sender = self.replies.paste_tx.clone();
+            let wake = self.waker.handle();
+            self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+                let reply = match sk_plat::receive_selection(&fd, 2, Duration::from_secs(5)) {
+                    Ok(bytes) => Pasted::KdeIntent(bytes == b"1", generation, into),
+                    Err(_) => Pasted::NotFiles,
+                };
+                let _ = sender.send(reply);
+                wake.wake();
+            });
+        } else {
+            self.read_file_paste(mime, false, generation, into);
+        }
+    }
+
+    fn paste_offer_is_current(&mut self, generation: u64) -> bool {
+        if generation == self.window.clipboard().generation() {
+            return true;
+        }
+        self.notice =
+            Some((sk_model::i18n::lookup("error.clipboard_changed").to_owned(), Instant::now()));
+        self.dirty = true;
+        false
+    }
+
+    fn clipboard_failed(&mut self) {
+        self.notice =
+            Some((sk_model::i18n::lookup("error.clipboard_no_files").to_owned(), Instant::now()));
+        self.dirty = true;
+    }
+
+    fn read_file_paste(&mut self, mime: &str, moving: bool, generation: u64, into: PathBuf) {
         let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else {
-            self.notice =
-                Some((sk_model::i18n::format("error.clipboard_refused", &[&mime]), Instant::now()));
+            self.clipboard_failed();
             return;
         };
-        // Our own mark, for a clipboard we published ourselves. A peer's verb
-        // arrives inside the bytes and overrides it below.
-        let moving = self.cutting;
         let carries_verb = mime == "x-special/gnome-copied-files";
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let mut bytes = Vec::new();
-            let mut file = std::fs::File::from(fd);
-            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            let Ok(bytes) =
+                sk_plat::receive_selection(&fd, 16 * 1024 * 1024, Duration::from_secs(5))
+            else {
+                let _ = sender.send(Pasted::NotFiles);
+                wake.wake();
+                return;
+            };
 
             // **The peer's verb wins where there is one.** A cut in Nautilus
             // arrives as `x-special/gnome-copied-files` opening with `cut`, and
@@ -5377,8 +5501,11 @@ impl App {
                 let paths: Vec<PathBuf> =
                     paths.into_iter().filter(|path| path.symlink_metadata().is_ok()).collect();
                 let moving = matches!(intent, sk_plat::Intent::Cut);
-                let reply =
-                    if paths.is_empty() { Pasted::NotFiles } else { Pasted::Files(paths, moving) };
+                let reply = if paths.is_empty() {
+                    Pasted::NotFiles
+                } else {
+                    Pasted::Files(paths, moving, generation, into)
+                };
                 if sender.send(reply).is_ok() {
                     wake.wake();
                 }
@@ -5397,8 +5524,11 @@ impl App {
                 .filter_map(|line| sk_plat::decode_uri(line).or_else(|| Some(PathBuf::from(line))))
                 .filter(|path| path.is_absolute() && path.symlink_metadata().is_ok())
                 .collect();
-            let reply =
-                if paths.is_empty() { Pasted::NotFiles } else { Pasted::Files(paths, moving) };
+            let reply = if paths.is_empty() {
+                Pasted::NotFiles
+            } else {
+                Pasted::Files(paths, moving, generation, into)
+            };
             if sender.send(reply).is_ok() {
                 wake.wake();
             }
@@ -7930,7 +8060,11 @@ scope_aim={scope_aim:?}",
 
     /// Puts finished thumbnails into the atlas.
     fn drain_previews(&mut self) {
+        let missing = self.previews.missing.len();
         let answers = self.previews.drain();
+        if missing != self.previews.missing.len() {
+            self.dirty = true;
+        }
         if answers.is_empty() {
             return;
         }
@@ -8027,6 +8161,9 @@ scope_aim={scope_aim:?}",
                     self.panes.focused_mut().select_after(name);
                 }
                 self.panes.focused_mut().refresh(&self.jobs);
+                if !self.edits.busy() {
+                    self.sidebar.reload(&self.jobs);
+                }
                 message
             }
             crate::edit::Landed::Failed(message) => {
@@ -8056,6 +8193,24 @@ scope_aim={scope_aim:?}",
         }
     }
 
+    /// Open this folder in an independent process with its own session slot.
+    pub(crate) fn new_window(&mut self) {
+        let path = self.panes.focused().path.clone();
+        let sender = self.replies.launched_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let child = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe).arg("--new-window").arg(path).spawn()
+            });
+            let key = if child.is_ok() { "notice.new_window" } else { "error.new_window" };
+            let _ = sender.send(Launched {
+                child: child.ok(),
+                notice: sk_model::i18n::lookup(key).to_owned(),
+            });
+            wake.wake();
+        });
+    }
+
     /// Goes to the parent directory.
     pub(crate) fn go_up(&mut self) {
         self.panes.focused_mut().go_up(&self.jobs);
@@ -8083,6 +8238,7 @@ scope_aim={scope_aim:?}",
     /// underneath keeps its old number until somebody asks — and `F5` is a person
     /// asking.
     pub(crate) fn reload(&mut self) {
+        self.watcher.watch(self.watched.clone());
         self.measurer.forget_all();
         // The places too: a volume can appear or vanish while a window is open,
         // and nothing here watches `/proc/self/mountinfo` yet.
@@ -8831,7 +8987,7 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
             "{shape} \
 path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
-selected={} scroll={:.1} loading={} watching={} notice={:?} \
+selected={} scroll={:.1} loading={} watching={} watch_reason={:?} thumbs_missing={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
@@ -8854,6 +9010,11 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             self.panes.focused().scroll.offset(),
             self.panes.focused().loading,
             self.watching,
+            // The two degraded-runtime explanations the status line puts in place
+            // of the row count — ADR 0037. Reported because "the window says why"
+            // is the claim, and a scenario cannot read the status line's pixels.
+            self.watch_failure.map(sk_fs::watch::Failure::message).unwrap_or_default(),
+            self.previews.missing.contains(&sk_preview::Kind::Image),
             self.notice.as_ref().map(|(message, _)| message.as_str()).unwrap_or_default(),
             self.edits.history.can_undo(),
             self.edits.history.can_redo(),
@@ -9817,6 +9978,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             }
             // A peer's. Nothing is held here, so the highlight is all there is.
             self.files_drag = Some(FilesDrag {
+                copying: true,
+                directory: false,
                 from: position,
                 paths: Vec::new(),
                 id: None,
@@ -9832,7 +9995,14 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         // time: a target that accepts once and then goes quiet gets a refusal
         // cursor over rows it would in fact accept.
         let wanted = self.drop_target().is_some().then_some("text/uri-list");
-        self.window.accept_drag(wanted, sk_plat::DragAction::Copy);
+        let action =
+            if self.files_drag.as_ref().is_some_and(|drag| !drag.paths.is_empty() && !drag.copying)
+            {
+                sk_plat::DragAction::Move
+            } else {
+                sk_plat::DragAction::Copy
+            };
+        self.window.accept_drag(wanted, action);
     }
 
     /// The directory a drop would land in.
@@ -9872,7 +10042,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             // rather than read — but it is still closed, or the display server
             // holds the pointer waiting for a confirmation.
             self.window.finish_drop();
-            self.drop_files(false);
+            let copying = self.files_drag.as_ref().is_some_and(|drag| drag.copying);
+            self.drop_files(copying);
             return;
         }
         if self.window.dragging_out() {
@@ -10146,6 +10317,15 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
     /// something nobody can see. Stated instead: a drag moves, `Ctrl` copies, and
     /// `Ctrl+Z` takes either back. A drop into another pane can now cross
     /// devices — the engine handles that, and the rule does not change with it.
+    fn drag_modifier(&mut self, copying: bool) {
+        if let Some(drag) = self.files_drag.as_mut().filter(|drag| !drag.paths.is_empty())
+            && drag.copying != copying
+        {
+            drag.copying = copying;
+            self.dirty = true;
+        }
+    }
+
     fn drop_files(&mut self, copying: bool) {
         // Asked before the drag is taken, because the answer for a drop into
         // another pane is the directory *that pane* is showing and the drag is
@@ -10282,6 +10462,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         }
         if clicks < 2 {
             self.files_drag = Some(FilesDrag {
+                copying: false,
+                directory: self.panes.focused().listing.flags(id).has(sk_model::Flags::DIR),
                 from: position,
                 paths: self.selected_paths(),
                 id: Some(id),
@@ -10781,7 +10963,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         {
             self.panes.focused_mut().selection.replace_with(id);
         }
-        let groups = if row.is_some() { crate::menu::ON_ROW } else { crate::menu::ON_BACKGROUND };
+        let groups = if self.trash_context() && row.is_some() {
+            crate::menu::IN_TRASH
+        } else if row.is_some() {
+            crate::menu::ON_ROW
+        } else {
+            crate::menu::ON_BACKGROUND
+        };
         self.menu_wanted = Some((position, groups));
     }
 
@@ -10819,7 +11007,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             None => Point::new(self.placement.here.body.x + 8.0, self.placement.here.body.y + 8.0),
         };
         let groups = if self.panes.focused().cursor_row().is_some() {
-            crate::menu::ON_ROW
+            if self.trash_context() { crate::menu::IN_TRASH } else { crate::menu::ON_ROW }
         } else {
             crate::menu::ON_BACKGROUND
         };
@@ -11593,6 +11781,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             frames,
             last,
             renderer,
+            previews,
             jobs,
             show_keys,
             show_stats,
@@ -11604,6 +11793,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             backend,
             scale_120,
             watching,
+            watch_failure,
             notice,
             capabilities,
             hovered_button,
@@ -11689,7 +11879,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 count: drag.paths.len(),
-                directory: first.is_some_and(|path| path.is_dir()),
+                directory: drag.directory,
+                copying: drag.copying,
             }
         });
         let chrome = Chrome {
@@ -11702,6 +11893,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             typed: (!typed.is_empty()).then_some(typed.as_str()),
             band: *band,
             watching: *watching,
+            preview_missing: previews.missing.contains(&sk_preview::Kind::Image),
+            watch_failure: watch_failure.map(sk_fs::watch::Failure::message),
             // Progress wins over a notice while an operation is running: what a
             // person wants to see during a copy is the copy, and the notice that
             // preceded it has already been read.

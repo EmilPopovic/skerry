@@ -36,6 +36,7 @@ pub fn registry() -> Registry<App> {
     zoom(&mut registry);
     file(&mut registry);
     edit(&mut registry);
+    recovery(&mut registry);
     window(&mut registry);
     help(&mut registry);
     field(&mut registry);
@@ -534,7 +535,7 @@ fn edit(registry: &mut Registry<App>) {
             name: "action.new_folder",
             group: Group::File,
             keys: &["ctrl+shift+n"],
-            enabled: |app: &App| !app.busy(),
+            enabled: |app: &App| !app.busy() && !app.trash_context(),
             run: App::new_folder,
         },
         CommandSpec {
@@ -544,7 +545,9 @@ fn edit(registry: &mut Registry<App>) {
             // F2 in every file manager on every desktop, which is why the frame
             // statistics moved off it.
             keys: &["f2"],
-            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
+            enabled: |app: &App| {
+                app.panes.focused().focused().is_some() && !app.busy() && !app.trash_context()
+            },
             run: App::start_rename,
         },
         CommandSpec {
@@ -581,7 +584,9 @@ fn edit(registry: &mut Registry<App>) {
             // What every file manager binds a permanent delete to, and the
             // second press is what makes it safe to have on a key at all.
             keys: &["shift+delete"],
-            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
+            enabled: |app: &App| {
+                app.panes.focused().focused().is_some() && !app.busy() && !app.trash_context()
+            },
             run: App::delete_selection,
         },
         CommandSpec {
@@ -590,7 +595,9 @@ fn edit(registry: &mut Registry<App>) {
             group: Group::File,
             // What every file manager with a Duplicate binds it to.
             keys: &["ctrl+d"],
-            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
+            enabled: |app: &App| {
+                app.panes.focused().focused().is_some() && !app.busy() && !app.trash_context()
+            },
             run: App::duplicate_selection,
         },
         CommandSpec {
@@ -605,7 +612,9 @@ fn edit(registry: &mut Registry<App>) {
             // **Dimmed on anything that is not an archive**, which is the same
             // rule the colour commands follow for a folder: an action a person
             // can see and cannot use has said what it is for.
-            enabled: |app: &App| app.an_archive_is_selected() && !app.busy(),
+            enabled: |app: &App| {
+                app.an_archive_is_selected() && !app.busy() && !app.trash_context()
+            },
             run: App::extract_selection,
         },
         CommandSpec {
@@ -613,24 +622,10 @@ fn edit(registry: &mut Registry<App>) {
             name: "action.trash",
             group: Group::File,
             keys: &["delete"],
-            enabled: |app: &App| app.panes.focused().focused().is_some() && !app.busy(),
+            enabled: |app: &App| {
+                app.panes.focused().focused().is_some() && !app.busy() && !app.trash_context()
+            },
             run: App::trash_selection,
-        },
-        CommandSpec {
-            id: "edit.undo",
-            name: "action.undo",
-            group: Group::Edit,
-            keys: &["ctrl+z"],
-            enabled: |app: &App| app.can_undo(),
-            run: App::undo,
-        },
-        CommandSpec {
-            id: "edit.redo",
-            name: "action.redo",
-            group: Group::Edit,
-            keys: &["ctrl+shift+z", "ctrl+y"],
-            enabled: |app: &App| app.can_redo(),
-            run: App::redo,
         },
     ] {
         registry.add(spec);
@@ -682,6 +677,14 @@ fn window(registry: &mut Registry<App>) {
 /// Tabs and splits: how many panes there are and which has the keyboard.
 fn panes(registry: &mut Registry<App>) {
     for spec in [
+        CommandSpec {
+            id: "window.new",
+            name: "action.new_window",
+            group: Group::Pane,
+            keys: &["ctrl+n"],
+            enabled: |_| true,
+            run: App::new_window,
+        },
         CommandSpec {
             id: "tab.new",
             name: "action.new_tab",
@@ -1125,7 +1128,7 @@ fn file(registry: &mut Registry<App>) {
             // paste files yet. Now that one can, the universal chord belongs to
             // it and the stand-in moves down one.
             keys: &["ctrl+v"],
-            enabled: App::can_paste,
+            enabled: |app: &App| app.can_paste() && !app.trash_context(),
             run: App::paste_files,
         },
         CommandSpec {
@@ -1207,6 +1210,54 @@ fn help(registry: &mut Registry<App>) {
 /// Read by `every_command_can_be_reached_without_a_keyboard`. The toolbar and
 /// the window buttons are asked rather than listed, so renaming the command
 /// behind a button fails the test instead of quietly emptying it.
+/// Undo and recovery controls share the same operation queue.
+fn recovery(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "file.restore",
+            name: "action.restore",
+            group: Group::File,
+            keys: &["ctrl+alt+r"],
+            enabled: App::can_restore,
+            run: App::restore_selection,
+        },
+        CommandSpec {
+            id: "edit.skip_failed",
+            name: "action.skip_failed",
+            group: Group::Edit,
+            keys: &["ctrl+alt+s"],
+            enabled: App::can_skip_failed_operation,
+            run: App::skip_failed_operation,
+        },
+        CommandSpec {
+            id: "edit.dismiss_issue",
+            name: "action.dismiss_issue",
+            group: Group::Edit,
+            keys: &["ctrl+alt+d"],
+            enabled: App::has_operation_issue,
+            run: App::dismiss_operation_issue,
+        },
+        CommandSpec {
+            id: "edit.undo",
+            name: "action.undo",
+            group: Group::Edit,
+            keys: &["ctrl+z"],
+            enabled: |app: &App| app.can_undo(),
+            run: App::undo,
+        },
+        CommandSpec {
+            id: "edit.redo",
+            name: "action.redo",
+            group: Group::Edit,
+            keys: &["ctrl+shift+z", "ctrl+y"],
+            enabled: |app: &App| app.can_redo(),
+            run: App::redo,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
 #[cfg(test)]
 fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     let mut reach: Vec<(&'static str, &'static str)> = Vec::new();
@@ -1232,6 +1283,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("config.write", "a row in the settings panel"));
     for groups in [
         crate::menu::ON_ROW,
+        crate::menu::IN_TRASH,
         crate::menu::ON_BACKGROUND,
         crate::menu::IN_A_LOOK,
         crate::menu::ON_A_PLACE,

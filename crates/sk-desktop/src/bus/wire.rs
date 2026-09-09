@@ -510,6 +510,9 @@ pub fn valid_signature(signature: &str, single: bool) -> bool {
 /// makes non-trivial.
 #[must_use]
 pub fn split(signature: &str) -> Vec<String> {
+    if !valid_signature(signature, false) {
+        return Vec::new();
+    }
     let bytes = signature.as_bytes();
     let mut out = Vec::new();
     let mut at = 0;
@@ -545,6 +548,27 @@ pub fn split(signature: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[path = "../../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
+#[test]
+fn parser_campaign_dbus() {
+    let seeds: &[&[u8]] =
+        &[b"\x01\x00\x00\x00a\x00", b"\x01s\x00\x00\x03\x00\x00\x00abc\x00", &[0; 64]];
+    fuzz_support::campaign("dbus", seeds, |bytes| {
+        for signature in ["s", "v", "as", "a{sv}", "(ua{sv})", "a(so)", "aay"] {
+            for little in [true, false] {
+                let _ = Reader::new(bytes, 0, little).read(signature);
+            }
+        }
+        if let Ok(signature) = std::str::from_utf8(bytes) {
+            let _ = valid_signature(signature, false);
+            let _ = split(signature);
+        }
+    });
+}
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
@@ -563,6 +587,15 @@ mod tests {
     /// for the first `i` = 8, two `i` is 8 more = 16, the variant's signature is
     /// 1 + 1 + 1 = 19, its empty string pads to 4 and takes 5 = 25 — and the
     /// array's length begins at the next multiple of **four**, which is 28.
+    #[test]
+    fn splitting_a_malformed_or_nonascii_signature_is_safe() {
+        let bad = include_bytes!("../../../../tests/fuzz/dbus-nonascii-signature.bin");
+        assert!(split(std::str::from_utf8(bad).unwrap()).is_empty());
+        for bad in ["ǹ", "a", "(s", "{sv}", "a{vv}"] {
+            assert!(split(bad).is_empty());
+        }
+    }
+
     #[test]
     fn an_array_that_follows_something_aligns_to_four() {
         let mut writer = Writer::at(0);

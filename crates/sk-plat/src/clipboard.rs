@@ -109,6 +109,10 @@ impl Content {
                 // this is the only one that carries the verb.
                 ("x-special/gnome-copied-files".to_owned(), cut_or_copy.into_bytes().into()),
                 ("text/uri-list".to_owned(), uris.into_bytes().into()),
+                (
+                    "application/x-kde-cutselection".to_owned(),
+                    Vec::from(if intent == Intent::Cut { b"1" } else { b"0" }).into(),
+                ),
                 ("text/plain;charset=utf-8".to_owned(), text.clone().into_bytes().into()),
                 ("text/plain".to_owned(), text.into_bytes().into()),
                 // X11's name for UTF-8 text, which GTK and Qt both still offer
@@ -158,6 +162,44 @@ impl Content {
     #[must_use]
     pub fn bytes_for(&self, mime: &str) -> Option<&[u8]> {
         self.types.iter().find(|(name, _)| name == mime).map(|(_, bytes)| &bytes[..])
+    }
+}
+
+/// Read a selection on a worker, refusing oversized or stalled transfers.
+pub fn receive(
+    fd: &OwnedFd,
+    limit: usize,
+    timeout: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
+    use rustix::event::{PollFd, PollFlags};
+    let flags = rustix::fs::fcntl_getfl(fd)?;
+    rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)?;
+    let deadline = std::time::Instant::now() + timeout;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        let timeout = rustix::event::Timespec::try_from(left)
+            .map_err(|_| std::io::ErrorKind::InvalidInput)?;
+        let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
+            Ok(0) => return Err(std::io::ErrorKind::TimedOut.into()),
+            Ok(_) => {}
+        }
+        match rustix::io::read(fd, &mut buffer) {
+            Ok(0) => return Ok(bytes),
+            Ok(count) if bytes.len().saturating_add(count) <= limit => {
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            Ok(_) => return Err(std::io::ErrorKind::FileTooLarge.into()),
+            Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -242,11 +284,18 @@ pub fn decode_uri(uri: &str) -> Option<std::path::PathBuf> {
 /// hands back a descriptor rather than a buffer for the same reason.
 #[derive(Default, Debug)]
 pub struct Clipboard {
+    pub(crate) generation: u64,
     pub(crate) offer_types: Vec<String>,
     pub(crate) primary_types: Vec<String>,
 }
 
 impl Clipboard {
+    /// Identity of the current offer, invalidated when ownership changes.
+    #[must_use]
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// The MIME types the peer is currently offering on the clipboard.
     #[must_use]
     pub fn offered(&self) -> &[String] {
@@ -373,6 +422,38 @@ mod tests {
     /// slowly held the window still, `xdg_wm_base.ping` included, until the
     /// compositor gave up on it. Watched failing with the `write_all` restored,
     /// this test does not finish.
+    #[test]
+    fn selection_reads_stop_at_the_byte_limit_and_deadline() {
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        rustix::io::write(&write, b"abc").unwrap();
+        drop(write);
+        assert_eq!(super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap(), b"abc");
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        rustix::io::write(&write, b"abcd").unwrap();
+        assert_eq!(
+            super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap_err().kind(),
+            std::io::ErrorKind::FileTooLarge
+        );
+        let (read, _held) = rustix::pipe::pipe().unwrap();
+        assert_eq!(
+            super::receive(&read, 3, std::time::Duration::from_millis(1)).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    fn kde_marker_tracks_cut_and_copy_intent() {
+        let paths = [std::path::PathBuf::from("/tmp/a file")];
+        assert_eq!(
+            Content::paths(&paths, Intent::Cut).bytes_for("application/x-kde-cutselection"),
+            Some(&b"1"[..])
+        );
+        assert_eq!(
+            Content::paths(&paths, Intent::Copy).bytes_for("application/x-kde-cutselection"),
+            Some(&b"0"[..])
+        );
+    }
+
     #[test]
     fn a_selection_larger_than_a_pipe_does_not_block_the_caller() {
         let (read, write) =

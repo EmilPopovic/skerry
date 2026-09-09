@@ -35,6 +35,7 @@ install: build
 	done
 	install -Dm644 packaging/dev.skerry.Skerry.desktop \
 		"$(datadir)/applications/dev.skerry.Skerry.desktop"
+	install -Dm644 packaging/icons/dev.skerry.Skerry.svg "$(datadir)/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg"
 	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
 	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"
 	install -Dm644 packaging/THIRD-PARTY-NOTICES.txt "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt"
@@ -43,6 +44,7 @@ install: build
 uninstall:
 	for binary in $(BINARIES); do rm -f "$(bindir)/$$binary"; done
 	rm -f "$(datadir)/applications/dev.skerry.Skerry.desktop"
+	rm -f "$(datadir)/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg"
 	rm -f "$(datadir)/licenses/skerry/LICENSE" "$(datadir)/licenses/skerry/NOTICE"
 	rm -f "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt" "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
 

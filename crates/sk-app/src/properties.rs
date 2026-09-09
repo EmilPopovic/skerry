@@ -71,6 +71,12 @@ impl Properties {
                 });
             }
             rows.push(Row { label: label("properties.where"), value: self.parent() });
+            if let Some(original) = &facts.original {
+                rows.push(Row {
+                    label: label("properties.original"),
+                    value: original.display().to_string(),
+                });
+            }
             rows.push(Row { label: label("properties.size"), value: self.size_line(facts) });
             rows.push(Row {
                 label: label("properties.modified"),

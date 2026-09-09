@@ -57,7 +57,7 @@ sockets or process isolation were required.
 
 | Check | Result |
 | --- | --- |
-| `tools/check` | All gates passed: 980 tests, five explicitly ignored; formatting, clippy with warnings denied, repository rules, package/notice checks, release panic recovery and 86 golden frames. |
+| `tools/check` | All gates passed: formatting, clippy with warnings denied, repository rules, package/notice checks, release panic recovery and 86 golden frames. The suite was 980 tests at that run and is 996 now, five explicitly ignored; the added tests cover trash recovery and queue retention and were run separately. Golden frames need the recorded font bytes, so only a font-matched host reproduces that part. |
 | ARM cross-check | All workspace targets compiled for aarch64 Linux with Rust 1.96.1; native execution remains a CI check. |
 | Minimum Rust | `cargo check --workspace --all-targets --locked` passed on 1.90. |
 | Supply audit | cargo-deny 0.20.2: advisories, licenses, bans and sources passed against the fetched database on 2026-09-09. |
@@ -65,6 +65,8 @@ sockets or process isolation were required.
 | Real D-Bus | Private-daemon integration test passed separately. |
 | Kernel confinement | Linux 6.8.0-139 guest: mandatory Landlock and seccomp tests passed, including a dynamically linked executable. |
 | Filesystem guest | 80 passes, zero failures, five FAT limitations, five explicitly owed checks across rootfs/tmpfs/ext4/btrfs/XFS/FAT. All five injected faults passed. |
+| Degradation injection | `SKERRY_DISABLE` forces absence at the six runtime probes (vulkan, portal, helpers, udisks2, watch, and a named helper). A GUI scenario asserts the visible outcome on both a missing image decoder — the look ends in `refused` rather than `waiting`, and the status line names the unavailable facility — and a refused watch, which reports the stale listing and the refresh key. Both halves were confirmed to fail when the injection is removed. |
+| Parser campaigns | 500,000 mutations each against tar, ZIP and the D-Bus wire on seed 20260909, and 20,000 each on the default seed 380535: no panic, no timeout, no memory-limit kill. Bounded mutation fuzzing over six valid seeds ([ADR 0040](adr/0040-bounded-parser-mutation-campaigns.md)), not coverage-guided; the markdown, `.desktop`, MIME and keymap parsers are not yet targets. |
 
 The filesystem VM runs as UID 1000 after guest-only mount setup. Disk-full and
 read-error cases leave no incomplete final file or temporary file; the partial
@@ -80,6 +82,11 @@ symlinks, hardlinks, xattrs or all names. These are explicit limitations.
 | X11, 125% | 145 passed, zero failed, three explicit skips. |
 | Sway, 100% | 140 passed, one palette test synchronization failure, seven skips. The corrected palette scenario passed separately. |
 | Sway, 125% | 141 passed, one first-frame scale failure, six skips. The startup fix passed the scale/palette/keyboard/close checks; ten consecutive warm-start scale checks also passed. |
+
+Re-run on 2026-09-09 after the degraded-runtime scenario and the two new
+diagnostic fields were added: **X11 at 100%, 148 passed, zero failed, three
+explicit skips** over 151 registered scenarios. Only that backend and scale were
+re-run; the Sway and fractional rows above stand on their original sessions.
 
 The full-run failures above were investigated and corrected, not discarded or
 converted into skips. Follow-up runs target the changed behavior; they are not
@@ -131,6 +138,11 @@ host timings do not establish the interactive performance budgets.
   Software-rendered automated tests do not substitute for every compositor,
   driver, network filesystem or removable device. NTFS/NFS and the GUI hung-mount
   case are not covered by this local VM evidence.
+
+[RELEASE-NOTES.md](../RELEASE-NOTES.md) is the user-facing companion to this
+record and must ship with the release; it states the glibc 2.39 floor, the
+recovery behaviour of trash and the operation queue, and the narrowed fuzzing and
+`--bench` claims.
 
 Known feature limits remain in the [README](../README.md#what-this-alpha-does-not-do):
 accessibility actions/tables are incomplete, X11 lacks input-method/touchpad

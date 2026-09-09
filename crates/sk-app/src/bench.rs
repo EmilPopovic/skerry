@@ -128,6 +128,8 @@ fn chrome_of<'a>(
         typed: None,
         band: None,
         watching: true,
+        preview_missing: false,
+        watch_failure: None,
         notice: None,
         hovered_button: None,
         hovered_crumb: None,

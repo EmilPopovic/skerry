@@ -58,6 +58,10 @@ pub const ON_ROW: &[&[&str]] = &[
     ],
 ];
 
+/// Recoverable entries offer restore rather than mutations of their stored names.
+pub const IN_TRASH: &[&[&str]] =
+    &[&["file.restore"], &["view.quick_look", "file.properties", "file.copy", "file.copy_path"]];
+
 /// What a secondary click inside a text preview offers.
 ///
 /// **Two rows, and they are the pointer's way to the look's own scope.** `Ctrl+A`
@@ -98,7 +102,15 @@ pub const ON_A_PLACE: &[&[&str]] = &[
 /// What a secondary click on anything else offers.
 pub const ON_BACKGROUND: &[&[&str]] = &[
     &["file.new_folder", "file.paste"],
-    &["edit.undo", "edit.redo", "edit.pause", "edit.cancel", "edit.resume"],
+    &[
+        "edit.undo",
+        "edit.redo",
+        "edit.pause",
+        "edit.cancel",
+        "edit.resume",
+        "edit.skip_failed",
+        "edit.dismiss_issue",
+    ],
     &[
         "select.all",
         "view.filter",
@@ -119,7 +131,7 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
         "view.bands_show",
     ],
     &["view.columns_reset", "view.hidden", "view.theme", "view.sidebar"],
-    &["tab.new", "tab.close", "tab.reopen"],
+    &["window.new", "tab.new", "tab.close", "tab.reopen"],
     &["pane.split_beside", "pane.split_below", "pane.close"],
     &["place.pin", "file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
     &["view.palette", "help.keys", "settings.open"],

@@ -342,6 +342,8 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for State {
                 state.drags.offer_types_in_flight.clear();
             }
             wl_data_device::Event::Selection { id } => {
+                state.clipboard.shared.generation =
+                    state.clipboard.shared.generation.wrapping_add(1);
                 if let Some(old) = state.clipboard.offer.take() {
                     old.destroy();
                 }

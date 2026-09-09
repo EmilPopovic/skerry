@@ -1,4 +1,5 @@
 [package]
+build = "../skerry/build.rs"
 name = "skerry-thumbnailer"
 version.workspace = true
 edition.workspace = true

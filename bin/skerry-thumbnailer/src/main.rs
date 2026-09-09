@@ -32,6 +32,10 @@ use std::path::{Path, PathBuf};
 use sk_preview::wire::{Ask, Refusal, Reply, Request};
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("skerry-thumbnailer {} ({})", env!("CARGO_PKG_VERSION"), env!("SKERRY_COMMIT"));
+        return;
+    }
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if let Some(at) = arguments.iter().position(|it| it == "--write") {
         let (from, into) = (arguments.first().map(PathBuf::from), arguments.get(at + 1));

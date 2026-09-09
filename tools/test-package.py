@@ -35,7 +35,7 @@ class Distribution(unittest.TestCase):
         def command(args, **_):
             if args[0] == "rustc":
                 return str(self.root / "toolchain")
-            return "GLIBC_2.28 GLIBC_2.34" if args[0] == "readelf" else f"skerry {self.version} (fixture)"
+            return "GLIBC_2.28 GLIBC_2.34" if args[0] == "readelf" else f"{Path(args[0]).name} {self.version} (fixture)"
         with patch.object(package.subprocess, "check_output", side_effect=command):
             return package.package(self.binaries, self.output, kwargs.get("arch", "x86_64"), kwargs.get("tag"))
 
@@ -58,11 +58,17 @@ class Distribution(unittest.TestCase):
             self.assertEqual((installed / "bin" / name).read_bytes(), (self.binaries / name).read_bytes())
         for name in ("THIRD-PARTY-NOTICES.txt", "RUST-COPYRIGHT.html"):
             self.assertEqual((installed / "share/licenses/skerry" / name).read_bytes(), (source / name).read_bytes())
+        # The release notes state the compatibility floor and the recovery behaviour,
+        # so an installation that dropped them would answer neither question.
+        for name in ("RELEASE-NOTES.md", "SECURITY.md"):
+            self.assertEqual((installed / "share/doc/skerry" / name).read_bytes(), (source / name).read_bytes())
+        self.assertTrue((installed / "share/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg").is_file())
         sentinel = installed / "share/licenses/skerry/retained"
         sentinel.write_text("unrelated")
         subprocess.run(["make", "uninstall", *args], cwd=source, check=True, capture_output=True)
         self.assertEqual(sentinel.read_text(), "unrelated")
         self.assertFalse((installed / "bin/skerry").exists())
+        self.assertFalse((installed / "share/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg").exists())
 
     def test_wrong_tag_missing_helper_and_wrong_architecture_are_refused(self):
         with self.assertRaises(ValueError):

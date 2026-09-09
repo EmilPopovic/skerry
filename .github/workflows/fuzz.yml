@@ -1,0 +1,31 @@
+name: parser-fuzz
+on:
+  schedule:
+    - cron: '31 3 * * *'
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  mutations:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      - name: Toolchain
+        run: |
+          rustup toolchain install 1.96.1 --profile minimal --no-self-update
+          rustup default 1.96.1
+      - name: Bounded parser campaigns
+        run: python3 tools/fuzz-parsers.py --cases 50000 --seed "${GITHUB_RUN_ID}"
+      - name: Keep crash inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: parser-crashes-${{ matrix.runner }}
+          path: /tmp/skerry-fuzz-*.bin
+          if-no-files-found: ignore

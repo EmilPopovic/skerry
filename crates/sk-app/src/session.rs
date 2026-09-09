@@ -48,11 +48,17 @@ use crate::panes::Axis;
 /// One acknowledged snapshot and at most one writer in flight.
 #[derive(Default)]
 pub struct WriteBack {
+    file: Option<PathBuf>,
     acknowledged: String,
     flight: Option<std::sync::mpsc::Receiver<(String, bool)>>,
 }
 
 impl WriteBack {
+    /// Save every checkpoint to the exclusively held window slot.
+    pub fn at(file: PathBuf) -> Self {
+        Self { file: Some(file), ..Self::default() }
+    }
+
     /// Drains acknowledgement, optionally waiting during process exit.
     pub fn ready(&mut self, wait: bool) -> bool {
         use std::sync::mpsc::TryRecvError;
@@ -80,7 +86,10 @@ impl WriteBack {
 
     /// Starts a save if no earlier save is still running.
     pub fn start(&mut self, text: String, pool: &sk_util::Pool, wake: &sk_util::WakeHandle) {
-        self.start_with(text, pool, wake, write);
+        let file = self.file.clone().or_else(path);
+        self.start_with(text, pool, wake, move |text| {
+            file.is_some_and(|file| sk_fs::atomically(&file, text))
+        });
     }
 
     fn start_with(
@@ -106,7 +115,8 @@ impl WriteBack {
     /// Finishes older work before publishing the final snapshot on exit.
     pub fn finish(&mut self, text: String) {
         self.ready(true);
-        if text != self.acknowledged && write(&text) {
+        let file = self.file.clone().or_else(path);
+        if text != self.acknowledged && file.is_some_and(|file| sk_fs::atomically(&file, &text)) {
             self.acknowledged = text;
         }
     }
@@ -248,6 +258,57 @@ pub fn path() -> Option<PathBuf> {
     Some(state.join("skerry").join("session"))
 }
 
+/// A session slot exclusively owned by this window, acquired before display startup.
+pub fn claim(independent: bool) -> std::io::Result<Option<(PathBuf, std::fs::File)>> {
+    let Some(base) = path() else { return Ok(None) };
+    claim_at(&base, independent).map(Some)
+}
+
+fn claim_at(base: &Path, independent: bool) -> std::io::Result<(PathBuf, std::fs::File)> {
+    if let Some(parent) = base.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    for slot in usize::from(independent)..64 {
+        let file = if slot == 0 {
+            base.to_path_buf()
+        } else {
+            base.with_file_name(format!("session-window-{slot}"))
+        };
+        let lock = file.with_extension("lock");
+        match sk_fs::lock_file(&lock) {
+            Ok(held) => return Ok((file, held)),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "all window session slots are in use"))
+}
+
+/// Retain panic diagnostics without attempting to recover inconsistent UI state.
+pub fn install_panic_log(identity: &'static str) {
+    use std::io::Write as _;
+    let Some(file) = path().map(|path| path.with_file_name("panic.log")) else { return };
+    let output = match sk_fs::diagnostic_file(&file) {
+        Ok(output) => std::sync::Mutex::new(output),
+        Err(error) => {
+            eprintln!("skerry: cannot open panic diagnostics {}: {error}", file.display());
+            return;
+        }
+    };
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(mut output) = output.try_lock() {
+            let seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |time| time.as_secs());
+            let _ =
+                writeln!(output, "{identity} pid={} unix={seconds}: {info}", std::process::id());
+            let _ = output.flush();
+        }
+        previous(info);
+    }));
+}
+
 /// The three column widths on a `columns` line, defaulting any that is missing
 /// or unreadable.
 ///
@@ -265,28 +326,6 @@ fn read_columns(value: &str) -> crate::layout::Columns {
         modified: next(default.modified),
     }
     .clamped()
-}
-
-/// Reads the file, or nothing if there is not one this build understands.
-///
-/// **Runs before the frame loop starts**, which is the one place a filesystem
-/// call is not a rule 1 violation: there is no frame to block yet, and the
-/// alternative is opening on `$HOME` and jumping to the restored tree a moment
-/// later. One `openat` and one read of a file a few hundred bytes long.
-#[must_use]
-pub fn load() -> Option<Session> {
-    let file = path()?;
-    let text = std::fs::read_to_string(file).ok()?;
-    parse(&text)
-}
-
-/// Writes `text` where [`path`] says, whole and atomically.
-///
-/// **Runs on a job**, through [`sk_fs::atomically`] — the four steps that are why
-/// rule 6 can claim to survive a power cut, in the one place the view records and
-/// the pinned places take them too.
-pub fn write(text: &str) -> bool {
-    path().is_some_and(|file| sk_fs::atomically(&file, text))
 }
 
 /// The file's text for a session.
@@ -594,6 +633,28 @@ mod tests {
     /// The view mode and the grouping were written on this line for two commits
     /// and belong to the folder now, so those tokens are skipped rather than
     /// refused — a person who ran those builds keeps their splits and their tabs.
+    #[test]
+    fn simultaneous_windows_own_distinct_reusable_checkpoint_slots() {
+        let root =
+            std::env::temp_dir().join(format!("skerry-session-slots-{}", std::process::id()));
+        let base = root.join("session");
+        let (main, first_lock) = super::claim_at(&base, false).unwrap();
+        let (second, second_lock) = super::claim_at(&base, true).unwrap();
+        let (third, third_lock) = super::claim_at(&base, false).unwrap();
+        assert_eq!(main, base);
+        assert_ne!(main, second);
+        assert_ne!(second, third);
+        std::fs::write(&main, b"first window").unwrap();
+        std::fs::write(&second, b"second window").unwrap();
+        drop(second_lock);
+        let (reused, reused_lock) = super::claim_at(&base, true).unwrap();
+        assert_eq!(reused, second);
+        assert_eq!(std::fs::read(&reused).unwrap(), b"second window");
+        assert_eq!(std::fs::read(&main).unwrap(), b"first window");
+        drop((first_lock, third_lock, reused_lock));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn every_arity_the_format_has_ever_had_still_restores_its_tabs() {
         let cases = [

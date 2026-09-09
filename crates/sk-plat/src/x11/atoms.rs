@@ -74,5 +74,6 @@ x11rb::atom_manager! {
         text_plain_utf8: b"text/plain;charset=utf-8",
         text_plain: b"text/plain",
         gnome_copied_files: b"x-special/gnome-copied-files",
+        kde_cutselection: b"application/x-kde-cutselection",
     }
 }

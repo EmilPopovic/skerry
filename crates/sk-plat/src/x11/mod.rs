@@ -723,7 +723,10 @@ impl Window {
     pub fn set_selection(&mut self, selection: Selection, content: Content) {
         let offered = self.selections.publish(&ask!(self), selection, content);
         match selection {
-            Selection::Clipboard => self.clipboard.offer_types = offered,
+            Selection::Clipboard => {
+                self.clipboard.generation = self.clipboard.generation.wrapping_add(1);
+                self.clipboard.offer_types = offered;
+            }
             Selection::Primary => self.clipboard.primary_types = offered,
         }
     }
@@ -965,10 +968,15 @@ impl Window {
     /// and asking would be a round trip to answer a question we are the answer
     /// to.
     fn selection_changed(&mut self, event: &xfixes::SelectionNotifyEvent) {
+        // Qt refuses conversions older than its ownership timestamp. An input
+        // event from before this selection existed cannot timestamp TARGETS.
+        self.time = event.timestamp;
         if event.owner == self.id {
             return;
         }
         let which = if event.selection == self.atoms.CLIPBOARD {
+            self.clipboard.generation = self.clipboard.generation.wrapping_add(1);
+            self.clipboard.offer_types.clear();
             Selection::Clipboard
         } else {
             Selection::Primary

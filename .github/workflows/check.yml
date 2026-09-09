@@ -46,12 +46,12 @@ jobs:
     # Pinned rather than `ubuntu-latest`, and 26.04 rather than 24.04: the
     # `frames` job needs this image's font packages to the byte, and one image
     # across the workflow means one story about what CI is.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Packages
-        # `libxkbcommon-dev` because `#[link(name = "xkbcommon")]` needs the
+        # `desktop-file-utils libxkbcommon-dev` because `#[link(name = "xkbcommon")]` needs the
         # linker symlink. The fonts because twelve places in the tests open with
         # `let Ok(fonts) = Fonts::discover() else { return }` and pass while
         # measuring nothing where there are none — `frames` is what proves the
@@ -59,7 +59,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+            desktop-file-utils libxkbcommon-dev fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal \
@@ -95,7 +95,7 @@ jobs:
     # than trusted, because `tools/golden` *skips* where either is missing —
     # right for a person, decoration here. The fonts the harness checks itself,
     # against the hash of every file in `tests/golden/faces.txt`.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -103,7 +103,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev mesa-vulkan-drivers python3-pil \
+            desktop-file-utils libxkbcommon-dev mesa-vulkan-drivers python3-pil \
             fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji fonts-noto-mono \
             poppler-utils fonts-urw-base35
       - name: Toolchain
@@ -156,7 +156,7 @@ jobs:
     # running these on a second one immediately found a harness bug that had been
     # latent since it was written — see
     # docs/12-measurement.md#a-helper-can-be-correct-only-because-of-the-fixture-it-grew-up-in.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -174,9 +174,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev mesa-vulkan-drivers xvfb x11-utils imagemagick \
+            desktop-file-utils libxkbcommon-dev mesa-vulkan-drivers xvfb x11-utils imagemagick \
             python3-pil fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji \
-            poppler-utils fonts-urw-base35 libglib2.0-bin python3-gi gir1.2-gtk-3.0 xclip sway grim wl-clipboard
+            poppler-utils fonts-urw-base35 libglib2.0-bin python3-gi gir1.2-gtk-3.0 xclip sway grim wl-clipboard fuse3 python3-pyqt6 qt6-wayland qt6-qpa-plugins
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update
@@ -192,7 +192,14 @@ jobs:
           restore-keys: scenarios-${{ env.RUST }}-
       - name: Build
         run: cargo build --release --workspace --locked
+      - name: Require a working hung filesystem rig
+        run: |
+          test -c /dev/fuse
+          test -r /dev/fuse && test -w /dev/fuse
+          python3 tools/hung-mount --self-test
       - name: GUI scenarios
+        env:
+          SKERRY_REQUIRE_HUNG_MOUNT: "1"
         run: ./tools/gui-test --${{ matrix.backend }} --scale=${{ matrix.scale }}
 
   aarch64:
@@ -220,7 +227,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+            desktop-file-utils libxkbcommon-dev fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal \
@@ -248,7 +255,7 @@ jobs:
     # `tools/check` runs the offline half of this where a person has the tool
     # installed. Here the whole of it runs, `advisories` included, because that
     # check fetches the RustSec database and this is where a network is a given.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -282,14 +289,14 @@ jobs:
     # honours `$CC` and `rustc`'s linker does not — and a person can run the same
     # script. It needs a cold target directory, so it gets no cache: a warm one
     # re-runs no build scripts, which is a gate that passes by not looking.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+          sudo apt-get install -y --no-install-recommends desktop-file-utils libxkbcommon-dev
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update
@@ -301,14 +308,14 @@ jobs:
     # `rust-version = "1.90"` is a promise to anyone whose distribution is a
     # release or two behind. A `check` is enough to keep it: what breaks an MSRV
     # is syntax and library items, not codegen.
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+          sudo apt-get install -y --no-install-recommends desktop-file-utils libxkbcommon-dev
       - name: Toolchain
         run: |
           rustup toolchain install "$MSRV" --profile minimal --no-self-update

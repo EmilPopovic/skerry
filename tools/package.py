@@ -37,11 +37,17 @@ def package(binaries: Path, output: Path, arch: str, tag: str | None = None) -> 
     identity = subprocess.check_output([str((binaries / "skerry").resolve()), "--version"], text=True).strip()
     if not identity.startswith(f"skerry {version} ("):
         raise ValueError(f"binary version disagrees with manifest: {identity}")
+    for name in BINARIES[1:]:
+        helper = subprocess.check_output([str((binaries / name).resolve()), "--version"], text=True).strip()
+        if helper != identity.replace("skerry ", f"{name} ", 1):
+            raise ValueError(f"helper identity disagrees with application: {helper}")
     versions = set()
     for name in BINARIES:
         symbols = subprocess.check_output(["readelf", "--version-info", str(binaries / name)], text=True)
         versions.update(re.findall(r"\bGLIBC_(\d+(?:\.\d+)+)\b", symbols))
     floor = max(versions, key=lambda value: tuple(map(int, value.split("."))), default="none")
+    if floor != "none" and tuple(map(int, floor.split("."))) > (2, 39):
+        raise ValueError(f"GLIBC_{floor} exceeds the alpha baseline GLIBC_2.39")
     toolchain = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip())
     rust_notices = toolchain / "share/doc/rust/COPYRIGHT-library.html"
     if not rust_notices.is_file():
@@ -65,8 +71,11 @@ def package(binaries: Path, output: Path, arch: str, tag: str | None = None) -> 
             ("packaging/README.binary.md", "README.md"),
             ("packaging/dev.skerry.Skerry.desktop", "usr/share/applications/dev.skerry.Skerry.desktop"),
             ("LICENSE", "LICENSE"), ("NOTICE", "NOTICE"),
+            ("RELEASE-NOTES.md", "RELEASE-NOTES.md"), ("SECURITY.md", "SECURITY.md"),
+            ("packaging/icons/dev.skerry.Skerry.svg", "usr/share/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg"),
             ("packaging/THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"),
         ):
+            (root / target).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / source, root / target)
         shutil.copyfile(rust_notices, root / "RUST-COPYRIGHT.html")
         (root / "BUILD-INFO").write_text(f"{identity}\narchitecture: {arch}\nglibc-symbol-floor: {floor}\n")

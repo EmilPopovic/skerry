@@ -12,7 +12,7 @@ The complete list. Anything not here is probed.
 | Assumption | Floor | Why this floor |
 | --- | --- | --- |
 | Linux kernel | **5.10** | The oldest LTS still in wide use (Debian 11). Gives `statx`, `copy_file_range`, `FICLONE`, `inotify`, `SEEK_HOLE`. |
-| libc | **Target: glibc 2.28, or musl 1.2** | Binary compatibility with this target still needs verification. CI tarballs use their runner's glibc; `BUILD-INFO` records their actual required symbol version. |
+| libc | **Source target: glibc 2.28, or musl 1.2.** The `0.1.0-alpha.1` binaries require **glibc 2.39** | Nothing in the source needs more than 2.28, but the published tarballs are built on their CI runner and inherit its glibc, which excludes Debian 12 and Ubuntu 22.04. `BUILD-INFO` records each artifact's measured symbol floor and `tools/package.py` refuses one above the declared baseline. Reaching 2.28 needs an older build baseline and runtime testing on it; neither has happened, so no 2.28 binary claim is made. See [RELEASE-NOTES.md](../RELEASE-NOTES.md). |
 | Architecture | **x86-64 and aarch64** | Both built and tested in CI from the first commit. Adding a third is then a CI line, not a port. |
 | Display server | **Wayland or X11** | Both first-class. Neither is a fallback for the other. |
 | GPU | **anything, including none** | Vulkan where available, GL otherwise, llvmpipe as the floor — which is also what CI runs on. |
@@ -53,8 +53,14 @@ Two rules govern this table:
    by whoever built it. Build-time features exist only for things that cannot be probed —
    developer tooling, and the `tracing` instrumentation.
 2. **Every fallback path is tested.** CI forces each degradation with an environment
-   override (`SKERRY_DISABLE=udisks2,portal,vulkan,landlock`) rather than trusting that the
-   code compiles.
+   override rather than trusting that the code compiles. The comma-separated names are
+   `vulkan`, `portal`, `udisks2`, `watch`, `helpers`, and any single helper by program
+   name. **`landlock` is deliberately not one of them**: confinement is mandatory, and
+   [ADR 0037](adr/0037-runtime-degradation-is-visible-and-injectable.md) makes the
+   override able to simulate an absent optional facility and unable to relax a required
+   one. A scenario asserts the *visible* outcome of the two a person would notice — an
+   unavailable decoder and a refused watch — because surviving a degradation silently is
+   the failure this is guarding against.
 
 ## What is never in the graph
 

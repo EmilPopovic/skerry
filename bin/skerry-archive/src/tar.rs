@@ -361,6 +361,25 @@ impl Pax {
     }
 }
 
+#[test]
+fn parser_campaign_tar() {
+    crate::fuzz_support::campaign(
+        "tar",
+        &[include_bytes!("../../../tests/fuzz/valid.tar"), &[0; 1024]],
+        |bytes| {
+            let mut tar = Tar::over(bytes);
+            for _ in 0..1024 {
+                match tar.next() {
+                    Ok(Some(_)) => {
+                        let _ = tar.data(&mut |_| Ok(()));
+                    }
+                    _ => break,
+                }
+            }
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

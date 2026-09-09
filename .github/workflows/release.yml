@@ -35,15 +35,18 @@ jobs:
   validate-filesystems:
     uses: ./.github/workflows/torture.yml
 
+  validate-parsers:
+    uses: ./.github/workflows/fuzz.yml
+
   tarball:
-    needs: [validate, validate-filesystems]
+    needs: [validate, validate-filesystems, validate-parsers]
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-26.04
+          - runner: ubuntu-24.04
             arch: x86_64
           - runner: ubuntu-24.04-arm
             arch: aarch64
@@ -58,7 +61,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libxkbcommon-dev binutils
+          sudo apt-get install -y --no-install-recommends desktop-file-utils libxkbcommon-dev binutils
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update

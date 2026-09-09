@@ -24,18 +24,22 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::Mode;
 use sk_model::{Problem, ProblemKind};
 
 /// What a mutation did, and enough to undo it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Change {
+    /// A trash entry restored, including its durable inverse.
+    Restored(crate::trash::Entry),
     /// Completed or partial work with a user-visible problem that must be retained.
     Noted {
         /// What can still be undone.
         change: Box<Change>,
         /// The problem already translated for the operation result.
         note: String,
+        /// Partial copied data can be retried using the copy engine's resume checks.
+        retry: bool,
     },
     /// Several changes made by one gesture, oldest first.
     ///
@@ -142,6 +146,16 @@ impl Change {
         }
     }
 
+    /// Whether a partial copy still owes data, unlike a metadata-only warning.
+    #[must_use]
+    pub fn needs_retry(&self) -> bool {
+        match self {
+            Self::Noted { retry, .. } => *retry,
+            Self::Batch(changes) => changes.iter().any(Self::needs_retry),
+            _ => false,
+        }
+    }
+
     /// What a person is looking for after an operation: the folder they made,
     /// the new name, or — after an undo — the thing that came back.
     #[must_use]
@@ -149,6 +163,7 @@ impl Change {
         match self {
             // The last one, which is what the gesture finished by doing and
             // therefore where a person is looking.
+            Self::Restored(entry) => &entry.original,
             Self::Noted { change, .. } => change.subject(),
             Self::Batch(changes) => changes.last().map_or(Path::new(""), Change::subject),
             // The folder that was made, and the file that was edited: two
@@ -186,6 +201,7 @@ impl Change {
             path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
         };
         match self {
+            Self::Restored(entry) => ("history.restored", named(&entry.original)),
             Self::Noted { change, .. } => change.summary(),
             Self::Batch(changes) => match changes.as_slice() {
                 [] => ("history.nothing", String::new()),
@@ -218,6 +234,7 @@ impl Change {
         match self {
             // The *first* one, because a batch is undone backwards and the first
             // change is the last to be put back.
+            Self::Restored(entry) => Some(&entry.stored),
             Self::Noted { change, .. } => change.origin(),
             Self::Batch(changes) => changes.first().and_then(Change::origin),
             // Nothing to point at: undoing a `Created` removes the folder, and
@@ -243,6 +260,7 @@ impl Change {
 /// both are.
 fn many_key(one: &'static str) -> &'static str {
     match one {
+        "history.restored" => "history.restored_many",
         "history.created" => "history.created_many",
         "history.renamed" => "history.renamed_many",
         "history.copied" => "history.copied_many",
@@ -258,6 +276,7 @@ fn many_key(one: &'static str) -> &'static str {
 ///
 /// **Runs on a job.**
 pub fn create_directory(parent: &Path, name: &str) -> Result<Change, Problem> {
+    crate::trash::writable(parent)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -274,6 +293,7 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<Change, Problem> {
 ///
 /// **Runs on a job.**
 pub fn rename(from: &Path, name: &str) -> Result<Change, Problem> {
+    crate::trash::writable(from)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -292,48 +312,24 @@ pub fn rename(from: &Path, name: &str) -> Result<Change, Problem> {
 ///
 /// **Runs on a job.**
 pub fn trash(path: &Path) -> Result<Change, Problem> {
-    let Some(name) = path.file_name() else {
-        return Err(Problem::new(ProblemKind::BadName, path.display().to_string(), "no name"));
-    };
-    let home = trash_home()?;
-    let (files, info) = (home.join("files"), home.join("info"));
-    // The data directory may not exist at all on a fresh account, and `mkdir`
-    // does not make parents. The parents get the ordinary mode; the three trash
-    // directories get **0700**, because the specification says a trash is
-    // private and a world-readable one leaks every filename in it.
-    if let Some(parent) = home.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        return Err(io_problem(&error, parent));
-    }
-    for directory in [&home, &files, &info] {
-        if let Err(error) = rustix::fs::mkdir(directory, Mode::from_bits_truncate(0o700))
-            && error != rustix::io::Errno::EXIST
-        {
-            return Err(problem(error, directory));
-        }
-    }
+    let entry = crate::trash::put(path)?;
+    let change =
+        Change::Trashed { original: entry.original, stored: entry.stored, info: entry.info };
+    Ok(match entry.warning {
+        Some(note) => Change::Noted { change: Box::new(change), note, retry: false },
+        None => change,
+    })
+}
 
-    // **The `.trashinfo` reserves the name, not the move.** The specification
-    // says to create it with `O_EXCL`, because that is the one step that can
-    // claim a name atomically — two programs trashing `notes.txt` at the same
-    // moment must not both believe they own `files/notes.txt`.
-    let (stored, info_path) = claim(&files, &info, name)?;
-    let record = format!(
-        "[Trash Info]\nPath={}\nDeletionDate={}\n",
-        encode_path_bytes(path.as_os_str().as_encoded_bytes()),
-        deletion_date()
-    );
-    std::fs::write(&info_path, record).map_err(|error| io_problem(&error, &info_path))?;
-
-    if let Err(error) = move_no_replace(path, &stored) {
-        // The reservation is ours and the move failed, so the reservation goes:
-        // an `info` entry with no file behind it is a trash the desktop's own
-        // tools report as corrupt.
-        let _ = std::fs::remove_file(&info_path);
-        return Err(error);
-    }
-    Ok(Change::Trashed { original: path.to_path_buf(), stored, info: info_path })
+/// Restores a persistent trash entry. Runs on a filesystem job.
+pub fn restore(stored: &Path) -> Result<Change, Problem> {
+    let entry = crate::trash::restore(stored)?;
+    let warning = entry.warning.clone();
+    let change = Change::Restored(entry);
+    Ok(match warning {
+        Some(note) => Change::Noted { change: Box::new(change), note, retry: false },
+        None => change,
+    })
 }
 
 /// Copies `source` into the directory `into`.
@@ -347,6 +343,7 @@ pub fn copy_into(
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
+    crate::trash::writable(into)?;
     let Some(name) = source.file_name() else {
         return Err(Problem::new(
             ProblemKind::BadName,
@@ -371,6 +368,7 @@ pub fn copy_into(
             Err(problem) if taken(&destination) => Ok(Change::Noted {
                 change: Box::new(Change::Copied { source: source.to_path_buf(), destination }),
                 note: problem.message(),
+                retry: problem.kind() != ProblemKind::Preservation,
             }),
             Err(problem) => Err(problem),
         };
@@ -405,8 +403,33 @@ pub fn copy_into(
         Err(problem) if !existed && taken(&destination) => Ok(Change::Noted {
             change: Box::new(Change::Copied { source: source.to_path_buf(), destination }),
             note: problem.message(),
+            retry: problem.kind() != ProblemKind::Preservation,
         }),
         Err(problem) => Err(problem),
+    }
+}
+
+/// Resume a partial copy at the exact destination recorded in its undo entry.
+///
+/// The caller must retain ownership of that entry throughout recovery.
+pub fn resume_copy(
+    source: &Path,
+    destination: &Path,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(crate::copy::Progress),
+) -> Result<Change, Problem> {
+    crate::trash::writable(destination)?;
+    let options = crate::copy::Options { resume: true, ..Default::default() };
+    let change =
+        Change::Copied { source: source.to_path_buf(), destination: destination.to_path_buf() };
+    match crate::copy::copy_to_options(source, destination, options, cancel, watch) {
+        Ok(()) => Ok(change),
+        Err(_) if cancel.is_cancelled() => Ok(change),
+        Err(problem) => Ok(Change::Noted {
+            change: Box::new(change),
+            note: problem.message(),
+            retry: problem.kind() != ProblemKind::Preservation,
+        }),
     }
 }
 
@@ -441,12 +464,8 @@ pub enum Conflict {
     /// [`Change::Batch`], so `Ctrl+Z` removes what arrived *and* brings back
     /// what it displaced, in that order.
     ///
-    /// The cost is that this fails where the trash does — a file on a drive with
-    /// no per-volume `.Trash-$uid`, which is the same gap
-    /// [`ProblemKind::AcrossFilesystems`] names. Reported rather than downgraded
-    /// to an overwrite: "Replace" that silently became "destroy" on some drives
-    /// and not others is the kind of difference nobody can see until it costs
-    /// them something.
+    /// If no safe writable trash can be created on that filesystem, replacement
+    /// is refused and the existing destination is retained.
     Replace,
 }
 
@@ -472,6 +491,8 @@ pub fn move_into(
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
+    crate::trash::writable(source)?;
+    crate::trash::writable(into)?;
     // **A move never renames.** [`Conflict::Rename`] is a copy's answer, and a
     // move that quietly renamed would leave two files under names neither of
     // them chose — so it is not offered for one, and reaching here with it
@@ -511,6 +532,7 @@ pub fn move_into(
 ///
 /// **Runs on a job.**
 pub fn write_text(path: &Path, text: &str) -> Result<(), Problem> {
+    crate::trash::writable(path)?;
     crate::save::write(path, text).map_err(|error| io_problem(&error, path))
 }
 
@@ -530,7 +552,7 @@ pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
         Err(problem)
             if crate::read_text(path, crate::TEXT_LIMIT).is_ok_and(|text| text == after) =>
         {
-            Ok(Change::Noted { change: Box::new(change), note: problem.message() })
+            Ok(Change::Noted { change: Box::new(change), note: problem.message(), retry: false })
         }
         Err(problem) => Err(problem),
     }
@@ -613,6 +635,7 @@ fn replace_into(
 /// **Runs on a job.**
 pub fn revert(change: &Change) -> Result<(), Problem> {
     match change {
+        Change::Restored(entry) => crate::trash::put_back(entry),
         Change::Noted { change, .. } => revert(change),
         // Backwards, and the first failure stops it: a batch half undone is a
         // state somebody can look at and act on, where carrying on past an
@@ -651,12 +674,7 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
             }
             write_text(path, before)
         }
-        Change::Trashed { original, stored, info } => {
-            move_no_replace(stored, original)?;
-            // The file is back; a leftover `.trashinfo` is the corruption the
-            // claim step exists to avoid, so its removal is not optional.
-            std::fs::remove_file(info).map_err(|error| io_problem(&error, info))
-        }
+        Change::Trashed { .. } => revert_recorded(change).map(|_| ()),
     }
 }
 
@@ -665,6 +683,7 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
 /// **Runs on a job.**
 pub fn apply(change: &Change) -> Result<Change, Problem> {
     match change {
+        Change::Restored(entry) => restore(&entry.stored),
         Change::Noted { change, .. } => apply(change),
         Change::Batch(changes) => {
             changes.iter().map(apply).collect::<Result<_, _>>().map(Change::Batch)
@@ -715,9 +734,11 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             let fresh = Change::Copied { source: source.clone(), destination: destination.clone() };
             match crate::copy::copy_to(source, destination, &sk_util::Cancel::new(), &mut |_| {}) {
                 Ok(()) => Ok(fresh),
-                Err(problem) if !existed && taken(destination) => {
-                    Ok(Change::Noted { change: Box::new(fresh), note: problem.message() })
-                }
+                Err(problem) if !existed && taken(destination) => Ok(Change::Noted {
+                    change: Box::new(fresh),
+                    note: problem.message(),
+                    retry: problem.kind() != ProblemKind::Preservation,
+                }),
                 Err(problem) => Err(problem),
             }
         }
@@ -748,6 +769,21 @@ pub struct Replay {
 
 /// Undoes one leaf and retains a warning if publication succeeded before sync failed.
 pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
+    if let Change::Trashed { original, stored, .. } = change {
+        if crate::trash::read(stored)?.original != *original {
+            return Err(Problem::new(
+                ProblemKind::TrashUnavailable,
+                stored.display().to_string(),
+                "trash metadata changed after the operation",
+            ));
+        }
+        let restored = crate::trash::restore(stored)?;
+        return Ok(match restored.warning {
+            Some(note) => Change::Noted { change: Box::new(change.clone()), note, retry: false },
+            None => change.clone(),
+        });
+    }
+
     if let Change::Edited { path, before, after } = change {
         if crate::read_text(path, crate::TEXT_LIMIT)? != *after {
             return Err(Problem::new(
@@ -758,7 +794,7 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
         }
         return match edit_text(path, before)? {
             Change::Noted { note, .. } => {
-                Ok(Change::Noted { change: Box::new(change.clone()), note })
+                Ok(Change::Noted { change: Box::new(change.clone()), note, retry: false })
             }
             _ => Ok(change.clone()),
         };
@@ -826,47 +862,6 @@ pub fn replay(
     Replay { completed: grouped(completed), remaining: grouped(waiting), problem }
 }
 
-/// `$XDG_DATA_HOME/Trash`, or the specification's fallback.
-fn trash_home() -> Result<PathBuf, Problem> {
-    if let Some(data) =
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute())
-    {
-        return Ok(data.join("Trash"));
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|path| path.is_absolute());
-    home.map(|home| home.join(".local/share/Trash")).ok_or_else(|| {
-        Problem::plain(ProblemKind::Unreadable, "neither XDG_DATA_HOME nor HOME is set")
-    })
-}
-
-/// Claims a free name in the trash, returning where the file and its record go.
-///
-/// The `info` file is created empty with `O_EXCL` — that is the atomic step, and
-/// the specification names it as such. The name is then `name`, `name.2`,
-/// `name.3` and so on until one is free.
-fn claim(files: &Path, info: &Path, name: &std::ffi::OsStr) -> Result<(PathBuf, PathBuf), Problem> {
-    for attempt in 1..1000u32 {
-        let mut candidate = name.to_owned();
-        if attempt != 1 {
-            candidate.push(format!(".{attempt}"));
-        }
-        let mut record_name = candidate.clone();
-        record_name.push(".trashinfo");
-        let record = info.join(record_name);
-        let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC;
-        match rustix::fs::open(&record, flags, Mode::from_bits_truncate(0o600)) {
-            Ok(_) => return Ok((files.join(candidate), record)),
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(error) => return Err(problem(error, &record)),
-        }
-    }
-    Err(Problem::new(
-        ProblemKind::Unreadable,
-        name.to_string_lossy(),
-        "a thousand names in the trash are taken",
-    ))
-}
-
 /// Moves `from` to `to`, and **never over anything**.
 ///
 /// `renameat2` with `RENAME_NOREPLACE`, which is one syscall and cannot race —
@@ -887,7 +882,7 @@ fn move_no_replace(from: &Path, to: &Path) -> Result<(), Problem> {
 }
 
 /// The deletion time the specification asks for: local, to the second, no zone.
-fn deletion_date() -> String {
+pub(crate) fn deletion_date() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
@@ -918,7 +913,7 @@ fn encode_path(path: &str) -> String {
     encode_path_bytes(path.as_bytes())
 }
 
-fn encode_path_bytes(path: &[u8]) -> String {
+pub(crate) fn encode_path_bytes(path: &[u8]) -> String {
     const KEEP: &[u8] = b"-_.~/";
     let mut out = String::with_capacity(path.len());
     for byte in path {
@@ -932,7 +927,7 @@ fn encode_path_bytes(path: &[u8]) -> String {
     out
 }
 
-fn problem(error: rustix::io::Errno, path: &Path) -> Problem {
+pub(crate) fn problem(error: rustix::io::Errno, path: &Path) -> Problem {
     let kind = match error {
         rustix::io::Errno::NOENT => ProblemKind::Gone,
         rustix::io::Errno::ACCESS | rustix::io::Errno::PERM | rustix::io::Errno::ROFS => {
@@ -1331,11 +1326,9 @@ mod tests {
         });
     }
 
-    /// A trash on another filesystem needs the per-volume `.Trash-$uid` the
-    /// specification describes, which is owed. Until then this must refuse and
-    /// say so — never half-move anything.
+    /// Trash remains on its source volume and its record supports recovery after restart.
     #[test]
-    fn a_file_on_another_filesystem_is_refused_and_left_alone() {
+    fn a_file_on_another_filesystem_uses_its_local_trash_and_restores() {
         with_trash("trash-xdev", |root| {
             // `/dev/shm` is a tmpfs on every Linux system that has it, and the
             // scratch root is on whatever `/tmp` is. Where they are the same
@@ -1359,9 +1352,16 @@ mod tests {
                 return;
             }
 
-            let refused = trash(&mine).expect_err("must refuse");
-            assert_eq!(refused.kind(), ProblemKind::AcrossFilesystems);
-            assert_eq!(std::fs::read(&mine).unwrap(), b"elsewhere", "the file was disturbed");
+            let change = trash(&mine).expect("volume trash");
+            let Change::Trashed { stored, info, .. } = &change else { panic!("trash expected") };
+            assert!(stored.starts_with(elsewhere));
+            assert!(!mine.exists());
+            let record = std::fs::read_to_string(info).unwrap();
+            assert!(record.contains(&format!("Path=skerry-xdev-{}.txt", std::process::id())));
+            let restored = super::restore(stored).expect("persistent restore");
+            assert_eq!(std::fs::read(&mine).unwrap(), b"elsewhere");
+            revert(&restored).expect("undo restore");
+            apply(&restored).expect("redo restore");
             // And no orphan record: the reservation is made before the move, so
             // a failed move that left it behind would be a trash the desktop's
             // own tools report as corrupt.
@@ -1370,6 +1370,69 @@ mod tests {
                 .join(format!("{}.trashinfo", mine.file_name().unwrap().to_string_lossy()));
             assert!(!orphan.exists(), "a record with no file behind it: {orphan:?}");
             let _ = std::fs::remove_file(&mine);
+        });
+    }
+
+    #[test]
+    fn persistent_restore_never_replaces_an_existing_original() {
+        with_trash("restore-collision", |root| {
+            let source = root.join("notes");
+            std::fs::write(&source, b"old").unwrap();
+            let Change::Trashed { stored, info, .. } = trash(&source).unwrap() else {
+                panic!("trash")
+            };
+            std::fs::write(&source, b"new").unwrap();
+            assert_eq!(super::restore(&stored).unwrap_err().kind(), ProblemKind::NameTaken);
+            assert_eq!(std::fs::read(&source).unwrap(), b"new");
+            assert_eq!(std::fs::read(&stored).unwrap(), b"old");
+            assert!(info.exists());
+            std::fs::remove_file(&source).unwrap();
+            let restored = super::restore(&stored).unwrap();
+            assert_eq!(std::fs::read(&source).unwrap(), b"old");
+            revert(&restored).unwrap();
+            apply(&restored).unwrap();
+            assert_eq!(std::fs::read(&source).unwrap(), b"old");
+        });
+    }
+
+    #[test]
+    fn recovery_rejects_malformed_paths_and_symlinked_records() {
+        with_trash("restore-hostile", |root| {
+            let source = root.join("notes");
+            std::fs::write(&source, b"kept").unwrap();
+            let Change::Trashed { stored, info, .. } = trash(&source).unwrap() else {
+                panic!("trash")
+            };
+            for path in ["../escape", "%2e%2e/escape", "%00", "bad%ZZ", ""] {
+                std::fs::write(
+                    &info,
+                    format!("[Trash Info]\nPath={path}\nDeletionDate=2026-09-09T12:00:00\n"),
+                )
+                .unwrap();
+                assert!(super::restore(&stored).is_err(), "{path}");
+                assert_eq!(std::fs::read(&stored).unwrap(), b"kept");
+            }
+            std::fs::remove_file(&info).unwrap();
+            std::os::unix::fs::symlink(&stored, &info).unwrap();
+            assert!(super::restore(&stored).is_err());
+            assert_eq!(std::fs::read(&stored).unwrap(), b"kept");
+        });
+    }
+
+    #[test]
+    fn trash_refuses_symlinked_storage_without_disturbing_the_source() {
+        with_trash("trash-hostile", |root| {
+            let outside = root.join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::fs::create_dir_all(root.join("data")).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("data/Trash")).unwrap();
+            let source = root.join("notes");
+            std::fs::write(&source, b"kept").unwrap();
+            assert_eq!(trash(&source).unwrap_err().kind(), ProblemKind::TrashUnavailable);
+            assert_eq!(std::fs::read(&source).unwrap(), b"kept");
+            // Nothing may have been written through the symlink, and counting is how
+            // that is read.
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0); // skerry-allow: no-read-dir
         });
     }
 
@@ -1674,7 +1737,7 @@ mod tests {
         let result =
             copy_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
                 .unwrap();
-        let Change::Noted { change, note } = result else {
+        let Change::Noted { change, note, .. } = result else {
             panic!("partial work was not reported")
         };
         assert_eq!(*change, Change::Copied { source, destination: into.join("tree") });

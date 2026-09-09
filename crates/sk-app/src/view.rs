@@ -66,6 +66,10 @@ pub struct Chrome<'a> {
     /// status line says so, because a listing that is a snapshot should not look
     /// like one that is live.
     pub watching: bool,
+    /// Thumbnail helper is unavailable; built-in file marks remain visible.
+    pub preview_missing: bool,
+    /// The reason changes are not being watched, as a catalogue key.
+    pub watch_failure: Option<&'static str>,
     /// The window button under the pointer, if the window draws its own frame.
     pub hovered_button: Option<Button>,
     /// The path component under the pointer: whose bar, and how deep.
@@ -3100,6 +3104,8 @@ const SEARCH_SUMMARY: f32 = 22.0;
 
 /// What a drag of files is carrying, for the card under the pointer.
 pub struct Carrying {
+    /// The action the current drop would perform.
+    pub copying: bool,
     /// Where the pointer is, in logical pixels.
     pub at: Point,
     /// The first file's name.
@@ -3127,7 +3133,9 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     let badge = (carrying.count > 1).then(|| format!("+{}", carrying.count - 1));
     let badge_width =
         badge.as_ref().map_or(0.0, |it| text_width(painter, it, metrics.header_size, true) + 10.0);
-    let name_width = text_width(painter, &carrying.name, metrics.text_size, false);
+    let key = if carrying.copying { "drag.copy" } else { "drag.move" };
+    let name = sk_model::i18n::format(key, &[&carrying.name]);
+    let name_width = text_width(painter, &name, metrics.text_size, false);
     let width = (CARD_ICON + CARD_INSET * 3.0 + name_width + badge_width).clamp(64.0, CARD_WIDEST);
     let area = Area {
         // Clamped inside the window: a card that runs off the right edge is a
@@ -3160,7 +3168,7 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     let x = area.x + CARD_INSET * 2.0 + CARD_ICON;
     let room = area.width - (x - area.x) - CARD_INSET - badge_width;
     let style = TextStyle::new(metrics.text_size, theme.palette.text);
-    line(painter, &carrying.name, style, x, room, baseline);
+    line(painter, &name, style, x, room, baseline);
     if let Some(badge) = badge {
         let style = TextStyle::new(metrics.header_size, theme.palette.dim).right();
         line(painter, &badge, style, x, area.width - (x - area.x) - CARD_INSET, baseline);
@@ -3643,6 +3651,7 @@ fn place_row(
             icon,
             if row.remote { kinds.audio } else { kinds.unknown },
         ),
+        Mark::Trash => painter.icon(sk_ui::Icon::Folder, icon, theme.palette.dim),
         Mark::Place(_) => painter.icon(sk_ui::Icon::Folder, icon, kinds.folder),
     }
 
@@ -5422,10 +5431,24 @@ fn status(
     } else {
         i18n::plural("status.counts.none", rows as u64, &[&format::grouped(rows)])
     };
-    let left = if chrome.watching { left } else { i18n::format("status.unwatched", &[&left]) };
+    let left = if chrome.progress.is_some() || chrome.notice.is_some() {
+        left
+    } else if let Some(reason) = chrome.watch_failure {
+        i18n::lookup(reason).to_owned()
+    } else if chrome.preview_missing {
+        i18n::lookup("preview.thumbnails_unavailable").to_owned()
+    } else if chrome.watching {
+        left
+    } else {
+        i18n::format("status.unwatched", &[&left])
+    };
     // Full strength while something is running. The dim grey is right for a row
     // count that is always there and wrong for a sentence about work in flight.
-    let ink = if chrome.progress.is_some() { theme.palette.text } else { theme.palette.dim };
+    let ink = if chrome.progress.is_some() || !chrome.watching {
+        theme.palette.text
+    } else {
+        theme.palette.dim
+    };
     let style = TextStyle::new(size, ink);
     line(painter, &left, style, metrics.gutter, layout.status.width * 0.6, baseline);
 
@@ -5917,6 +5940,8 @@ mod tests {
                 typed: None,
                 band: None,
                 watching: true,
+                preview_missing: false,
+                watch_failure: None,
                 notice: None,
                 hovered_button: None,
                 hovered_crumb: None,

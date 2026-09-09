@@ -98,6 +98,34 @@ struct Running {
     started: std::time::Instant,
 }
 
+// A resumed copy extends the output owned by its existing undo entry.
+fn copied_destination<'a>(
+    change: &'a Change,
+    source: &std::path::Path,
+) -> Option<&'a std::path::Path> {
+    match change {
+        Change::Copied { source: old, destination } if old == source => Some(destination),
+        Change::Noted { change, .. } => copied_destination(change, source),
+        Change::Batch(changes) => {
+            changes.iter().rev().find_map(|change| copied_destination(change, source))
+        }
+        _ => None,
+    }
+}
+
+fn same_copy(old: &Change, fresh: &Change) -> bool {
+    match (old, fresh) {
+        (_, Change::Noted { change, .. }) => same_copy(old, change),
+        (Change::Noted { change, .. }, _) => same_copy(change, fresh),
+        (Change::Batch(changes), _) => changes.iter().any(|old| same_copy(old, fresh)),
+        (
+            Change::Copied { source: a, destination: b },
+            Change::Copied { source: c, destination: d },
+        ) => a == c && b == d,
+        _ => false,
+    }
+}
+
 /// Everything the frame loop needs to know about mutations.
 pub struct Edits {
     /// One stack for every mutation — [rule 3](../../../docs/03-principles.md).
@@ -154,6 +182,7 @@ pub struct Edits {
     /// because a person's Replace or Keep both is a decision about this file and
     /// outranks the queue's provenance.
     resuming: bool,
+    retrying_copy: bool,
     /// What a stopped queue still owes, until it is picked up or replaced.
     ///
     /// **[Rule 7](../../../docs/03-principles.md#7-honest-progress)'s last
@@ -169,6 +198,8 @@ pub struct Edits {
     /// 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md)
     /// makes for leaving the undo stack out of the session.
     stopped: Option<Stopped>,
+    /// Last operation warning/error, retained until acknowledged.
+    pub issue: Option<String>,
     /// What a queued operation has changed so far, recorded as one entry when it
     /// drains. A cancelled queue still records what it did: those files moved,
     /// and an undo has to be able to bring them back.
@@ -209,6 +240,10 @@ pub struct Edits {
 
 /// What a stopped queue still owes.
 struct Stopped {
+    /// The next item failed, so Skip applies to it.
+    failed: bool,
+    /// The interrupted item may contain verified partial copy output.
+    merge: bool,
     /// What it was doing. The merge is a flag on the run rather than a change to
     /// the verb — [`Edits::resuming`] — because a move carries no conflict answer
     /// of its own and would otherwise be the one verb that could not be picked
@@ -233,6 +268,8 @@ struct Stopped {
 /// beside it would be a second place for that policy to drift.
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum Queued {
+    /// Restore selected persistent trash entries.
+    Restore,
     /// Move to the trash.
     Trash,
     /// Copy into this directory.
@@ -261,6 +298,20 @@ enum Queued {
         /// Which entries to take, or empty for the whole archive.
         only: Vec<String>,
     },
+}
+
+impl Queued {
+    /// The catalogue key for what the status line says while this runs.
+    const fn verb(&self) -> &'static str {
+        match self {
+            Self::Restore => "verb.restoring",
+            Self::Trash => "verb.trashing",
+            Self::Erase => "verb.deleting",
+            Self::Copy { .. } => "verb.copying",
+            Self::Move { .. } => "verb.moving",
+            Self::Unpack { .. } => "verb.extracting",
+        }
+    }
 }
 
 /// Unpacks `archive` into a new folder beside it.
@@ -360,6 +411,7 @@ fn unpack_owned(
         refusal => Change::Noted {
             change: Box::new(unpacked),
             note: refused(refusal, &done.note, archive).message(),
+            retry: false,
         },
     }
 }
@@ -538,7 +590,9 @@ impl Edits {
             counting: None,
             cancelled_queue: false,
             resuming: false,
+            retrying_copy: false,
             stopped: None,
+            issue: None,
             batch: Vec::new(),
             running: None,
             progress,
@@ -609,6 +663,11 @@ impl Edits {
     /// A failure stops the rest. Continuing would trash some of a selection and
     /// not others with only the last message visible, and "seven of nine went"
     /// is not a state a person can act on.
+    pub fn restore_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Restore, paths, jobs)
+    }
+
+    /// Move selected files into their filesystem's trash.
     pub fn trash_all(&mut self, paths: Vec<PathBuf>, jobs: &Jobs) -> bool {
         self.queue_all(Queued::Trash, paths, jobs)
     }
@@ -692,16 +751,14 @@ impl Edits {
         if paths.is_empty() {
             return false;
         }
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.stopped.is_some() {
             return false;
         }
         self.doing = doing;
         self.queued = paths.len();
-        // A fresh batch replaces whatever a stopped one still owed: two queues at
-        // once is the thing `pending` exists to prevent, and an offer to resume
-        // something a person has moved on from is a button that does the wrong
-        // thing quietly.
+        // Pending recovery requires an explicit retry, skip or dismissal.
         self.stopped = None;
+        self.issue = None;
         self.resuming = false;
         // Reversed, so `pop` takes them in the order they were given — which is
         // display order, so the notice counts down the list a person is looking
@@ -732,7 +789,10 @@ impl Edits {
         // it will write is only knowable by decompressing the archive, so a walk
         // beside it would decompress everything twice to put an estimate on the
         // line. Rule 7 would rather have no ETA than pay for one.
-        if matches!(self.doing, Queued::Trash | Queued::Erase | Queued::Unpack { .. }) {
+        if matches!(
+            self.doing,
+            Queued::Restore | Queued::Trash | Queued::Erase | Queued::Unpack { .. }
+        ) {
             return;
         }
         let paths = self.queue.clone();
@@ -795,6 +855,22 @@ impl Edits {
         (self.total.bytes, self.total.complete)
     }
 
+    /// Where a retried copy of `source` left its partial output, from the undo
+    /// entry the interrupted run recorded.
+    ///
+    /// Only a retry has one: an ordinary run has nothing half-written to merge
+    /// into, and reusing the previous entry's destination would make it merge
+    /// into a tree somebody else's operation owns.
+    fn half_copied_destination(&self, source: &Path) -> Option<PathBuf> {
+        if !self.retrying_copy {
+            return None;
+        }
+        self.history
+            .peek_undo()
+            .and_then(|change| copied_destination(change, source))
+            .map(std::path::Path::to_path_buf)
+    }
+
     /// Starts the next queued operation, if nothing is in flight.
     pub fn next_in_queue(&mut self, jobs: &Jobs) {
         if self.pending.is_some() || self.clash.is_some() {
@@ -809,13 +885,7 @@ impl Edits {
         };
         self.running_path = Some(path.clone());
         let doing = self.doing.clone();
-        let verb = match doing {
-            Queued::Trash => "verb.trashing",
-            Queued::Erase => "verb.deleting",
-            Queued::Copy { .. } => "verb.copying",
-            Queued::Move { .. } => "verb.moving",
-            Queued::Unpack { .. } => "verb.extracting",
-        };
+        let verb = doing.verb();
         // Carried across the queue rather than reset per entry, so nine files
         // read as one operation with one rate.
         let carried = self.running.take().filter(|_| !self.queue.is_empty());
@@ -831,7 +901,9 @@ impl Edits {
         // The answer this one item runs under, whether it came from the panel
         // just now or from a "for the rest" given several items ago.
         let answer = self.once.take().or(self.standing);
-        let resuming = self.resuming;
+        let resuming = std::mem::take(&mut self.resuming);
+        self.retrying_copy = resuming && matches!(doing, Queued::Copy { .. });
+        let resume_destination = self.half_copied_destination(&path);
         let queue_left = self.queue.len();
         let pause = self.pause.clone();
         let reported = std::sync::Arc::clone(&self.reported);
@@ -864,7 +936,9 @@ impl Edits {
                 Queued::Move { into } => (Some(into.clone()), true),
                 // An unpack asks nothing about a taken name: the folder it makes
                 // is a free one, chosen on this job a moment from now.
-                Queued::Trash | Queued::Erase | Queued::Unpack { .. } => (None, false),
+                Queued::Restore | Queued::Trash | Queued::Erase | Queued::Unpack { .. } => {
+                    (None, false)
+                }
             };
             // **Asked here, on the job.** Whether a name is taken is a `statx`,
             // and rule 1 has no exemption for a fast one — so the question is
@@ -893,6 +967,7 @@ impl Edits {
                 _ => sk_fs::ops::Conflict::Refuse,
             };
             Outcome::Did(match doing {
+                Queued::Restore => ops::restore(&path),
                 Queued::Trash => ops::trash(&path),
                 Queued::Erase => ops::erase(&path, cancel),
                 // **A paste into the folder the file came from renames**, with
@@ -900,6 +975,14 @@ impl Edits {
                 // where you copied from means, and a panel asking "replace this
                 // with itself?" would be a question with no right answer.
                 Queued::Copy { into, conflict: policy } => {
+                    if let Some(destination) = resume_destination {
+                        return Outcome::Did(ops::resume_copy(
+                            &path,
+                            &destination,
+                            cancel,
+                            &mut watch,
+                        ));
+                    }
                     let same = path.parent() == Some(into.as_path());
                     let conflict = if same { policy } else { conflict };
                     ops::copy_into(&path, &into, conflict, cancel, &mut watch)
@@ -974,11 +1057,12 @@ impl Edits {
     /// Undoes the most recent change.
     pub fn undo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_undo().cloned() else { return };
+        if self.busy() {
+            return;
+        }
+        self.stopped = None;
         self.start(Pending::Undoing, jobs, move |_| {
-            Outcome::Undid(ops::replay(&change, true, &mut |leaf| {
-                ops::revert(leaf)?;
-                Ok(leaf.clone())
-            }))
+            Outcome::Undid(ops::replay(&change, true, &mut |leaf| ops::revert_recorded(leaf)))
         });
     }
 
@@ -992,6 +1076,10 @@ impl Edits {
     /// where undoing took it from.
     pub fn redo(&mut self, jobs: &Jobs) {
         let Some(change) = self.history.peek_redo().cloned() else { return };
+        if self.busy() {
+            return;
+        }
+        self.stopped = None;
         self.start(Pending::Redoing, jobs, move |cancel| {
             Outcome::Redid(ops::replay(&change, false, &mut |leaf| {
                 if let Change::Unpacked { archive, root, only } = leaf {
@@ -1074,6 +1162,7 @@ impl Edits {
         match outcome {
             Outcome::Did(Ok(change)) => {
                 let warning = change.warning().map(str::to_owned);
+                let retry = change.needs_retry();
                 // **A trashed file has no row to point at.** The cursor moved to
                 // the neighbour when the operation started, which is where a
                 // person deleting several files in a row needs it; asking for the
@@ -1086,7 +1175,9 @@ impl Edits {
                 // and an entry that refused would put every earlier change out
                 // of reach — so `Ctrl+Z` after a delete undoes the rename before
                 // it, which is what a person means by it.
-                let recordable = !matches!(change, Change::Erased { .. });
+                let already_recorded = std::mem::take(&mut self.retrying_copy)
+                    && self.history.peek_undo().is_some_and(|old| same_copy(old, &change));
+                let recordable = !matches!(change, Change::Erased { .. }) && !already_recorded;
                 // **One gesture is one undo.** A queue of two hundred pastes
                 // used to record two hundred entries, so `Ctrl+Z` after it took
                 // back the last file and left the other hundred and ninety-nine
@@ -1099,25 +1190,7 @@ impl Edits {
                         self.history.record(change);
                     }
                 }
-                let message = if self.queued > 1 {
-                    let done = self.queued - self.queue.len();
-                    // **Named by what the queue is doing.** This said "Moved 10
-                    // of 10 to Trash" for a paste, because the queue was
-                    // generalised from trashing and its wording was not. Three
-                    // keys rather than a verb slotted into one sentence: a
-                    // sentence assembled from parts is untranslatable by
-                    // construction, which is what `i18n` exists to prevent.
-                    let key = match self.doing {
-                        Queued::Trash => "notice.trashed",
-                        Queued::Erase => "notice.deleted",
-                        Queued::Copy { .. } => "notice.copied_in",
-                        Queued::Move { .. } => "notice.moved_in",
-                        Queued::Unpack { .. } => "notice.unpacked",
-                    };
-                    sk_model::i18n::format(key, &[&done, &self.queued])
-                } else {
-                    sk_model::i18n::lookup("notice.done").to_owned()
-                };
+                let message = self.completed_message();
                 // Not `queued > 1`, because a cancelled queue of nine has one
                 // entry done and eight dropped, and "1 of 9" would read as still
                 // running.
@@ -1127,8 +1200,11 @@ impl Edits {
                 } else {
                     message
                 };
-                if warning.is_some() {
-                    self.queue.clear();
+                if let Some(message) = &warning {
+                    self.issue = Some(message.clone());
+                    if retry {
+                        self.retain_failed(true);
+                    }
                 }
                 if self.queue.is_empty() {
                     self.queued = 0;
@@ -1170,7 +1246,11 @@ impl Edits {
             }
             Outcome::Did(Err(problem)) => {
                 self.walking = None;
-                self.queue.clear();
+                if !self.cancelled_queue {
+                    self.issue = Some(problem.message());
+                    self.retain_failed(false);
+                }
+                self.cancelled_queue = false;
                 self.queued = 0;
                 self.finish_the_batch();
                 Some(Landed::Failed(problem.message()))
@@ -1179,6 +1259,21 @@ impl Edits {
             // absence of an outcome, not one of them.
             Outcome::Clashed(_) => None,
         }
+    }
+
+    fn completed_message(&self) -> String {
+        if self.queued <= 1 {
+            return sk_model::i18n::lookup("notice.done").to_owned();
+        }
+        let key = match self.doing {
+            Queued::Restore => "notice.restored",
+            Queued::Trash => "notice.trashed",
+            Queued::Erase => "notice.deleted",
+            Queued::Copy { .. } => "notice.copied_in",
+            Queued::Move { .. } => "notice.moved_in",
+            Queued::Unpack { .. } => "notice.unpacked",
+        };
+        sk_model::i18n::format(key, &[&(self.queued - self.queue.len()), &self.queued])
     }
 
     /// Issues the next step of a walk, if one is still going.
@@ -1204,7 +1299,7 @@ impl Edits {
         jobs: &Jobs,
         work: impl FnOnce(&Cancel) -> Outcome + Send + 'static,
     ) {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.stopped.is_some() {
             return;
         }
         self.pending = Some(kind);
@@ -1228,7 +1323,7 @@ impl Edits {
         });
     }
 
-    /// Stops the operation in flight and drops the rest of the queue.
+    /// Stops the operation in flight and retains the rest for explicit recovery.
     ///
     /// A tree copy stops between files and keeps what it wrote — the undo entry
     /// covers it. Anything smaller than that ignores this and finishes, because
@@ -1249,6 +1344,8 @@ impl Edits {
             owed.extend(self.running_path.clone());
             let verb = self.running.as_ref().map_or("verb.copying", |it| it.verb);
             self.stopped = (!owed.is_empty()).then(|| Stopped {
+                failed: false,
+                merge: true,
                 doing: self.doing.clone(),
                 queued: self.queued,
                 done: self.queued.saturating_sub(owed.len()),
@@ -1276,6 +1373,55 @@ impl Edits {
         self.busy() && !matches!(self.doing, Queued::Trash)
     }
 
+    fn retain_failed(&mut self, merge: bool) {
+        let mut owed = std::mem::take(&mut self.queue);
+        owed.extend(self.running_path.clone());
+        let verb = self.running.as_ref().map_or("verb.copying", |it| it.verb);
+        if !owed.is_empty() {
+            self.stopped = Some(Stopped {
+                doing: self.doing.clone(),
+                done: self.queued.saturating_sub(owed.len()),
+                queued: self.queued,
+                owed,
+                verb,
+                failed: true,
+                merge,
+            });
+        }
+        if let Some(counting) = self.counting.take() {
+            counting.cancel();
+        }
+        self.pause.release();
+    }
+
+    /// Whether skipping the failed current item is meaningful.
+    #[must_use]
+    pub fn can_skip_failed(&self) -> bool {
+        self.stopped.as_ref().is_some_and(|stopped| stopped.failed) && !self.busy()
+    }
+
+    /// Skip the failed item, preserve partial output, and continue later items.
+    pub fn skip_failed(&mut self, jobs: &Jobs) {
+        if let Some(stopped) = self.stopped.as_mut().filter(|stopped| stopped.failed) {
+            stopped.owed.pop();
+            stopped.merge = false;
+            stopped.failed = false;
+            if stopped.owed.is_empty() {
+                self.stopped = None;
+                return;
+            }
+            self.resume(jobs);
+        }
+    }
+
+    /// Acknowledge the visible issue and explicitly discard any pending work.
+    pub fn dismiss_issue(&mut self) {
+        if !self.busy() {
+            self.stopped = None;
+            self.issue = None;
+        }
+    }
+
     /// Whether a stopped queue is waiting to be picked up.
     #[must_use]
     pub fn resumable(&self) -> bool {
@@ -1297,20 +1443,16 @@ impl Edits {
     /// size and enters a directory that is already there, which is what makes
     /// pressing this twice cost a walk and no bytes.
     pub fn resume(&mut self, jobs: &Jobs) {
-        let Some(stopped) = self.stopped.take() else { return };
         if self.pending.is_some() {
             return;
         }
+        let Some(stopped) = self.stopped.take() else { return };
         self.doing = stopped.doing;
         self.queued = stopped.queued;
-        self.resuming = true;
+        self.resuming = stopped.merge;
         // `owed` is in the order the queue would have worked through it, with the
         // interrupted item appended; `queue` is popped from the back.
         self.queue = stopped.owed;
-        self.queue.reverse();
-        if let Some(front) = self.queue.pop() {
-            self.queue.insert(0, front);
-        }
         self.reported = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
         self.batch.clear();
         self.start_counting(jobs);
@@ -1337,10 +1479,21 @@ impl Edits {
         // seconds — after which a person who looked away would have nothing on
         // screen telling them that six of nine files are still where they were.
         if let Some(stopped) = self.stopped.as_ref().filter(|_| self.running.is_none()) {
+            if let Some(issue) = &self.issue {
+                return Some(sk_model::i18n::format(
+                    "notice.queue_failed",
+                    &[issue, &stopped.owed.len()],
+                ));
+            }
             return Some(sk_model::i18n::format(
                 "notice.stopped",
                 &[&sk_model::i18n::lookup(stopped.verb), &stopped.owed.len(), &stopped.queued],
             ));
+        }
+        if let Some(issue) = &self.issue
+            && self.running.is_none()
+        {
+            return Some(issue.clone());
         }
         let running = self.running.as_ref()?;
         let elapsed = running.started.elapsed().as_secs_f64();
@@ -1484,6 +1637,137 @@ mod tests {
         root
     }
 
+    #[test]
+    fn a_failed_item_retains_later_work_and_retry_preserves_order() {
+        let root = scratch("recover-queue");
+        let into = root.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let first = root.join("first");
+        let later = root.join("later");
+        std::fs::write(&later, b"later").unwrap();
+        let mut harness = Harness::new();
+        let doing = Queued::Copy { into: into.clone(), conflict: sk_fs::ops::Conflict::Refuse };
+        assert!(harness.edits.queue_all(
+            doing.clone(),
+            vec![first.clone(), later.clone()],
+            &harness.jobs
+        ));
+        harness.settle();
+        assert!(harness.edits.can_skip_failed());
+        assert_eq!(harness.edits.owed(), Some((2, 2)));
+        assert!(!into.join("later").exists());
+        assert!(
+            !harness.edits.queue_all(doing, vec![later], &harness.jobs),
+            "new work discarded the recovery queue"
+        );
+        std::fs::write(&first, b"first").unwrap();
+        harness.edits.resume(&harness.jobs);
+        harness.settle();
+        assert_eq!(std::fs::read(into.join("first")).unwrap(), b"first");
+        assert_eq!(std::fs::read(into.join("later")).unwrap(), b"later");
+        assert!(harness.edits.owed().is_none());
+        assert!(harness.edits.history.can_undo());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skipping_a_failed_item_keeps_the_later_item_and_the_issue() {
+        let root = scratch("skip-failed");
+        let into = root.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let later = root.join("later");
+        std::fs::write(&later, b"later").unwrap();
+        let mut harness = Harness::new();
+        harness.edits.queue_all(
+            Queued::Copy { into: into.clone(), conflict: sk_fs::ops::Conflict::Refuse },
+            vec![root.join("missing"), later],
+            &harness.jobs,
+        );
+        harness.settle();
+        harness.edits.skip_failed(&harness.jobs);
+        harness.settle();
+        assert_eq!(std::fs::read(into.join("later")).unwrap(), b"later");
+        assert!(harness.edits.issue.is_some());
+        assert!(harness.edits.progress_line().is_some());
+        harness.edits.dismiss_issue();
+        assert!(harness.edits.progress_line().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn metadata_warning_does_not_discard_or_pause_the_rest_of_a_paste() {
+        let root = scratch("warning-queue");
+        let into = root.join("into");
+        std::fs::create_dir(&into).unwrap();
+        let later = root.join("later");
+        std::fs::write(&later, b"later").unwrap();
+        let first = into.join("first");
+        std::fs::write(&first, b"first").unwrap();
+        let mut harness = Harness::new();
+        harness.edits.doing =
+            Queued::Copy { into: into.clone(), conflict: sk_fs::ops::Conflict::Refuse };
+        harness.edits.queued = 2;
+        harness.edits.queue = vec![later];
+        harness
+            .edits
+            .sender
+            .send(super::Outcome::Did(Ok(sk_fs::ops::Change::Noted {
+                change: Box::new(sk_fs::ops::Change::Copied {
+                    source: root.join("first"),
+                    destination: first,
+                }),
+                note: "xattr could not be preserved".into(),
+                retry: false,
+            })))
+            .unwrap();
+        harness.settle();
+        assert_eq!(std::fs::read(into.join("later")).unwrap(), b"later");
+        assert_eq!(harness.edits.history.len(), 1);
+        assert_eq!(harness.edits.issue.as_deref(), Some("xattr could not be preserved"));
+        assert!(harness.edits.owed().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrying_partial_output_does_not_create_two_undo_entries_for_one_destination() {
+        let root = scratch("partial-history");
+        let source = root.join("source");
+        let into = root.join("into");
+        let destination = into.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(source.join("first"), b"first").unwrap();
+        std::fs::write(source.join("later"), b"later").unwrap();
+        std::fs::write(destination.join("first"), b"first").unwrap();
+        let mut harness = Harness::new();
+        harness.edits.doing = Queued::Copy { into, conflict: sk_fs::ops::Conflict::Refuse };
+        harness.edits.queued = 1;
+        harness.edits.running_path = Some(source.clone());
+        harness
+            .edits
+            .sender
+            .send(super::Outcome::Did(Ok(sk_fs::ops::Change::Noted {
+                change: Box::new(sk_fs::ops::Change::Copied {
+                    source,
+                    destination: destination.clone(),
+                }),
+                note: "injected read failure".into(),
+                retry: true,
+            })))
+            .unwrap();
+        harness.settle();
+        assert_eq!(harness.edits.history.len(), 1);
+        harness.edits.resume(&harness.jobs);
+        harness.settle();
+        assert_eq!(std::fs::read(destination.join("later")).unwrap(), b"later");
+        assert_eq!(harness.edits.history.len(), 1, "retry duplicated ownership of partial output");
+        harness.edits.undo(&harness.jobs);
+        harness.settle();
+        assert!(!destination.exists());
+        assert!(!harness.edits.history.can_undo());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A stopped queue keeps what it owes, and picking it up finishes exactly
     /// that — [rule 7](../../../docs/03-principles.md#7-honest-progress)'s third
     /// word.
@@ -1534,10 +1818,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A fresh batch replaces the offer, rather than leaving a button that would
-    /// pick up something the person has moved on from.
+    /// Starting unrelated work cannot silently discard unfinished work.
     #[test]
-    fn a_new_operation_forgets_what_a_stopped_one_owed() {
+    fn a_new_operation_requires_dismissing_what_a_stopped_one_owed() {
         let root = scratch("replaced");
         let into = root.join("into");
         std::fs::create_dir(&into).unwrap();
@@ -1552,6 +1835,8 @@ mod tests {
 
         let second = root.join("second");
         std::fs::write(&second, b"y").unwrap();
+        assert!(!harness.edits.paste_all(vec![second.clone()], into.clone(), false, &harness.jobs));
+        harness.edits.dismiss_issue();
         assert!(harness.edits.paste_all(vec![second], into.clone(), false, &harness.jobs));
         assert!(!harness.edits.resumable(), "the old offer survived a new batch");
         harness.settle();
