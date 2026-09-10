@@ -87,6 +87,10 @@ pub mod state {
     pub const EDITABLE: u64 = 1 << 7;
     /// Not greyed out.
     pub const ENABLED: u64 = 1 << 8;
+    /// It can open onto more: a menu item with a submenu.
+    pub const EXPANDABLE: u64 = 1 << 9;
+    /// It has opened: the submenu is up.
+    pub const EXPANDED: u64 = 1 << 10;
     /// Can take the keyboard.
     pub const FOCUSABLE: u64 = 1 << 11;
     /// Has it now.

@@ -1289,7 +1289,18 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
         crate::menu::ON_A_PLACE,
     ] {
         for id in groups.iter().flat_map(|group| group.iter()) {
-            reach.push((id, "the context menu"));
+            // A row that opens a submenu reaches everything on it, and the Open
+            // with row reaches what its command would have asked.
+            if *id == crate::menu::OPEN_WITH {
+                reach
+                    .push((crate::menu::OPEN_WITH_COMMAND, "the context menu's Open with submenu"));
+            } else if let Some(sub) = crate::menu::submenu(id) {
+                for child in sub.groups.iter().flat_map(|group| group.iter()) {
+                    reach.push((child, "a submenu of the context menu"));
+                }
+            } else {
+                reach.push((id, "the context menu"));
+            }
         }
     }
     reach

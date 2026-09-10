@@ -10,8 +10,35 @@
 //! **The list is read on a job.** Resolving a type opens the file when the name
 //! says nothing, and resolving handlers reads `.desktop` files across every XDG
 //! data directory.
+//!
+//! **The same answer feeds two places.** `Ctrl+Shift+O` shows it as this panel;
+//! the row menu hangs it off its Open with row as a submenu
+//! ([`crate::menu::Kind::OpenWith`]), where each application is a row to
+//! choose. Both are the same job and the same [`Handlers`], and which one asked
+//! travels with the answer, so a menu that closed before its job finished does
+//! not leave a panel open for nobody.
 
 use sk_desktop::DesktopEntry;
+
+/// Who asked which applications open a file, which is where the answer goes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Asker {
+    /// The command: the answer is this panel.
+    Panel,
+    /// A context menu's Open with row: the answer is its submenu.
+    Menu,
+}
+
+/// What the job that resolves a file's applications sends back.
+pub(crate) struct Handlers {
+    /// What was asked about.
+    pub(crate) path: std::path::PathBuf,
+    /// The type it turned out to be.
+    pub(crate) mime: String,
+    /// The applications, best first — which is the order the desktop's own
+    /// association files put them in.
+    pub(crate) rows: Vec<DesktopEntry>,
+}
 
 /// How many applications the list shows before it scrolls.
 ///
@@ -36,8 +63,8 @@ pub(crate) struct Openers {
 }
 
 impl Openers {
-    pub(crate) fn new(path: std::path::PathBuf, mime: String, rows: Vec<DesktopEntry>) -> Self {
-        Self { path, mime, rows, active: 0, scroll: 0 }
+    pub(crate) fn new(found: Handlers) -> Self {
+        Self { path: found.path, mime: found.mime, rows: found.rows, active: 0, scroll: 0 }
     }
 
     /// Moves the highlight, wrapping at both ends.
@@ -106,7 +133,11 @@ mod tests {
 
     fn list(count: usize) -> Openers {
         let rows = (0..count).map(|index| entry(&format!("app-{index}"))).collect();
-        Openers::new(PathBuf::from("/tmp/thing.txt"), "text/plain".to_owned(), rows)
+        Openers::new(super::Handlers {
+            path: PathBuf::from("/tmp/thing.txt"),
+            mime: "text/plain".to_owned(),
+            rows,
+        })
     }
 
     #[test]

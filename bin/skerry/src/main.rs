@@ -37,6 +37,8 @@ struct Overlays {
     keys: bool,
     menu: bool,
     row_menu: bool,
+    menu_colours: bool,
+    menu_open_with: bool,
     clash: bool,
     erase: bool,
     trash_question: bool,
@@ -94,6 +96,8 @@ impl Overlays {
             "--keys" => &mut self.keys,
             "--menu" => &mut self.menu,
             "--menu-row" => &mut self.row_menu,
+            "--menu-colours" => &mut self.menu_colours,
+            "--menu-open-with" => &mut self.menu_open_with,
             "--clash" => &mut self.clash,
             "--erase" => &mut self.erase,
             "--trash-question" => &mut self.trash_question,
@@ -176,6 +180,8 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         keys: overlays.keys,
         menu: overlays.menu,
         row_menu: overlays.row_menu,
+        menu_colours: overlays.menu_colours,
+        menu_open_with: overlays.menu_open_with,
         clash: overlays.clash,
         erase: overlays.erase,
         trash_question: overlays.trash_question,
@@ -470,6 +476,8 @@ skerry [OPTIONS] [PATH]
   --keys           show the keyboard overlay
   --menu           show the context menu, for a golden frame of it
   --menu-row       show the menu a secondary click on a row opens
+  --menu-colours   show that menu with its Colour submenu open beside it
+  --menu-open-with show that menu with its Open with submenu open
   --clash          show the panel that asks about a name already taken
   --stopped        show the strip after a stop: what is owed, and Pick up
   --search         show the search over everything under this folder

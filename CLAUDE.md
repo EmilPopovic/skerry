@@ -7,8 +7,8 @@ your first change; everything else in this file assumes it.
 ## Where the project is right now
 
 **M0, in progress, and something you can use for a day.** Twelve crates and three
-sandboxed helpers, 996 passing tests, 151 GUI scenarios **on Wayland and X11**,
-eighty-six golden frames (current release evidence and explicit skips are in
+sandboxed helpers, 1,007 passing tests, 152 GUI scenarios **on Wayland and X11**,
+eighty-seven golden frames (current release evidence and explicit skips are in
 [13-release-readiness.md](docs/13-release-readiness.md)): a Details view
 over a real directory at a **0.342 ms frame p99 with 200,000 entries in it**, live
 under inotify, with folder totals, a sidebar **whose places open into a tree, whose divider
@@ -31,7 +31,12 @@ where a tab dragged to a pane's edge splits it, **each pane carrying its own
 tab strip and, under it, its own Back / Forward / Parent / Reload and its own
 breadcrumbs** — so the window draws a title bar only where the compositor draws
 no frame — a command registry
-behind every key, a context menu and a fuzzy palette over the same registry,
+behind every key, a context menu and a fuzzy palette over the same registry —
+**where a row that is a question opens its answers beside it**: Open in, Open
+with, Colour, View, Sort by, Group by, so the background menu is twenty-two rows
+rather than forty-three, and Open with is the one whose rows are data, the
+applications this machine's `.desktop` files name, arriving from a job started
+when the row opens —
 new-folder / rename / **copy / cut / paste / duplicate / Move to Trash** with one
 undo stack over all of it — **and the stack is visible**: a strip above the status
 line, collapsed to its header until somebody expands it, one row per edit oldest

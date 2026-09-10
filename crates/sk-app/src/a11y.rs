@@ -33,12 +33,16 @@ mod ids {
     pub const MENU: u32 = 6;
     /// The quick look's text.
     pub const LOOK: u32 = 7;
+    /// The submenu one of the menu's rows has open.
+    pub const SUBMENU: u32 = 8;
     /// Rows of the listing start here; one number per row index.
     pub const ROWS: u32 = 1_000;
     /// The sidebar's rows.
     pub const PLACE_ROWS: u32 = 100_000;
     /// A menu's or a palette's rows.
     pub const MENU_ROWS: u32 = 200_000;
+    /// The submenu's rows.
+    pub const SUBMENU_ROWS: u32 = 300_000;
 }
 
 /// What is on screen, as a tree an assistive technology can walk.
@@ -164,14 +168,52 @@ fn field_of(app: &App, scale: f32, nodes: &mut Vec<Node>) -> Option<u32> {
 }
 
 /// The open menu or palette, as a menu with its rows.
+///
+/// **A submenu is a menu inside its owner's item**, not more rows of the parent.
+/// A reader that announced "Red" as a sibling of "Properties" would be
+/// describing a menu nobody drew, and the tree ADR 0026 publishes is the one
+/// AT-SPI describes: the owner is expandable and expanded, and the submenu is
+/// its child.
 fn menu_of(app: &App, scale: f32, nodes: &mut Vec<Node>, focus: &mut Option<u32>) -> Option<u32> {
     let rows = app.a11y_menu();
     if rows.is_empty() {
         return None;
     }
+    let submenu = app.a11y_submenu();
     let mut menu = Node::new(ids::MENU, Role::Menu, sk_model::i18n::lookup("a11y.menu"));
     for (at, (name, area, active)) in rows.iter().enumerate() {
         let number = ids::MENU_ROWS + u32::try_from(at).unwrap_or(0);
+        menu.children.push(number);
+        let mut item = Node::new(number, Role::MenuItem, name.clone())
+            .with(state::FOCUSABLE)
+            .with(if *active { state::FOCUSED } else { 0 })
+            .at(scaled(area.x, area.y, area.width, area.height, scale));
+        if let Some((_, inside)) = submenu.as_ref().filter(|(owner, _)| *owner == at) {
+            item = item.with(state::EXPANDABLE | state::EXPANDED);
+            item.children.push(ids::SUBMENU);
+            let inner = submenu_of(name, inside, scale, nodes, focus);
+            nodes.push(inner);
+        }
+        nodes.push(item);
+        if *active {
+            *focus = Some(number);
+        }
+    }
+    nodes.push(menu);
+    Some(ids::MENU)
+}
+
+/// The open submenu, named after the row it hangs off, with its rows.
+fn submenu_of(
+    owner: &str,
+    rows: &[crate::app::A11yRow],
+    scale: f32,
+    nodes: &mut Vec<Node>,
+    focus: &mut Option<u32>,
+) -> Node {
+    let mut menu = Node::new(ids::SUBMENU, Role::Menu, owner);
+    for (at, (name, area, active)) in rows.iter().enumerate() {
+        let number = ids::SUBMENU_ROWS + u32::try_from(at).unwrap_or(0);
         menu.children.push(number);
         nodes.push(
             Node::new(number, Role::MenuItem, name.clone())
@@ -183,8 +225,7 @@ fn menu_of(app: &App, scale: f32, nodes: &mut Vec<Node>, focus: &mut Option<u32>
             *focus = Some(number);
         }
     }
-    nodes.push(menu);
-    Some(ids::MENU)
+    menu
 }
 
 /// The quick look's text, where it is showing any.

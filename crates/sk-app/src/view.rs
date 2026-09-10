@@ -265,6 +265,12 @@ pub struct Hits {
     /// same story as the breadcrumbs': the rectangle is known where the text is
     /// measured, and the next event tests against it.
     pub menu: Vec<Area>,
+    /// The same, for the rows of the submenu one of those rows has open.
+    pub submenu: Vec<Area>,
+    /// The submenu's whole panel, while one is drawn: what a press or a wheel
+    /// inside it belongs to, and the base of the triangle a pointer may cross
+    /// the parent's rows in on its way there.
+    pub submenu_panel: Option<Area>,
     /// One rectangle per *drawn* palette result, in draw order — so the index a
     /// click reports is an offset from the palette's scroll rather than an index
     /// into the whole result list.
@@ -510,9 +516,12 @@ pub fn draw(
     }
     // Last, so it is over everything: a menu under the statistics overlay is a
     // menu whose rows cannot be read or aimed at.
-    match chrome.menu {
-        Some(menu) => context_menu(painter, layout, menu, hits),
-        None => hits.menu.clear(),
+    if let Some(menu) = chrome.menu {
+        context_menu(painter, layout, menu, hits);
+    } else {
+        hits.menu.clear();
+        hits.submenu.clear();
+        hits.submenu_panel = None;
     }
 }
 
@@ -872,48 +881,102 @@ pub fn field_scroll(caret: f32, room: f32) -> f32 {
 /// How much of the box is kept to the right of the caret.
 const CARET_PAD: f32 = 12.0;
 
-/// The context menu, over everything else.
+/// The context menu, over everything else, and the submenu one of its rows has
+/// open beside it.
 ///
 /// **Width from the widest row, never a constant.** Every string here is
 /// translated and a chord's display name is longer in some languages than the
 /// command's; a fixed width ellipsizes Move to Trash in exactly the locale
-/// nobody testing it reads.
+/// nobody testing it reads. Each panel is measured over its own rows, so a
+/// submenu of three short words is not as wide as the menu it hangs off.
 fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &mut Hits) {
-    use crate::menu::{DIVIDER, INSET, SPACING, STEP, WIDTH};
+    let room = layout.window.height - crate::menu::MARGIN * 2.0;
+    let (first, drawn) = menu.window(room);
+    let width = menu_width(painter, drawn);
+    let area = crate::menu::place(menu.at, width, crate::menu::height(drawn), layout.window);
+    panel_shape(painter, area, hits);
+    let mut rows = std::mem::take(&mut hits.menu);
+    let open = menu.sub.as_deref().map(|sub| sub.owner);
+    menu_rows(painter, menu, first, drawn, area, open, &mut rows);
+    hits.menu = rows;
 
-    let theme = *painter.theme;
-    let metrics = theme.metrics;
-    // What fits in the window, which for the background menu is not all of it.
-    let (first, drawn) = menu.window(layout.window.height - crate::menu::MARGIN * 2.0);
+    // The owner has to be drawn for the submenu to hang off it: a submenu whose
+    // owner scrolled out would hang off nothing.
+    let owner = menu
+        .sub
+        .as_deref()
+        .and_then(|sub| hits.menu.get(sub.owner).copied().filter(|owner| owner.width > 0.0));
+    let (Some(sub), Some(owner)) = (menu.sub.as_deref(), owner) else {
+        hits.submenu.clear();
+        hits.submenu_panel = None;
+        return;
+    };
+    let (first, drawn) = sub.menu.window(room);
+    let width = menu_width(painter, drawn);
+    let beside =
+        crate::menu::place_beside(owner, area, width, crate::menu::height(drawn), layout.window);
+    panel_shape(painter, beside, hits);
+    let mut rows = std::mem::take(&mut hits.submenu);
+    menu_rows(painter, &sub.menu, first, drawn, beside, None, &mut rows);
+    hits.submenu = rows;
+    hits.submenu_panel = Some(beside);
+}
+
+/// How wide a panel showing exactly these rows is.
+fn menu_width(painter: &mut Painter<'_>, drawn: &[crate::menu::Item]) -> f32 {
+    use crate::menu::{CHEVRON, INSET, SPACING, WIDTH};
+    let metrics = painter.theme.metrics;
     let widest = drawn
         .iter()
         .map(|item| {
             let name = text_width(painter, &item.name, metrics.text_size, false);
             let keys = text_width(painter, &item.keys, metrics.header_size, true);
-            name + if keys > 0.0 { SPACING + keys } else { 0.0 }
+            let mark = if item.opens() { CHEVRON } else { keys };
+            name + if mark > 0.0 { SPACING + mark } else { 0.0 }
         })
         .fold(0.0f32, f32::max);
-    let width = (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1);
-    let area = crate::menu::place(menu.at, width, crate::menu::height(drawn), layout.window);
-    panel_shape(painter, area, hits);
+    (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1)
+}
 
-    // One rectangle per row, drawn or not, so a hit is an index into the menu's
-    // own rows: a row that is scrolled out gets an empty rectangle, which
-    // `contains` answers `false` for.
-    hits.menu.clear();
-    hits.menu.resize(menu.items.len(), Area::default());
+/// The rows of one panel — the menu's or its submenu's — into `area`. `open` is
+/// the row whose submenu is up, if one is.
+///
+/// One rectangle per row, drawn or not, so a hit is an index into the menu's
+/// own rows: a row that is scrolled out gets an empty rectangle, which
+/// `contains` answers `false` for.
+fn menu_rows(
+    painter: &mut Painter<'_>,
+    menu: &Menu,
+    first: usize,
+    drawn: &[crate::menu::Item],
+    area: Area,
+    open: Option<usize>,
+    rows: &mut Vec<Area>,
+) {
+    use crate::menu::{CHEVRON, DIVIDER, INSET, SPACING, STEP};
+
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    rows.clear();
+    rows.resize(menu.items.len(), Area::default());
     let tops: Vec<f32> = crate::menu::row_tops(drawn, area).collect();
     for (offset, (item, top)) in drawn.iter().zip(tops).enumerate() {
         let index = first + offset;
-        hits.menu[index] = Area { x: area.x, y: top, width: area.width, height: STEP };
+        rows[index] = Area { x: area.x, y: top, width: area.width, height: STEP };
         if item.starts_group && offset > 0 {
             let y = top - DIVIDER / 2.0;
             painter.hairline(area.x + INSET, y, area.width - INSET * 2.0, theme.palette.divider);
         }
-        let highlighted = menu.active == Some(index);
-        if highlighted {
+        // **The owner of an open submenu is open, not chosen.** The accent pill
+        // means "what the next key acts on", and while a submenu is up that is
+        // one of its rows; the owner takes the quieter fill a hovered list row
+        // has, which says where the submenu came from without claiming the key.
+        let owner = open == Some(index);
+        let highlighted = menu.active == Some(index) && !owner;
+        if highlighted || owner {
             let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, STEP);
-            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+            let fill = if owner { theme.palette.hover } else { theme.palette.accent };
+            painter.list.rect(pill, fill, painter.px(5.0));
         }
         let (name_colour, keys_colour) = match (item.enabled, highlighted) {
             (false, _) => (theme.palette.dim.with_alpha(110), theme.palette.dim.with_alpha(80)),
@@ -922,13 +985,12 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
         };
         let baseline = painter.baseline(top, STEP, metrics.text_size);
         let mut inner = area.width - INSET * 2.0;
-        let keys_width = text_width(painter, &item.keys, metrics.header_size, true);
         let name_style = TextStyle::new(metrics.text_size, name_colour);
         let mut x = area.x + INSET;
         // **A colour's row shows the colour.** Seven rows of colour names with no
         // colours on them is a menu somebody has to try rather than read, which
         // is the difference between this and every other row here.
-        if let Some(colour) = crate::colours::of_command(item.id) {
+        if let Some(colour) = crate::colours::of_command(&item.id) {
             let dot = 10.0;
             let ink = colour.ink(&theme.palette);
             let ink = if item.enabled { ink } else { ink.with_alpha(90) };
@@ -937,6 +999,22 @@ fn context_menu(painter: &mut Painter<'_>, layout: &Layout, menu: &Menu, hits: &
             x += dot + 8.0;
             inner -= dot + 8.0;
         }
+        // **A row that opens says so where its chord would be.** The chevron is
+        // the one mark every desktop uses for it, and a row with a chord and a
+        // chevron both would be a row that does two things.
+        if item.opens() {
+            let tall = CHEVRON * 1.25;
+            let box_ = painter.rect(
+                area.right() - INSET - CHEVRON * 0.625,
+                top + (STEP - tall) / 2.0,
+                CHEVRON * 0.625,
+                tall,
+            );
+            painter.chevron(box_, keys_colour, Direction::Right, 1.25);
+            line(painter, &item.name, name_style, x, inner - CHEVRON - SPACING * 0.5, baseline);
+            continue;
+        }
+        let keys_width = text_width(painter, &item.keys, metrics.header_size, true);
         line(painter, &item.name, name_style, x, inner - keys_width - SPACING * 0.5, baseline);
         let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
         line(painter, &item.keys, keys_style, x, inner, baseline);

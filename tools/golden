@@ -155,11 +155,16 @@ FRAMES = [
     # row offers, over a folder. Two menus and one of them had no frame at all,
     # which is how a row added to it could change nothing anyone could see.
     ("context-menu-row", ["--size", "900x520", "--scale", "125", "--menu-row"]),
-    # **The same menu, in a window tall enough to show its last group.** A folder
-    # row's menu ends in the seven colours, each drawing its own swatch — and at
-    # 520 logical pixels that group is below the fold, so the frame above would
-    # not catch a swatch that stopped being drawn.
-    ("context-menu-colours", ["--size", "900x820", "--scale", "100", "--menu-row"]),
+    # **The same menu with its Colour submenu open beside it.** A folder row's
+    # menu ends in one row called Colour, and the seven rows it opens onto each
+    # draw their own swatch — in a panel hung off the owner's row, level with it,
+    # with the owner still lit behind. The only frame of a submenu at all, and
+    # therefore of the chevron on a row that opens one.
+    ("context-menu-colours", ["--size", "900x820", "--scale", "100", "--menu-colours"]),
+    # The one submenu whose rows are data rather than commands: two applications
+    # with no chord and no swatch, hung off Open with. A row shape nothing else
+    # draws.
+    ("context-menu-open-with", ["--size", "900x820", "--scale", "100", "--menu-open-with"]),
     # The one panel with no way to dismiss it, and the only one whose content is
     # a *comparison*: two files' sizes and dates side by side, which is what
     # makes "replace or keep both" a question anybody can answer. Its check box

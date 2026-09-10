@@ -3972,10 +3972,15 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
 
     # A press that dismisses a menu dismisses it and nothing else: aimed at
     # another row, so a click that got through would move the cursor and say so.
+    # **At the far end of the row, clear of the menu.** The menu opens at the
+    # pointer and runs rightwards and downwards from it, so a point thirty pixels
+    # right of the pointer and four rows down was a point *inside* the menu — on
+    # a dimmed Extract row for as long as the menu was tall enough to flip to
+    # the top of the window, and on Duplicate the day it was not.
     away = aim(
         run,
         opened,
-        float(opened["name_x"]) + 30.0,
+        float(opened["body_right"]) - 40.0,
         float(opened["body_top"]) + float(opened["row_h"]) * 6.5,
     )
     run.drive(
@@ -3998,6 +4003,55 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
             raise Failure("the sidebar answered with the list's own menu")
         if not over_place["place_menu"]:
             raise Failure("the menu is about no place at all")
+
+
+@scenario("context-menu-submenus")
+def context_menu_submenus(run: Run, fixture: Path) -> None:
+    """A row that is a question opens its answers beside the menu, by hand and by key.
+
+    By hand: resting on Colour opens the colours with Colour still lit behind
+    them, and moving onto another row of the parent closes them again. By key:
+    Right on Open in opens it with its first row lit, Down walks the submenu and
+    not the parent, Left comes back to the row it hung off, and Escape closes
+    one level at a time — so a person who opened a submenu by mistake is not
+    thrown out of the menu.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 100\n")
+    pointing = point_at(run, 0)
+    expect(pointing, hover_name="alpha")
+    run.drive("click right\nsleep 400\nkey f12\nsleep 150\n")
+    opened = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+    expect(opened, submenu="0")
+    if "menu.colour:view.colour_red" not in opened["menu_holds"]:
+        raise Failure(f"the Colour row holds {opened['menu_holds']!r}")
+
+    colours = open_submenu(run, opened, "menu.colour")
+    # Seven rows, the owner lit behind them, and nothing in the submenu lit yet:
+    # a hand resting on the owner has not chosen anything.
+    expect(colours, submenu="7", submenu_of="menu.colour", menu_id="menu.colour")
+    expect(colours, submenu_active="-1")
+
+    # Onto a row of the parent that opens nothing: the submenu goes, the row lights.
+    away = menu_aim(run, colours, "file.copy")
+    run.drive(f"move {away[0]:.2f} {away[1]:.2f}\nsleep 200\nkey f12\nsleep 150\n")
+    moved = until(run, submenu="0")
+    expect(moved, menu_id="file.copy")
+    run.drive("key escape\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), menu="0")
+
+    # The keyboard's turn, at the cursor row the secondary click put on `alpha`.
+    run.drive("key shift+f10\nsleep 300\nkey down\nsleep 100\nkey down\nsleep 150\nkey f12\nsleep 150\n")
+    expect(run.state(), menu_id="menu.open_in", submenu="0")
+    run.drive("key right\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), submenu_of="menu.open_in", submenu_active="0", submenu_id="go.open_new_tab")
+    run.drive("key down\nsleep 150\nkey f12\nsleep 150\n")
+    expect(run.state(), submenu_id="go.open_beside", menu_id="menu.open_in")
+    run.drive("key left\nsleep 150\nkey f12\nsleep 150\n")
+    expect(run.state(), submenu="0", menu_id="menu.open_in")
+    run.drive("key right\nsleep 150\nkey escape\nsleep 150\nkey f12\nsleep 150\n")
+    expect(run.state(), submenu="0", menu_id="menu.open_in", menu_active="1")
+    run.drive("key escape\nsleep 200\nkey f12\nsleep 150\n")
+    expect(run.state(), menu="0")
 
 
 @scenario("mouse-only-trash-and-undo", fresh=True)
@@ -4046,36 +4100,70 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
     identifier and never by arithmetic over the menu's own constants — which it
     would have to copy, and which would then be a second copy to keep right.
 
+    **The menu's own rows only.** A command behind a row that opens is reached
+    through `submenu_aim`, which names the row: depth is a property of the menu a
+    scenario is asserting about, and a helper that quietly opened whichever
+    submenu held the command would let a command move one press deeper without
+    any scenario noticing.
+    """
+    return aim_in_panel(run, state, command, "menu")
+
+
+def submenu_aim(run: Run, state: dict[str, str], owner: str, command: str) -> tuple[float, float]:
+    """Where to click one row of the submenu `owner` opens onto, opening it first."""
+    return aim_in_panel(run, open_submenu(run, state, owner), command, "submenu")
+
+
+def open_submenu(run: Run, state: dict[str, str], owner: str) -> dict[str, str]:
+    """Moves the pointer onto `owner` and returns the state once its submenu is drawn.
+
+    By hand rather than by key, because that is how a pointer scenario reaches
+    one: a submenu opens on hover, with no press.
+    """
+    over = menu_aim(run, state, owner)
+    run.drive(f"move {over[0]:.2f} {over[1]:.2f}\nsleep 200\nkey f12\nsleep 150\n")
+    return holds(
+        run,
+        lambda it: it.get("submenu_of") == owner and bool(it.get("submenu_aim")),
+        f"the {owner} submenu to open with drawn rows",
+    )
+
+
+def aim_in_panel(run: Run, state: dict[str, str], command: str, panel: str) -> tuple[float, float]:
+    """Where to click one row of `panel` — `menu` or `submenu` — by identifier.
+
     **Scrolls to it if it is not drawn.** The background menu is taller than a
     720-pixel window and scrolls, and only the drawn rows report a rectangle. A
     helper that gave up on the first look made every menu scenario depend on the
     menu's *length*: adding two commands pushed the palette below the fold and
     `palette-by-pointer` failed — on X11, where the window is 720 tall, and not on
     Wayland, where it is not. Scrolling here is also the only thing that covers a
-    scrolled menu being clickable at all.
+    scrolled menu being clickable at all — and an Open with submenu on a machine
+    with a dozen text editors is a panel that scrolls too.
     """
-    # **Wait for a drawn menu before reading one.** The aim points come from the
+    aim_key, scroll_key, drawn_key = f"{panel}_aim", f"{panel}_scroll", f"{panel}_drawn"
+    # **Wait for a drawn panel before reading one.** The aim points come from the
     # hit rectangles a *frame* fills, so a dump taken between the click and the
     # next frame reports every row as dimmed-or-not and none of them as anywhere.
     # Under a full sweep that is what arrives, and the reads below then take an
     # empty string apart — a crash rather than a failure, which is the same defect
     # `keyboard-cursor` records at the top of this file.
-    if not state.get("menu_aim"):
-        state = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+    if not state.get(aim_key):
+        state = holds(run, lambda it: bool(it.get(aim_key)), f"a {panel} with drawn rows")
     for attempt in range(8):
         # F12 can observe the model after a wheel event but before its paint.
         # Aim only when the hit rectangles represent that same scroll position.
-        if state.get("menu_scroll") != state.get("menu_drawn"):
-            state = holds(run, lambda it: it.get("menu_scroll") == it.get("menu_drawn"),
-                          "the menu's current scroll position to be painted")
-        for entry in state.get("menu_aim", "").split(","):
+        if state.get(scroll_key) != state.get(drawn_key):
+            state = holds(run, lambda it: it.get(scroll_key) == it.get(drawn_key),
+                          f"the {panel}'s current scroll position to be painted")
+        for entry in state.get(aim_key, "").split(","):
             name, _, point = entry.partition("@")
             if name == command:
                 x, _, y = point.partition(":")
                 return aim(run, state, float(x), float(y))
         if attempt == 0:
-            # The pointer has to be over the menu for the wheel to reach it.
-            first = state.get("menu_aim", "").split(",")[0]
+            # The pointer has to be over the panel for the wheel to reach it.
+            first = state.get(aim_key, "").split(",")[0]
             _, _, point = first.partition("@")
             x, _, y = point.partition(":")
             if not x:
@@ -4088,7 +4176,7 @@ def menu_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, floa
         # and neither agreed with the pane.
         run.drive("scroll 3\nsleep 150\nkey f12\nsleep 150\n")
         state = run.state()
-    raise Failure(f"{command} is not on the open menu: {state.get('menu_aim')!r}")
+    raise Failure(f"{command} is not on the open {panel}: {state.get(aim_key)!r}")
 
 
 def palette_aim(run: Run, state: dict[str, str], command: str) -> tuple[float, float]:
@@ -6269,6 +6357,43 @@ def a_screen_reader_can_read_the_window(run: Run, fixture: Path) -> None:
             after = focused_row(ask, rows)
             if before == after:
                 raise Failure(f"the focused row is still {after} after Down")
+
+            # **A submenu is a menu inside its owner's item**, not more rows of
+            # the parent: a reader that announced an application as a sibling of
+            # Properties would be describing a menu nobody drew. Open with, because
+            # it is the one row that opens over any entry — and its rows are
+            # whatever this machine has, so only their role is asserted.
+            window.drive("key shift+f10\nsleep 300\n")
+            for _ in range(4):
+                window.drive("key down\nsleep 120\nkey f12\nsleep 150\n")
+                if window.state().get("menu_id") == "menu.open_with":
+                    break
+            else:
+                raise Failure("the arrows never reached the Open with row")
+            window.drive("key right\nsleep 500\n")
+
+            def role_of(path: str) -> str:
+                return ask(path, "org.a11y.atspi.Accessible.GetRoleName").strip("(),' ")
+
+            menus = [it for it in paths_in(ask(frame[0], "org.a11y.atspi.Accessible.GetChildren"))
+                     if role_of(it) == "menu"]
+            if len(menus) != 1:
+                raise Failure(f"the frame holds {len(menus)} menus with one open")
+            items = paths_in(ask(menus[0], "org.a11y.atspi.Accessible.GetChildren"))
+            nested = [(it, inner) for it in items
+                      for inner in paths_in(ask(it, "org.a11y.atspi.Accessible.GetChildren"))
+                      if role_of(inner) == "menu"]
+            if len(nested) != 1:
+                raise Failure(f"{len(nested)} menu items hold a menu, wanted the open one")
+            owner, inner = nested[0]
+            owner_name = ask(owner, "org.freedesktop.DBus.Properties.Get",
+                             "org.a11y.atspi.Accessible", "Name")
+            if "Open with" not in owner_name:
+                raise Failure(f"the submenu hangs off {owner_name}")
+            inner_rows = paths_in(ask(inner, "org.a11y.atspi.Accessible.GetChildren"))
+            if not inner_rows or any(role_of(it) != "menu item" for it in inner_rows):
+                raise Failure(f"the Open with submenu reads as {len(inner_rows)} nodes")
+            window.drive("key escape\nsleep 150\nkey escape\nsleep 200\n")
         finally:
             window.close()
     finally:
@@ -7092,22 +7217,25 @@ def colour_a_folder(run: Run, fixture: Path) -> None:
         expect(row, hover_name="alpha")
         own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        # **`menu_dim` and not `menu_aim`.** A folder's menu is twenty-four rows
-        # and `menu_aim` lists only the ones that are *drawn*, so asserting
-        # against it asserts that the menu fits — which it does under Xvfb's
-        # 720-pixel window and does not under the nested compositor's shorter
-        # tile, so this failed three times in three on Wayland while passing on
-        # X11. That is the trap `palette-by-pointer` names two hundred lines
-        # above. `menu_dim` lists every row whatever is drawn, so it answers both
-        # halves at once: Remove the colour is *there*, and it is dimmed, because
-        # a folder with no colour has nothing to take away.
-        if "view.colour_none" not in opened["menu_dim"]:
-            raise Failure(f"Remove the colour is not dimmed and there: {opened['menu_dim']!r}")
+        # **`submenu_dim` and not `submenu_aim`.** The colours are behind one row
+        # of the menu, and `submenu_dim` lists every row of the submenu whatever
+        # is drawn, so it answers both halves at once: Remove the colour is
+        # *there*, and it is dimmed, because a folder with no colour has nothing
+        # to take away. (The parent's own `menu_aim` lists only the rows that are
+        # *drawn*, and a folder's menu did not fit the nested compositor's
+        # shorter tile, so an assertion against it failed three times in three
+        # on Wayland while passing on X11 — the trap `palette-by-pointer` names
+        # above.)
+        colours = open_submenu(own, opened, "menu.colour")
+        if "view.colour_none" not in colours["submenu_dim"]:
+            raise Failure(
+                f"Remove the colour is not dimmed and there: {colours['submenu_dim']!r}"
+            )
 
         # And the row that is clicked is reached through the helper that scrolls,
         # which is the only thing that can say a row nobody has drawn is
         # reachable at all.
-        aimed = menu_aim(own, opened, "view.colour_red")
+        aimed = submenu_aim(own, opened, "menu.colour", "view.colour_red")
         own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
         until(own, coloured="alpha:red")
 
@@ -7133,9 +7261,10 @@ def colour_a_folder(run: Run, fixture: Path) -> None:
         expect(row, hover_name="alpha")
         back.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         opened = holds(back, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        if "view.colour_none" in opened["menu_dim"]:
+        colours = open_submenu(back, opened, "menu.colour")
+        if "view.colour_none" in colours["submenu_dim"]:
             raise Failure("Remove the colour is dimmed on a folder that has one")
-        aimed = menu_aim(back, opened, "view.colour_none")
+        aimed = submenu_aim(back, opened, "menu.colour", "view.colour_none")
         back.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
         until(back, coloured="")
     finally:
@@ -7801,7 +7930,7 @@ def colour_a_selection(run: Run, fixture: Path) -> None:
         own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
         expect(opened, selected="3")
-        aimed = menu_aim(own, opened, "view.colour_blue")
+        aimed = submenu_aim(own, opened, "menu.colour", "view.colour_blue")
         own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
         coloured = until(own, coloured="alpha:blue,beta:blue,gamma:blue")
         assert coloured is not None and chosen is not None
@@ -7813,7 +7942,7 @@ def colour_a_selection(run: Run, fixture: Path) -> None:
         point_at(own, 0)
         own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        aimed = menu_aim(own, opened, "view.colour_none")
+        aimed = submenu_aim(own, opened, "menu.colour", "view.colour_none")
         own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 500\nkey f12\nsleep 200\n")
         until(own, coloured="")
     finally:
@@ -8919,9 +9048,12 @@ def open_in_a_new_tab(run: Run, fixture: Path) -> None:
         raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
     run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
     opened = run.state()
-    if "go.open_new_tab" in opened["menu_dim"]:
-        raise Failure("Open in a new tab is dimmed over a folder")
-    aimed = menu_aim(run, opened, "go.open_new_tab")
+    # Behind the Open in row, which is dimmed exactly when everything it opens
+    # onto is — so over a folder it is offered, and the tab is a row of its
+    # submenu.
+    if "menu.open_in" in opened["menu_dim"]:
+        raise Failure("Open in is dimmed over a folder")
+    aimed = submenu_aim(run, opened, "menu.open_in", "go.open_new_tab")
     run.drive(
         f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n"
     )
@@ -8940,7 +9072,7 @@ def open_in_a_new_tab(run: Run, fixture: Path) -> None:
     if not onto["hover_name"].startswith("file-"):
         raise Failure(f"row 3 is {onto['hover_name']!r}, wanted a file")
     run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
-    if "go.open_new_tab" not in run.state()["menu_dim"]:
+    if "menu.open_in" not in run.state()["menu_dim"]:
         raise Failure("Open in a new tab is offered over a file")
     run.drive("key escape\nsleep 300\n")
 
@@ -8975,9 +9107,9 @@ def open_into_a_pane(run: Run, fixture: Path) -> None:
         raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
     run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
     opened = run.state()
-    if "go.open_beside" in opened["menu_dim"]:
-        raise Failure("Open right is dimmed over a folder")
-    aimed = menu_aim(run, opened, "go.open_beside")
+    if "menu.open_in" in opened["menu_dim"]:
+        raise Failure("Open in is dimmed over a folder")
+    aimed = submenu_aim(run, opened, "menu.open_in", "go.open_beside")
     run.drive(
         f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 900\nkey f12\nsleep 300\n"
     )
@@ -9005,9 +9137,10 @@ def open_into_a_pane(run: Run, fixture: Path) -> None:
         raise Failure(f"row 3 is {onto['hover_name']!r}, wanted a file")
     run.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
     dimmed = run.state()["menu_dim"]
-    for command in ("go.open_beside", "go.open_below"):
-        if command not in dimmed:
-            raise Failure(f"{command} is offered over a file: {dimmed!r}")
+    # The two panes are rows of the Open in submenu, and the row is dimmed
+    # exactly when everything behind it is — a file opens into no pane.
+    if "menu.open_in" not in dimmed:
+        raise Failure(f"Open in is offered over a file: {dimmed!r}")
 
 
 @scenario("a-tab-answers-a-click-a-double-click-and-its-cross")
@@ -9312,6 +9445,27 @@ def open_with(run: Run, fixture: Path) -> None:
         expect(after, openers="0")
         if "Probe" not in after.get("notice", ""):
             raise Failure(f"the notice reads {after.get('notice')!r}")
+
+        # And the same list is the row menu's Open with submenu: its rows are
+        # what the job found, named by their `.desktop` ids, and choosing one
+        # starts it the way Enter in the panel did. The job starts when the row
+        # opens, so the submenu says `Reading…` first and then holds the answer.
+        point_at(own, 3)
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        open_submenu(own, opened, "menu.open_with")
+        ready = holds(
+            own,
+            lambda it: "skerry-probe.desktop" in it.get("submenu_aim", ""),
+            "the Open with submenu to list the installed handler",
+        )
+        aimed = aim_in_panel(own, ready, "skerry-probe.desktop", "submenu")
+        own.drive(
+            f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 700\nkey f12\nsleep 300\n"
+        )
+        chosen = until(own, menu="0")
+        if "Probe" not in chosen.get("notice", ""):
+            raise Failure(f"the notice after the submenu reads {chosen.get('notice')!r}")
     finally:
         own.close()
 

@@ -696,8 +696,8 @@ struct Replies {
     siblings_rx: Receiver<Siblings>,
     facts_tx: std::sync::mpsc::Sender<sk_fs::facts::Facts>,
     facts_rx: Receiver<sk_fs::facts::Facts>,
-    openers_tx: std::sync::mpsc::Sender<crate::openers::Openers>,
-    openers_rx: Receiver<crate::openers::Openers>,
+    openers_tx: std::sync::mpsc::Sender<(crate::openers::Asker, crate::openers::Handlers)>,
+    openers_rx: Receiver<(crate::openers::Asker, crate::openers::Handlers)>,
     /// A search report, and the query it is an answer to.
     found_tx: std::sync::mpsc::Sender<(String, sk_index::Found)>,
     found_rx: Receiver<(String, sk_index::Found)>,
@@ -796,6 +796,10 @@ struct Copied {
     /// The text, or why there is none.
     outcome: Result<String, Problem>,
 }
+
+/// One row of a menu as the accessibility tree reads it: what it says, where
+/// it is, and whether it is the one the keys act on.
+pub(crate) type A11yRow = (String, Area, bool);
 
 /// The application.
 ///
@@ -1014,6 +1018,14 @@ pub struct App {
     /// leaves the request here and [`App::handle`] builds it, which is the one
     /// place a menu is ever constructed.
     menu_wanted: Option<(Point, &'static [&'static [&'static str]])>,
+    /// A submenu a hover asked for: which row of the open menu, and where the
+    /// pointer was. The same shape as `menu_wanted` and for the same reason —
+    /// building rows needs the registry, and a pointer's motion does not carry
+    /// it — so `settle_menu` opens it after the event.
+    submenu_wanted: Option<(usize, Point)>,
+    /// The token of the job finding the open menu's applications, so closing
+    /// the menu can stop a job whose answer nobody is waiting for.
+    menu_job: Option<sk_util::Cancel>,
     /// What the jobs a command starts answer on.
     replies: Replies,
     layout: Layout,
@@ -1661,6 +1673,8 @@ impl App {
             cutting: false,
             menu: None,
             menu_wanted: None,
+            submenu_wanted: None,
+            menu_job: None,
             replies,
             frames: Frames::new(),
             last: FrameStats::default(),
@@ -2305,12 +2319,28 @@ impl App {
         // menu is *about* — `App::place_in_question` does — and taking the
         // request first would answer that question as though no menu were being
         // opened at all.
-        let Some((at, groups)) = self.menu_wanted else { return };
-        self.menu = crate::menu::build(groups, commands, at, |id| {
-            commands.find(id).is_some_and(|command| commands.enabled(command, self))
-        });
-        self.menu_wanted = None;
-        self.dirty = true;
+        if let Some((at, groups)) = self.menu_wanted {
+            self.menu = crate::menu::build(groups, commands, at, |id| self.runnable(commands, id));
+            self.menu_wanted = None;
+            // A hover's request was against the menu this one replaces.
+            self.submenu_wanted = None;
+            self.dirty = true;
+            // The Open with row learns its file now; its job waits for the row
+            // to open — `expand_menu_row`.
+            if let Some(file) = self.selected_paths().into_iter().next()
+                && let Some(menu) = self.menu.as_mut()
+            {
+                menu.asks_about(file);
+            }
+        } else if let Some((row, from)) = self.submenu_wanted.take() {
+            self.expand_menu_row(row, Some(from), commands);
+        }
+    }
+
+    /// Whether `id` names a command that can run right now — the question every
+    /// menu row asks when it is built, and again in every frame it is drawn.
+    fn runnable(&self, commands: &Registry<Self>, id: &str) -> bool {
+        commands.find(id).is_some_and(|command| commands.enabled(command, self))
     }
 
     fn key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) {
@@ -4854,9 +4884,21 @@ impl App {
         } else if self.menu.is_some() {
             // A menu taller than the window scrolls; one that fits does not
             // move, and neither does the list behind it.
+            //
+            // **The wheel belongs to the panel under the pointer.** A submenu of
+            // fifteen applications scrolls on its own, and the parent behind it
+            // stays put.
             let room = self.layout.window.height - crate::menu::MARGIN * 2.0;
+            let over_the_submenu = self
+                .hits
+                .submenu_panel
+                .is_some_and(|panel| panel.contains(self.pointer.x, self.pointer.y));
             if let Some(menu) = self.menu.as_mut() {
-                menu.wheel(delta.y, room);
+                if over_the_submenu && let Some(sub) = menu.sub.as_mut() {
+                    sub.menu.wheel(delta.y, room);
+                } else {
+                    menu.wheel(delta.y, room);
+                }
             }
         } else if mods.ctrl
             && self.quick_look.as_ref().is_some_and(crate::quicklook::QuickLook::zoomable)
@@ -5741,14 +5783,33 @@ impl App {
             return;
         }
         let Some(path) = self.selected_paths().into_iter().next() else { return };
+        self.ask_which_applications(path, crate::openers::Asker::Panel);
+    }
+
+    /// Starts the job that finds which applications open `path`, for whichever
+    /// of the two places shows the answer: the panel, or a menu's Open with row.
+    fn ask_which_applications(&mut self, path: PathBuf, asker: crate::openers::Asker) {
         let Some(desktop) = self.desktop.clone() else { return };
         let sender = self.replies.openers_tx.clone();
         let wake = self.waker.handle();
-        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+        // **A menu's job is the menu's to stop.** On a mount that has stopped
+        // answering it would otherwise sit on the pane's lane and then open a
+        // file nobody is waiting to hear about — so the token is kept, and
+        // `close_menu` pulls it.
+        let cancel = sk_util::Cancel::new();
+        if asker == crate::openers::Asker::Menu
+            && let Some(previous) = self.menu_job.replace(cancel.clone())
+        {
+            previous.cancel();
+        }
+        self.jobs.pool.spawn(self.panes.focused().lane(), cancel, move |cancel| {
+            if cancel.is_cancelled() {
+                return;
+            }
             let mime = desktop.mime.of(&path, false);
             let rows = desktop.apps.handlers_for(&mime);
-            let list = crate::openers::Openers::new(path, mime, rows);
-            if sender.send(list).is_ok() {
+            let found = crate::openers::Handlers { path, mime, rows };
+            if sender.send((asker, found)).is_ok() {
                 wake.wake();
             }
         });
@@ -6736,15 +6797,32 @@ impl App {
 
     /// Takes delivery of the Open With list.
     fn drain_openers(&mut self) {
-        let Ok(list) = self.replies.openers_rx.try_recv() else { return };
-        if list.rows.is_empty() {
-            self.notice =
-                Some((sk_model::i18n::format("error.no_handler", &[&list.mime]), Instant::now()));
-            self.dirty = true;
-            return;
+        // Every answer that has landed, because two landing between two turns
+        // are one wake: a menu opened over one file and then another leaves
+        // the first's answer ahead of the second's in the channel.
+        while let Ok((asker, found)) = self.replies.openers_rx.try_recv() {
+            match asker {
+                // Into the menu's Open with row, if the menu the job was
+                // started for is still up and still about that file; otherwise
+                // nobody is waiting for it.
+                crate::openers::Asker::Menu => {
+                    if self.menu.as_mut().is_some_and(|menu| menu.answer(found)) {
+                        self.dirty = true;
+                    }
+                }
+                crate::openers::Asker::Panel if found.rows.is_empty() => {
+                    self.notice = Some((
+                        sk_model::i18n::format("error.no_handler", &[&found.mime]),
+                        Instant::now(),
+                    ));
+                    self.dirty = true;
+                }
+                crate::openers::Asker::Panel => {
+                    self.openers = Some(crate::openers::Openers::new(found));
+                    self.dirty = true;
+                }
+            }
         }
-        self.openers = Some(list);
-        self.dirty = true;
     }
 
     /// Launches the highlighted application and closes the list.
@@ -6752,7 +6830,16 @@ impl App {
         let Some(list) = self.openers.take() else { return };
         self.dirty = true;
         let Some(entry) = list.chosen().cloned() else { return };
-        let path = list.path.clone();
+        self.start_application(entry, list.path.clone());
+    }
+
+    /// Hands `path` to `entry` on a job, and says so in the status line once it
+    /// has. From the Open with panel and from the menu's Open with submenu alike.
+    ///
+    /// A job because `spawn` is `fork` plus `exec`, which with a `pre_exec` set
+    /// blocks the parent on the child's exec-status pipe — `launch`'s reason,
+    /// and the same rule.
+    fn start_application(&mut self, entry: sk_desktop::DesktopEntry, path: PathBuf) {
         let sender = self.replies.launched_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
@@ -9038,32 +9125,71 @@ sizes={known}/{running} jobs={jobs}/{panics}",
             .and_then(|menu| menu.active)
             .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         let id = menu.and_then(super::menu::Menu::active_id).unwrap_or_default();
-        let dimmed = menu.map_or_else(String::new, |menu| {
+        let dimmed = menu.map_or_else(String::new, |menu| Self::dimmed_rows(&menu.items));
+        let aim =
+            menu.map_or_else(String::new, |menu| Self::row_aims(&menu.items, &self.hits.menu));
+        // What each row that opens holds, as `owner:child|child`, so a scenario
+        // that names a colour can find the row to open first.
+        let holds = menu.map_or_else(String::new, |menu| {
             menu.items
                 .iter()
-                .filter(|item| !item.enabled)
-                .map(|item| item.id)
-                .collect::<Vec<_>>()
-                .join(",")
-        });
-        let aim = menu.map_or_else(String::new, |menu| {
-            menu.items
-                .iter()
-                .zip(&self.hits.menu)
-                // A row scrolled out of a menu taller than the window has an
-                // empty rectangle, and an aim at it would be an aim at nothing.
-                .filter(|(_, area)| area.width > 0.0)
-                .map(|(item, area)| {
-                    format!("{}@{:.0}:{:.0}", item.id, area.x + 20.0, area.y + area.height / 2.0)
-                })
+                .filter(|item| item.opens())
+                .map(|item| format!("{}:{}", item.id, item.holds().join("|")))
                 .collect::<Vec<_>>()
                 .join(",")
         });
         let scroll = menu.map_or(0, |menu| menu.scroll);
         let drawn = self.hits.menu.iter().position(|area| area.width > 0.0).unwrap_or(0);
+        // The open submenu, reported the way its parent is.
+        let sub = menu.and_then(|menu| menu.sub.as_deref());
+        let sub_of =
+            sub.and_then(|sub| menu?.items.get(sub.owner)).map_or("", |owner| owner.id.as_str());
+        let sub_rows = sub.map_or(0, |sub| sub.menu.items.len());
+        let sub_active = sub
+            .and_then(|sub| sub.menu.active)
+            .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
+        let sub_id = sub.and_then(|sub| sub.menu.active_id()).unwrap_or_default();
+        let sub_dimmed = sub.map_or_else(String::new, |sub| Self::dimmed_rows(&sub.menu.items));
+        let sub_aim =
+            sub.map_or_else(String::new, |sub| Self::row_aims(&sub.menu.items, &self.hits.submenu));
+        let sub_scroll = sub.map_or(0, |sub| sub.menu.scroll);
+        let sub_drawn = self.hits.submenu.iter().position(|area| area.width > 0.0).unwrap_or(0);
         format!(
-            "menu={rows} menu_active={active} menu_id={id:?} menu_aim={aim:?} menu_dim={dimmed:?} menu_scroll={scroll} menu_drawn={drawn}"
+            "menu={rows} menu_active={active} menu_id={id:?} menu_aim={aim:?} menu_dim={dimmed:?} menu_scroll={scroll} menu_drawn={drawn} menu_holds={holds:?} \
+submenu={sub_rows} submenu_of={sub_of:?} submenu_active={sub_active} submenu_id={sub_id:?} submenu_aim={sub_aim:?} submenu_dim={sub_dimmed:?} \
+submenu_scroll={sub_scroll} submenu_drawn={sub_drawn}"
         )
+    }
+
+    /// The rows of a menu that cannot run, by identifier.
+    ///
+    /// "Dimmed rather than absent" is a claim about the interface and not an
+    /// implementation detail, so it is reported — and every row is, drawn or
+    /// not, so a scenario can ask about a row below the fold.
+    fn dimmed_rows(items: &[crate::menu::Item]) -> String {
+        items
+            .iter()
+            .filter(|item| !item.enabled)
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Where each drawn row of a menu can be clicked: the middle of the row, by
+    /// identifier, so a scenario names a command instead of copying the menu's
+    /// own constants — which would then be a second copy to keep right.
+    fn row_aims(items: &[crate::menu::Item], areas: &[Area]) -> String {
+        items
+            .iter()
+            .zip(areas)
+            // A row scrolled out of a menu taller than the window has an empty
+            // rectangle, and an aim at it would be an aim at nothing.
+            .filter(|(_, area)| area.width > 0.0)
+            .map(|(item, area)| {
+                format!("{}@{:.0}:{:.0}", item.id, area.x + 20.0, area.y + area.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// The open palette, reported the way the menu is.
@@ -10256,15 +10382,35 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         None
     }
 
+    /// The open submenu's rows, the same way, and which row of the menu they
+    /// hang off.
+    pub(crate) fn a11y_submenu(&self) -> Option<(usize, Vec<A11yRow>)> {
+        let sub = self.menu.as_ref()?.sub.as_deref()?;
+        let rows = sub
+            .menu
+            .items
+            .iter()
+            .zip(&self.hits.submenu)
+            .enumerate()
+            .map(|(at, (item, area))| (item.name.clone(), *area, sub.menu.active == Some(at)))
+            .collect();
+        Some((sub.owner, rows))
+    }
+
     /// The open menu's rows: what each says, where it is, and which is on.
-    pub(crate) fn a11y_menu(&self) -> Vec<(String, Area, bool)> {
+    pub(crate) fn a11y_menu(&self) -> Vec<A11yRow> {
         if let Some(menu) = self.menu.as_ref() {
+            // While the open submenu has a highlight of its own, the owner is
+            // not the focus — one focus, or a reader reads two.
+            let sub_lit = menu.sub.as_deref().is_some_and(|sub| sub.menu.active.is_some());
             return menu
                 .items
                 .iter()
                 .zip(&self.hits.menu)
                 .enumerate()
-                .map(|(at, (item, area))| (item.name.clone(), *area, menu.active == Some(at)))
+                .map(|(at, (item, area))| {
+                    (item.name.clone(), *area, menu.active == Some(at) && !sub_lit)
+                })
                 .collect();
         }
         if let Some(palette) = self.palette.as_ref() {
@@ -10982,7 +11128,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
     /// a row somebody clicked minutes ago.
     fn close_menu(&mut self) -> bool {
         self.place_target = None;
+        self.submenu_wanted = None;
+        self.stop_menu_job();
         self.menu.take().is_some()
+    }
+
+    /// Stops the job finding the menu's applications, if one is still out.
+    fn stop_menu_job(&mut self) {
+        if let Some(job) = self.menu_job.take() {
+            job.cancel();
+        }
     }
 
     /// Opens the context menu from the keyboard, or closes an open one.
@@ -11202,28 +11357,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
     /// landed — and a click on a row that had become runnable was dropped
     /// silently, because `menu_press` filters on the stale answer.
     fn settle_menu_state(&mut self, commands: &Registry<Self>) {
-        let Some(menu) = self.menu.as_ref() else { return };
-        // On the stack rather than in a `Vec`: this runs in every frame a menu is
-        // open, and no menu in the program has half this many rows.
-        let mut wanted = [false; 32];
-        let rows = menu.items.len().min(wanted.len());
-        for (slot, item) in wanted.iter_mut().zip(&menu.items) {
-            *slot = commands.find(item.id).is_some_and(|id| commands.enabled(id, self));
-        }
-        let Some(menu) = self.menu.as_mut() else { return };
-        let mut moved = false;
-        for (item, enabled) in menu.items.iter_mut().zip(wanted).take(rows) {
-            moved |= item.enabled != enabled;
-            item.enabled = enabled;
-        }
-        // A highlight cannot sit on a row that has stopped being runnable.
-        if menu.active.is_some_and(|row| !menu.items.get(row).is_some_and(|item| item.enabled)) {
-            menu.active = None;
-            moved = true;
-        }
-        if moved {
+        // Taken out and put back, so the registry can be asked about `self`
+        // while the menu's rows are being written.
+        let Some(mut menu) = self.menu.take() else { return };
+        if menu.settle(&|id| self.runnable(commands, id)) {
             self.dirty = true;
         }
+        self.menu = Some(menu);
     }
 
     /// A press while a menu is open: it runs a row, or it dismisses.
@@ -11233,19 +11373,164 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
     /// the desktop does, and the difference between closing a menu and trashing
     /// the file the menu was over.
     fn menu_press(&mut self, position: Point, commands: &Registry<Self>) {
-        let chosen = self
-            .menu_at(position)
-            .and_then(|row| self.menu.as_ref()?.items.get(row))
-            .filter(|item| item.enabled)
-            .map(|item| item.id);
-        self.menu = None;
         self.dirty = true;
-        if let Some(id) = chosen.and_then(|id| commands.find(id)) {
-            commands.run(id, self);
+        // Inside the submenu: one of its rows, or its padding.
+        if self.hits.submenu_panel.is_some_and(|panel| panel.contains(position.x, position.y)) {
+            let chosen = self
+                .submenu_at(position)
+                .and_then(|row| self.menu.as_ref()?.sub.as_ref()?.menu.items.get(row))
+                .and_then(crate::menu::Item::choice);
+            self.choose(chosen, commands);
+            return;
         }
-        // **The target outlives the menu by exactly one command**, which is the
-        // command the menu was opened for.
+        let row = self.menu_at(position);
+        // **A press on a row that opens keeps the menu.** Its submenu opens, or
+        // stays open if it was, and nothing closes.
+        if let Some(row) = row
+            && self.menu.as_ref().is_some_and(|menu| {
+                menu.items.get(row).is_some_and(|item| item.opens() && item.enabled)
+            })
+        {
+            self.expand_menu_row(row, Some(position), commands);
+            return;
+        }
+        let chosen = row
+            .and_then(|row| self.menu.as_ref()?.items.get(row))
+            .and_then(crate::menu::Item::choice);
+        self.choose(chosen, commands);
+    }
+
+    /// Closes the menu and does what the chosen row does — nothing, for a press
+    /// or a key that dismissed.
+    ///
+    /// **A dismissing press does nothing else.** The click that closes a menu
+    /// must not also land on the row underneath it — which is what every menu on
+    /// the desktop does, and the difference between closing a menu and trashing
+    /// the file the menu was over. The target outlives the menu by exactly one
+    /// command, which is the command the menu was opened for.
+    fn choose(&mut self, chosen: Option<crate::menu::Choice>, commands: &Registry<Self>) {
+        self.menu = None;
+        self.stop_menu_job();
+        self.dirty = true;
+        match chosen {
+            Some(crate::menu::Choice::Run(id)) => {
+                if let Some(command) = commands.find(&id) {
+                    commands.run(command, self);
+                }
+            }
+            Some(crate::menu::Choice::Launch { entry, path }) => {
+                self.start_application(entry, path);
+            }
+            None => {}
+        }
         self.place_target = None;
+    }
+
+    /// Opens the submenu under a row of the open menu, in place of whichever was
+    /// open, and puts the highlight on the row.
+    ///
+    /// `from` is the pointer, when a pointer asked. The same row asked for again
+    /// keeps its submenu and moves the apex of the triangle
+    /// [`crate::menu::Sub::heading_in`] draws, so the triangle follows the hand
+    /// along the row.
+    fn expand_menu_row(&mut self, row: usize, from: Option<Point>, commands: &Registry<Self>) {
+        let Some(mut menu) = self.menu.take() else { return };
+        if menu.sub.as_ref().is_some_and(|sub| sub.owner == row) {
+            if let Some(sub) = menu.sub.as_mut()
+                && from.is_some()
+            {
+                sub.from = from;
+            }
+        } else {
+            menu.collapse();
+            if !menu.expand(row, commands, |id| self.runnable(commands, id), from) {
+                menu.hover(Some(row));
+            }
+            self.dirty = true;
+        }
+        // **The Open with row's job starts when the row opens, not with the
+        // menu.** Started with the menu it ran on the pane's device lane ahead
+        // of whatever the same menu was opened to do — measured, a Move to Trash
+        // chosen a moment later waited seconds behind it for its listing to come
+        // back. The submenu says `Reading…` for the frames the job takes, which
+        // is what `Ctrl+Shift+O` has always cost.
+        let asks = match menu.items.get(row).map(|item| &item.kind) {
+            Some(crate::menu::Kind::OpenWith { path, found: None }) if self.menu_job.is_none() => {
+                Some(path.clone())
+            }
+            _ => None,
+        };
+        self.menu = Some(menu);
+        if let Some(path) = asks {
+            self.ask_which_applications(path, crate::openers::Asker::Menu);
+        }
+    }
+
+    /// The pointer moved with a menu open. Whether it is on a row a click would
+    /// do something on — `menu_at` answers where the pointer is and not whether
+    /// anything is there to run, and a dimmed row reported as a hand is the
+    /// interface promising a click that `menu_press` then drops.
+    fn hover_menu(&mut self, position: Point) -> bool {
+        if self.hits.submenu_panel.is_some_and(|panel| panel.contains(position.x, position.y)) {
+            return self.hover_submenu_row(position);
+        }
+        let row = self.menu_at(position);
+        if self.holds_the_submenu_open(position, row) {
+            return row.is_some();
+        }
+        let Some(menu) = self.menu.as_mut() else { return false };
+        let item = row.and_then(|row| menu.items.get(row));
+        let clickable = item.is_some_and(|item| item.enabled);
+        if let Some(row) = row
+            && item.is_some_and(|item| item.enabled && item.opens())
+        {
+            // A request rather than the submenu itself, because building its
+            // rows needs the registry and a pointer's motion does not carry it.
+            self.submenu_wanted = Some((row, position));
+            return true;
+        }
+        let mut changed = menu.collapse();
+        changed |= menu.hover(row);
+        if changed {
+            self.dirty = true;
+        }
+        clickable
+    }
+
+    /// The pointer is inside the submenu: its rows take the highlight, and the
+    /// owner keeps its own.
+    fn hover_submenu_row(&mut self, position: Point) -> bool {
+        let row = self.submenu_at(position);
+        let Some(sub) = self.menu.as_mut().and_then(|menu| menu.sub.as_mut()) else {
+            return false;
+        };
+        if sub.menu.hover(row) {
+            self.dirty = true;
+        }
+        row.and_then(|row| sub.menu.items.get(row)).is_some_and(|item| item.enabled)
+    }
+
+    /// Whether a pointer over the parent leaves the open submenu where it is:
+    /// on the owner's row, off every row, or inside the triangle towards the
+    /// submenu — [`crate::menu::Sub::heading_in`] — which is a way there rather
+    /// than a row.
+    fn holds_the_submenu_open(&mut self, position: Point, row: Option<usize>) -> bool {
+        let Some(sub) = self.menu.as_mut().and_then(|menu| menu.sub.as_mut()) else {
+            return false;
+        };
+        if row == Some(sub.owner) {
+            sub.from = Some(position);
+            return true;
+        }
+        let owner = self.hits.menu.get(sub.owner).copied().unwrap_or_default();
+        let panel = self.hits.submenu_panel.unwrap_or_default();
+        row.is_none() || sub.heading_in(position, panel, owner)
+    }
+
+    /// Which row of the open submenu is under a point, if one is open.
+    fn submenu_at(&self, position: Point) -> Option<usize> {
+        self.menu.as_ref()?.sub.as_ref()?;
+        self.hits.submenu.iter().position(|area| area.contains(position.x, position.y))
     }
 
     /// One key to an open menu. Returns whether it was consumed.
@@ -11260,25 +11545,49 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         let room = self.layout.window.height - crate::menu::MARGIN * 2.0;
         let Some(menu) = self.menu.as_mut() else { return false };
         let bare = event.mods.none();
+        let in_a_submenu = menu.sub.is_some();
         match event.key {
+            // **One level at a time**, and Right on a row that opens nothing
+            // does nothing rather than dismissing: a person walking a menu with
+            // the arrows has not asked to leave it.
+            Key::Named(Named::Escape) if in_a_submenu => {
+                menu.collapse();
+            }
             Key::Named(Named::Escape) => {
                 self.close_menu();
             }
+            Key::Named(Named::Left) if bare => {
+                menu.collapse();
+            }
             Key::Named(Named::Down) if bare => {
-                menu.step(true);
-                menu.reveal(room);
+                let inner = menu.innermost_mut();
+                inner.step(true);
+                inner.reveal(room);
             }
             Key::Named(Named::Up) if bare => {
-                menu.step(false);
-                menu.reveal(room);
+                let inner = menu.innermost_mut();
+                inner.step(false);
+                inner.reveal(room);
+            }
+            Key::Named(Named::Right) if bare => {
+                let opener = (!in_a_submenu).then_some(menu.active).flatten().filter(|row| {
+                    menu.items.get(*row).is_some_and(|item| item.opens() && item.enabled)
+                });
+                if let Some(row) = opener {
+                    self.expand_menu_row_by_key(row, commands);
+                }
             }
             Key::Named(Named::Enter) => {
-                let chosen = menu.active_id();
-                self.menu = None;
-                if let Some(id) = chosen.and_then(|id| commands.find(id)) {
-                    commands.run(id, self);
+                let inner = menu.innermost_mut();
+                let opener = inner.active.filter(|row| {
+                    inner.items.get(*row).is_some_and(|item| item.opens() && item.enabled)
+                });
+                if let Some(row) = opener {
+                    self.expand_menu_row_by_key(row, commands);
+                } else {
+                    let chosen = inner.active_item().and_then(crate::menu::Item::choice);
+                    self.choose(chosen, commands);
                 }
-                self.place_target = None;
             }
             _ => {
                 // **The diagnostic report passes through every mode, this one
@@ -11300,6 +11609,15 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         }
         self.dirty = true;
         true
+    }
+
+    /// Right or Enter on a row that opens: the submenu, with its first row lit,
+    /// because a key has nowhere to point.
+    fn expand_menu_row_by_key(&mut self, row: usize, commands: &Registry<Self>) {
+        self.expand_menu_row(row, None, commands);
+        if let Some(sub) = self.menu.as_mut().and_then(|menu| menu.sub.as_mut()) {
+            sub.menu.step(true);
+        }
     }
 
     /// Opens the palette, or closes it if it is already open.
@@ -11412,17 +11730,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         // An open menu is over everything, so nothing under it hovers: a row
         // lighting up behind a menu reads as a click that will land there.
         if self.menu.is_some() {
-            let row = self.menu_at(position);
-            // **Only where a click would do something.** `menu_at` answers where
-            // the pointer is and not whether anything is there to run, so a
-            // dimmed row was reported as a hand — the interface promising a click
-            // that `menu_press` then dropped.
-            let clickable = row
-                .and_then(|row| self.menu.as_ref()?.items.get(row))
-                .is_some_and(|item| item.enabled);
-            if self.menu.as_mut().is_some_and(|menu| menu.hover(row)) {
-                self.dirty = true;
-            }
+            let clickable = self.hover_menu(position);
             self.point(if clickable { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow });
             return true;
         }

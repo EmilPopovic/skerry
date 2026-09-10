@@ -436,6 +436,11 @@ pub struct Capture {
     pub menu: bool,
     /// Whether to draw the menu a secondary click on a row opens instead.
     pub row_menu: bool,
+    /// Whether to draw that menu with its Colour submenu open beside it.
+    pub menu_colours: bool,
+    /// Whether to draw that menu with its Open with submenu open, listing two
+    /// applications the capture states rather than a job found.
+    pub menu_open_with: bool,
     /// Whether to draw the panel that asks about a name already taken.
     pub clash: bool,
     /// Whether to draw the question a permanent deletion asks.
@@ -725,15 +730,60 @@ fn requested_grouping(request: &Capture) -> Option<crate::groups::Grouping> {
     .find_map(|(wanted, grouping)| wanted.then_some(grouping))
 }
 
-/// Whichever of the two context menus was asked for.
+/// Whichever of the two context menus was asked for, with a submenu open if
+/// one was.
 fn sample_context_menu(
     request: &Capture,
     here: &crate::panes::PaneLayout,
 ) -> Option<crate::menu::Menu> {
-    match (request.menu, request.row_menu) {
+    let over_a_row = request.row_menu || request.menu_colours || request.menu_open_with;
+    let mut menu = match (request.menu, over_a_row) {
         (_, true) => sample_row_menu(here),
         (true, false) => sample_menu(here),
         (false, false) => None,
+    }?;
+    if request.menu_colours {
+        // Remove the colour is dimmed, because a folder that has no colour has
+        // nothing to take away — the state the submenu opens in over a fresh
+        // folder, and the one row of it that draws no swatch.
+        expand_sample(&mut menu, crate::menu::COLOUR.id, |id| id != "view.colour_none");
+    } else if request.menu_open_with {
+        // Two applications, stated: what a job would find depends on the
+        // machine, and a frame that depended on the machine would not be a
+        // reference.
+        let path = std::path::PathBuf::from("/tmp/skerry-golden");
+        let stated = |id: &str, name: &str| sk_desktop::DesktopEntry {
+            id: id.to_owned(),
+            path: std::path::PathBuf::from(format!("/usr/share/applications/{id}")),
+            name: name.to_owned(),
+            exec: "true %f".to_owned(),
+            terminal: false,
+            mime_types: vec!["inode/directory".to_owned()],
+            no_display: false,
+            try_exec: None,
+        };
+        menu.asks_about(path.clone());
+        menu.answer(crate::openers::Handlers {
+            path,
+            mime: "inode/directory".to_owned(),
+            rows: vec![
+                stated("org.gnome.Nautilus.desktop", "Files"),
+                stated("org.gnome.Console.desktop", "Terminal"),
+            ],
+        });
+        expand_sample(&mut menu, crate::menu::OPEN_WITH, |_| true);
+    }
+    Some(menu)
+}
+
+/// Opens the submenu under the row called `owner` and lights its first row,
+/// which is the state a key leaves it in.
+fn expand_sample(menu: &mut crate::menu::Menu, owner: &str, enabled: impl Fn(&str) -> bool) {
+    let Some(row) = menu.items.iter().position(|item| item.id == owner) else { return };
+    if menu.expand(row, &crate::commands::registry(), enabled, None)
+        && let Some(sub) = menu.sub.as_mut()
+    {
+        sub.menu.step(true);
     }
 }
 
@@ -971,15 +1021,15 @@ fn sample_openers() -> crate::openers::Openers {
         no_display: false,
         try_exec: None,
     };
-    crate::openers::Openers::new(
-        std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
-        "application/gzip".to_owned(),
-        vec![
+    crate::openers::Openers::new(crate::openers::Handlers {
+        path: std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
+        mime: "application/gzip".to_owned(),
+        rows: vec![
             entry("Archive Manager", "org.gnome.FileRoller"),
             entry("Ark", "org.kde.ark"),
             entry("Text Editor", "org.gnome.TextEditor"),
         ],
-    )
+    })
 }
 
 /// The settings panel, with one value from each of the three sources.

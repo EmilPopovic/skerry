@@ -625,6 +625,41 @@ action.dump = Print a diagnostic report
 # person hears rather than labels a person reads.
 a11y.places = Places
 a11y.menu = Menu
+
+# The rows of a context menu that open a second menu beside it: each is a
+# question, and the rows it opens onto are the answers. Open with is the one
+# whose answers are what this machine has installed rather than commands.
+menu.open_in = Open in
+menu.open_with = Open with
+menu.colour = Colour
+menu.view = View
+menu.sort = Sort by
+menu.group = Group by
+menu.index = Index
+menu.operation = Operation
+menu.panes = Tabs and panes
+# The Open with submenu's one row for the frames before the job has answered.
+menu.reading = Reading…
+# The short names rows take inside a submenu, where the heading has already
+# asked the question: under Colour, "Red" and not "Colour it red". The palette
+# shows the command alone and keeps the whole sentence.
+menu.colour.red = Red
+menu.colour.orange = Orange
+menu.colour.yellow = Yellow
+menu.colour.green = Green
+menu.colour.blue = Blue
+menu.colour.purple = Purple
+menu.open_in.new_tab = A new tab
+menu.open_in.beside = A pane to the right
+menu.open_in.below = A pane below
+menu.sort.name = Name
+menu.sort.size = Size
+menu.sort.modified = Date
+menu.group.time = Time
+menu.group.size = Size
+menu.group.kind = Kind
+menu.index.build = This folder
+menu.index.build_all = Every filesystem
 field.name = Name
 field.path = Location
 field.palette = Command
