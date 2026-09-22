@@ -806,3 +806,44 @@ mod tests {
         assert!(Path::new("/usr/share/icons").is_absolute());
     }
 }
+
+/// **`index.theme` is a file we did not write** — ADR 0042 puts it on the fuzzing
+/// list rather than outside it. A theme package is not a download directory, but
+/// it is not ours either, and this parser reads every one installed on the
+/// machine before the first icon is drawn.
+///
+/// The name and the subdirectory each go through [`plain`] and [`under`] on the
+/// way to a path, so a mutated group header that is `../..` is refused here and
+/// not by whatever the join lands on.
+#[test]
+fn parser_campaign_icons() {
+    let seeds: &[&[u8]] = &[
+        b"[Icon Theme]\nName=T\nInherits=a,b\nDirectories=16x16/places\n\n\
+          [16x16/places]\nSize=16\nType=Fixed\n",
+        b"[Icon Theme]\nDirectories=48x48/apps\nScaledDirectories=48x48@2x/apps\n\n\
+          [48x48/apps]\nSize=48\nType=Scalable\nMinSize=1\nMaxSize=512\n\n\
+          [48x48@2x/apps]\nSize=48\nScale=2\nThreshold=8\n",
+        b"[Icon Theme]\n",
+        &[0; 48],
+    ];
+    crate::fuzz_support::campaign("index.theme", seeds, |bytes| {
+        let text = String::from_utf8_lossy(bytes);
+        let index = Ini::of(&text);
+        for group in ["Icon Theme", "16x16/places", "48x48@2x/apps", "", "\u{fffd}"] {
+            let _ = index.value(group, "Directories");
+            let _ = describe(&index, group);
+        }
+        // Every name that reaches a path goes through these two, so a mutated
+        // header that is a traversal is refused before anything is joined.
+        for name in index.value("Icon Theme", "Directories").unwrap_or_default().split(',') {
+            let name = name.trim();
+            assert!(!under(name) || !name.starts_with('/'), "{name:?} reached a join");
+        }
+        if let Some(inherits) = index.value("Icon Theme", "Inherits") {
+            for name in inherits.split(',') {
+                let name = name.trim();
+                assert!(!plain(name) || (!name.contains('/') && name != ".."), "{name:?} joined");
+            }
+        }
+    });
+}
