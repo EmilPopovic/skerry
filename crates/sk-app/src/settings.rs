@@ -27,9 +27,9 @@ use crate::views::Layout;
 
 /// Every setting, in the order the panel lists them.
 ///
-/// **Six, and the record says no more.** Each is one the window already changes
-/// as it runs, which is what makes the precedence rule testable: a setting the
-/// window cannot change has no second opinion to lose to.
+/// **Seven.** Each is one the window already changes as it runs, which is what
+/// makes the precedence rule testable: a setting the window cannot change has no
+/// second opinion to lose to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Setting {
     /// Dark or light.
@@ -44,16 +44,20 @@ pub(crate) enum Setting {
     View,
     /// Whether Move to Trash asks first.
     ConfirmTrash,
+    /// Where a file's mark comes from — [ADR
+    /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    Icons,
 }
 
 /// Every setting, in panel order. See [`Setting`].
-pub(crate) const ALL: [Setting; 6] = [
+pub(crate) const ALL: [Setting; 7] = [
     Setting::Theme,
     Setting::Hidden,
     Setting::Sidebar,
     Setting::SidebarWidth,
     Setting::View,
     Setting::ConfirmTrash,
+    Setting::Icons,
 ];
 
 /// How wide the sidebar moves per press of a step.
@@ -77,6 +81,13 @@ pub(crate) enum Kind {
     },
     /// A number in logical pixels, with a step either way.
     Number,
+    /// One of a list, stepped either way.
+    ///
+    /// **Not three buttons.** One of [`Icons`]' values is the name of a theme
+    /// somebody wrote in the file, so the list is not fixed and cannot be drawn
+    /// as a row of positions — it is the word in force with a step on each side,
+    /// which is [`Kind::Number`]'s shape over something that is not a number.
+    Choice,
     /// Something the row does, rather than a value it holds.
     Action,
 }
@@ -94,6 +105,7 @@ impl Setting {
             Self::SidebarWidth => "sidebar_width",
             Self::View => "view",
             Self::ConfirmTrash => "confirm_trash",
+            Self::Icons => "icons",
         }
     }
 
@@ -106,6 +118,7 @@ impl Setting {
             Self::SidebarWidth => "settings.sidebar_width",
             Self::View => "settings.view",
             Self::ConfirmTrash => "settings.confirm_trash",
+            Self::Icons => "settings.icons",
         }
     }
 
@@ -119,6 +132,7 @@ impl Setting {
             Self::Sidebar => Kind::Either { yes: "settings.shown", no: "settings.hidden_word" },
             Self::SidebarWidth => Kind::Number,
             Self::View => Kind::Either { yes: "settings.grid", no: "settings.details" },
+            Self::Icons => Kind::Choice,
         }
     }
 
@@ -128,13 +142,77 @@ impl Setting {
     }
 }
 
-/// What all six are set to.
+/// Where a file's mark comes from.
+///
+/// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
+/// and the marks are one of three rather than the branch nothing chose.** A file
+/// manager that draws the desktop's icons everywhere looks like every other
+/// window on that desktop; somebody who prefers nine hues over a geometric mark
+/// at 0.012 ms a frame should not have to uninstall a theme to keep them. A
+/// branch nobody can choose is a branch that rots.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum Icons {
+    /// Skerry's own geometric marks. Nothing parses an `index.theme` and the
+    /// lookup is never called.
+    Marks,
+    /// Whatever the desktop is using, asked at start-up. What a fresh install
+    /// takes, so a machine with a theme installed looks like the rest of it.
+    #[default]
+    Desktop,
+    /// One theme, whatever the desktop does.
+    Named(String),
+}
+
+impl Icons {
+    /// The word this is written as in the config file.
+    #[must_use]
+    pub(crate) fn token(&self) -> &str {
+        match self {
+            Self::Marks => "marks",
+            Self::Desktop => "desktop",
+            Self::Named(name) => name,
+        }
+    }
+
+    /// The word the panel shows, which is a theme's own name where there is one.
+    #[must_use]
+    pub(crate) fn shown(&self) -> &str {
+        match self {
+            Self::Marks => sk_model::i18n::lookup("settings.icons_marks"),
+            Self::Desktop => sk_model::i18n::lookup("settings.icons_desktop"),
+            Self::Named(name) => name,
+        }
+    }
+
+    /// What the word after the `=` means, or nothing where it means nothing.
+    ///
+    /// **Any other word is a theme name**, because a theme name is whatever
+    /// somebody installed and this build cannot have a list of them. A name
+    /// nothing declares is a load that fails and says so, which is a different
+    /// state from this returning nothing.
+    fn of(word: &str) -> Option<Self> {
+        match word {
+            "" => None,
+            "marks" => Some(Self::Marks),
+            "desktop" => Some(Self::Desktop),
+            other if other.split_whitespace().count() == 1 => Some(Self::Named(other.to_owned())),
+            _ => None,
+        }
+    }
+}
+
+/// What all seven are set to.
 ///
 /// **A struct rather than the window's own fields.** The config's values and the
 /// live ones are two different things that have to be compared — that comparison
 /// *is* the precedence rule — and a rule written against two copies of the same
 /// type is a rule that can be unit tested without a window.
-#[derive(Clone, Copy, PartialEq, Debug)]
+///
+/// **`Clone` rather than `Copy` since ADR 0042.** `icons` may be a theme's name,
+/// so one of the seven owns a `String`; every caller that used to take a copy
+/// takes a reference, which is what keeps a panel open for a frame from
+/// allocating one.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Values {
     /// Whether the dark palette is in use.
     pub dark: bool,
@@ -148,6 +226,8 @@ pub struct Values {
     pub layout: Layout,
     /// Whether Move to Trash asks first.
     pub confirm_trash: bool,
+    /// Where a file's mark comes from.
+    pub icons: Icons,
 }
 
 impl Default for Values {
@@ -159,6 +239,7 @@ impl Default for Values {
             aside: crate::sidebar::DEFAULT_WIDTH,
             layout: Layout::Details,
             confirm_trash: false,
+            icons: Icons::default(),
         }
     }
 }
@@ -176,7 +257,7 @@ impl Values {
             Setting::Sidebar => self.sidebar,
             Setting::View => self.layout == Layout::Grid,
             Setting::ConfirmTrash => self.confirm_trash,
-            Setting::SidebarWidth => false,
+            Setting::SidebarWidth | Setting::Icons => false,
         }
     }
 
@@ -188,7 +269,31 @@ impl Values {
             Setting::Sidebar => self.sidebar = yes,
             Setting::View => self.layout = if yes { Layout::Grid } else { Layout::Details },
             Setting::ConfirmTrash => self.confirm_trash = yes,
-            Setting::SidebarWidth => {}
+            Setting::SidebarWidth | Setting::Icons => {}
+        }
+    }
+
+    /// Moves a choice one position, wrapping at both ends.
+    ///
+    /// **`named` is the theme the ring keeps a place for**, so a person who
+    /// stepped away from `Papirus` to look at the marks can step back to it
+    /// without editing the file. The window remembers it, because a value that
+    /// has been stepped past is not in the value any more — see
+    /// [`crate::app::App::step_icons`].
+    pub(crate) fn step(&mut self, delta: isize, named: Option<&str>) {
+        let mut ring = vec![Icons::Marks, Icons::Desktop];
+        if let Some(name) = named.map(str::to_owned).or_else(|| match &self.icons {
+            Icons::Named(name) => Some(name.clone()),
+            Icons::Marks | Icons::Desktop => None,
+        }) {
+            ring.push(Icons::Named(name));
+        }
+        let at = ring.iter().position(|it| *it == self.icons).unwrap_or(0);
+        let Ok(span) = isize::try_from(ring.len()) else { return };
+        let Ok(from) = isize::try_from(at) else { return };
+        let to = usize::try_from(from.wrapping_add(delta).rem_euclid(span)).unwrap_or(0);
+        if let Some(chosen) = ring.get(to) {
+            self.icons = chosen.clone();
         }
     }
 
@@ -209,6 +314,11 @@ impl Values {
                 self.aside = width.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
                 true
             }
+            Kind::Choice => {
+                let Some(icons) = Icons::of(word) else { return false };
+                self.icons = icons;
+                true
+            }
             Kind::Action => false,
         }
     }
@@ -219,6 +329,7 @@ impl Values {
             Setting::Theme => (if self.dark { "dark" } else { "light" }).to_owned(),
             Setting::View => self.layout.token().to_owned(),
             Setting::SidebarWidth => format!("{}", self.aside.round()),
+            Setting::Icons => self.icons.token().to_owned(),
             other => (if self.yes(other) { "on" } else { "off" }).to_owned(),
         }
     }
@@ -345,13 +456,14 @@ const fn at(setting: Setting) -> usize {
         Setting::SidebarWidth => 3,
         Setting::View => 4,
         Setting::ConfirmTrash => 5,
+        Setting::Icons => 6,
     }
 }
 
-/// The panel's rows: the six settings, then the two things it can do.
+/// The panel's rows: the seven settings, then the two things it can do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Row {
-    /// One of the six.
+    /// One of the seven.
     Of(Setting),
     /// Make this the desktop's handler for folders.
     Handler,
@@ -426,10 +538,10 @@ impl Panel {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{ALL, Marks, Panel, Row, Setting, Source, Values, rows};
+    use super::{ALL, Icons, Kind, Marks, Panel, Row, Setting, Source, Values, rows};
     use crate::views::Layout;
 
-    /// The round trip every one of the six has to survive, because the file is
+    /// The round trip every one of the seven has to survive, because the file is
     /// written by us and read by us and a setting that cannot do this is a
     /// setting that silently resets.
     #[test]
@@ -439,6 +551,7 @@ mod tests {
                 let mut wrote = Values::default();
                 wrote.set(setting, start);
                 wrote.aside = 300.0;
+                wrote.icons = Icons::Named("breeze-dark".to_owned());
                 let word = wrote.word(setting);
                 let mut read = Values::default();
                 assert!(read.take(setting, &word), "{} refused its own {word:?}", setting.name());
@@ -448,9 +561,9 @@ mod tests {
                     "{} did not survive {word:?}",
                     setting.name()
                 );
-                // The one setting with no true-or-false position, checked as the
-                // number it is — without this the loop above asserts `false ==
-                // false` about it and says nothing at all.
+                // The two settings with no true-or-false position, checked as
+                // what they are — without this the loop above asserts `false ==
+                // false` about them and says nothing at all.
                 if setting == Setting::SidebarWidth {
                     assert!(
                         (read.aside - wrote.aside).abs() < f32::EPSILON,
@@ -458,8 +571,62 @@ mod tests {
                         read.aside
                     );
                 }
+                if setting == Setting::Icons {
+                    assert_eq!(read.icons, wrote.icons, "the icons came back from {word:?}");
+                }
             }
         }
+    }
+
+    /// All three values of the first setting that is neither a truth nor a
+    /// number, through the file and back.
+    #[test]
+    fn the_three_icon_sources_survive_the_file() {
+        for icons in [Icons::Marks, Icons::Desktop, Icons::Named("Papirus-Dark".to_owned())] {
+            let wrote = Values { icons: icons.clone(), ..Values::default() };
+            let word = wrote.word(Setting::Icons);
+            let mut read = Values::default();
+            assert!(read.take(Setting::Icons, &word), "icons refused its own {word:?}");
+            assert_eq!(read.icons, icons, "{word:?} did not survive");
+        }
+        assert_eq!(Values::default().icons, Icons::Desktop, "a fresh install is not the desktop's");
+        assert!(matches!(Setting::Icons.kind(), Kind::Choice));
+    }
+
+    /// A theme name is whatever somebody installed, so almost any word is one —
+    /// but a line with nothing after the `=`, or a sentence, is a problem printed
+    /// at start-up rather than a theme called *Adwaita Dark*.
+    #[test]
+    fn an_icons_line_with_no_word_or_two_words_is_refused() {
+        for word in ["", "   ", "Adwaita Dark", "\ttwo words\t"] {
+            let mut values = Values::default();
+            assert!(!values.take(Setting::Icons, word), "{word:?} was taken as a theme");
+            assert_eq!(values.icons, Icons::Desktop, "a refused word still moved the setting");
+        }
+    }
+
+    /// **The theme the file named stays in the ring**, so stepping away from it
+    /// to look at the marks is a step that can be taken back without editing the
+    /// file — and stepping is a cycle, like every other list in this window.
+    #[test]
+    fn stepping_the_icons_row_cycles_and_keeps_the_theme_that_was_named() {
+        let mut values = Values { icons: Icons::Named("Yaru".to_owned()), ..Values::default() };
+        let kept = Some("Yaru");
+        values.step(1, kept);
+        assert_eq!(values.icons, Icons::Marks);
+        values.step(1, kept);
+        assert_eq!(values.icons, Icons::Desktop);
+        values.step(1, kept);
+        assert_eq!(values.icons, Icons::Named("Yaru".to_owned()), "the named theme left the ring");
+        values.step(-1, kept);
+        assert_eq!(values.icons, Icons::Desktop);
+
+        // With no theme named there are two positions and no third to reach.
+        let mut two = Values::default();
+        two.step(1, None);
+        assert_eq!(two.icons, Icons::Marks);
+        two.step(1, None);
+        assert_eq!(two.icons, Icons::Desktop);
     }
 
     #[test]

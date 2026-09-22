@@ -896,6 +896,8 @@ struct Overlays {
     properties: Option<crate::properties::Properties>,
     openers: Option<crate::openers::Openers>,
     settings: Option<(crate::settings::Panel, crate::settings::Values, crate::settings::Marks)>,
+    /// What the frame's `icons` value resolved to — ADR 0042's three sources.
+    icons: crate::icons::Source,
     clash: Option<crate::edit::Clash>,
     search: Option<crate::search::Search>,
     carrying: Option<crate::view::Carrying>,
@@ -1049,12 +1051,14 @@ fn sample_settings() -> (crate::settings::Panel, crate::settings::Values, crate:
         aside: 240.0,
         layout: crate::views::Layout::Grid,
         confirm_trash: false,
+        icons: crate::settings::Icons::Marks,
     };
     let mut marks = crate::settings::Marks::default();
     marks.name(Setting::Hidden);
     marks.name(Setting::View);
     marks.touch(Setting::View);
     marks.name(Setting::SidebarWidth);
+    marks.name(Setting::Icons);
     (panel, values, marks)
 }
 
@@ -1093,6 +1097,11 @@ fn sample_overlays(
         properties: request.properties.then(sample_properties),
         openers: request.open_with.then(sample_openers),
         settings: request.settings.then(sample_settings),
+        // **Our own marks, on every machine.** A frame that showed a loaded theme
+        // would be a frame of whatever the build box happened to have installed,
+        // and ADR 0042's point is that this state is a choice rather than a
+        // fallback — so it is the one the golden frame keeps honest.
+        icons: crate::icons::Source::Ours,
         clash: request.clash.then(|| sample_clash(&request.path)),
         search: request.search.then(|| sample_search(&request.path)),
         // Stated, because a capture has no pointer: the card follows one, and
@@ -1343,7 +1352,9 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
-        settings: sample.overlays.settings.as_ref().map(|(p, v, m)| (p, *v, *m)),
+        settings: sample.overlays.settings.as_ref().map(|(panel, values, marks)| {
+            crate::view::Settings { panel, values, marks: *marks, icons: &sample.overlays.icons }
+        }),
         carrying: sample.overlays.carrying.as_ref(),
         search: sample.overlays.search.as_ref(),
         clash: sample.overlays.clash.as_ref(),

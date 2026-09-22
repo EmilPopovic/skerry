@@ -6731,6 +6731,27 @@ def every_settings_row_answers_a_pointer(run: Run, fixture: Path) -> None:
         if int(shrank["sidebar_width"][0]) != was:
             raise Failure(f"the width came back to {shrank['sidebar_width'][0]}, not {was}")
 
+        # The choice, both ways — ADR 0042's seventh setting, and the first that
+        # is neither a truth nor a number. A fresh window is on `desktop`; one
+        # step is `marks`, and one back is `desktop` again.
+        state = own.state()
+        if settings_of(state).get("icons") != ("desktop", "default"):
+            raise Failure(f"a fresh window is {settings_of(state).get('icons')}, not the desktop's")
+        onward = a_control(own, state, 6, "yes")
+        own.drive(f"move {onward[0]:.2f} {onward[1]:.2f}\nclick left\nsleep 350\nkey f12\nsleep 200\n")
+        stepped = settings_of(holds(own, lambda it: settings_of(it).get("icons", ("desktop",))[0] != "desktop", "a stepped choice"))
+        if stepped["icons"] != ("marks", "window"):
+            raise Failure(f"one step from the desktop is {stepped['icons']}, not our own marks")
+        # And the state the window resolved to, which under `marks` is nothing
+        # parsed, nothing held and the lookup never called.
+        expect(own.state(), icons="ours")
+        state = own.state()
+        backward = a_control(own, state, 6, "no")
+        own.drive(f"move {backward[0]:.2f} {backward[1]:.2f}\nclick left\nsleep 350\nkey f12\nsleep 200\n")
+        home = settings_of(holds(own, lambda it: settings_of(it).get("icons", ("marks",))[0] != "marks", "the choice back"))
+        if home["icons"] != ("desktop", "window"):
+            raise Failure(f"one step back is {home['icons']}, not the desktop's")
+
         # Escape is the way out, and the panel goes.
         own.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
         gone = holds(own, lambda it: not settings_of(it), "the panel closed")

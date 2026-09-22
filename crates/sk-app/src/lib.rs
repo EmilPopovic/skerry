@@ -39,6 +39,7 @@ mod frames;
 mod groups;
 mod headless;
 mod highlight;
+mod icons;
 mod indexing;
 mod keys;
 mod layout;

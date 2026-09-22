@@ -163,8 +163,8 @@ pub struct Chrome<'a> {
     pub properties: Option<&'a crate::properties::Properties>,
     /// The Open With list, while it is open.
     pub openers: Option<&'a crate::openers::Openers>,
-    /// The settings panel, while it is open, and what all six are set to.
-    pub settings: Option<(&'a crate::settings::Panel, crate::settings::Values, Marks)>,
+    /// The settings panel, while it is open.
+    pub settings: Option<Settings<'a>>,
     /// The keyboard hint in the corner of the path bar, from the registry.
     pub hint: &'a str,
     /// Where each leaf of the pane tree is, in layout order.
@@ -2369,6 +2369,27 @@ fn open_with(
     }
 }
 
+/// What the settings panel draws: the rows, their values and their provenance.
+///
+/// **A struct rather than a tuple since ADR 0042.** `icons` is a seventh value
+/// that is neither a truth nor a number and the source it resolved to is an
+/// eighth thing to carry, and four positional fields is three too many to read.
+#[derive(Clone, Copy)]
+pub struct Settings<'a> {
+    /// Which row the keyboard is on, and what the last action said.
+    pub panel: &'a crate::settings::Panel,
+    /// What all seven are set to.
+    ///
+    /// **By reference**, because one of the seven owns a `String` — copying it
+    /// would be an allocation in every frame the panel is open.
+    pub values: &'a crate::settings::Values,
+    /// Which file decided each one.
+    pub marks: Marks,
+    /// What the `icons` value resolved to, which the panel says in a line of its
+    /// own under the rows.
+    pub icons: &'a crate::icons::Source,
+}
+
 /// Which half of a settings row a press landed on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingAim {
@@ -2391,12 +2412,12 @@ pub enum SettingAim {
 fn settings_panel(
     painter: &mut Painter<'_>,
     layout: &Layout,
-    showing: Option<(&crate::settings::Panel, crate::settings::Values, Marks)>,
+    showing: Option<Settings<'_>>,
     hits: &mut Hits,
 ) {
     // The clear is here rather than at the call site, because a rectangle from
     // the frame before is a control a press still lands on.
-    let Some((panel, values, marks)) = showing else {
+    let Some(Settings { panel, values, marks, icons }) = showing else {
         hits.settings.clear();
         return;
     };
@@ -2416,7 +2437,12 @@ fn settings_panel(
     let width = (labels + SETTINGS_CONTROL + SETTINGS_SOURCE + PROPERTIES_INSET * 3.0)
         .clamp(PROPERTIES_WIDTH.0.min(layout.window.width), layout.window.width - 32.0);
     let said = panel.said.as_ref().map_or(0.0, |_| SETTINGS_STEP);
-    let height = SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP + PROPERTIES_INSET + said;
+    // **Always a line, whatever the icons row says.** ADR 0042's three sources
+    // have to be distinguishable in the panel, and a line that appears only for
+    // two of them is a line a person reads as an error.
+    let resolved = icons.says();
+    let height =
+        SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP + PROPERTIES_INSET + said + SETTINGS_STEP;
     let area = Area {
         x: ((layout.window.width - width) / 2.0).max(0.0),
         y: ((layout.window.height - height) / 2.0).max(8.0),
@@ -2465,15 +2491,17 @@ fn settings_panel(
             baseline,
         );
         let right = area.right() - PROPERTIES_INSET - SETTINGS_SOURCE - 12.0;
-        setting_control(painter, (index, *row), (&values, panel), (top, right), hits);
+        setting_control(painter, (index, *row), (values, panel), (top, right), hits);
     }
 
-    if let Some(said) = &panel.said {
-        let top = area.y + SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP;
+    let under = area.y + SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP;
+    for (step, sentence) in [Some(&resolved), panel.said.as_ref()].into_iter().flatten().enumerate()
+    {
+        let top = under + step as f32 * SETTINGS_STEP;
         let baseline = painter.baseline(top, SETTINGS_STEP, metrics.header_size);
         line(
             painter,
-            said,
+            sentence,
             TextStyle::new(metrics.header_size, theme.palette.dim),
             area.x + PROPERTIES_INSET,
             inner,
@@ -2536,6 +2564,41 @@ fn setting_control(
             setting_button(
                 painter,
                 "\u{2212}",
+                (index, false, SettingAim::No),
+                (edge, middle),
+                hits,
+            );
+        }
+        crate::settings::Kind::Choice => {
+            edge = setting_button(
+                painter,
+                "\u{203a}",
+                (index, false, SettingAim::Yes),
+                (edge, middle),
+                hits,
+            );
+            let theme = *painter.theme;
+            let metrics = theme.metrics;
+            let shown = values.icons.shown();
+            // Two pixels of slack past the measurement, for the reason the
+            // panel's own label column takes it: the box a word is drawn into is
+            // the box it is ellipsised against, and measured exactly `Skerry`
+            // came out as `Skerr…`.
+            let width = (text_width(painter, shown, metrics.header_size, false) + 2.0)
+                .clamp(28.0, SETTINGS_CONTROL - 56.0);
+            let baseline = painter.baseline(middle, SETTING_BUTTON, metrics.header_size);
+            line(
+                painter,
+                shown,
+                TextStyle::new(metrics.header_size, theme.palette.text).centred(),
+                edge - width,
+                width,
+                baseline,
+            );
+            edge -= width + 4.0;
+            setting_button(
+                painter,
+                "\u{2039}",
                 (index, false, SettingAim::No),
                 (edge, middle),
                 hits,

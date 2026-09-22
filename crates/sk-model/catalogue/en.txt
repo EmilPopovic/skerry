@@ -186,6 +186,20 @@ settings.sidebar = List of places
 settings.sidebar_width = Width of that list
 settings.view = New folders open as
 settings.confirm_trash = Ask before moving to Trash
+settings.icons = Marks on files come from
+# The two words the icons row steps between, beside a theme's own name — which is
+# never translated, because it is what the directory it came from is called.
+settings.icons_marks = Skerry
+settings.icons_desktop = The desktop
+# What the icons row resolved to, under the panel. ADR 0042 requires our own
+# marks, a theme that loaded and a theme that did not to say three different
+# things: a machine with a broken index.theme must not look like one whose owner
+# chose the marks.
+icons.ours = Skerry draws its own marks.
+icons.loading = Looking for the desktop's icon theme…
+icons.ready = Icons from {0}.
+icons.unknown = No icon theme called {0} is installed, so Skerry is drawing its own marks.
+icons.empty = The icon theme {0} has no icons Skerry can draw, so it is drawing its own marks.
 # The two words on a switch. Each pair is the whole choice, so a person can see
 # what the other position would be without pressing it.
 settings.dark = Dark

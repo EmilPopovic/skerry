@@ -728,6 +728,9 @@ struct Replies {
     /// can put on screen. See [`Mounted`].
     mounted_tx: std::sync::mpsc::Sender<Mounted>,
     mounted_rx: Receiver<Mounted>,
+    /// What a theme load found, or why it found nothing — ADR 0042.
+    icons_tx: std::sync::mpsc::Sender<crate::icons::Loaded>,
+    icons_rx: Receiver<crate::icons::Loaded>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -758,6 +761,7 @@ impl Replies {
         let (handler_tx, handler_rx) = mpsc::channel();
         let (mounted_tx, mounted_rx) = mpsc::channel();
         let (asked_tx, asked_rx) = mpsc::channel();
+        let (icons_tx, icons_rx) = mpsc::channel();
         Self {
             paste_tx,
             paste_rx,
@@ -785,6 +789,8 @@ impl Replies {
             handler_rx,
             mounted_tx,
             mounted_rx,
+            icons_tx,
+            icons_rx,
         }
     }
 }
@@ -1150,6 +1156,28 @@ pub struct App {
     /// *provenance*, which is what the precedence rule and the panel's third
     /// column are both about.
     marks: crate::settings::Marks,
+    /// Where a file's mark comes from, as the setting says it.
+    ///
+    /// **The one value that does live here rather than where it is used** — ADR
+    /// 0042. The others are read off the palette or off a pane; this one has no
+    /// other home, because what is *used* is the theme beside it and that is a
+    /// resolution of this rather than a copy of it.
+    icons: crate::settings::Icons,
+    /// The last theme the setting named, which keeps a place in the panel's ring.
+    ///
+    /// **A window that has stepped past a theme can step back to it.** Without
+    /// this, `icons = Papirus` in the file and two presses of `→` leaves no way
+    /// back to Papirus except editing the file, which is rule 4 the wrong way
+    /// round.
+    icon_named: Option<String>,
+    /// What that resolved to: our marks, a theme, or a theme that could not be
+    /// had. See [`crate::icons::Source`].
+    icon_theme: crate::icons::Source,
+    /// What the settings portal said the desktop's icon theme is called.
+    ///
+    /// Asked once, at start-up, on the connection that already exists — the same
+    /// call and the same 0.15 ms as the colour scheme beside it.
+    desktop_icons: Option<String>,
     /// The settings panel, while it is open.
     panel: Option<crate::settings::Panel>,
     /// Whether Move to Trash asks before it moves anything.
@@ -1279,7 +1307,7 @@ impl App {
         // fresh window does, and the session below moves only what this window
         // was told to move.
         app.marks = keymap.marks;
-        let from_file = keymap.values;
+        let from_file = keymap.values.clone();
         app.keymap = keymap;
         app.take_values(&from_file);
         if let Some(session) = &session {
@@ -1315,6 +1343,12 @@ impl App {
         if asked.is_some_and(|dark| dark != app.theme.dark) {
             app.theme = if asked == Some(true) { Theme::dark() } else { Theme::light() };
         }
+        // **The same portal, the same connection and the same one read** — ADR
+        // 0042. Asked whatever the setting says, because the answer is what
+        // `icons = desktop` resolves to and the setting can be moved to it from
+        // the panel without a second call.
+        app.desktop_icons = bus.as_mut().and_then(crate::service::desktop_icon_theme);
+        app.ask_for_the_icons();
         // **The name was taken before the window existed** — a second instance has
         // to hand over and exit without flashing one — so what arrives here is the
         // connection that already owns it, and the service thread answers on it
@@ -1379,6 +1413,9 @@ impl App {
                 pane.show_hidden = session.hidden;
             }
         }
+        if changed(Setting::Icons) {
+            self.set_icons(session.icons.clone());
+        }
     }
 
     /// Puts the window back the way the file says it was.
@@ -1421,6 +1458,7 @@ impl App {
             hidden: self.panes.focused().show_hidden,
             layout: self.views.defaults.layout,
             confirm_trash: self.confirm_trash,
+            icons: self.icons.clone(),
             touched: self.marks,
             zoom: self.zoom,
             window: (self.logical.width as u32, self.logical.height as u32),
@@ -1443,6 +1481,7 @@ impl App {
             aside: self.sidebar.width,
             layout: self.views.defaults.layout,
             confirm_trash: self.confirm_trash,
+            icons: self.icons.clone(),
         }
     }
 
@@ -1459,6 +1498,7 @@ impl App {
         self.sidebar.width = values.aside.clamp(crate::sidebar::NARROWEST, crate::sidebar::WIDEST);
         self.views.defaults.layout = values.layout;
         self.confirm_trash = values.confirm_trash;
+        self.set_icons(values.icons.clone());
         for pane in self.panes.every_mut() {
             pane.show_hidden = values.hidden;
         }
@@ -1483,7 +1523,13 @@ impl App {
                 self.relayout();
             }
             Setting::ConfirmTrash => self.confirm_trash = yes,
-            Setting::Theme | Setting::Hidden | Setting::Sidebar | Setting::SidebarWidth => {}
+            // Neither a truth nor a number — see `Self::step_icons`, which is the
+            // path the panel's two arrows take for it.
+            Setting::Theme
+            | Setting::Hidden
+            | Setting::Sidebar
+            | Setting::SidebarWidth
+            | Setting::Icons => {}
         }
         self.dirty = true;
     }
@@ -1717,6 +1763,10 @@ impl App {
             saves: 0,
             session_owed: false,
             marks: crate::settings::Marks::default(),
+            icons: crate::settings::Icons::default(),
+            icon_named: None,
+            icon_theme: crate::icons::Source::Ours,
+            desktop_icons: None,
             panel: None,
             confirm_trash: false,
             look_pan: None,
@@ -1788,6 +1838,7 @@ impl App {
             self.drain_facts();
             self.drain_openers();
             self.drain_handler();
+            self.drain_icons();
             self.drain_mounted();
             self.drain_found();
             self.drain_index();
@@ -6048,6 +6099,86 @@ impl App {
         });
     }
 
+    /// Loads whatever the `icons` setting asks for, on a job.
+    ///
+    /// **Nothing joins rule 1's start-up list** — ADR 0042. The walk is 51.9 ms
+    /// for breeze and 15.4 ms for Adwaita, which is six frame budgets and three;
+    /// the geometric mark is drawn at the final position until the theme lands,
+    /// which is ADR 0018's *one texel until the first thumbnail exists* in its
+    /// other form.
+    ///
+    /// Under `marks` no job is started at all, so nothing parses an `index.theme`
+    /// and nothing walks an icon directory.
+    fn ask_for_the_icons(&mut self) {
+        let asked = self.icons.clone();
+        if asked == crate::settings::Icons::Marks {
+            self.icon_theme = crate::icons::Source::Ours;
+            self.dirty = true;
+            return;
+        }
+        self.icon_theme = crate::icons::Source::Loading;
+        self.dirty = true;
+        let from_the_portal = self.desktop_icons.clone();
+        let sender = self.replies.icons_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let Some(loaded) = crate::icons::load(&asked, from_the_portal) else { return };
+            if sender.send(loaded).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of a theme, or of the news that there is none.
+    ///
+    /// **The last answer wins.** Stepping the row twice queues two loads and the
+    /// second is the one asked for; draining the channel whole rather than one
+    /// message a frame is what stops the first from landing on top of it.
+    fn drain_icons(&mut self) {
+        let mut last = None;
+        while let Ok(loaded) = self.replies.icons_rx.try_recv() {
+            last = Some(loaded);
+        }
+        let Some(loaded) = last else { return };
+        // A theme that came back for a setting somebody has since moved away from
+        // is an answer to a question nobody is asking any more.
+        if self.icons == crate::settings::Icons::Marks {
+            return;
+        }
+        self.icon_theme = loaded.settle();
+        self.dirty = true;
+    }
+
+    /// Steps the `icons` row and records that this window did it.
+    ///
+    /// **Through `Marks::touch` like every other change**, because the touched
+    /// mark is what lets the session override the file and a path that skipped it
+    /// would set a value the next start-up quietly discarded.
+    pub(crate) fn step_icons(&mut self, delta: isize) {
+        let mut values = self.values();
+        values.step(delta, self.icon_named.as_deref());
+        if values.icons == self.icons {
+            self.dirty = true;
+            return;
+        }
+        self.marks.touch(crate::settings::Setting::Icons);
+        self.set_icons(values.icons);
+        self.ask_for_the_icons();
+    }
+
+    /// Puts the `icons` setting where `icons` says, remembering any theme it
+    /// names.
+    ///
+    /// **The one assignment**, because the remembered name is what the panel's
+    /// ring is built from and a second assignment is a second chance for the two
+    /// to disagree.
+    fn set_icons(&mut self, icons: crate::settings::Icons) {
+        if let crate::settings::Icons::Named(name) = &icons {
+            self.icon_named = Some(name.clone());
+        }
+        self.icons = icons;
+    }
+
     /// Writes `mimeapps.list` on a job, and says what it did.
     fn become_the_handler(&mut self, yes: bool) {
         let sender = self.replies.handler_tx.clone();
@@ -6136,6 +6267,7 @@ impl App {
                     -crate::settings::WIDTH_STEP
                 });
             }
+            (Row::Of(_), Kind::Choice) => self.step_icons(if yes { 1 } else { -1 }),
             (Row::Handler, _) => self.become_the_handler(yes),
             _ => {}
         }
@@ -6153,7 +6285,8 @@ impl App {
                     let yes = !self.values().yes(setting);
                     self.change(setting, yes);
                 }
-                _ => self.resize_aside(crate::settings::WIDTH_STEP),
+                Kind::Choice => self.step_icons(1),
+                Kind::Number | Kind::Action => self.resize_aside(crate::settings::WIDTH_STEP),
             },
             Row::Handler => {
                 let yes = !panel.handler.unwrap_or(false);
@@ -9595,6 +9728,7 @@ volumes={volumes:?} aside_grabbed={}",
         let check_aim = self.check_aim();
         let settings = self.settings_report();
         let settings_aim = self.settings_aim();
+        let icons = self.icon_theme.token();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
@@ -9610,6 +9744,7 @@ crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
 composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_aim={settings_aim:?} \
+icons={icons} \
 {places_report} \
 path_field={path_field} name_field={name_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \
@@ -12078,6 +12213,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         // and `marks` is a copy, so both are taken while `self` is still whole.
         let settings_values = self.values();
         let settings_marks = self.marks;
+        let settings_icons = &self.icon_theme;
 
         let Self {
             list,
@@ -12245,7 +12381,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             palette: palette.as_ref(),
             properties: properties.as_ref(),
             openers: openers.as_ref(),
-            settings: panel.as_ref().map(|it| (it, settings_values, settings_marks)),
+            settings: panel.as_ref().map(|it| crate::view::Settings {
+                panel: it,
+                values: &settings_values,
+                marks: settings_marks,
+                icons: settings_icons,
+            }),
             hint,
             leaves: &placement.leaves,
             dividers: &placement.dividers,

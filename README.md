@@ -180,9 +180,10 @@ the first bug report on one of them.
 - **No encrypted volumes.** A disk appears in the sidebar whether or not anything
   has mounted it, and a press mounts it through udisks2 — but a LUKS container is
   not offered, because unlocking one is a passphrase field and its own surface.
-- **Six settings, and no more.** `Ctrl ,` opens a panel listing the theme, hidden
-  files, the sidebar and its width, what a new folder opens as, and whether Move to
-  Trash asks first — each with its value and where that value came from. Everything
+- **Seven settings, and no more.** `Ctrl ,` opens a panel listing the theme, hidden
+  files, the sidebar and its width, what a new folder opens as, whether Move to
+  Trash asks first, and where a file's mark comes from — each with its value and
+  where that value came from. Everything
   else is a chord, a drag, or per-folder and remembered where you set it.
 - **Four performance budget rows are missed**, and each is recorded with its number
   rather than widened: cold start, the 1M sort, one scroll run in five at a million
@@ -198,10 +199,13 @@ the first bug report on one of them.
   panel — the line is that a container Skerry can parse it parses, and a
   compressor is the machine's ([ADR
   0032](docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
-- **No icon themes.** An application icon ships and the desktop entry names it,
-  but nothing is resolved out of `index.theme`: the window draws its own built-in
-  glyphs, and a file's mark is a page coloured by its MIME category rather than
-  the themed icon the rest of the desktop would draw for it.
+- **No themed icon is drawn yet.** `index.theme` is parsed and the freedesktop
+  search runs — `icons = desktop` resolves a theme on a job, in 15.4 ms for
+  Adwaita and 51.9 ms for breeze, and says in the settings panel which one it
+  found — but nothing has yet asked the decoder for the file it names, so a file's
+  mark is still a page coloured by its MIME category. `icons = marks` is that
+  state chosen rather than suffered
+  ([ADR 0042](docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)).
 - **Creating things is thin.** New folder and a single rename. No new file, no
   Templates, no symlinks, and no batch rename — which M3 names and this is not.
 - **Properties is read-only**, and it shows owners as numeric ids rather than

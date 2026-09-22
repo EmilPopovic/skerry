@@ -66,9 +66,11 @@ These are the parts most worth knowing before you trust the alpha with real work
 The README carries the [full list](README.md#what-this-alpha-does-not-do). The
 ones most likely to be reached for in the first week:
 
-- **No icon themes.** An application icon ships and the desktop entry names it,
-  but nothing is resolved out of `index.theme`: a file's mark is a built-in glyph
-  coloured by MIME category, not the themed icon your desktop would draw.
+- **No themed icon is drawn yet.** `index.theme` is parsed and the freedesktop
+  search runs, and the `icons` setting says where a mark comes from — but nothing
+  has yet asked the decoder for the file it names, so a file's mark is a built-in
+  glyph coloured by MIME category rather than the themed icon your desktop would
+  draw.
 - **Creating things is thin.** New folder and single rename only — no new file,
   Templates, symlinks or batch rename.
 - **Properties is read-only**, and owners are shown as numeric ids.
