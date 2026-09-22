@@ -171,6 +171,108 @@ pub(crate) enum Mounting {
 /// The type a file manager is the default for.
 const FOLDERS: &str = "inode/directory";
 
+/// Makes this the desktop's file manager, or stops being it. Whether it worked,
+/// and what to say about it.
+///
+/// **Two files and one decision.** `mimeapps.list` says what a *running* desktop
+/// opens a folder with; the D-Bus service file says what to *start* when none of
+/// this is running. A person who had one and not the other would have a file
+/// manager that answers the desktop about half the time, which is not a state
+/// worth being able to choose — so the row writes both or neither, and takes the
+/// first back when the second is refused.
+///
+/// **Runs on a job**: two reads and two writes, plus a bus call.
+fn handle_folders(yes: bool) -> (bool, String) {
+    let done = if yes { become_the_file_manager() } else { stop_being_the_file_manager() };
+    match done {
+        Ok((listed, started, key)) => {
+            (true, sk_model::i18n::format(key, &[&listed.display(), &started.display()]))
+        }
+        Err(said) => (false, said),
+    }
+}
+
+/// Both files, the service file first.
+///
+/// **First because it is the half that can be refused on somebody else's
+/// behalf**: a service file naming another program is that person's choice, and
+/// finding it only after `mimeapps.list` had been written is the half-state
+/// [`handle_folders`] exists to rule out.
+///
+/// **A bus that would not reload is said, not swallowed**: until it does, the
+/// desktop keeps starting whichever file manager it found first, so a row that
+/// only said *written* would be telling the person something untrue until they
+/// log in again.
+fn become_the_file_manager() -> Result<(PathBuf, PathBuf, &'static str), String> {
+    let started = sk_desktop::activation::announce().map_err(activation_said)?;
+    let key = if sk_desktop::activation::rescan() {
+        "settings.handler_written"
+    } else {
+        "settings.handler_written_next_login"
+    };
+    match folder_association(true) {
+        Ok(listed) => Ok((listed, started, key)),
+        Err(said) => {
+            let _ = sk_desktop::activation::withdraw();
+            Err(said)
+        }
+    }
+}
+
+/// Neither file names this program any more, `mimeapps.list` first.
+///
+/// **A service file naming another program is success here, not a refusal.**
+/// Turning the row off asks that nothing start Skerry, and a file that starts
+/// something else already says so — deleting it to prove the point would be the
+/// hijack [`sk_desktop::activation`] refuses, in reverse.
+fn stop_being_the_file_manager() -> Result<(PathBuf, PathBuf, &'static str), String> {
+    use sk_desktop::activation::Refused;
+    let listed = folder_association(false)?;
+    let started = match sk_desktop::activation::withdraw() {
+        Ok(path) => path,
+        Err(Refused::Taken(_)) => sk_desktop::activation::place().unwrap_or_default(),
+        Err(why) => {
+            let _ = folder_association(true);
+            return Err(activation_said(why));
+        }
+    };
+    Ok((listed, started, "settings.handler_cleared"))
+}
+
+/// The half of [`handle_folders`] a running desktop reads. The file, or what to
+/// say instead.
+fn folder_association(yes: bool) -> Result<PathBuf, String> {
+    let id = crate::service::DESKTOP_ID;
+    let done = if yes {
+        sk_desktop::mimeapps::set_default(FOLDERS, id)
+    } else {
+        sk_desktop::mimeapps::clear_default(FOLDERS, id)
+    };
+    done.map_err(|why| match why {
+        sk_desktop::mimeapps::Refused::Unreadable(line) => {
+            sk_model::i18n::format("error.mimeapps_unreadable", &[&line])
+        }
+        _ => sk_model::i18n::lookup("error.mimeapps_refused").to_owned(),
+    })
+}
+
+/// What to say when the service file was not written or not removed.
+fn activation_said(why: sk_desktop::activation::Refused) -> String {
+    use sk_desktop::activation::Refused;
+    let place = sk_desktop::activation::place().unwrap_or_default();
+    match why {
+        Refused::Taken(program) => {
+            sk_model::i18n::format("error.activation_taken", &[&place.display(), &program])
+        }
+        Refused::Unnameable => {
+            sk_model::i18n::format("error.activation_unnameable", &[&place.display()])
+        }
+        Refused::NoDataHome | Refused::NotWritten => {
+            sk_model::i18n::lookup("error.activation_refused").to_owned()
+        }
+    }
+}
+
 /// A permanent deletion waiting for an answer.
 ///
 /// Holds the paths rather than re-reading the selection when the answer comes:
@@ -6032,41 +6134,31 @@ impl App {
         self.dirty = true;
     }
 
-    /// Reads `mimeapps.list` on a job, so the handler row can say yes or no.
+    /// Reads what makes this the desktop's file manager, so the row can say yes
+    /// or no.
     ///
-    /// **On a job because it is an `openat` and a read**, which rule 1 does not
-    /// allow the frame loop — so the row starts saying nothing rather than
-    /// saying *No* and being wrong for a frame.
+    /// **On a job because it is four `openat`s and a `readlink`**, which rule 1
+    /// does not allow the frame loop — so the row starts saying nothing rather
+    /// than saying *No* and being wrong for a frame.
     fn ask_about_the_handler(&mut self) {
         let sender = self.replies.handler_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
-            let is = sk_desktop::mimeapps::is_default(FOLDERS, crate::service::DESKTOP_ID);
+            let is = sk_desktop::mimeapps::is_default(FOLDERS, crate::service::DESKTOP_ID)
+                && sk_desktop::activation::is_ours();
             if sender.send((is, None)).is_ok() {
                 wake.wake();
             }
         });
     }
 
-    /// Writes `mimeapps.list` on a job, and says what it did.
+    /// Writes both files on a job, and says what it did.
     fn become_the_handler(&mut self, yes: bool) {
         let sender = self.replies.handler_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
-            let id = crate::service::DESKTOP_ID;
-            let done = if yes {
-                sk_desktop::mimeapps::set_default(FOLDERS, id)
-            } else {
-                sk_desktop::mimeapps::clear_default(FOLDERS, id)
-            };
-            let said = match &done {
-                Ok(path) => sk_model::i18n::format("settings.handler_written", &[&path.display()]),
-                Err(sk_desktop::mimeapps::Refused::Unreadable(line)) => {
-                    sk_model::i18n::format("error.mimeapps_unreadable", &[line])
-                }
-                Err(_) => sk_model::i18n::lookup("error.mimeapps_refused").to_owned(),
-            };
-            if sender.send((done.is_ok() && yes, Some(said))).is_ok() {
+            let (done, said) = handle_folders(yes);
+            if sender.send((done && yes, Some(said))).is_ok() {
                 wake.wake();
             }
         });

@@ -26,6 +26,7 @@
 // table in Cargo.toml, together with the few pedantic lints allowed there with a
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
+pub mod activation;
 pub mod apps;
 pub mod atspi;
 pub mod bus;
@@ -52,10 +53,8 @@ use std::path::{Path, PathBuf};
 #[must_use]
 pub fn data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::with_capacity(4);
-    if let Some(home) = env_path("XDG_DATA_HOME") {
+    if let Some(home) = data_home() {
         dirs.push(home);
-    } else if let Some(home) = env_path("HOME") {
-        dirs.push(home.join(".local/share"));
     }
     match std::env::var_os("XDG_DATA_DIRS") {
         Some(value) if !value.is_empty() => {
@@ -67,6 +66,17 @@ pub fn data_dirs() -> Vec<PathBuf> {
         }
     }
     dirs
+}
+
+/// The one XDG data directory a person's own files are written to.
+///
+/// **Its own function because the first entry of [`data_dirs`] is not it.** With
+/// neither `$XDG_DATA_HOME` nor `$HOME` set, that list starts at
+/// `/usr/local/share` — a directory a writer must never land in, which is what
+/// [`crate::activation`] is about.
+#[must_use]
+pub fn data_home() -> Option<PathBuf> {
+    env_path("XDG_DATA_HOME").or_else(|| env_path("HOME").map(|home| home.join(".local/share")))
 }
 
 /// The XDG config directories, most specific first.

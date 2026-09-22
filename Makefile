@@ -6,6 +6,17 @@
 # `DESTDIR` to a staging root; a person building for themselves sets
 # `PREFIX=$HOME/.local`.
 #
+# **No `org.freedesktop.FileManager1.service` is installed, and that is a
+# decision rather than an omission.** The path a package would put it at is
+# `$(datadir)/dbus-1/services/org.freedesktop.FileManager1.service`, which on a
+# machine with Nautilus installed already belongs to Nautilus's package — and
+# shipping it would take the desktop's *show me this file* away from a file
+# manager the person already chose, at install time, which is the same grab
+# `sk_app::service` refuses to make at run time. The file is written into
+# `$XDG_DATA_HOME` by the settings panel's *Open folders with Skerry* row
+# instead, where it wins over this directory by order; see
+# `crates/sk-desktop/src/activation.rs`.
+#
 # The three helpers go in `bindir` beside the binary rather than in `libexec`,
 # because `sk_preview::host` looks beside itself first and treats a helper found
 # on `PATH` as a version it cannot trust. A packager who wants them in libexec
