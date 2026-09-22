@@ -8483,7 +8483,16 @@ scope_aim={scope_aim:?}",
             // this one is the cheaper question: an icon's key has no modification
             // time in it, so nothing a listing produced can land here.
             if let Some(icon) = self.icon_names.look_up(&answer.key) {
-                self.renderer.hold_icon(icon, answer.size.0, answer.size.1, &answer.pixels);
+                // **A band that would not take it is a refusal too.** Sixteen
+                // slots at 128 device pixels, every one of them drawn this frame,
+                // is a band with nowhere to evict — and asking again is a loop,
+                // because the answer marks the window dirty and the dirty frame
+                // asks again. That is ADR 0042's *the 128 band thrashes* revisit
+                // trigger reached, and it degrades to an icon that does not
+                // arrive rather than to a window that spins.
+                if !self.renderer.hold_icon(icon, answer.size.0, answer.size.1, &answer.pixels) {
+                    self.icon_names.refuse(&answer.key);
+                }
                 continue;
             }
             // A name nobody holds any more is an answer to a question about a

@@ -317,14 +317,19 @@ pub(crate) fn names_for(directory: bool, mime: Option<&str>) -> Vec<String> {
 #[derive(Default)]
 pub(crate) struct Names {
     named: HashMap<sk_preview::Key, ImageKey>,
-    /// Icons the child could not decode, which are never asked for again.
+    /// Icons that will never reach the atlas, which are never asked for again.
     ///
     /// **Rule 1's idle promise, and it is not a nicety.** A file the atlas never
     /// holds is one `settle_icons` would queue on every frame, and the reply
-    /// marks the window dirty — so one `.xpm` in a theme is a window that redraws
-    /// and re-decodes for as long as it is open. A theme really does ship those:
-    /// the extension is in the specification and `skerry-thumbnailer` decodes
-    /// PNG, JPEG, SVG and GIF.
+    /// marks the window dirty — so one of these is a window that redraws and
+    /// re-decodes for as long as it is open.
+    ///
+    /// Two things land here. A picture the child could not decode: a theme really
+    /// does ship `.xpm`, because the extension is in the specification, and
+    /// `skerry-thumbnailer` decodes PNG, JPEG, SVG and GIF. And a band with every
+    /// slot drawn this frame, which has nowhere to evict — ADR 0042's own revisit
+    /// trigger, degrading to an icon that does not arrive rather than to a window
+    /// that spins.
     refused: Vec<sk_preview::Key>,
     next: u64,
 }
@@ -347,7 +352,7 @@ impl Names {
         self.named.get(key).copied()
     }
 
-    /// Records that the child could not draw this one.
+    /// Records that this one will never reach the atlas.
     ///
     /// **Bounded, and cleared whole when it fills.** A theme has a few hundred
     /// names at four bands; a list that grew without end would be a leak, and
