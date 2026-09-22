@@ -8286,6 +8286,13 @@ scope_aim={scope_aim:?}",
             let Some(pane) = self.panes.leaf(leaf.id).map(crate::panes::Tabs::showing) else {
                 continue;
             };
+            // **Details and grid, which is where `icon_of` runs.** A column draws
+            // its mark through a call of its own and never reads `Pane::icons`,
+            // so asking here would start a child process for a picture nothing
+            // would put on screen.
+            if pane.mode == crate::cells::Mode::Columns {
+                continue;
+            }
             let cells = self.cells_of(leaf, pane);
             for row in cells.visible(pane.scroll.offset()) {
                 let Some(id) = pane.listing.at(row) else { continue };
