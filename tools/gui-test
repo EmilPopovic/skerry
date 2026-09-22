@@ -4736,6 +4736,55 @@ def dragging_between_panes(run: Run, fixture: Path) -> None:
         raise Failure("undo did not bring file-1.txt back")
 
 
+@scenario("an-alt-drag-asks-where-it-lands", fresh=True)
+def an_alt_drag_asks(run: Run, fixture: Path) -> None:
+    """`Alt` held across a drag opens a menu at the drop instead of moving.
+
+    **A modifier, not the other button.** GTK's convention: plain moves, `Ctrl`
+    copies, `Alt` asks. The answer here is Link, the one verb no modifier gives,
+    chosen with the pointer — and the original stays where it was, because a
+    link consumes nothing, and `Ctrl+Z` takes the link back.
+    """
+    listed(run)
+    run.drive("text alpha\n")
+    until(run, cursor="alpha")
+    run.drive("key shift+enter\n")
+    until(run, panes="2", pane_focus="0")
+    run.drive("sleep 1100\ntext file-1.txt\n")
+    chosen = until(run, selected="1", cursor="file-1.txt")
+    held = point_at(run, int(chosen["cursor_row"]))
+    x, y, width, height = (float(part) for part in held["pane_body"].split(",")[1].split(":"))
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    to_point = aim(run, held, x + width / 2.0, y + height - 24.0)
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\nhold alt\nsleep 100\n"
+        f"drag {from_point[0]:.1f} {from_point[1]:.1f} {to_point[0]:.1f} {to_point[1]:.1f}\n"
+        "sleep 100\nlet-go alt\n"
+    )
+    asked = holds(run, lambda it: bool(it.get("menu_aim")), "the question a drop asks")
+    for wanted in ("drop.move", "drop.copy", "drop.link", "drop.cancel"):
+        if wanted not in asked["menu_aim"]:
+            raise Failure(f"{wanted} is not on the drop's menu: {asked['menu_aim']!r}")
+    expect(asked, undo="false", dragging="false")
+    if (fixture / "alpha" / "file-1.txt").exists(follow_symlinks=False):
+        raise Failure("the drop did something before it was answered")
+
+    aimed = menu_aim(run, asked, "drop.link")
+    run.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\n")
+    until(run, undo="true", menu="0")
+    link = fixture / "alpha" / "file-1.txt"
+    if not link.is_symlink() or link.resolve() != (fixture / "file-1.txt").resolve():
+        raise Failure(f"alpha/file-1.txt is not a link to the original: {link.exists()=}")
+    if not (fixture / "file-1.txt").is_file():
+        raise Failure("the original went, so the drop moved rather than linked")
+
+    run.drive("key ctrl+z\n")
+    until(run, undo="false")
+    settled(run)
+    if link.exists(follow_symlinks=False):
+        raise Failure("undo left the link behind")
+
+
 def creep(frm: tuple[float, float], to: tuple[float, float], steps: int = 8) -> str:
     """Driver lines that walk the pointer from one point to another.
 

@@ -3204,10 +3204,40 @@ fn scope_switch(
 /// The summary line between the field and the results.
 const SEARCH_SUMMARY: f32 = 22.0;
 
+/// What a drop of files this window is carrying will do.
+///
+/// **Chosen by what is held when the button comes up**, and changed by pressing
+/// or letting go of a modifier mid-drag — the card says which, because a
+/// modifier nobody can see the effect of is a guess.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DropVerb {
+    /// Nothing held.
+    Move,
+    /// `Ctrl`.
+    Copy,
+    /// `Alt`, which is GTK's: the drop opens a menu at the pointer that asks.
+    Ask,
+}
+
+impl DropVerb {
+    /// The verb what is held means: `Alt` over `Ctrl`, because asking includes
+    /// copying and the reverse is not true.
+    #[must_use]
+    pub fn held(mods: sk_plat::Modifiers) -> Self {
+        if mods.alt {
+            Self::Ask
+        } else if mods.ctrl {
+            Self::Copy
+        } else {
+            Self::Move
+        }
+    }
+}
+
 /// What a drag of files is carrying, for the card under the pointer.
 pub struct Carrying {
     /// The action the current drop would perform.
-    pub copying: bool,
+    pub verb: DropVerb,
     /// Where the pointer is, in logical pixels.
     pub at: Point,
     /// The first file's name.
@@ -3235,7 +3265,11 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     let badge = (carrying.count > 1).then(|| format!("+{}", carrying.count - 1));
     let badge_width =
         badge.as_ref().map_or(0.0, |it| text_width(painter, it, metrics.header_size, true) + 10.0);
-    let key = if carrying.copying { "drag.copy" } else { "drag.move" };
+    let key = match carrying.verb {
+        DropVerb::Move => "drag.move",
+        DropVerb::Copy => "drag.copy",
+        DropVerb::Ask => "drag.ask",
+    };
     let name = sk_model::i18n::format(key, &[&carrying.name]);
     let name_width = text_width(painter, &name, metrics.text_size, false);
     let width = (CARD_ICON + CARD_INSET * 3.0 + name_width + badge_width).clamp(64.0, CARD_WIDEST);
@@ -6506,5 +6540,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn alt_asks_ctrl_copies_and_nothing_held_moves() {
+        use super::DropVerb;
+        let held = |ctrl, alt| sk_plat::Modifiers { ctrl, alt, ..sk_plat::Modifiers::default() };
+        assert_eq!(DropVerb::held(held(false, false)), DropVerb::Move);
+        assert_eq!(DropVerb::held(held(true, false)), DropVerb::Copy);
+        assert_eq!(DropVerb::held(held(false, true)), DropVerb::Ask);
+        assert_eq!(DropVerb::held(held(true, true)), DropVerb::Ask);
     }
 }

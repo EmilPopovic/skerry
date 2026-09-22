@@ -1110,7 +1110,7 @@ fn sample_overlays(
             name: "quarterly-report.pdf".to_owned(),
             count: 3,
             directory: false,
-            copying: false,
+            verb: crate::view::DropVerb::Move,
         }),
     }
 }

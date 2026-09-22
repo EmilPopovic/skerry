@@ -730,6 +730,11 @@ properties.original = Restore to
 
 drag.copy = Copy {0}
 drag.move = Move {0}
+drag.ask = Drop {0}…
+drop.move = Move here
+drop.copy = Copy here
+drop.link = Link here
+drop.cancel = Cancel
 
 watch.disabled = Automatic refresh disabled. Listing may be stale — F5 to refresh.
 watch.remote = Remote changes are not reported. Listing may be stale — F5 to refresh.

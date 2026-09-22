@@ -22,7 +22,7 @@
 //! neither a button, nor a column header, nor on one of these menus or the
 //! submenus they open, nor in the exemption table with a reason, fails the build.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sk_cmd::Registry;
 use sk_desktop::DesktopEntry;
@@ -327,9 +327,30 @@ pub enum Kind {
         /// The file a new one is copied from.
         template: PathBuf,
     },
+    /// One answer to the question an `Alt`-drag asks where it lands: what to do
+    /// with `paths` in `into`, or — `None` — nothing.
+    DropAs {
+        /// What to do; `None` for Cancel.
+        verb: Option<DropAs>,
+        /// What was dropped.
+        paths: Vec<PathBuf>,
+        /// Where.
+        into: PathBuf,
+    },
     /// A row that says something and does nothing: `Reading…`, or that nothing
     /// installed opens the file. Never enabled.
     Note,
+}
+
+/// What a drop that asked can be answered with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DropAs {
+    /// Move them there.
+    Move,
+    /// Copy them there.
+    Copy,
+    /// Put a symbolic link to each there.
+    Link,
 }
 
 /// One row of an open menu.
@@ -367,6 +388,15 @@ pub enum Choice {
         /// The template.
         template: PathBuf,
     },
+    /// Finish a drop that asked.
+    DropAs {
+        /// The answer.
+        verb: DropAs,
+        /// What was dropped.
+        paths: Vec<PathBuf>,
+        /// Where.
+        into: PathBuf,
+    },
 }
 
 impl Item {
@@ -390,7 +420,14 @@ impl Item {
             Kind::Instantiate { template } => {
                 Some(Choice::Instantiate { template: template.clone() })
             }
-            Kind::Submenu(_) | Kind::OpenWith { .. } | Kind::Templates { .. } | Kind::Note => None,
+            Kind::DropAs { verb: Some(verb), paths, into } => {
+                Some(Choice::DropAs { verb: *verb, paths: paths.clone(), into: into.clone() })
+            }
+            Kind::Submenu(_)
+            | Kind::OpenWith { .. }
+            | Kind::Templates { .. }
+            | Kind::DropAs { verb: None, .. }
+            | Kind::Note => None,
         }
     }
 
@@ -413,6 +450,7 @@ impl Item {
             | Kind::Command
             | Kind::Launch { .. }
             | Kind::Instantiate { .. }
+            | Kind::DropAs { .. }
             | Kind::Note => Vec::new(),
         }
     }
@@ -551,6 +589,31 @@ fn applications(answer: Option<&Handlers>, at: Point) -> Menu {
     Menu { at, items, active: None, scroll: 0, sub: None }
 }
 
+/// The question an `Alt`-drag asks where it lands, opened at the pointer.
+///
+/// **Its rows are the drop's, not the registry's.** A drop is not something the
+/// palette could run — there is nothing held once the button is up — so, like
+/// Open with's applications, these are data. Each row names the chord that does
+/// the same without asking, which is how the menu teaches the drag.
+#[must_use]
+pub fn drop_question(paths: &[PathBuf], into: &Path, at: Point) -> Menu {
+    let row = |id: &'static str, keys: &str, verb: Option<DropAs>, starts_group: bool| Item {
+        id: id.to_owned(),
+        name: i18n::lookup(id).to_owned(),
+        keys: keys.to_owned(),
+        enabled: true,
+        starts_group,
+        kind: Kind::DropAs { verb, paths: paths.to_vec(), into: into.to_path_buf() },
+    };
+    let items = vec![
+        row("drop.move", "", Some(DropAs::Move), false),
+        row("drop.copy", "Ctrl", Some(DropAs::Copy), false),
+        row("drop.link", "", Some(DropAs::Link), false),
+        row("drop.cancel", "Esc", None, true),
+    ];
+    Menu { at, items, active: Some(0), scroll: 0, sub: None }
+}
+
 /// The New from template submenu, in whichever of its three states the answer
 /// is in.
 ///
@@ -665,7 +728,11 @@ impl Menu {
             }),
             Kind::OpenWith { found, .. } => Some(applications(found.as_ref(), self.at)),
             Kind::Templates { found } => Some(templates(found.as_ref(), self.at)),
-            Kind::Command | Kind::Launch { .. } | Kind::Instantiate { .. } | Kind::Note => None,
+            Kind::Command
+            | Kind::Launch { .. }
+            | Kind::Instantiate { .. }
+            | Kind::DropAs { .. }
+            | Kind::Note => None,
         };
         let Some(menu) = menu else { return false };
         self.active = Some(owner);
@@ -763,7 +830,7 @@ impl Menu {
                 }
                 Kind::OpenWith { .. } => enabled(OPEN_WITH_COMMAND),
                 Kind::Templates { .. } => enabled(FROM_TEMPLATE_COMMAND),
-                Kind::Launch { .. } | Kind::Instantiate { .. } => true,
+                Kind::Launch { .. } | Kind::Instantiate { .. } | Kind::DropAs { .. } => true,
                 Kind::Note => false,
             };
             moved |= item.enabled != now;
@@ -1008,9 +1075,9 @@ mod tests {
     use sk_plat::{Point, Size};
 
     use super::{
-        COLOUR, Choice, FROM_TEMPLATE, IN_A_LOOK, IN_TRASH, Item, Kind, Menu, ON_A_PLACE,
-        ON_BACKGROUND, ON_ROW, OPEN_WITH, SUBMENUS, Sub, height, inside, place, place_beside,
-        row_tops, submenu,
+        COLOUR, Choice, DropAs, FROM_TEMPLATE, IN_A_LOOK, IN_TRASH, Item, Kind, Menu, ON_A_PLACE,
+        ON_BACKGROUND, ON_ROW, OPEN_WITH, SUBMENUS, Sub, drop_question, height, inside, place,
+        place_beside, row_tops, submenu,
     };
     use crate::layout::Area;
     use crate::openers::Handlers;
@@ -1430,5 +1497,33 @@ mod tests {
         assert!(inside(Point::new(2.0, 2.0), a, b, c));
         assert!(inside(Point::new(5.0, 0.0), a, b, c));
         assert!(!inside(Point::new(6.0, 6.0), a, b, c));
+    }
+
+    #[test]
+    fn a_drop_that_asks_offers_move_copy_link_and_a_way_out() {
+        let paths = vec![PathBuf::from("/a/one"), PathBuf::from("/a/two")];
+        let into = PathBuf::from("/b");
+        let question = drop_question(&paths, &into, Point::new(10.0, 20.0));
+        let ids: Vec<&str> = question.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["drop.move", "drop.copy", "drop.link", "drop.cancel"]);
+        assert_eq!(
+            question.active,
+            Some(0),
+            "Enter on a fresh question moves, as a plain drop does"
+        );
+        let verbs: Vec<Option<DropAs>> = question
+            .items
+            .iter()
+            .map(|item| match item.choice() {
+                Some(Choice::DropAs { verb, paths: carried, into: onto }) => {
+                    assert_eq!((&carried, &onto), (&paths, &into));
+                    Some(verb)
+                }
+                Some(_) => panic!("a drop's row chose something else"),
+                None => None,
+            })
+            .collect();
+        assert_eq!(verbs, [Some(DropAs::Move), Some(DropAs::Copy), Some(DropAs::Link), None]);
+        assert!(question.items.iter().all(|item| item.enabled && !item.opens()));
     }
 }

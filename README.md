@@ -225,9 +225,9 @@ the first bug report on one of them.
   tested against a real GTK peer and a real Qt peer, which is not the same as
   testing against Nautilus and Dolphin themselves. Portal file transfers are not
   implemented, so a sandboxed Flatpak peer receives nothing.
-- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag says
-  whether it will move or copy, but there is no right-drag menu, no link action
-  and no drop onto an executable.
+- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag
+  moves, `Ctrl` copies and `Alt` asks where it lands — Move, Copy or Link — but
+  only for a drop this window takes, and there is no drop onto an executable.
 - **No "always open with this."** Open With opens once. The only default this
   writes is the folder handler, from the settings panel.
 - **No recents, no path completion.** `Ctrl+L` takes a path and that is all it does.

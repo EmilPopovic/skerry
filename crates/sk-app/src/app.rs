@@ -68,7 +68,7 @@ const SESSION_FLOOR: Duration = Duration::from_secs(2);
 /// moves or does not. Deciding on the press is what makes dragging three files
 /// drag one of them.
 struct FilesDrag {
-    copying: bool,
+    verb: crate::view::DropVerb,
     directory: bool,
     /// Where the press was, in logical pixels.
     from: Point,
@@ -2251,12 +2251,12 @@ impl App {
             Event::CloseRequested => self.closing = true,
             Event::Focused(_) => self.dirty = true,
             Event::KeyDown(key) => {
-                self.drag_modifier(key.mods.ctrl);
+                self.drag_modifier(key.mods);
                 self.key(key, commands);
             }
-            Event::KeyUp(key) => self.drag_modifier(key.mods.ctrl),
+            Event::KeyUp(key) => self.drag_modifier(key.mods),
             Event::PointerMoved { position, mods } => {
-                self.drag_modifier(mods.ctrl);
+                self.drag_modifier(*mods);
                 self.moved(*position);
             }
             // A drag from somewhere else — or from here, because a drag that
@@ -2312,7 +2312,7 @@ impl App {
                         self.window.cancel_drag();
                     }
                     if !std::mem::take(&mut self.dropped) {
-                        self.drop_files(mods.ctrl);
+                        self.drop_files(crate::view::DropVerb::held(*mods), position);
                     }
                     self.release();
                 }
@@ -10303,7 +10303,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             }
             // A peer's. Nothing is held here, so the highlight is all there is.
             self.files_drag = Some(FilesDrag {
-                copying: true,
+                verb: crate::view::DropVerb::Copy,
                 directory: false,
                 from: position,
                 paths: Vec::new(),
@@ -10321,8 +10321,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         // cursor over rows it would in fact accept.
         let wanted = self.drop_target().is_some().then_some("text/uri-list");
         let action =
-            if self.files_drag.as_ref().is_some_and(|drag| !drag.paths.is_empty() && !drag.copying)
-            {
+            if self.files_drag.as_ref().is_some_and(|drag| {
+                !drag.paths.is_empty() && drag.verb == crate::view::DropVerb::Move
+            }) {
                 sk_plat::DragAction::Move
             } else {
                 sk_plat::DragAction::Copy
@@ -10367,8 +10368,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             // rather than read — but it is still closed, or the display server
             // holds the pointer waiting for a confirmation.
             self.window.finish_drop();
-            let copying = self.files_drag.as_ref().is_some_and(|drag| drag.copying);
-            self.drop_files(copying);
+            let verb =
+                self.files_drag.as_ref().map_or(crate::view::DropVerb::Copy, |drag| drag.verb);
+            self.drop_files(verb, position);
             return;
         }
         if self.window.dragging_out() {
@@ -10657,21 +10659,24 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
 
     /// Finishes a drag of files, or collapses it back into a plain click.
     ///
-    /// **Move, and `Ctrl` copies.** GNOME and KDE decide this per drop from the
-    /// device each side is on, so the same gesture moves or copies depending on
-    /// something nobody can see. Stated instead: a drag moves, `Ctrl` copies, and
-    /// `Ctrl+Z` takes either back. A drop into another pane can now cross
-    /// devices — the engine handles that, and the rule does not change with it.
-    fn drag_modifier(&mut self, copying: bool) {
+    /// **Move, `Ctrl` copies, and `Alt` asks.** GNOME and KDE decide this per
+    /// drop from the device each side is on, so the same gesture moves or copies
+    /// depending on something nobody can see. Stated instead: a drag moves,
+    /// `Ctrl` copies, `Ctrl+Z` takes either back, and `Alt` — GTK's modifier for
+    /// it — opens a menu where the drop lands. A modifier rather than the other
+    /// button, because a drag with the secondary button held is a gesture no
+    /// touchpad makes comfortably and a scenario cannot tell from a click.
+    fn drag_modifier(&mut self, mods: sk_plat::Modifiers) {
+        let verb = crate::view::DropVerb::held(mods);
         if let Some(drag) = self.files_drag.as_mut().filter(|drag| !drag.paths.is_empty())
-            && drag.copying != copying
+            && drag.verb != verb
         {
-            drag.copying = copying;
+            drag.verb = verb;
             self.dirty = true;
         }
     }
 
-    fn drop_files(&mut self, copying: bool) {
+    fn drop_files(&mut self, verb: crate::view::DropVerb, at: Point) {
         // Asked before the drag is taken, because the answer for a drop into
         // another pane is the directory *that pane* is showing and the drag is
         // what says which pane that is.
@@ -10688,9 +10693,30 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             self.dirty = true;
             return;
         };
-        let took = self.edits.paste_all(drag.paths, into, !copying, &self.jobs);
+        let took = match verb {
+            crate::view::DropVerb::Move => self.edits.paste_all(drag.paths, into, true, &self.jobs),
+            crate::view::DropVerb::Copy => {
+                self.edits.paste_all(drag.paths, into, false, &self.jobs)
+            }
+            crate::view::DropVerb::Ask => {
+                self.close_menu();
+                self.menu = Some(crate::menu::drop_question(&drag.paths, &into, at));
+                self.dirty = true;
+                return;
+            }
+        };
         self.said_it_is_busy(took);
         self.dirty = true;
+    }
+
+    /// Does what the question an `Alt`-drag asked was answered with.
+    fn drop_as(&mut self, verb: crate::menu::DropAs, paths: Vec<PathBuf>, into: PathBuf) {
+        let took = match verb {
+            crate::menu::DropAs::Move => self.edits.paste_all(paths, into, true, &self.jobs),
+            crate::menu::DropAs::Copy => self.edits.paste_all(paths, into, false, &self.jobs),
+            crate::menu::DropAs::Link => self.edits.link_all(paths, into, &self.jobs),
+        };
+        self.said_it_is_busy(took);
     }
 
     /// Chooses what a press on a row selects, and whether it may become a drag.
@@ -10807,7 +10833,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         }
         if clicks < 2 {
             self.files_drag = Some(FilesDrag {
-                copying: false,
+                verb: crate::view::DropVerb::Move,
                 directory: self.panes.focused().listing.flags(id).has(sk_model::Flags::DIR),
                 from: position,
                 paths: self.selected_paths(),
@@ -11623,6 +11649,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             Some(crate::menu::Choice::Instantiate { template }) => {
                 self.new_from_template(template);
             }
+            Some(crate::menu::Choice::DropAs { verb, paths, into }) => {
+                self.drop_as(verb, paths, into);
+            }
             None => {}
         }
         self.place_target = None;
@@ -12410,7 +12439,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
                     .unwrap_or_default(),
                 count: drag.paths.len(),
                 directory: drag.directory,
-                copying: drag.copying,
+                verb: drag.verb,
             }
         });
         let chrome = Chrome {

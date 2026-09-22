@@ -133,8 +133,11 @@ The one integration nobody can fake, because it is judged against other applicat
   target may not fall back.
 - XDND on X11, `wl_data_device` on Wayland, as both **source and target** — the source half
   is why Skerry owns its platform layer ([ADR 0002](adr/0002-own-platform-layer.md)).
-- Copy, move and link semantics with the modifier conventions of the desktop, plus the
-  right-drag menu that makes them explicit. **The two protocols do not share an action
+- Copy, move and link semantics with the modifier conventions of the desktop — a drag
+  moves, `Ctrl` copies, and `Alt`, GTK's modifier for it, opens a menu at the drop that
+  asks. **A modifier, not the secondary button**: a secondary-button drag is a gesture no
+  touchpad makes comfortably, and one that starts on a row is a context menu everywhere
+  else in this window. **The two protocols do not share an action
   vocabulary**: XDND has copy, move, link, ask and private; `wl_data_device_manager` has
   copy, move and ask and no link. `sk-plat` exposes the union and the policy above it greys
   out what the display server cannot express.
