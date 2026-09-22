@@ -8102,7 +8102,7 @@ scope_aim={scope_aim:?}",
             }
         }
         for (leaf, id, path, mtime) in wanted {
-            let (_, image) = self.thumbs.name(&path, mtime);
+            let (key, image) = self.thumbs.name(&path, mtime);
             // **`holds_image`, not `get`.** Asking whether to fetch must not stamp
             // the frame the atlas evicts by, or the least recently *drawn* entry
             // would be whatever nobody has asked about.
@@ -8118,7 +8118,7 @@ scope_aim={scope_aim:?}",
                     tabs.showing_mut().thumbs.remove(&id);
                 }
             }
-            if !held {
+            if !held && !self.thumbs.was_refused(&key) {
                 self.previews.want(crate::previews::thumbnail(path, mtime));
             }
         }
@@ -8208,6 +8208,11 @@ scope_aim={scope_aim:?}",
                 continue;
             }
             if answer.refusal != sk_preview::Refusal::None || answer.pixels.is_empty() {
+                // Remembered, or the next frame asks for it again — see
+                // `Thumbs::refused` for what that cost.
+                if self.thumbs.look_up(&answer.key).is_some() {
+                    self.thumbs.refuse(answer.key);
+                }
                 continue;
             }
             // A name nobody holds any more is an answer to a question about a
