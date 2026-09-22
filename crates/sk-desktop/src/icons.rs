@@ -235,8 +235,12 @@ impl Theme {
     }
 
     fn within(name: &str, bases: &[PathBuf], cancel: &sk_util::Cancel) -> Result<Self, Refused> {
+        // **Each `index.theme` is read once.** The chain walk reads them all to
+        // follow `Inherits`, and re-reading them to follow `Directories` would be
+        // a second pass over `hicolor`'s 55,507 bytes for every theme that
+        // inherits it, which is all of them.
         let chain = inheritance(name, bases);
-        if declarations(name, bases).is_empty() {
+        if chain.first().is_none_or(|first| first.declared.is_empty()) {
             return Err(Refused::Unknown);
         }
         let mut theme =
@@ -351,29 +355,44 @@ fn declarations(name: &str, bases: &[PathBuf]) -> Vec<String> {
     bases.iter().filter_map(|base| crate::read(&base.join(name).join("index.theme"))).collect()
 }
 
-/// The themes to search, in order, ending at `hicolor`.
+/// One theme in the chain, and the `index.theme` files that declared it.
+struct Link {
+    name: String,
+    declared: Vec<String>,
+}
+
+/// The themes to search, in order, ending at `hicolor`, each with what it said.
 ///
 /// Breadth first through `Inherits`, which is the order the specification's
-/// recursion visits them in, with a theme never visited twice.
-fn inheritance(name: &str, bases: &[PathBuf]) -> Vec<String> {
-    let mut chain = vec![name.to_owned()];
+/// recursion visits them in, with a theme never visited twice. The files are
+/// kept rather than re-read: see [`Theme::within`].
+fn inheritance(name: &str, bases: &[PathBuf]) -> Vec<Link> {
+    let mut chain = vec![Link { name: name.to_owned(), declared: declarations(name, bases) }];
     let mut at = 0;
     while at < chain.len() && chain.len() < MOST_INHERITED {
-        let Some(link) = chain.get(at).cloned() else { break };
-        at += 1;
-        for text in declarations(&link, bases) {
-            let index = Ini::of(&text);
-            let inherits = index.value("Icon Theme", "Inherits").unwrap_or_default();
-            for parent in inherits.split(',') {
-                let parent = parent.trim();
-                if plain(parent) && !chain.iter().any(|had| had == parent) {
-                    chain.push(parent.to_owned());
+        let mut found: Vec<String> = Vec::new();
+        {
+            let Some(link) = chain.get(at) else { break };
+            for text in &link.declared {
+                let index = Ini::of(text);
+                let inherits = index.value("Icon Theme", "Inherits").unwrap_or_default();
+                for parent in inherits.split(',') {
+                    let parent = parent.trim();
+                    if plain(parent) && !found.iter().any(|had| had == parent) {
+                        found.push(parent.to_owned());
+                    }
                 }
             }
         }
+        at += 1;
+        for parent in found {
+            if !chain.iter().any(|had| had.name == parent) {
+                chain.push(Link { declared: declarations(&parent, bases), name: parent });
+            }
+        }
     }
-    if !chain.iter().any(|had| had == FALLBACK) {
-        chain.push(FALLBACK.to_owned());
+    if !chain.iter().any(|had| had.name == FALLBACK) {
+        chain.push(Link { name: FALLBACK.to_owned(), declared: declarations(FALLBACK, bases) });
     }
     chain
 }
@@ -385,10 +404,11 @@ fn inheritance(name: &str, bases: &[PathBuf]) -> Vec<String> {
 /// `stat` before the `readdir` is a second syscall to learn what the first one
 /// reports anyway — 5,200 of them for `hicolor`'s 650 directories across eight
 /// bases. [`Theme::take`] drops the ones that do not open.
-fn searchable(theme: &str, bases: &[PathBuf]) -> Vec<Group> {
+fn searchable(link: &Link, bases: &[PathBuf]) -> Vec<Group> {
     let mut out = Vec::new();
-    let Some(text) = declarations(theme, bases).into_iter().next() else { return out };
-    let index = Ini::of(&text);
+    let Some(text) = link.declared.first() else { return out };
+    let theme = link.name.as_str();
+    let index = Ini::of(text);
     let listed = ["Directories", "ScaledDirectories"]
         .into_iter()
         .filter_map(|key| index.value("Icon Theme", key))

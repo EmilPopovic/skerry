@@ -964,3 +964,45 @@ child inside a bound, and the bottom row does not run under the sandbox at all
 What **is** a gate is that none of it happens on the frame loop: the listing is
 an ordinary job with a cancel token, and closing the panel kills the child rather
 than waiting out the rest of a four-gigabyte decompression.
+
+
+## What loading an icon theme costs, and why there is no row for it
+
+**[ADR 0042](adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)
+sized this from a Python walk and called it an upper bound. It was not.** The
+record argued the walk's placement from "23.1 ms as an upper bound, since the walk
+was Python's and a Rust one is faster", and the Rust one is **51.9 ms** for
+breeze — 2.2× the figure that was supposed to bound it. The conclusion the record
+drew from it stands, and stands by more: the walk is over a frame budget by six
+times rather than three, so it is a job and nothing joins
+[rule 1](03-principles.md)'s start-up list.
+
+Best of five, warm, release build, on the reference machine at a load average of
+2.7 to 3.2 over 24 threads, over the eight icon directories this machine's
+`XDG_DATA_DIRS` names. The whole inheritance chain is included and `hicolor` is in
+every one of them:
+
+| Theme | Load | Names | Directories |
+| --- | --- | --- | --- |
+| breeze | **51.9 ms** | 8,198 | 139 |
+| Yaru | 24.8 ms | 3,583 | 184 |
+| Adwaita | 15.4 ms | 1,847 | 74 |
+| `hicolor` alone | 13.6 ms | 1,127 | 57 |
+
+It was **150 ms for all four** before `index.theme` was parsed into its groups
+once instead of scanned from the top for each key: `hicolor`'s is 55,507 bytes
+declaring 650 directories, each asked six questions, which is 214 MB of
+comparisons for a file nothing else in the program reads twice.
+
+**No budget row, deliberately**, for the reason the archive table above gives: a
+row is a gate, and a gate over this would be measuring how many themes are
+installed on the machine running CI. What is a gate is that none of it happens on
+the frame loop — the walk is an ordinary job with a cancel token that a second ask
+trips, and the geometric mark is drawn at the final position until the theme
+lands.
+
+**What is not measured here is the frame.** `settle_icons` is a pass on the frame
+path and `--bench` runs `headless::Session` rather than `App`, so the *Scroll a
+large listing* row above cannot see it either way: the number in that row is the
+`marks` path and is unmoved because that path is unchanged. A before and an after
+for a themed window needs a bench harness that drives `App`, and that is owed.
