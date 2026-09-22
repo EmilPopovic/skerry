@@ -77,16 +77,20 @@ fn warm_and_draw(
         {
             let mut painter =
                 Painter { list, fonts: &mut session.fonts, cache, theme, scale: session.scale };
-            let chrome = sample_chrome(drawing.request, drawing.sample);
-            view::draw(
-                &mut painter,
-                drawing.panes,
-                drawing.layout,
-                drawing.now,
-                &chrome,
-                &mut diagnostics,
-                &mut crate::view::Hits::default(),
-            );
+            if drawing.request.marks {
+                crate::marks::specimen(&mut painter, drawing.layout.window);
+            } else {
+                let chrome = sample_chrome(drawing.request, drawing.sample);
+                view::draw(
+                    &mut painter,
+                    drawing.panes,
+                    drawing.layout,
+                    drawing.now,
+                    &chrome,
+                    &mut diagnostics,
+                    &mut crate::view::Hits::default(),
+                );
+            }
         }
         stats = session.renderer.draw(list, &mut session.fonts, theme.palette.background);
     }
@@ -458,6 +462,15 @@ pub struct Capture {
     /// different operation — and the frame that would catch the two drifting
     /// apart.
     pub indexing: bool,
+    /// Which icon theme to draw the marks from, or nothing for our own.
+    ///
+    /// **A capture's third source, and the reason it is a flag** — [ADR
+    /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    /// A window asks the desktop what it is using; a frame cannot, because a
+    /// golden frame of "whatever this machine had installed" is a frame of the
+    /// build box. So a capture names the theme, and the release gate is one frame
+    /// per source over one directory.
+    pub icons: Option<String>,
     /// Whether to lay the pane out as a grid instead of a details list.
     pub grid: bool,
     /// Whether to lay it out as a run of columns, one per level of the path.
@@ -515,6 +528,9 @@ pub struct Capture {
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
     pub carrying: bool,
+    /// Whether to draw the specimen sheet of Skerry's own marks instead of a
+    /// directory — [`crate::marks::specimen`].
+    pub marks: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.
@@ -904,6 +920,8 @@ struct Overlays {
     properties: Option<crate::properties::Properties>,
     openers: Option<crate::openers::Openers>,
     settings: Option<(crate::settings::Panel, crate::settings::Values, crate::settings::Marks)>,
+    /// What the frame's `icons` value resolved to — ADR 0042's three sources.
+    icons: crate::icons::Source,
     clash: Option<crate::edit::Clash>,
     search: Option<crate::search::Search>,
     carrying: Option<crate::view::Carrying>,
@@ -1066,12 +1084,14 @@ fn sample_settings() -> (crate::settings::Panel, crate::settings::Values, crate:
         aside: 240.0,
         layout: crate::views::Layout::Grid,
         confirm_trash: false,
+        icons: crate::settings::Icons::Marks,
     };
     let mut marks = crate::settings::Marks::default();
     marks.name(Setting::Hidden);
     marks.name(Setting::View);
     marks.touch(Setting::View);
     marks.name(Setting::SidebarWidth);
+    marks.name(Setting::Icons);
     (panel, values, marks)
 }
 
@@ -1110,6 +1130,11 @@ fn sample_overlays(
         properties: request.properties.then(sample_properties),
         openers: request.open_with.then(sample_openers),
         settings: request.settings.then(sample_settings),
+        // **Our own marks, on every machine.** A frame that showed a loaded theme
+        // would be a frame of whatever the build box happened to have installed,
+        // and ADR 0042's point is that this state is a choice rather than a
+        // fallback — so it is the one the golden frame keeps honest.
+        icons: crate::icons::Source::Ours,
         clash: request.clash.then(|| sample_clash(&request.path)),
         search: request.search.then(|| sample_search(&request.path)),
         // Stated, because a capture has no pointer: the card follows one, and
@@ -1150,6 +1175,140 @@ fn settle_folder_totals(pane: &mut Pane, session: &Session) {
     // and is exactly the kind of thing they exist to catch.
     measurer.update(pane, rows, &session.jobs);
     measurer.stop();
+}
+
+/// Loads the named theme and rasterises the marks it resolves, synchronously.
+///
+/// **What `App::settle_icons` does over frames, in one pass** — the same shape
+/// [`settle_thumbnails`] below has and for the same reason: the answer has to be
+/// on the GPU before the one frame that gets taken.
+///
+/// Returns what the theme resolved to, so [`report`] can print it — a frame that
+/// silently drew no icon is a frame of the geometric marks, and blessing one of
+/// those as if it showed the feature is the mistake
+/// [12-measurement.md](../../../docs/12-measurement.md) keeps recording.
+/// A row a capture asks an icon for: which column it is in — `None` for the
+/// pane's own listing — which entry, and what the theme is asked about it.
+struct Wanting<'a> {
+    owner: Option<usize>,
+    id: sk_model::EntryId,
+    directory: bool,
+    mime: Option<&'a str>,
+    side: f32,
+}
+
+fn settle_icons(
+    request: &Capture,
+    pane: &mut Pane,
+    session: &mut Session,
+    types: &sk_desktop::MimeDatabase,
+    at: (&crate::panes::PaneLayout, &sk_ui::Theme),
+) -> String {
+    let (here, theme) = at;
+    let Some(name) = request.icons.as_deref() else { return "ours".to_owned() };
+    let source = match sk_desktop::icons::Theme::load(name) {
+        Ok(theme) => crate::icons::Source::Ready(theme),
+        Err(why) => crate::icons::Source::Failed { theme: name.to_owned(), why },
+    };
+    let Some(found) = source.theme() else { return source.token() };
+
+    // The mark's own box, which is what decides the band — through the same
+    // `mark_of` the drawing calls, so a capture cannot disagree with the frame it
+    // is a capture of about where a mark is.
+    let cells = crate::groups::Bands::new(
+        pane.mode,
+        crate::view::table_of(here, pane),
+        theme.metrics.row_height,
+        &pane.bands,
+        pane.listing.rows(),
+        pane.closed,
+    );
+    let scale = f32::from(u16::try_from(request.scale_120).unwrap_or(120)) / 120.0;
+
+    let mut previews = sk_preview::Previews::new();
+    let mut names = crate::icons::Names::default();
+    // `None` for the pane's own listing, a column view's other columns by index.
+    let mut asked: Vec<(Option<usize>, sk_model::EntryId, sk_gpu::ImageKey)> = Vec::new();
+    // **Distinct pictures, not rows.** Every text file in a directory resolves to
+    // one `text-x-generic` file at one band, and `Previews::want` dedupes — so a
+    // count of rows is a count of answers that can never arrive, and the loop
+    // below waits out the whole deadline every time.
+    let mut wanted: Vec<sk_gpu::ImageKey> = Vec::new();
+    // The pane's own rows, and in a column view every other column's too — the
+    // same rows `App::icons_asked_for` asks about, so a capture draws what the
+    // window does.
+    let mut rows: Vec<Wanting<'_>> = Vec::new();
+    for row in 0..pane.listing.rows().min(MEASURED) {
+        let Some(id) = pane.listing.at(row) else { continue };
+        if pane.thumbs.contains_key(&id) {
+            continue;
+        }
+        let side = crate::view::mark_of(pane.mode, here, cells.at(row, 0.0), &theme.metrics).width;
+        let directory = pane.listing.flags(id).has(sk_model::Flags::DIR);
+        let mime = types.by_name(pane.listing.name(id));
+        rows.push(Wanting { owner: None, id, directory, mime, side });
+    }
+    if pane.mode == crate::cells::Mode::Columns {
+        let areas = crate::trail::areas(here.body, pane.trail.len(), pane.across.offset());
+        for (index, (level, area)) in pane.trail.iter().zip(areas).enumerate() {
+            let column = crate::trail::cells_of(level, area, theme.metrics.row_height);
+            for row in 0..level.dir.listing.rows().min(MEASURED) {
+                let Some(id) = level.dir.listing.at(row) else { continue };
+                let at = column.at(row, level.scroll.offset());
+                let side =
+                    crate::view::mark_of(crate::cells::Mode::Columns, here, at, &theme.metrics)
+                        .width;
+                let directory = level.dir.listing.flags(id).has(sk_model::Flags::DIR);
+                let mime = types.by_name(level.dir.listing.name(id));
+                rows.push(Wanting { owner: Some(index), id, directory, mime, side });
+            }
+        }
+    }
+    for Wanting { owner, id, directory, mime, side } in rows {
+        let (nominal, step, band) = crate::icons::sizing(side, scale);
+        let wants = crate::icons::names_for(directory, mime, types);
+        let Some(file) = wants.iter().find_map(|it| found.find(it, nominal, step)) else {
+            continue;
+        };
+        let (_, image) = names.name(&file, band);
+        asked.push((owner, id, image));
+        if !wanted.contains(&image) {
+            wanted.push(image);
+            previews.want(crate::icons::wanted(file, band));
+        }
+    }
+
+    let deadline = std::time::Instant::now() + READ_DEADLINE;
+    let mut landed = 0usize;
+    while landed < wanted.len() && std::time::Instant::now() < deadline {
+        previews.pump(&session.jobs.pool, &session.waker.handle());
+        for answer in previews.drain() {
+            landed += 1;
+            if answer.refusal != sk_preview::Refusal::None {
+                continue;
+            }
+            if let Some(image) = names.look_up(&answer.key) {
+                session.renderer.hold_icon(image, answer.size.0, answer.size.1, &answer.pixels);
+            }
+        }
+        std::thread::yield_now();
+    }
+    for (owner, id, image) in asked {
+        if !session.renderer.holds_icon(image) {
+            continue;
+        }
+        match owner {
+            None => {
+                pane.icons.insert(id, image);
+            }
+            Some(index) => {
+                if let Some(level) = pane.trail.get_mut(index) {
+                    level.icons.insert(id, image);
+                }
+            }
+        }
+    }
+    source.token()
 }
 
 /// Fetches every visible thumbnail and waits for it, so the frame is reproducible.
@@ -1363,7 +1522,9 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
-        settings: sample.overlays.settings.as_ref().map(|(p, v, m)| (p, *v, *m)),
+        settings: sample.overlays.settings.as_ref().map(|(panel, values, marks)| {
+            crate::view::Settings { panel, values, marks: *marks, icons: &sample.overlays.icons }
+        }),
         carrying: sample.overlays.carrying.as_ref(),
         search: sample.overlays.search.as_ref(),
         clash: sample.overlays.clash.as_ref(),
@@ -1457,6 +1618,9 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
     // a tab lands in the directory that tab holds, and a mark on the tab already
     // on screen could not tell the two apart.
     let drop_tab = (request.split && request.tab_drop).then(|| (panes.focus(), 0));
+    // **After the panes are laid out**, because the band an icon comes from is
+    // decided by the mark's own box and that box is a function of the layout.
+    let icons = settle_icons(request, panes.focused_mut(), &mut session, &types, (&here, &theme));
     // Three names and a total of nine, so the frame holds both the list and the
     // "and 6 more" line the list stops at.
     let doomed: Vec<String> = ["quarterly-report.pdf", "archive.tar.gz", "notes"]
@@ -1510,7 +1674,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         Problem::plain(ProblemKind::NoGpu, "the offscreen target could not be read back")
     })?;
     write(&request.file, session.physical, &pixels)?;
-    report(request, &session, panes.focused(), stats);
+    report(request, &session, panes.focused(), (stats, &icons));
     Ok(())
 }
 
@@ -1522,10 +1686,11 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
 /// fixture holds Hebrew, Arabic and an emoji, so a machine with a different set
 /// of fonts installed renders a different frame from the same commit. A harness
 /// comparing against a stored reference has to be able to say so.
-fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) {
+fn report(request: &Capture, session: &Session, pane: &Pane, what: (FrameStats, &str)) {
+    let (stats, icons) = what;
     eprintln!(
         "skerry: wrote {} — {}×{} at {}%, {} entries, {} quads, {} draws, {} glyphs, \
-{} thumbnails, {} pages holding {} KiB",
+{} thumbnails, {} pages holding {} KiB, icons {} in {} slots",
         request.file.display(),
         session.physical.0,
         session.physical.1,
@@ -1540,6 +1705,11 @@ fn report(request: &Capture, session: &Session, pane: &Pane, stats: FrameStats) 
         session.renderer.image_stats().0,
         session.renderer.preview_stats().0,
         session.renderer.preview_stats().1 / 1024,
+        // **Where the marks came from and how many arrived.** A frame under a
+        // theme that drew no icon is a frame of the geometric marks wearing the
+        // theme's name, which is the one way this gate could pass by accident.
+        icons,
+        session.renderer.icon_stats().0,
     );
     for path in session.fonts.paths() {
         eprintln!("skerry: face {}", path.display());

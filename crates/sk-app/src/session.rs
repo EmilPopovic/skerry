@@ -18,6 +18,7 @@
 //! hidden off            on | off
 //! view details          details | grid — what a folder with no record gets
 //! confirm off           on | off — whether Move to Trash asks first
+//! icons desktop         marks | desktop | a theme's own name
 //! touched theme hidden  the settings this window changed, in table order
 //! zoom 2                an index into App::ZOOM
 //! window 1100x720       logical pixels
@@ -159,6 +160,8 @@ pub struct Session {
     pub layout: crate::views::Layout,
     /// Whether Move to Trash asks first.
     pub confirm_trash: bool,
+    /// Where a file's mark came from — ADR 0042.
+    pub icons: crate::settings::Icons,
     /// Which settings this window changed, and so may override the config file.
     ///
     /// **[ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md).**
@@ -343,6 +346,7 @@ pub fn render(session: &Session) -> String {
     out.push_str(if session.hidden { "hidden on\n" } else { "hidden off\n" });
     let _ = writeln!(out, "view {}", session.layout.token());
     out.push_str(if session.confirm_trash { "confirm on\n" } else { "confirm off\n" });
+    let _ = writeln!(out, "icons {}", session.icons.token());
     // **Written even when empty**, so a window that has un-touched nothing still
     // says so and the line is a fact rather than an absence to be inferred.
     let _ = writeln!(out, "touched {}", session.touched.names().join(" "));
@@ -453,6 +457,7 @@ pub fn parse(text: &str) -> Option<Session> {
         hidden: false,
         layout: crate::views::Layout::Details,
         confirm_trash: false,
+        icons: crate::settings::Icons::default(),
         touched: crate::settings::Marks::default(),
         zoom: crate::app::ZOOM_DEFAULT,
         window: (1100, 720),
@@ -483,6 +488,15 @@ pub fn parse(text: &str) -> Option<Session> {
                 }
             }
             "confirm" => session.confirm_trash = value == "on",
+            // A word this build does not know leaves the default, which is the
+            // per-field tolerance the `columns` and `sidebar` lines already have.
+            "icons" => {
+                let mut values =
+                    crate::settings::Values { icons: session.icons.clone(), ..Default::default() };
+                if values.take(crate::settings::Setting::Icons, value) {
+                    session.icons = values.icons;
+                }
+            }
             "touched" => session.touched.read(value),
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
             "columns" => session.columns = read_columns(value),
@@ -718,6 +732,7 @@ mod tests {
             hidden: true,
             layout: crate::views::Layout::Details,
             confirm_trash: false,
+            icons: crate::settings::Icons::Named("Adwaita".to_owned()),
             touched: crate::settings::Marks::default(),
             zoom: 4,
             window: (1440, 900),

@@ -167,8 +167,8 @@ pub struct Chrome<'a> {
     pub properties: Option<&'a crate::properties::Properties>,
     /// The Open With list, while it is open.
     pub openers: Option<&'a crate::openers::Openers>,
-    /// The settings panel, while it is open, and what all six are set to.
-    pub settings: Option<(&'a crate::settings::Panel, crate::settings::Values, Marks)>,
+    /// The settings panel, while it is open.
+    pub settings: Option<Settings<'a>>,
     /// The keyboard hint in the corner of the path bar, from the registry.
     pub hint: &'a str,
     /// Where each leaf of the pane tree is, in layout order.
@@ -2001,13 +2001,17 @@ fn archive_row(painter: &mut Painter<'_>, row: &crate::archive::Row, shape: Area
     // like the pane's rows and a per-type badge added later arrives here too
     // without this function being touched — see [`sk_ui::Icon`].
     let (icon, tint) = match row.kind {
-        sk_preview::archive::Kind::Directory => (sk_ui::Icon::Folder, theme.palette.kinds.folder),
+        sk_preview::archive::Kind::Directory => {
+            (sk_ui::Icon::Mark(sk_ui::Mark::Folder), theme.palette.kinds.folder)
+        }
         // A link and a device node are drawn as what they are not: a page, dim.
         // Neither can be unpacked into anything a person opens, and a mark of
         // their own would be a symbol nobody has been taught.
-        sk_preview::archive::Kind::File => (sk_ui::Icon::Page, theme.palette.dim),
+        sk_preview::archive::Kind::File => {
+            (sk_ui::Icon::Mark(sk_ui::Mark::Unknown), theme.palette.dim)
+        }
         sk_preview::archive::Kind::Link | sk_preview::archive::Kind::Other => {
-            (sk_ui::Icon::Page, theme.palette.divider)
+            (sk_ui::Icon::Mark(sk_ui::Mark::Unknown), theme.palette.divider)
         }
     };
     painter.icon(icon, painter.rect(mark.x, mark.y, mark.width, mark.height), tint);
@@ -2531,6 +2535,27 @@ fn open_with(
     }
 }
 
+/// What the settings panel draws: the rows, their values and their provenance.
+///
+/// **A struct rather than a tuple since ADR 0042.** `icons` is a seventh value
+/// that is neither a truth nor a number and the source it resolved to is an
+/// eighth thing to carry, and four positional fields is three too many to read.
+#[derive(Clone, Copy)]
+pub struct Settings<'a> {
+    /// Which row the keyboard is on, and what the last action said.
+    pub panel: &'a crate::settings::Panel,
+    /// What all seven are set to.
+    ///
+    /// **By reference**, because one of the seven owns a `String` — copying it
+    /// would be an allocation in every frame the panel is open.
+    pub values: &'a crate::settings::Values,
+    /// Which file decided each one.
+    pub marks: Marks,
+    /// What the `icons` value resolved to, which the panel says in a line of its
+    /// own under the rows.
+    pub icons: &'a crate::icons::Source,
+}
+
 /// Which half of a settings row a press landed on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SettingAim {
@@ -2553,12 +2578,12 @@ pub enum SettingAim {
 fn settings_panel(
     painter: &mut Painter<'_>,
     layout: &Layout,
-    showing: Option<(&crate::settings::Panel, crate::settings::Values, Marks)>,
+    showing: Option<Settings<'_>>,
     hits: &mut Hits,
 ) {
     // The clear is here rather than at the call site, because a rectangle from
     // the frame before is a control a press still lands on.
-    let Some((panel, values, marks)) = showing else {
+    let Some(Settings { panel, values, marks, icons }) = showing else {
         hits.settings.clear();
         return;
     };
@@ -2578,7 +2603,12 @@ fn settings_panel(
     let width = (labels + SETTINGS_CONTROL + SETTINGS_SOURCE + PROPERTIES_INSET * 3.0)
         .clamp(PROPERTIES_WIDTH.0.min(layout.window.width), layout.window.width - 32.0);
     let said = panel.said.as_ref().map_or(0.0, |_| SETTINGS_STEP);
-    let height = SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP + PROPERTIES_INSET + said;
+    // **Always a line, whatever the icons row says.** ADR 0042's three sources
+    // have to be distinguishable in the panel, and a line that appears only for
+    // two of them is a line a person reads as an error.
+    let resolved = icons.says();
+    let height =
+        SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP + PROPERTIES_INSET + said + SETTINGS_STEP;
     let area = Area {
         x: ((layout.window.width - width) / 2.0).max(0.0),
         y: ((layout.window.height - height) / 2.0).max(8.0),
@@ -2627,15 +2657,17 @@ fn settings_panel(
             baseline,
         );
         let right = area.right() - PROPERTIES_INSET - SETTINGS_SOURCE - 12.0;
-        setting_control(painter, (index, *row), (&values, panel), (top, right), hits);
+        setting_control(painter, (index, *row), (values, panel), (top, right), hits);
     }
 
-    if let Some(said) = &panel.said {
-        let top = area.y + SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP;
+    let under = area.y + SETTINGS_TITLE + all.len() as f32 * SETTINGS_STEP;
+    for (step, sentence) in [Some(&resolved), panel.said.as_ref()].into_iter().flatten().enumerate()
+    {
+        let top = under + step as f32 * SETTINGS_STEP;
         let baseline = painter.baseline(top, SETTINGS_STEP, metrics.header_size);
         line(
             painter,
-            said,
+            sentence,
             TextStyle::new(metrics.header_size, theme.palette.dim),
             area.x + PROPERTIES_INSET,
             inner,
@@ -2698,6 +2730,41 @@ fn setting_control(
             setting_button(
                 painter,
                 "\u{2212}",
+                (index, false, SettingAim::No),
+                (edge, middle),
+                hits,
+            );
+        }
+        crate::settings::Kind::Choice => {
+            edge = setting_button(
+                painter,
+                "\u{203a}",
+                (index, false, SettingAim::Yes),
+                (edge, middle),
+                hits,
+            );
+            let theme = *painter.theme;
+            let metrics = theme.metrics;
+            let shown = values.icons.shown();
+            // Two pixels of slack past the measurement, for the reason the
+            // panel's own label column takes it: the box a word is drawn into is
+            // the box it is ellipsised against, and measured exactly `Skerry`
+            // came out as `Skerr…`.
+            let width = (text_width(painter, shown, metrics.header_size, false) + 2.0)
+                .clamp(28.0, SETTINGS_CONTROL - 56.0);
+            let baseline = painter.baseline(middle, SETTING_BUTTON, metrics.header_size);
+            line(
+                painter,
+                shown,
+                TextStyle::new(metrics.header_size, theme.palette.text).centred(),
+                edge - width,
+                width,
+                baseline,
+            );
+            edge -= width + 4.0;
+            setting_button(
+                painter,
+                "\u{2039}",
                 (index, false, SettingAim::No),
                 (edge, middle),
                 hits,
@@ -3465,7 +3532,11 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     );
     let colour =
         if carrying.directory { theme.palette.kinds.folder } else { theme.palette.kinds.unknown };
-    let mark = if carrying.directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
+    let mark = sk_ui::Icon::Mark(if carrying.directory {
+        sk_ui::Mark::Folder
+    } else {
+        sk_ui::Mark::Unknown
+    });
     painter.icon(mark, icon, colour);
 
     let baseline = painter.baseline(area.y, CARD_HEIGHT, metrics.text_size);
@@ -3949,14 +4020,17 @@ fn place_row(
         // It is a row a press *mounts* rather than opens, and the difference has
         // to be visible before the press: an identical row that behaves
         // differently is the thing rule 4 is about.
-        Mark::Volume if row.unmounted => painter.icon(sk_ui::Icon::Disk, icon, theme.palette.dim),
-        Mark::Volume => painter.icon(
-            sk_ui::Icon::Disk,
-            icon,
-            if row.remote { kinds.audio } else { kinds.unknown },
-        ),
-        Mark::Trash => painter.icon(sk_ui::Icon::Folder, icon, theme.palette.dim),
-        Mark::Place(_) => painter.icon(sk_ui::Icon::Folder, icon, kinds.folder),
+        Mark::Volume if row.unmounted => {
+            painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Drive), icon, theme.palette.dim);
+        }
+        Mark::Volume if row.remote => {
+            painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Network), icon, kinds.audio);
+        }
+        Mark::Volume => painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Drive), icon, kinds.unknown),
+        Mark::Trash => painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Trash), icon, theme.palette.dim),
+        Mark::Place(place) => {
+            painter.icon(sk_ui::Icon::Mark(crate::marks::of_place(place)), icon, kinds.folder);
+        }
     }
 
     let ink = match (current, row.unmounted) {
@@ -4442,7 +4516,7 @@ fn tab_strip(
         let icon = painter.rect(area.x + 9.0, shape.y + (shape.height - mark) / 2.0, mark, mark);
         let folder = theme.palette.kinds.folder;
         let ink = if active || marked { folder } else { folder.with_alpha(150) };
-        painter.icon(sk_ui::Icon::Folder, icon, ink);
+        painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Folder), icon, ink);
         let text_x = area.x + 9.0 + mark + 6.0;
         let close = crate::panes::tab_close(area);
         let room = close.map_or(area.right() - 10.0 - text_x, |it| it.x - 6.0 - text_x);
@@ -4804,6 +4878,23 @@ const CHEVRON: f32 = 14.0;
 /// **No size and no date, because a column has neither.** A trail level fetches no
 /// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
 /// that would be blank while it arrived.
+/// Where a column row's mark comes from — [ADR
+/// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)'s
+/// one question, with its two answers.
+#[derive(Clone, Copy)]
+enum ColumnMark<'a> {
+    /// The theme's icon, which the atlas holds.
+    Themed(sk_gpu::ImageKey),
+    /// Our own mark, coloured by the type the database says it is.
+    Ours(Option<&'a sk_desktop::MimeDatabase>),
+}
+
+impl<'a> ColumnMark<'a> {
+    fn of(icon: Option<&sk_gpu::ImageKey>, types: Option<&'a sk_desktop::MimeDatabase>) -> Self {
+        icon.map_or(Self::Ours(types), |image| Self::Themed(*image))
+    }
+}
+
 fn column_row(
     painter: &mut Painter<'_>,
     listing: &sk_model::Listing,
@@ -4811,7 +4902,7 @@ fn column_row(
     layout: &PaneLayout,
     cell: Area,
     state: CellState,
-    types: Option<&sk_desktop::MimeDatabase>,
+    source: ColumnMark<'_>,
 ) {
     // The column's rectangle at this row's height. `area` is the column, `top` is
     // where this row starts in it, and every line below wants one or the other.
@@ -4847,11 +4938,18 @@ fn column_row(
     let (_, text_x, width) = column_parts(area, &metrics);
     let mark = mark_of(Mode::Columns, layout, cell, &metrics);
     let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
-    let ink = kind_colour_of(&theme, types, listing, id, directory, broken);
     // **No thumbnail here, and that is ADR 0015 rather than an omission**: a
     // column fetches no metadata, and a thumbnail is keyed on when the file
-    // changed. See `mark_at`.
-    let mark = if directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
+    // changed. See `mark_at`. **A themed icon is not a thumbnail** — it is keyed
+    // on the file's type and needs no `statx` — so a column draws one where the
+    // setting names a theme, the way Details and the grid do.
+    let (mark, ink) = match source {
+        ColumnMark::Themed(image) => (sk_ui::Icon::Themed(image), theme.palette.text),
+        ColumnMark::Ours(types) => (
+            sk_ui::Icon::Mark(our_mark(listing, id, directory, types, &[])),
+            kind_colour_of(&theme, types, listing, id, directory, broken),
+        ),
+    };
     painter.icon(mark, icon_box, ink);
 
     let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
@@ -4900,7 +4998,8 @@ fn ancestor_columns(
             let top = cells.at(row, level.scroll.offset()).y;
             let state = CellState { chosen: level.chosen == Some(id), ..CellState::default() };
             let cell = Area { y: top, height: metrics.row_height, ..area };
-            column_row(painter, &level.dir.listing, id, layout, cell, state, chrome.types);
+            let mark = ColumnMark::of(level.icons.get(&id), chrome.types);
+            column_row(painter, &level.dir.listing, id, layout, cell, state, mark);
         }
         if rows == 0 && !level.dir.loading {
             let message = level.dir.problem.as_ref().map_or_else(
@@ -4951,9 +5050,11 @@ fn body(
     for heading in cells.headings(pane.scroll.offset()) {
         heading_at(painter, pane.grouping, heading);
     }
+    let specials = crate::marks::specials(chrome.places, &pane.path);
     for row in cells.visible(pane.scroll.offset()) {
         let context = RowContext {
             types: chrome.types,
+            specials: &specials,
             naming: chrome.naming.filter(|_| has_keyboard),
             drop_row: chrome.drop_row.filter(|(id, _)| *id == layout.id).map(|(_, row)| row),
         };
@@ -4971,7 +5072,8 @@ fn body(
                     chosen: false,
                 };
                 let cell = Area { y: top, height: metrics.row_height, ..area };
-                column_row(painter, &pane.listing, id, layout, cell, state, chrome.types);
+                let mark = ColumnMark::of(pane.icons.get(&id), chrome.types);
+                column_row(painter, &pane.listing, id, layout, cell, state, mark);
                 // **The field, after the row it replaces.** A column view had
                 // none: `F2` opened a rename that drew nothing, so the name was
                 // typed blind — and a press had no box to land in, which is the
@@ -5045,6 +5147,9 @@ fn body(
 struct RowContext<'a> {
     /// The filename half of shared-mime-info, for the kind colour.
     types: Option<&'a MimeDatabase>,
+    /// The well-known directories this pane is showing, by name —
+    /// [`crate::marks::specials`].
+    specials: &'a [(&'a str, sk_ui::Mark)],
     /// The name being typed, if one is — which suppresses every focus ring.
     naming: Option<&'a Naming>,
     /// Where a drag of files would land.
@@ -5146,7 +5251,7 @@ fn cell_at(
     context: RowContext<'_>,
     hits: &mut Hits,
 ) {
-    let RowContext { types, naming, drop_row } = context;
+    let RowContext { types, specials, naming, drop_row } = context;
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let Some(id) = pane.listing.at(row) else { return };
@@ -5178,7 +5283,7 @@ fn cell_at(
     }
 
     let mark = mark_of(pane.mode, layout, box_, &metrics);
-    mark_at(painter, pane, id, mark, MarkState { directory, broken }, types);
+    mark_at(painter, pane, id, mark, MarkState { directory, broken }, (types, specials));
 
     let label = grid_label(box_, &metrics);
     let baseline = painter.baseline(label.y, label.height, metrics.text_size);
@@ -5256,11 +5361,11 @@ fn mark_at(
     id: sk_model::EntryId,
     mark: Area,
     state: MarkState,
-    types: Option<&MimeDatabase>,
+    known: (Option<&MimeDatabase>, &[(&str, sk_ui::Mark)]),
 ) {
     let theme = *painter.theme;
     let box_ = painter.rect(mark.x, mark.y, mark.width, mark.height);
-    let (icon, colour) = icon_of(&theme, pane, id, state, types);
+    let (icon, colour) = icon_of(&theme, pane, id, state, known);
     painter.icon(icon, box_, colour);
 }
 
@@ -5274,12 +5379,23 @@ fn icon_of(
     pane: &Pane,
     id: sk_model::EntryId,
     state: MarkState,
-    types: Option<&MimeDatabase>,
+    known: (Option<&MimeDatabase>, &[(&str, sk_ui::Mark)]),
 ) -> (sk_ui::Icon, Color) {
+    let (types, specials) = known;
     if let Some(image) = pane.thumbs.get(&id) {
         // The tint carries only its alpha, which is opaque here: a dimmed
         // thumbnail would be a second meaning for the colour a broken link uses.
         return (sk_ui::Icon::Picture(*image), theme.palette.text);
+    }
+    // **The picture first, the theme second, our own mark last** — [ADR
+    // 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    // A thumbnail is more specific than anything a theme has; a themed icon is
+    // more specific than a kind. `Pane::icons` holds only what the atlas has
+    // confirmed, so an icon still being rasterised falls through to the mark
+    // below — drawn at the final position, to the logical pixel, which is what
+    // keeps the first frame honest.
+    if let Some(image) = pane.icons.get(&id) {
+        return (sk_ui::Icon::Themed(*image), theme.palette.text);
     }
     // **A colour somebody chose beats the colour of what the thing is.** A folder
     // is blue because it is a folder; one that is red is red because a person
@@ -5289,8 +5405,27 @@ fn icon_of(
         || kind_colour_of(theme, types, &pane.listing, id, state.directory, state.broken),
         |chosen| chosen.ink(&theme.palette),
     );
-    let icon = if state.directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
-    (icon, colour)
+    let mark = our_mark(&pane.listing, id, state.directory, types, specials);
+    (sk_ui::Icon::Mark(mark), colour)
+}
+
+/// Which of Skerry's own marks an entry gets — [`crate::marks`].
+///
+/// A folder by its name among the well-known directories this pane is showing,
+/// a file by its type and then its kind.
+fn our_mark(
+    listing: &sk_model::Listing,
+    id: sk_model::EntryId,
+    directory: bool,
+    types: Option<&MimeDatabase>,
+    specials: &[(&str, sk_ui::Mark)],
+) -> sk_ui::Mark {
+    if directory {
+        let name = listing.name(id);
+        return specials.iter().find(|(it, _)| *it == name).map_or(sk_ui::Mark::Folder, |it| it.1);
+    }
+    let (kind, mime) = sk_desktop::kind_and_type_of(listing, id, types);
+    crate::marks::of_file(kind, mime, types)
 }
 
 /// The colour of an entry's mark.
@@ -5328,7 +5463,7 @@ fn row_at(
     context: RowContext<'_>,
     hits: &mut Hits,
 ) {
-    let RowContext { types, naming, drop_row } = context;
+    let RowContext { types, specials, naming, drop_row } = context;
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let cursor = pane.selection.cursor();
@@ -5391,7 +5526,7 @@ fn row_at(
         }
 
         let mark = mark_of(pane.mode, layout, cells.at(row, pane.scroll.offset()), &metrics);
-        mark_at(painter, pane, id, mark, MarkState { directory, broken }, types);
+        mark_at(painter, pane, id, mark, MarkState { directory, broken }, (types, specials));
 
         let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
         if let Some(naming) = naming.filter(|naming| naming.row == row) {

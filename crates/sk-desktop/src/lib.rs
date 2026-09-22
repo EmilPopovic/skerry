@@ -12,9 +12,11 @@
 //!
 //! # What is here and what is owed
 //!
-//! Detecting a file's type, finding what opens it, and starting that. **Not**
-//! here: icon themes, D-Bus, `FileManager1`, udisks2, portals, and registering
-//! ourselves as a handler. Those are M7's and each is larger than all of this.
+//! Detecting a file's type, finding what opens it, starting that, and — since
+//! [ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)
+//! — which file draws an icon. **Not** here: turning that file into pixels, which
+//! is a decoder's job and therefore `sk-preview`'s, and no policy about which
+//! theme to ask.
 //!
 //! The type detection is by **filename** — `globs2` — plus a small table of
 //! signatures for files with no useful extension. shared-mime-info's binary
@@ -26,11 +28,16 @@
 // table in Cargo.toml, together with the few pedantic lints allowed there with a
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
+#[cfg(test)]
+#[path = "../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
 pub mod activation;
 pub mod apps;
 pub mod atspi;
 pub mod bus;
 pub mod entry;
+pub mod icons;
 pub mod launch;
 pub mod mime;
 pub mod mimeapps;
@@ -40,8 +47,9 @@ pub mod udisks;
 
 pub use apps::Applications;
 pub use entry::DesktopEntry;
+pub use icons::Theme as IconTheme;
 pub use launch::Launcher;
-pub use mime::{Category, MimeDatabase, category, is_text, kind_of, kinds};
+pub use mime::{Category, MimeDatabase, category, is_text, kind_and_type_of, kind_of, kinds};
 pub use places::{Kind, Place, bookmarks, file_uri, pin, reorder, templates, unpin, user_dirs};
 
 use std::path::{Path, PathBuf};

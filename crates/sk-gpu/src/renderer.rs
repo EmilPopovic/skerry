@@ -7,7 +7,7 @@ use sk_text::{Fonts, GlyphKey};
 
 use crate::atlas::{Atlas, COLOR_SIDE, MASK_SIDE, Placed};
 use crate::draw::{DrawList, Item, KIND_COLOR, KIND_MASK, Quad};
-use crate::images::{ImageKey, Images, SIDE as IMAGE_SIDE};
+use crate::images::{ICON_SIDE, ImageKey, Images, SIDE as IMAGE_SIDE};
 
 /// What one frame cost.
 ///
@@ -69,6 +69,9 @@ pub struct Renderer {
     color: wgpu::Texture,
     /// The thumbnail atlas's texture — ADR 0018's grid of equal slots.
     images: wgpu::Texture,
+    /// The icon atlas's texture — ADR 0042's four bands. Its own, because an icon
+    /// is keyed and sized differently from a thumbnail.
+    icons: wgpu::Texture,
     /// The pages held, each its own texture, keyed by what it is of — [ADR
     /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
     ///
@@ -83,6 +86,8 @@ pub struct Renderer {
     atlas: Atlas,
     /// What is in that grid, and what is queued for it.
     pictures: Images,
+    /// What is in the four bands, and what is queued for them.
+    marks: crate::images::Icons,
     /// Resolved instances for the frame being submitted, kept between frames so
     /// a frame is not an allocation.
     quads: Vec<Quad>,
@@ -210,7 +215,7 @@ impl Renderer {
         target: Target,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let Built { pipeline, layout, bind_group, uniforms, mask, color, images, preview } =
+        let Built { pipeline, layout, bind_group, uniforms, mask, color, images, icons, preview } =
             build(&device, format);
         let capacity = 1 << 14;
         let instances = instance_buffer(&device, capacity);
@@ -228,11 +233,13 @@ impl Renderer {
             color,
             layout,
             images,
+            icons,
             pages: std::collections::HashMap::new(),
             placeholder: preview,
             looking: crate::images::Preview::default(),
             atlas: Atlas::new(),
             pictures: Images::default(),
+            marks: crate::images::Icons::default(),
             quads: Vec::with_capacity(capacity),
             adapter: info.name,
             backend: format!("{:?}", info.backend),
@@ -278,6 +285,16 @@ impl Renderer {
         }
         self.images =
             atlas_texture(&self.device, "thumbnails", IMAGE_SIDE, wgpu::TextureFormat::Rgba8Unorm);
+        self.rebuild_bindings();
+    }
+
+    /// The same, for the icon atlas's four bands — ADR 0042.
+    fn grow_the_icon_atlas(&mut self) {
+        if !self.marks.in_use() || self.icons.width() == ICON_SIDE {
+            return;
+        }
+        self.icons =
+            atlas_texture(&self.device, "icons", ICON_SIDE, wgpu::TextureFormat::Rgba8Unorm);
         self.rebuild_bindings();
     }
 
@@ -330,6 +347,10 @@ impl Renderer {
                             .and_then(|key| self.pages.get(&key))
                             .unwrap_or(&self.placeholder),
                     )),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(&view(&self.icons)),
                 },
             ],
         });
@@ -428,6 +449,29 @@ impl Renderer {
         self.pictures.insert(key, width, height, pixels).is_some()
     }
 
+    /// Puts an icon in the band that fits it, or says it did not fit.
+    ///
+    /// `pixels` is straight `RGBA8`, neither side above the largest band's 128 —
+    /// [ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    pub fn hold_icon(&mut self, key: ImageKey, width: u32, height: u32, pixels: &[u8]) -> bool {
+        self.marks.insert(key, width, height, pixels).is_some()
+    }
+
+    /// Whether the icon atlas already holds `key`, without marking it as drawn.
+    ///
+    /// Like [`Self::holds_image`] and not like `get`, for the same reason.
+    #[must_use]
+    pub fn holds_icon(&self, key: ImageKey) -> bool {
+        self.marks.holds(key)
+    }
+
+    /// Icons held, how full the four bands are, and how many uploads are waiting.
+    #[must_use]
+    pub fn icon_stats(&self) -> (usize, f32, usize) {
+        let (held, full) = self.marks.stats();
+        (held, full, self.marks.pending())
+    }
+
     /// Whether the atlas already holds `key`, without marking it as drawn.
     ///
     /// For a caller deciding whether to ask a child for something. **Not
@@ -513,6 +557,7 @@ impl Renderer {
         // to advance exactly once per frame — a caller who forgot would make every
         // entry look equally old and eviction arbitrary.
         self.pictures.begin_frame();
+        self.marks.begin_frame();
         self.looking.begin_frame();
         let (width, height) = self.size();
 
@@ -546,9 +591,11 @@ impl Renderer {
         let boundaries = self.resolve(list, fonts, &mut stats);
         self.atlas.flush(&self.queue, &self.mask, &self.color);
         self.grow_the_image_atlas();
+        self.grow_the_icon_atlas();
         self.upload_the_previews();
         self.bind_the_drawn_page(list);
         self.pictures.flush(&self.queue, &self.images);
+        self.marks.flush(&self.queue, &self.icons);
 
         if self.quads.len() > self.capacity {
             self.capacity = self.quads.len().next_power_of_two();
@@ -564,6 +611,8 @@ impl Renderer {
             COLOR_SIDE as f32,
             IMAGE_SIDE as f32,
             IMAGE_SIDE as f32,
+            ICON_SIDE as f32,
+            ICON_SIDE as f32,
         ];
         self.queue.write_buffer(&self.uniforms, 0, as_bytes(&uniforms));
         self.queue.write_buffer(&self.instances, 0, as_bytes(&self.quads));
@@ -724,6 +773,14 @@ impl Renderer {
                         if let Some(slot) = self.pictures.get(*key) {
                             self.quads.push(filled_quad(slot, *rect, alpha.packed()));
                         }
+                    }
+                    Item::Icon { key, rect, alpha } => {
+                        if let Some(slot) = self.marks.get(*key) {
+                            self.quads.push(icon_quad(slot, *rect, alpha.packed()));
+                        }
+                        // An icon the atlas does not hold yet draws nothing here
+                        // — the geometric mark under it is what is on screen, and
+                        // the caller is what decides that. See `view::icon_of`.
                     }
                     Item::Image { key, rect, alpha } => {
                         if let Some(slot) = self.pictures.get(*key) {
@@ -898,8 +955,21 @@ fn filled_quad(slot: crate::images::Slot, rect: crate::Rect, color: u32) -> Quad
     }
 }
 
+/// An icon, centred in its box and never enlarged past its own band.
+///
+/// **The same fit as [`image_quad`], with its own kind.** An icon comes from the
+/// band at or above the size it is drawn at, so the scale is at most one and the
+/// picture is minified rather than blown up — which is the whole reason the
+/// freedesktop per-size directories exist.
+fn icon_quad(slot: crate::images::Slot, rect: crate::Rect, color: u32) -> Quad {
+    Quad { kind: KIND_ICON, ..image_quad(slot, rect, color) }
+}
+
 /// The shader's `KIND_IMAGE`, after the four triangle directions.
 const KIND_IMAGE: u32 = 7;
+
+/// A themed icon, from the banded atlas — ADR 0042.
+const KIND_ICON: u32 = 10;
 
 /// And the one preview, which samples a texture of its own.
 const KIND_PREVIEW: u32 = 8;
@@ -1004,6 +1074,7 @@ struct Built {
     mask: wgpu::Texture,
     color: wgpu::Texture,
     images: wgpu::Texture,
+    icons: wgpu::Texture,
     preview: wgpu::Texture,
 }
 
@@ -1012,7 +1083,9 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
     let color = atlas_texture(device, "colour glyphs", COLOR_SIDE, wgpu::TextureFormat::Rgba8Unorm);
     let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("uniforms"),
-        size: 32,
+        // Five `vec2<f32>`, rounded up to the sixteen bytes a uniform binding is
+        // sized in.
+        size: 48,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -1023,9 +1096,13 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
     // is a bind group rebuilt; the *layout* never changes, so the pipeline does
     // not either.
     let images = atlas_texture(device, "thumbnails", 1, wgpu::TextureFormat::Rgba8Unorm);
+    // One texel until an icon exists, which is the same rule and the reason a
+    // window under `icons = marks` allocates none of the four megabytes.
+    let icons = atlas_texture(device, "icons", 1, wgpu::TextureFormat::Rgba8Unorm);
     // One texel until a preview exists, for the reason the atlas is.
     let preview = atlas_texture(device, "preview", 1, wgpu::TextureFormat::Rgba8Unorm);
-    let (layout, bind_group) = bindings(device, &uniforms, &mask, &color, &images, &preview);
+    let lazy = Atlases { images: &images, icons: &icons, preview: &preview };
+    let (layout, bind_group) = bindings(device, &uniforms, &mask, &color, lazy);
     Built {
         pipeline: pipeline(device, &layout, format),
         layout,
@@ -1034,8 +1111,17 @@ fn build(device: &wgpu::Device, format: wgpu::TextureFormat) -> Built {
         mask,
         color,
         images,
+        icons,
         preview,
     }
+}
+
+/// The three textures that are one texel until something needs them.
+#[derive(Clone, Copy)]
+struct Atlases<'t> {
+    images: &'t wgpu::Texture,
+    icons: &'t wgpu::Texture,
+    preview: &'t wgpu::Texture,
 }
 
 fn bindings(
@@ -1043,9 +1129,9 @@ fn bindings(
     uniforms: &wgpu::Buffer,
     mask: &wgpu::Texture,
     color: &wgpu::Texture,
-    images: &wgpu::Texture,
-    preview: &wgpu::Texture,
+    lazy: Atlases<'_>,
 ) -> (wgpu::BindGroupLayout, wgpu::BindGroup) {
+    let Atlases { images, icons, preview } = lazy;
     // Nearest, deliberately. Every glyph is drawn 1:1 from a raster made at its
     // device size, so a filtering sampler could only hide a bug — which is
     // exactly the bug Spike A had.
@@ -1090,6 +1176,7 @@ fn bindings(
             },
             texture_entry(4, true),
             texture_entry(6, true),
+            texture_entry(7, true),
             wgpu::BindGroupLayoutEntry {
                 binding: 5,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1123,6 +1210,10 @@ fn bindings(
             wgpu::BindGroupEntry {
                 binding: 6,
                 resource: wgpu::BindingResource::TextureView(&view(preview)),
+            },
+            wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(&view(icons)),
             },
         ],
     });

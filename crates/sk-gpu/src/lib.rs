@@ -29,5 +29,5 @@ pub mod capture;
 pub mod draw;
 
 pub use draw::{Color, Direction, DrawList, Rect};
-pub use images::{ImageKey, SLOT as THUMBNAIL_SLOT};
+pub use images::{ICON_SIDE, ImageKey, SLOT as THUMBNAIL_SLOT, icon_band};
 pub use renderer::{FrameStats, Renderer};

@@ -476,63 +476,11 @@ impl Painter<'_> {
     /// why that is a value rather than four call sites.
     pub fn icon(&mut self, icon: Icon, box_rect: Rect, color: Color) {
         match icon {
-            Icon::Folder => self.folder(box_rect, color),
-            Icon::Page => self.file(box_rect, color),
-            Icon::Disk => self.disk(box_rect, color),
+            Icon::Mark(mark) => crate::marks::draw(self.list, mark, box_rect, color),
             // The tint carries only its alpha, so a caller can fade a thumbnail
             // in without a second code path — see [`Self::image`].
             Icon::Picture(key) => self.image(key, box_rect, color),
-        }
-    }
-
-    /// The mark for a directory: a folder, from two rounded rectangles.
-    ///
-    /// Geometric rather than from an icon theme, because icon themes belong to
-    /// `sk-desktop` and arrive in M7.
-    ///
-    /// **Two tones and not one.** An outline was tried and is what the objection
-    /// that used to be in this comment described — at fifteen logical pixels it
-    /// is four hairlines around a hole. What an outline was reaching for is the
-    /// *quiet* icon a modern tree draws, and two tones of one colour get that
-    /// without the hairlines: the tab a shade behind the body, which is how a
-    /// folder has been drawn since it stopped being drawn in perspective.
-    pub fn folder(&mut self, box_rect: Rect, color: Color) {
-        let unit = box_rect.height / 16.0;
-        let tab = Rect::new(
-            box_rect.x + unit,
-            box_rect.y + unit * 2.0,
-            box_rect.width * 0.45,
-            unit * 4.5,
-        );
-        let body = Rect::new(
-            box_rect.x,
-            box_rect.y + unit * 4.5,
-            box_rect.width,
-            box_rect.height - unit * 5.5,
-        );
-        // **The tab darker on either palette**, because it sits *behind* the
-        // body: mixing toward black is the one direction that reads as depth
-        // whether the ground is dark or light.
-        self.list.rect(tab, color.mix(Color::hex(0x000000), 0.25), unit * 1.2);
-        self.list.rect(body, color, unit * 1.6);
-    }
-
-    /// The mark for a mounted filesystem: a stack of two platters.
-    ///
-    /// Two rounded bars rather than a drive-shaped outline, because at fifteen
-    /// pixels a drive shape is a rectangle and this is the shape every disk icon
-    /// has been since the platters were real.
-    pub fn disk(&mut self, box_rect: Rect, color: Color) {
-        let unit = box_rect.height / 16.0;
-        let height = unit * 4.5;
-        for row in 0..2 {
-            let bar = Rect::new(
-                box_rect.x,
-                box_rect.y + unit * 3.0 + row as f32 * (height + unit * 1.5),
-                box_rect.width,
-                height,
-            );
-            self.list.rect(bar, color, unit * 2.0);
+            Icon::Themed(key) => self.themed(key, box_rect, color),
         }
     }
 
@@ -548,6 +496,18 @@ impl Painter<'_> {
     /// without a second code path; its colour channels are ignored.
     pub fn image(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
         self.list.image(key, box_rect, tint);
+    }
+
+    /// A themed icon, fitted inside `box_rect` and centred in it.
+    ///
+    /// **A key and a rectangle**, like [`Self::image`] and for the same reason —
+    /// [ADR 0003](../../../docs/adr/0003-wgpu-first-backend.md). Which band it
+    /// came from and where in it is the renderer's; an icon the atlas does not
+    /// hold draws nothing, which is why the caller draws the geometric mark under
+    /// it — [ADR
+    /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    pub fn themed(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
+        self.list.icon(key, box_rect, tint);
     }
 
     /// A thumbnail standing in for a picture, filling `box_rect` exactly.
@@ -600,70 +560,36 @@ impl Painter<'_> {
         );
         self.list.rect(block, ink, self.px(1.0));
     }
-
-    /// The mark for a file: an outlined page with two lines of text in it.
-    pub fn file(&mut self, box_rect: Rect, color: Color) {
-        let unit = box_rect.height / 16.0;
-        let page = Rect::new(
-            box_rect.x + box_rect.width * 0.18,
-            box_rect.y + unit,
-            box_rect.width * 0.64,
-            box_rect.height - unit * 2.0,
-        );
-        self.list.stroke(page, color, unit * 1.4, (unit * 1.3).max(1.0));
-        for offset in [0.40, 0.60] {
-            let rect = Rect::new(
-                (page.x + page.width * 0.26).round(),
-                (page.y + page.height * offset).round(),
-                (page.width * 0.48).round(),
-                (unit * 1.3).max(1.0).round(),
-            );
-            self.list.rect(rect, color, 0.0);
-        }
-    }
 }
 
 /// What a mark is, as a value rather than as a call.
 ///
-/// **Four shapes and one draw.** Each of these was a method called directly from
-/// four places in the view — a row, a grid cell, a sidebar row, a tab — so which
-/// shape an entry gets was a decision spread across the file, and every place
-/// that took it had to be found again to change it. The decision is now one
-/// value, made where the entry is known, and [`Painter::icon`] is the only thing
-/// that draws.
+/// **Three sources and one draw.** Each shape was once a method called directly
+/// from four places in the view — a row, a grid cell, a sidebar row, a tab — so
+/// which shape an entry got was a decision spread across the file. The decision
+/// is now one value, made where the entry is known, and [`Painter::icon`] is the
+/// only thing that draws: one of Skerry's own [`crate::marks`], a theme's icon,
+/// or a thumbnail.
 ///
-/// # Adding a per-type badge
-///
-/// The obvious next kind is what an IDE draws: a rounded square in the type's
-/// colour with two letters in it — `JS`, `MD`, `PY`. It is **a fifth variant and
-/// a fifth arm**, and nothing else in the view moves:
-///
-/// * `Badge(&'static str)` here, or a small inline string where the letters come
-///   from an extension rather than a table;
-/// * one arm in [`Painter::icon`] drawing a rounded rect and a centred run in
-///   the bold face;
-/// * one line in `view::icon_of`, which is where an entry already becomes an
-///   `Icon` and already has the listing and the type database in hand.
-///
-/// **What makes it a judgement rather than a task** is the size. A row's mark is
-/// **13 logical pixels**, so two letters are about seven pixels tall at 100% and
-/// fourteen at 200% — legible at the second and marginal at the first. Whoever
-/// takes it should render `scale-100` and `scale-200` and look at both before
-/// blessing anything, which is the same rule
+/// A new mark is a variant of [`crate::Mark`] and an arm in its drawing, and
+/// nothing in the view moves; which entries get it is `sk_app::marks`. Render
+/// the specimen sheet — `--capture --marks` at 100% and at 200% — and look at
+/// both before blessing anything, which is the rule
 /// [12-measurement.md](../../../docs/12-measurement.md#some-defects-are-only-visible-to-a-person-looking)
-/// already states.
-///
-/// The other future kind is M7's icon theme, which is a `Themed` variant looked
-/// up from the desktop's own `index.theme` — and it arrives through this seam
-/// rather than around it, which is the other reason this is a value.
+/// already states: at thirteen logical pixels an emblem is five pixels wide.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
-    /// A directory.
-    Folder,
-    /// A file with nothing more specific to say: a page with two lines on it.
-    Page,
-    /// A filesystem, mounted or not: a stack of platters.
-    Disk,
+    /// One of Skerry's own marks — [`crate::marks`], drawn from the display
+    /// list's shapes in the first frame and under a themed icon until it lands.
+    Mark(crate::marks::Mark),
+    /// An icon from the desktop's theme, which the caller asked for by name.
+    ///
+    /// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
+    /// and it arrives through this seam rather than around it** — which is the
+    /// other reason [`Icon`] is a value. Drawn only where the icon atlas holds
+    /// it; until then the caller draws the geometric mark for the same file at
+    /// the same rectangle, so the first frame is honest.
+    Themed(sk_gpu::ImageKey),
     /// A thumbnail the atlas already holds, which stands in for the file itself.
     ///
     /// **Only where the atlas has it.** `Pane::thumbs` holds keys the renderer

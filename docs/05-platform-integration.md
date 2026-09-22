@@ -43,8 +43,25 @@ window that started it closed.
 
 Full XDG icon theme resolution: `index.theme` inheritance, size and scale directories,
 `hicolor` as the terminal fallback, SVG rendering via `resvg`, PNG otherwise, everything
-cached into a GPU atlas keyed by (name, size, scale, theme generation). Users notice a wrong
+in a GPU atlas keyed by (name, size, scale, theme generation). Users notice a wrong
 icon long before they notice a frame time.
+
+[ADR 0042](adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)
+makes that sketch precise and settles the three things it leaves open. **Where a
+mark comes from is a setting** — `marks`, `desktop` or a named theme — because a
+file manager that draws the desktop's icons everywhere looks like every other
+window on that desktop, and the built-in marks are a value somebody chooses rather
+than the branch that runs when nothing else worked. **The atlas is its own**, four
+bands of equal slots in one 1024² texture rather than the thumbnails' single grid,
+because an icon is drawn from 16 device pixels to 128 and a thumbnail is one size.
+**And there is no disk cache**: the whole working set is 19.0 ms of another
+process's time for Adwaita and 6.4 ms for breeze, which is not worth a second
+writable path in a sandbox whose value is that the grant list is short enough to
+read.
+
+What is drawn from a theme today is a row's and a cell's mark. The sidebar's
+places, volumes and trash, the column view, the breadcrumb menus and the card
+under a drag still draw the built-in marks.
 
 ## Being a first-class citizen
 

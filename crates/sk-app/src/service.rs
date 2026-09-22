@@ -176,6 +176,38 @@ pub fn desktop_prefers_dark(bus: &mut Bus) -> Option<bool> {
     }
 }
 
+/// What the desktop says its icon theme is called.
+///
+/// **The same portal and the same connection as the colour scheme above**, under
+/// `org.gnome.desktop.interface`'s `icon-theme` — which is the key GTK itself
+/// reads through the portal and the one KDE's portal backend answers too. `None`
+/// where there is no portal, which is not an error: `sk_desktop::icons` reads the
+/// desktop's own settings files next, and `hicolor` after that.
+///
+/// **Read once, at start-up** — [ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+/// Following the setting as it changes needs a subscription, and a subscribing
+/// connection is the successor ADR 0023's revisit trigger names.
+#[must_use]
+pub fn desktop_icon_theme(bus: &mut Bus) -> Option<String> {
+    if sk_util::disabled("portal") {
+        return None;
+    }
+    let call = Message::call(
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        "org.freedesktop.portal.Settings",
+        "Read",
+        vec![
+            Value::Str("org.gnome.desktop.interface".to_owned()),
+            Value::Str("icon-theme".to_owned()),
+        ],
+    );
+    // Doubly wrapped, as the colour scheme is: `Read` answers `v`, and the value
+    // inside it is the variant the namespace stores.
+    let name = bus.call(call)?.body.first()?.text()?.trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Asks the running instance to show `paths`. Whether it answered.
 ///
 /// With nothing to show it still calls, with an empty list: the point of the call

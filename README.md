@@ -181,9 +181,10 @@ the first bug report on one of them.
 - **No encrypted volumes.** A disk appears in the sidebar whether or not anything
   has mounted it, and a press mounts it through udisks2 — but a LUKS container is
   not offered, because unlocking one is a passphrase field and its own surface.
-- **Six settings, and no more.** `Ctrl ,` opens a panel listing the theme, hidden
-  files, the sidebar and its width, what a new folder opens as, and whether Move to
-  Trash asks first — each with its value and where that value came from. Everything
+- **Seven settings, and no more.** `Ctrl ,` opens a panel listing the theme, hidden
+  files, the sidebar and its width, what a new folder opens as, whether Move to
+  Trash asks first, and where a file's mark comes from — each with its value and
+  where that value came from. Everything
   else is a chord, a drag, or per-folder and remembered where you set it.
 - **Four performance budget rows are missed**, and each is recorded with its number
   rather than widened: cold start, the 1M sort, one scroll run in five at a million
@@ -199,10 +200,15 @@ the first bug report on one of them.
   panel — the line is that a container Skerry can parse it parses, and a
   compressor is the machine's ([ADR
   0032](docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
-- **No icon themes.** An application icon ships and the desktop entry names it,
-  but nothing is resolved out of `index.theme`: the window draws its own built-in
-  glyphs, and a file's mark is a page coloured by its MIME category rather than
-  the themed icon the rest of the desktop would draw for it.
+- **Icon themes reach the pane and nothing else.** A row's and a cell's mark comes
+  from the desktop's theme — `index.theme` parsed, the freedesktop search run on a
+  job, the file rasterised by the same sandboxed helper that decodes PNG, JPEG,
+  SVG and GIF, and held in a banded atlas of its own
+  ([ADR 0042](docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)).
+  The sidebar's places, volumes and trash still draw the built-in marks, and so do
+  the breadcrumb menus and the card under a drag. `icons = marks` keeps the
+  built-in marks everywhere, and it is a value somebody chooses rather than the
+  branch that runs when nothing else worked.
 - **Creating things is thin.** New folder and a single rename. No new file, no
   Templates, no symlinks, and no batch rename — which M3 names and this is not.
 - **Properties changes the nine permission bits and nothing else.** Each one is

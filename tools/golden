@@ -97,6 +97,9 @@ GEOMETRY_RATIO = 0.5
 # not as a clock time that changes at midnight.
 FIXED_MTIME = 981_158_400  # 2001-02-03T00:00:00Z
 
+# The fixture icon theme's name, which a frame passes to `--icons`.
+ICON_THEME = "skerry-fixture"
+
 FRAMES = [
     ("scale-100", ["--size", "900x520", "--scale", "100"]),
     ("scale-125", ["--size", "900x520", "--scale", "125"]),
@@ -195,6 +198,19 @@ FRAMES = [
     ("grid", ["--size", "900x520", "--scale", "125", "--grid"]),
     ("grid-200", ["--size", "900x520", "--scale", "200", "--grid"]),
     ("grid-narrow", ["--size", "560x420", "--scale", "100", "--grid"]),
+    # **An icon theme's marks**, which is ADR 0042's release gate: every frame
+    # above draws our own marks, and these two draw a theme — a fixture theme
+    # built below, because a frame of the machine's Adwaita is a frame of one
+    # machine. At 125% because that is the scale where an icon was once drawn at
+    # 16 device pixels in a 20-pixel box, and in the grid because its sizes are
+    # another band of the atlas.
+    ("icons-theme", ["--size", "900x520", "--scale", "125", "--icons", ICON_THEME]),
+    ("icons-theme-grid", ["--size", "900x520", "--scale", "200", "--grid", "--icons", ICON_THEME]),
+    # And the column view, whose other columns are listings of their own: under a
+    # theme every column draws the theme's icons, or rule 8 has one view of a
+    # listing disagreeing with the other two about what a file looks like.
+    ("icons-theme-columns", ["--size", "1100x520", "--scale", "125", "--columns",
+                             "--at", "documents/deeper", "--icons", ICON_THEME]),
     # The column view: one column per level of the path, the pane's own rightmost
     # with the real selection in it and every ancestor showing which of its
     # entries the next column came from. The **only** frame where more than one
@@ -444,6 +460,13 @@ FRAMES = [
     # something attached to a position rather than to a rectangle of the layout,
     # and the only one that would catch the card sliding under a panel.
     ("carrying", ["--size", "900x520", "--scale", "125", "--carrying"]),
+    # Skerry's own marks, every one at the four sizes the window draws them —
+    # the sheet a change to any shape in `sk_ui::marks` is looked at on. At 150%
+    # so a unit of the grid is a fractional pixel at thirteen, which is where a
+    # mark that is only right on whole pixels shows it; and in both palettes,
+    # because the recessed emblem is a darker tone of the ink on either ground.
+    ("marks", ["--size", "1230x470", "--scale", "150", "--marks"]),
+    ("marks-light", ["--size", "1230x470", "--scale", "150", "--marks", "--light"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.
@@ -515,6 +538,58 @@ FRAMES = [
 
 class Failure(Exception):
     pass
+
+
+def build_icon_fixture() -> dict[str, str]:
+    """A data home holding one icon theme, and data directories holding no other.
+
+    **No other, because hicolor is walked last whether or not a theme names it**
+    — the specification makes it every chain's fallback — and a capture that
+    could see `/usr/share/icons/hicolor` would draw whatever this machine has
+    installed there. So the data directories hold the MIME database and
+    nothing else: every existing frame already depends on this machine's
+    database for its kind colours, and an icon the fixture lacks falls through
+    to our own mark, which is the same on every machine.
+    """
+    home = FIXTURE / "icon-data"
+    root = home / "icons" / ICON_THEME
+    sizes = (16, 24, 32, 48, 64, 128)
+    shapes = [
+        ("places", "folder", "#c04040"),
+        ("mimetypes", "text-x-generic", "#40a0c0"),
+        ("mimetypes", "image-x-generic", "#40a060"),
+        ("mimetypes", "package-x-generic", "#c09040"),
+        # The two generics the MIME database *names* rather than the lookup
+        # building one: a PDF's and an archive's. Built, both asked for
+        # `application-x-generic` and drew the text icon — which this frame
+        # would now show.
+        ("mimetypes", "x-office-document", "#9060c0"),
+    ]
+    groups = "".join(
+        f"\n[{s}x{s}/{kind}]\nSize={s}\nType=Fixed\n" for s in sizes for kind in ("places", "mimetypes")
+    )
+    listed = ",".join(f"{s}x{s}/{kind}" for s in sizes for kind in ("places", "mimetypes"))
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "index.theme").write_text(f"[Icon Theme]\nName={ICON_THEME}\nDirectories={listed}\n{groups}")
+    for size in sizes:
+        for kind, icon, colour in shapes:
+            at = root / f"{size}x{size}" / kind
+            at.mkdir(parents=True, exist_ok=True)
+            # A ring inside the square, so a frame of the theme cannot be
+            # mistaken for a frame of a flat-coloured mark.
+            (at / f"{icon}.svg").write_text(
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}">'
+                f'<rect width="{size}" height="{size}" rx="{size // 6}" fill="{colour}"/>'
+                f'<circle cx="{size / 2}" cy="{size / 2}" r="{size / 4}" fill="none" '
+                f'stroke="#ffffff" stroke-width="{max(1, size // 12)}"/></svg>'
+            )
+    system = FIXTURE / "icon-system"
+    system.mkdir(parents=True, exist_ok=True)
+    database = next((Path(d) / "mime" for d in ("/usr/local/share", "/usr/share") if (Path(d) / "mime").is_dir()), None)
+    link = system / "mime"
+    if database is not None and not link.exists():
+        link.symlink_to(database)
+    return {"XDG_DATA_HOME": str(home), "XDG_DATA_DIRS": str(system)}
 
 
 def build_fixture() -> Path:
@@ -928,11 +1003,14 @@ def render(name: str, arguments: list[str], into: Path, root: str = "fixture") -
     directory instead, and the shared one is left alone.
     """
     raw = into.with_suffix(".raw.png")
+    environment = dict(os.environ, VK_LOADER_DRIVERS_SELECT="lvp_icd.json", TZ="UTC")
+    if "--icons" in arguments:
+        environment.update(build_icon_fixture())
     done = subprocess.run(
         [str(SKERRY), "--capture", str(raw), *arguments, str(FIXTURE / root)],
         capture_output=True,
         text=True,
-        env=dict(os.environ, VK_LOADER_DRIVERS_SELECT="lvp_icd.json", TZ="UTC"),
+        env=environment,
     )
     if done.returncode != 0:
         raise Failure(f"{name}: {done.stderr.strip()[:300]}")

@@ -16,10 +16,12 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod format;
+pub mod marks;
 pub mod painter;
 pub mod scroll;
 pub mod theme;
 
+pub use marks::Mark;
 pub use painter::{Align, Icon, Painter, TextStyle, advance_of, advance_to, caret_offset};
 pub use scroll::{GAIN as SCROLL_GAIN, MIN_THUMB, Scroll, thumb, visible_rows};
 pub use sk_gpu::Direction;

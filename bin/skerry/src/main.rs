@@ -52,6 +52,7 @@ struct Overlays {
     grouped_kind: bool,
     search: bool,
     carrying: bool,
+    marks: bool,
     path_entry: bool,
     palette: bool,
     filter: bool,
@@ -120,6 +121,7 @@ impl Overlays {
             "--history" => &mut self.history,
             "--search" => &mut self.search,
             "--carrying" => &mut self.carrying,
+            "--marks" => &mut self.marks,
             "--path-entry" => &mut self.path_entry,
             "--palette" => &mut self.palette,
             "--filter" => &mut self.filter,
@@ -162,6 +164,8 @@ struct Shape {
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
+    /// The icon theme `--icons` named, or nothing for our own marks.
+    icons: Option<String>,
     /// The name of a file to open a quick look at.
     looking: Option<String>,
 }
@@ -188,6 +192,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         progress: overlays.progress,
         stopped: overlays.stopped,
         indexing: overlays.indexing,
+        icons: shape.icons.clone(),
         grid: overlays.grid,
         columns: overlays.columns,
         at: shape.at.clone(),
@@ -203,6 +208,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         looking: shape.looking.clone(),
         search: overlays.search,
         carrying: overlays.carrying,
+        marks: overlays.marks,
         path_entry: overlays.path_entry,
         palette: overlays.palette,
         filter: overlays.filter,
@@ -270,6 +276,7 @@ fn main() -> std::process::ExitCode {
     let mut forced_scale = None;
     let mut at: Option<String> = None;
     let mut looking: Option<String> = None;
+    let mut icons: Option<String> = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -318,6 +325,10 @@ fn main() -> std::process::ExitCode {
             "--scale" => match arguments.next().as_deref().and_then(parse_scale) {
                 Some(scale) => forced_scale = Some(scale),
                 None => return usage_error("--scale needs a percentage, such as 125"),
+            },
+            "--icons" => match arguments.next() {
+                Some(name) if !name.is_empty() => icons = Some(name),
+                _ => return usage_error("--icons needs the name of an installed theme"),
             },
             "--look" | "--at" => match arguments.next() {
                 // Two flags, one shape: a name that follows. `--at` says which
@@ -375,6 +386,7 @@ fn main() -> std::process::ExitCode {
                 look_find,
                 at,
                 looking,
+                icons,
             },
             &overlays,
         )
@@ -482,6 +494,7 @@ skerry [OPTIONS] [PATH]
   --stopped        show the strip after a stop: what is owed, and Pick up
   --search         show the search over everything under this folder
   --carrying       show the card that follows a drag of files
+  --marks          draw every one of Skerry's own marks, at every size
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it
@@ -503,6 +516,9 @@ skerry [OPTIONS] [PATH]
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree
   --coloured       give two folders a colour, for a frame of the marks
+  --icons <theme>  draw the marks from an installed icon theme rather than from
+                   Skerry's own. Named rather than asked of the desktop, so the
+                   frame is a function of the theme and not of the machine
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,

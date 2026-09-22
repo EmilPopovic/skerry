@@ -6925,12 +6925,151 @@ def every_settings_row_answers_a_pointer(run: Run, fixture: Path) -> None:
         if int(shrank["sidebar_width"][0]) != was:
             raise Failure(f"the width came back to {shrank['sidebar_width'][0]}, not {was}")
 
+        # The choice, both ways — ADR 0042's seventh setting, and the first that
+        # is neither a truth nor a number. A fresh window is on `desktop`; one
+        # step is `marks`, and one back is `desktop` again.
+        state = own.state()
+        if settings_of(state).get("icons") != ("desktop", "default"):
+            raise Failure(f"a fresh window is {settings_of(state).get('icons')}, not the desktop's")
+        onward = a_control(own, state, 6, "yes")
+        own.drive(f"move {onward[0]:.2f} {onward[1]:.2f}\nclick left\nsleep 350\nkey f12\nsleep 200\n")
+        stepped = settings_of(holds(own, lambda it: settings_of(it).get("icons", ("desktop",))[0] != "desktop", "a stepped choice"))
+        if stepped["icons"] != ("marks", "window"):
+            raise Failure(f"one step from the desktop is {stepped['icons']}, not our own marks")
+        # And the state the window resolved to, which under `marks` is nothing
+        # parsed, nothing held and the lookup never called.
+        expect(own.state(), icons="ours")
+        state = own.state()
+        backward = a_control(own, state, 6, "no")
+        own.drive(f"move {backward[0]:.2f} {backward[1]:.2f}\nclick left\nsleep 350\nkey f12\nsleep 200\n")
+        home = settings_of(holds(own, lambda it: settings_of(it).get("icons", ("marks",))[0] != "marks", "the choice back"))
+        if home["icons"] != ("desktop", "window"):
+            raise Failure(f"one step back is {home['icons']}, not the desktop's")
+
         # Escape is the way out, and the panel goes.
         own.drive("key escape\nsleep 300\nkey f12\nsleep 200\n")
         gone = holds(own, lambda it: not settings_of(it), "the panel closed")
         expect(gone, settings="")
     finally:
         own.close()
+
+
+def install_a_theme(place: dict, name: str, sizes: tuple[int, ...] = (16, 32, 48)) -> Path:
+    """A theme of our own under this scenario's `XDG_DATA_HOME`.
+
+    **A fixture rather than whatever the machine has installed.** Adwaita is on
+    the development box and may not be on a runner, and a gate that passes by
+    being skipped is decoration — `docs/12-measurement.md`. The files are SVG
+    because an SVG is text: a scenario can write one, and `skerry-thumbnailer`
+    decodes it through the same path a real theme's would take.
+    """
+    root = Path(place["XDG_DATA_HOME"]) / "icons" / name
+    groups = "".join(
+        f"\n[{size}x{size}/places]\nSize={size}\nType=Fixed\n"
+        f"\n[{size}x{size}/mimetypes]\nSize={size}\nType=Fixed\n"
+        for size in sizes
+    )
+    listed = ",".join(f"{s}x{s}/places,{s}x{s}/mimetypes" for s in sizes)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "index.theme").write_text(f"[Icon Theme]\nName={name}\nDirectories={listed}\n{groups}")
+    for size in sizes:
+        for folder, icon, colour in [
+            ("places", "folder", "#c04040"),
+            ("mimetypes", "text-x-generic", "#40a0c0"),
+        ]:
+            at = root / f"{size}x{size}" / folder
+            at.mkdir(parents=True, exist_ok=True)
+            (at / f"{icon}.svg").write_text(
+                f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}">'
+                f'<rect width="{size}" height="{size}" rx="{size // 6}" fill="{colour}"/></svg>'
+            )
+    return root
+
+
+@scenario("a-mark-comes-from-the-source-the-setting-names", fresh=True)
+def a_mark_comes_from_the_source_the_setting_names(run: Run, fixture: Path) -> None:
+    """[ADR 0042](docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
+    over all three of its sources.
+
+    **`marks` and a failed theme are different states, and this is where that is
+    worth something.** Under `marks` nothing parses an `index.theme`, nothing is
+    held and the lookup is never called — so the icon atlas is empty, and the
+    emptiness is the assertion. Under a theme that could not be loaded the marks
+    are drawn too, and the window says a different sentence about why: a machine
+    with a broken theme must not look like one whose owner chose the marks.
+
+    The third source is a theme this scenario installs, because a gate that
+    passes by being skipped on a machine with no theme is decoration.
+    """
+    run.close()
+    place = own_config(run, "icons")
+    config = Path(place["XDG_CONFIG_HOME"]) / "skerry" / "config"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    install_a_theme(place, "skerry-fixture")
+
+    # One: our own marks. Nothing is parsed and nothing reaches the GPU.
+    config.write_text("icons = marks\n")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        state = holds(own, lambda it: it.get("icons") == "ours", "our own marks")
+        expect(state, icons="ours", icon_slots="0:0")
+    finally:
+        own.close()
+
+    # Two: a theme nothing declares. The marks are drawn, and the window says
+    # something different about why — which is the state ADR 0042 requires to be
+    # reachable from different code than the one above.
+    config.write_text("icons = no-such-theme-is-installed\n")
+    absent = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(absent)
+        state = holds(
+            absent,
+            lambda it: it.get("icons", "").startswith("failed:"),
+            "a theme that could not be had",
+        )
+        expect(state, icons="failed:no-such-theme-is-installed:unknown", icon_slots="0:0")
+    finally:
+        absent.close()
+
+    # Three: the theme this scenario installed. It loads, and a mark reaches the
+    # atlas — which is the half a state dump alone cannot claim, because the
+    # count comes from `sk-gpu` after the child answered.
+    config.write_text("icons = skerry-fixture\n")
+    themed = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(themed)
+        state = holds(
+            themed,
+            lambda it: it.get("icons", "").startswith("ready:skerry-fixture:"),
+            "the installed theme",
+        )
+        # The count is the whole chain, `hicolor` included — which the
+        # specification requires to be in it whether or not anything names it.
+        if int(state["icons"].rsplit(":", 1)[1]) < 2:
+            raise Failure(f"the theme holds {state['icons']}, not even its own two names")
+        landed = holds(
+            themed,
+            lambda it: int(it.get("icon_slots", "0:0").split(":")[0]) > 0,
+            "an icon on the GPU",
+        )
+        held = int(landed["icon_slots"].split(":")[0])
+        if held > 8:
+            raise Failure(f"{held} icons for two names — the key is not the file and the band")
+
+        # **And a column view's other columns.** They are listings of their own,
+        # so an icon reaching the pane's rows says nothing about them; under a
+        # theme every column draws it, or one view of a listing disagrees with
+        # the other two about what a file looks like — rule 8.
+        themed.drive("text alpha\nsleep 400\nkey enter\nsleep 900\nkey ctrl+3\nsleep 600\nkey f12\nsleep 200\n")
+        holds(
+            themed,
+            lambda it: int(it.get("trail_icons", "0")) > 0,
+            "the column view's other columns to draw the theme's icons",
+        )
+    finally:
+        themed.close()
 
 
 @scenario("asking-before-the-trash-is-a-setting", fresh=True)

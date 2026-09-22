@@ -338,6 +338,7 @@ mod tests {
     fn the_settings_it_writes_are_the_settings_it_reads_back() {
         let registry = crate::commands::registry();
         let wrote = crate::settings::Values {
+            icons: crate::settings::Icons::Named("Adwaita".to_owned()),
             dark: false,
             hidden: true,
             sidebar: false,

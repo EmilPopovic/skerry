@@ -128,20 +128,34 @@ impl Category {
 /// that is not a folder or a program is `Unknown`.
 #[must_use]
 pub fn kind_of(listing: &Listing, id: EntryId, mime: Option<&MimeDatabase>) -> Category {
+    kind_and_type_of(listing, id, mime).0
+}
+
+/// [`kind_of`], and the type the name answered to on the way.
+///
+/// **One lookup for both**, for a caller that wants the type as well as the
+/// kind — a mark that tells a spreadsheet from a letter — and would otherwise
+/// ask the database twice for every visible row of every frame.
+#[must_use]
+pub fn kind_and_type_of<'m>(
+    listing: &Listing,
+    id: EntryId,
+    mime: Option<&'m MimeDatabase>,
+) -> (Category, Option<&'m str>) {
     let flags = listing.flags(id);
     if flags.has(Flags::DIR) {
-        return Category::Folder;
+        return (Category::Folder, None);
     }
-    let by_name =
-        mime.and_then(|mime| mime.by_name(listing.name(id))).map_or(Category::Unknown, category);
+    let found = mime.and_then(|mime| mime.by_name(listing.name(id)));
+    let by_name = found.map_or(Category::Unknown, category);
     // The mode bit after the name: a program is usually called something with no
     // extension at all — `runme`, `configure`, half of `/usr/bin` — so a
     // name-only answer calls it unknown, and what it is is the one thing about it
     // worth marking.
     if by_name == Category::Unknown && flags.has(Flags::EXEC) {
-        Category::Executable
+        (Category::Executable, found)
     } else {
-        by_name
+        (by_name, found)
     }
 }
 
@@ -330,6 +344,23 @@ pub struct MimeDatabase {
     cased_literals: HashMap<String, (u32, String)>,
     /// Everything else, matched in order of weight.
     patterns: Vec<Pattern>,
+    /// The icon a type names in `mime/icons`, where it names one other than its
+    /// own spelling.
+    icons: HashMap<String, String>,
+    /// The generic icon a type names in `mime/generic-icons` — `package-x-generic`
+    /// for a compressed tarball, `x-office-document` for a PDF.
+    generic_icons: HashMap<String, String>,
+}
+
+/// Takes one `type:icon` file into `into`, keeping what an earlier data
+/// directory already said — which is how `$XDG_DATA_HOME` beats `/usr/share`.
+fn absorb_icons(into: &mut HashMap<String, String>, text: &str) {
+    for line in text.lines() {
+        let Some((mime, icon)) = line.trim().split_once(':') else { continue };
+        if !mime.is_empty() && !icon.is_empty() && !mime.starts_with('#') {
+            into.entry(mime.to_owned()).or_insert_with(|| icon.to_owned());
+        }
+    }
 }
 
 impl MimeDatabase {
@@ -345,8 +376,45 @@ impl MimeDatabase {
             if let Some(text) = crate::read(&dir.join("mime/globs2")) {
                 database.absorb(&text);
             }
+            if let Some(text) = crate::read(&dir.join("mime/icons")) {
+                absorb_icons(&mut database.icons, &text);
+            }
+            if let Some(text) = crate::read(&dir.join("mime/generic-icons")) {
+                absorb_icons(&mut database.generic_icons, &text);
+            }
         }
         database
+    }
+
+    /// Takes one `mime/generic-icons` file: `type:icon` per line.
+    pub fn absorb_generic_icons(&mut self, text: &str) {
+        absorb_icons(&mut self.generic_icons, text);
+    }
+
+    /// The two icon names a type answers to, the specific one first.
+    ///
+    /// **The [shared-mime-info
+    /// specification](https://specifications.freedesktop.org/shared-mime-info-spec/latest/)'s
+    /// own two**: the `icon` the database names, or the type with its `/` made a
+    /// `-`; then the `generic-icon` it names, or `{media}-x-generic` where it
+    /// names none. The generic is *read*, not built — built, a PDF asked every
+    /// theme for `application-x-generic`, which almost none ships, and fell all
+    /// the way to the text icon where `x-office-document` was waiting.
+    #[must_use]
+    pub fn icon_names(&self, mime: &str) -> [String; 2] {
+        let own = self.icons.get(mime).cloned().unwrap_or_else(|| mime.replace('/', "-"));
+        let generic = self.generic_icons.get(mime).cloned().unwrap_or_else(|| {
+            let media = mime.split_once('/').map_or(mime, |(media, _)| media);
+            format!("{media}-x-generic")
+        });
+        [own, generic]
+    }
+
+    /// The `generic-icon` the database names for a type, and only where it names
+    /// one — borrowed, because a row's mark asks this every frame.
+    #[must_use]
+    pub fn generic_icon(&self, mime: &str) -> Option<&str> {
+        self.generic_icons.get(mime).map(String::as_str)
     }
 
     /// Parses one `globs2` file: `weight:type:glob[:flags]` per line.

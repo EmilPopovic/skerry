@@ -547,15 +547,11 @@ pub fn split(signature: &str) -> Vec<String> {
     out
 }
 
-#[cfg(test)]
-#[path = "../../../../tools/fuzz-support.rs"]
-mod fuzz_support;
-
 #[test]
 fn parser_campaign_dbus() {
     let seeds: &[&[u8]] =
         &[b"\x01\x00\x00\x00a\x00", b"\x01s\x00\x00\x03\x00\x00\x00abc\x00", &[0; 64]];
-    fuzz_support::campaign("dbus", seeds, |bytes| {
+    crate::fuzz_support::campaign("dbus", seeds, |bytes| {
         for signature in ["s", "v", "as", "a{sv}", "(ua{sv})", "a(so)", "aay"] {
             for little in [true, false] {
                 let _ = Reader::new(bytes, 0, little).read(signature);
