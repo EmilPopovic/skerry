@@ -19,32 +19,31 @@ themselves are below and do not move.
 
 | Row | Status | Where | What is left |
 | --- | --- | --- | --- |
-| 1 · activation file | **done on its branch** | `r1/01-activation-file` — `3d5103e` | Merge. Its scenario passes on both display servers and was watched failing; every gate it can reach passes. `./tools/check` is red only on the two failures that predate it. No golden frame should move — the row's sentence appears only after a press |
-| 2 · icon themes | **done on its branch** | `r1/02-icons` — `760b0b5`, carrying ADR 0042 | Merge. The release gate is three fixture-theme frames, and they found two defects that are fixed: the generic icon was built rather than read from the MIME database, and the column view drew marks under a theme. **`marks` is now a set of its own**: thirty-one shapes in [`sk_ui::marks`](../crates/sk-ui/src/marks.rs) — a folder emblem for each well-known directory, a page with what the file is inside it, and a drive, stick, disc, globe, bin and clock for the sidebar — with a specimen sheet (`--capture --marks`, goldens `marks` and `marks-light`). Frame p99 0.281 → 0.325 ms best of five. The fresh-install default stays `desktop`, as ADR 0042 settles. Owed and named: the sidebar, breadcrumb menus and drag card still draw our marks under a theme |
-| 3 · always open with this | **done on its branch** | `r1/03-07-defaults-and-notice` — `dbdf6a8` | Merge, and bless `context-menu-open-with` — the one frame it moves. Reached from the last row of Open with, not a row beside it: a second top-level row pushed *Colour* off the row menu at 900×520. Its scenario passes on both display servers and was watched failing |
-| 4 · Empty Trash | **done on its branch** | `r1/04-05-trash-and-creation` — `4574ff9` | Merge, and bless `context-menu`. The marking of the undo stack is per direction — an applied trash and an undone restore are stranded, the other two are not — and its scenario was watched failing |
-| 5 · new file, symlink, Templates | **done on its branch** | `r1/04-05-trash-and-creation` — `4574ff9` | Merge. A link is *Paste as link* on the background menu rather than a row on a file's, which is at its height. A templates folder of folders lists only its top-level files |
-| 6 · Properties that writes | **done on its branch** | `r1/06-properties` — `7f9e802` | Merge, and bless `properties`. One name lookup is out at a time and lands only on the owner it was about. Adds `ProblemKind::ChangedSince`, which the text editor's undo now uses too |
-| 7 · a notification when unfocused | **done on its branch** | `r1/03-07-defaults-and-notice` — `dbdf6a8` | No scenario drives the unfocused path — the harness cannot take the keyboard from a window. The policy and the run's clock are unit-tested, and the wire was checked against GLib and swaync. The *Show in folder* button needs row 12 |
-| 8 · recents | **done on its branch** | `r1/08-recents` — `a1b23c8`, carrying ADR 0043 | Merge. Owed and named: a sidebar row, which the sidebar's path-keyed model makes its own change, and an order by when each was opened. The shared *write* stays behind the record's measurement |
-| 9 · path completion | **done on its branch** | `r1/09-10-path-field-and-pointer` — `603c7ac` | Merge. One completion read is out at a time, so a dead mount costs one worker |
-| 10 · middle click and PRIMARY | **done on its branches** | `r1/09-10-path-field-and-pointer` — `603c7ac`; the drag that asks on `r1/10-drag-asks` — `e251086` | Merge. **Decided: no right-drag.** A drag moves, `Ctrl` copies, and `Alt` — GTK's modifier — opens *Move here / Copy here / Link here / Cancel* where it lands, only for a drop this window takes. `skerry-drive` gained `hold` and `let-go`; `an-alt-drag-asks-where-it-lands` passes on both servers and was watched failing |
+| 1 · activation file | **merged** | `main` | — |
+| 2 · icon themes | **merged** | `main`, ADR 0042 | `marks` is Skerry's own set: thirty-one shapes in [`sk_ui::marks`](../crates/sk-ui/src/marks.rs), a specimen sheet (`--capture --marks`, goldens `marks` and `marks-light`), frame p99 0.281 → 0.325 ms best of five. The fresh-install default stays `desktop`, as ADR 0042 settles |
+| 3 · always open with this | **merged** | `main` | — |
+| 4 · Empty Trash | **merged** | `main` | — |
+| 5 · new file, symlink, Templates | **merged** | `main` | — |
+| 6 · Properties that writes | **merged** | `main` | — |
+| 7 · a notification when unfocused | **merged** | `main` | The *Show in folder* button needs row 12 |
+| 8 · recents | **merged** | `main`, ADR 0043 | See *Owed* below |
+| 9 · path completion | **merged** | `main` | — |
+| 10 · middle click, PRIMARY, a drag that asks | **merged** | `main` | **No right-drag.** A drag moves, `Ctrl` copies, `Alt` opens *Move here / Copy here / Link here / Cancel* where it lands, for a drop this window takes |
 
-R2 is not started, and starting it before R1 lands would be starting the second
-half of a release whose first half is in branches.
+**R1 is on `main`**, merged in the order below, with the refused-thumbnail fix
+first. The merged tree passes every gate except the three golden frames that drift
+on the development machine at untouched `HEAD` — `keyboard-overlay`, `carrying`,
+`palette` — and its first full sweeps, run serially at a load average of 2 to 4,
+were **161 of 163 on X11 and 165 of 166 on Wayland**. The one failure both
+servers share is `release-qt-cut-clipboard-works-in-both-directions`, whose Qt
+peer needs `PyQt6` and this machine has none. The other X11 failure was
+`path-completion-is-a-list-and-not-a-mode`, which had only ever run alone:
+`…/fixture` has real completions once a sweep leaves `fixture-<scenario>` beside
+it. It now takes a fixture of its own.
 
-**One defect found along the way is on its own branch, and it is the one to
-merge first.** `fix/refused-thumbnail-spins` — `bb1e54e`. A single truncated PNG
-on screen made an untouched window spend more than a core: 535 ticks of CPU in
-five idle seconds on `main`, 1 after the fix, because a refused thumbnail was
-asked for again on every frame. It breaks the zero-CPU-at-idle invariant, it
-predates R1, and the existing idle scenario could not see it, because that gate
-excuses CPU spent drawing and this loop drew a frame every cycle.
+R2 is next, and nothing in it has started.
 
-### Merging R1
-
-Nine branches, each forked from `7fa7f55` and each green on its own. This order
-puts the independent ones first and the two that carry ADRs last:
+### Merging R1, as it was done
 
 1. `fix/refused-thumbnail-spins`
 2. `r1/01-activation-file`
@@ -52,50 +51,26 @@ puts the independent ones first and the two that carry ADRs last:
 4. `r1/10-drag-asks`, which is `r1/04-05-trash-and-creation` and one commit
 5. `r1/06-properties`
 6. `r1/09-10-path-field-and-pointer`
-7. `r1/02-icons`, carrying ADR 0042
+7. `r1/02-icons`, carrying ADR 0042 and the icon set
 8. `r1/08-recents`, carrying ADR 0043
 
-**Conflicts to expect, all of them adjacent insertions rather than two edits of
-one line:** the command registry, the catalogue, the menu tables and their
-tests, the `Replies` channels in `app.rs`, and the README's and the release
-notes' list of what the alpha does not do, which five branches each shorten.
-`docs/adr/README.md` takes two rows at one line, both of which belong. Rows 1 and
-8 each compute the XDG data home; after both land, `recents.rs` should call
-`sk_desktop::data_home` rather than keep its own copy.
-
-**No two branches bind the same chord** — `Ctrl+Alt+O`, `Ctrl+Alt+N`,
-`Ctrl+Alt+V`, `Ctrl+Shift+Delete`, `Shift+Insert`, `Ctrl+Alt+H` and `Alt+Delete`
-were chosen against each other — and the registry's own tests fail the build if
-a merge makes that untrue.
-
-**Golden frames to bless once merged**, each looked at and each moved for a
-reason its commit gives: `context-menu-open-with` (row 3), `context-menu`
-(rows 4 and 5), `properties` (row 6), and `settings` and `settings-light` (row
-2). Row 2's three new frames are already blessed, because a new frame has
-nothing to compare against until it is. The three that fail at untouched `HEAD`
-are a separate decision.
-
-**Then the sweeps, serially**, on both display servers, on the merged tree: each
-branch ran its own scenarios, but no full sweep of all of them together has run.
+Every conflict was an adjacent insertion. Two functions went over clippy's
+hundred lines once both halves were in and were split — `commands::hand_over`
+out of `commands::edit`, `App::overlay_line` out of `App::chrome_state` — and
+`recents.rs` now calls `sk_desktop::data_home`. ADRs 0037 to 0041 became rows of
+the index table rather than bullets under it.
 
 ### Owed from R1, and why
 
 - **Recents have no sidebar row and sort the way the pane does.** The sidebar's
   rows are paths throughout — trees, pins, reordering and drop targets — and a
   row with no directory behind it is its own change.
-- **Icons in the sidebar, the breadcrumb menus and the drag card.** Chrome
-  rather than a view of files, so it is not rule 8's; it is a consistency still
-  worth having.
+- **A theme's icons in the sidebar, the breadcrumb menus and the drag card.**
+  They draw Skerry's own marks whatever `icons` says — a place its emblem, a
+  volume its drive — which is chrome rather than a view of files, so not rule
+  8's; it is a consistency still worth having.
 - **The shared recents write** stays behind the measurement ADR 0043 names, and
   a notification's *Show in folder* behind row 12.
-
-**Two things to know before merging these branches.** `r1/02-icons-adr` and
-`r1/08-recents-adr` each add a row to `docs/adr/README.md` at the same line, so
-they conflict textually and trivially — both rows belong, in number order. And
-that index has a pre-existing discontinuity worth closing in the same pass: its
-table ends at 0036 and records 0037 to 0041 are bullets below it, so 0042 and
-0043 landing in the table make it read 0036, 0042, 0043. One list, once, after
-both merge.
 
 **A commit whose subject begins `WIP:` is a snapshot, not a result.** It was
 taken so work survives a session ending; nothing in one has been checked, and no
