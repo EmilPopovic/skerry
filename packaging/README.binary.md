@@ -18,7 +18,9 @@ make install DESTDIR=/tmp/skerry-package PREFIX=/usr
 ```
 
 Use `make uninstall` with the same `PREFIX` and `DESTDIR` to remove these files.
-Installation does not change the desktop's default file manager.
+Installation does not change the desktop's default file manager. The settings
+panel's *Open folders with Skerry* row does, and it is what writes the D-Bus
+service file that lets the desktop start Skerry while no window is open.
 
 This is an alpha. Keep backups of important files. Copy and extraction undo move
 output into trash; trash must be available on a compatible filesystem. Editing

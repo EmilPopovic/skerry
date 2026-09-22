@@ -206,9 +206,16 @@ settings.from_window = changed
 settings.handler = Open folders with Skerry
 settings.keymap = Write the keymap to a file
 settings.write = Write
-settings.handler_written = Written to {0}
+# The handler row writes two files: the association a running desktop reads, and
+# the D-Bus service file that starts Skerry when none of it is running.
+settings.handler_written = Written to {0} and {1}
+settings.handler_written_next_login = Written to {0} and {1} — the desktop will start Skerry for a folder from the next login
+settings.handler_cleared = {0} and {1} no longer name Skerry
 error.mimeapps_unreadable = Line {0} of mimeapps.list is not something Skerry can rewrite — it was left alone
 error.mimeapps_refused = mimeapps.list could not be written — check that the config directory can be written
+error.activation_taken = {0} already starts {1} — Skerry left it alone
+error.activation_unnameable = Skerry cannot write its own path into {0}, so the desktop cannot start it
+error.activation_refused = The D-Bus service file could not be written — check that the data directory can be written
 # Mounting a disk, which is udisks2's job and polkit's permission — ADR 0030.
 # Each says what happened and what to do, and none of them shows the D-Bus chain.
 error.no_system_bus = There is no system bus, so Skerry cannot mount a disk. Mount it from a terminal instead.
