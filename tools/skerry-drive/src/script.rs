@@ -80,6 +80,12 @@ pub enum Action {
     Sleep {
         milliseconds: u32,
     },
+    /// A modifier pressed or let go on its own, so it can be held across what
+    /// comes between — a drag, where the program reads it on every motion.
+    Hold {
+        held: Held,
+        down: bool,
+    },
 }
 
 /// Parses a whole script, or says which line is wrong.
@@ -138,6 +144,15 @@ fn step(verb: &str, rest: &[&str]) -> Result<Vec<Action>, String> {
             let button = rest.first().map_or(Ok(Button::Left), |name| button(name))?;
             Ok(vec![Action::Press { button, down: false }])
         }
+        "hold" | "let-go" => {
+            let held = match rest.first() {
+                Some(&"shift") => Held::Shift,
+                Some(&"ctrl") => Held::Ctrl,
+                Some(&"alt") => Held::Alt,
+                _ => return Err(format!("{verb} needs `shift`, `ctrl` or `alt`")),
+            };
+            Ok(vec![Action::Hold { held, down: verb == "hold" }])
+        }
         "drag" => {
             if rest.len() != 4 {
                 return Err("drag needs four numbers".into());
@@ -193,6 +208,7 @@ pub(crate) enum Held {
     Nothing,
     Shift,
     Ctrl,
+    Alt,
 }
 
 impl Held {
@@ -202,6 +218,7 @@ impl Held {
             Self::Nothing => None,
             Self::Shift => Some((EV_LEFTSHIFT, MOD_SHIFT)),
             Self::Ctrl => Some((EV_LEFTCTRL, MOD_CONTROL)),
+            Self::Alt => Some((EV_LEFTALT, MOD_ALT)),
         }
     }
 }

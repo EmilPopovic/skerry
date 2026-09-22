@@ -84,8 +84,9 @@ ones most likely to be reached for in the first week:
   tested against a real GTK peer and a real Qt peer rather than against Nautilus
   and Dolphin themselves. Portal file transfers are not implemented, so a
   sandboxed Flatpak peer receives nothing.
-- **No middle-click open-in-tab and no PRIMARY paste.** No right-drag menu, link
-  action or drop onto an executable.
+- **No middle-click open-in-tab and no PRIMARY paste.** An `Alt`-drag asks
+  Move, Copy or Link only where Skerry takes the drop, and nothing drops onto an
+  executable.
 - **"Always open with this" writes the association and opens nothing**, and a
   desktop notification carries no buttons — a button needs `ActionInvoked`, which
   is a signal, and there is no subscribing bus connection. No recents and no path

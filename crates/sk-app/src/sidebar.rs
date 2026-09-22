@@ -73,6 +73,14 @@ pub struct Entry {
     /// is deliberate rather than a path somebody forgot to fill in. A press on
     /// such a row mounts it and then goes there.
     pub unmounted: bool,
+    /// What a trash row is holding, once the walk that counted it has answered.
+    ///
+    /// **Its own job and not part of [`build`]**, because a trash with two
+    /// hundred thousand files in it is a walk to the leaves and the rest of the
+    /// list must not wait behind it: the row appears with its name and the
+    /// figure arrives after. `None` on every row that is not a trash, and on a
+    /// trash whose walk has not landed yet.
+    pub held: Option<sk_fs::trash::Held>,
 }
 
 /// What a write to the list of places was doing.
@@ -137,6 +145,8 @@ pub struct Row {
     pub heading: Option<&'static str>,
     /// The block device behind a volume row. See [`Entry::device`].
     pub device: Option<PathBuf>,
+    /// What a trash row is holding. See [`Entry::held`].
+    pub held: Option<sk_fs::trash::Held>,
     /// Whether it is a volume nothing has mounted. See [`Entry::unmounted`].
     pub unmounted: bool,
 }
@@ -203,6 +213,12 @@ pub struct Sidebar {
     pub loads: u64,
     loaded: Receiver<Vec<Section>>,
     sender: Sender<Vec<Section>>,
+    /// What each trash turned out to be holding, from the walk that counted it.
+    count_rx: Receiver<Vec<(PathBuf, sk_fs::trash::Held)>>,
+    count_tx: Sender<Vec<(PathBuf, sk_fs::trash::Held)>>,
+    /// The walk's own token, so a list that has been rebuilt stops the walk over
+    /// the trashes the old one named.
+    counting: Option<Cancel>,
     wake: WakeHandle,
 }
 
@@ -211,6 +227,7 @@ impl Sidebar {
     #[must_use]
     pub fn new(jobs: &Jobs, wake: WakeHandle, open: bool, width: f32) -> Self {
         let (sender, loaded) = std::sync::mpsc::channel();
+        let (count_tx, count_rx) = std::sync::mpsc::channel();
         let sidebar = Self {
             sections: Vec::new(),
             visible: Vec::new(),
@@ -222,6 +239,9 @@ impl Sidebar {
             loads: 0,
             loaded,
             sender,
+            count_rx,
+            count_tx,
+            counting: None,
             wake,
         };
         sidebar.reload(jobs);
@@ -262,6 +282,7 @@ impl Sidebar {
         // frame, and comparing two lists of mount points on a frame that has no
         // answer waiting is an allocation per frame for nothing.
         let Ok(first) = self.loaded.try_recv() else { return None };
+        self.counting.take().inspect(Cancel::cancel);
         let before = std::mem::replace(&mut self.sections, first);
         self.loads += 1;
         while let Ok(more) = self.loaded.try_recv() {
@@ -271,6 +292,76 @@ impl Sidebar {
         self.hover = None;
         self.settle();
         Some(vanished(&before, &self.sections))
+    }
+
+    /// Starts the walk that counts what each trash is holding.
+    ///
+    /// **Separate from [`Sidebar::reload`], and after it.** `build` is three
+    /// small file reads and a `statx` per candidate; this is a walk to the
+    /// leaves of every trash on the machine, and a list that waited for it would
+    /// be a sidebar missing for as long as somebody's Trash is large.
+    pub fn count_the_trashes(&mut self, jobs: &Jobs) {
+        let trashes: Vec<PathBuf> = self
+            .sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .filter(|entry| entry.mark == Mark::Trash)
+            .map(|entry| entry.path.clone())
+            .collect();
+        if trashes.is_empty() {
+            return;
+        }
+        let count_tx = self.count_tx.clone();
+        let wake = self.wake.clone();
+        let token = Cancel::new();
+        self.counting = Some(token.clone());
+        jobs.pool.spawn(Lane::Parallel, token, move |cancel| {
+            let each: Vec<(PathBuf, sk_fs::trash::Held)> = trashes
+                .into_iter()
+                .map(|path| {
+                    let held = sk_fs::trash::held(&path, cancel);
+                    (path, held)
+                })
+                .collect();
+            if !cancel.is_cancelled() && count_tx.send(each).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of the walk. Whether anything the list draws changed.
+    pub fn took_the_count(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(counted) = self.count_rx.try_recv() {
+            for section in &mut self.sections {
+                for entry in &mut section.entries {
+                    let Some((_, held)) = counted.iter().find(|(path, _)| *path == entry.path)
+                    else {
+                        continue;
+                    };
+                    changed |= entry.held != Some(*held);
+                    entry.held = Some(*held);
+                }
+            }
+        }
+        if changed {
+            self.settle();
+        }
+        changed
+    }
+
+    /// Every trash on the list, and what each is holding.
+    ///
+    /// **What Empty Trash is given**, and the reason the command needs no
+    /// syscall of its own: the walk that found these rows already ran on a job,
+    /// so the frame loop is reading a list it has been handed.
+    #[must_use]
+    pub fn trashes(&self) -> Vec<(PathBuf, sk_fs::trash::Held)> {
+        self.visible
+            .iter()
+            .filter(|row| row.mark == Mark::Trash)
+            .map(|row| (row.path.clone(), row.held.unwrap_or_default()))
+            .collect()
     }
 
     /// Every drawn row, in display order.
@@ -309,6 +400,7 @@ impl Sidebar {
                     open,
                     heading: heading.take(),
                     device: entry.device.clone(),
+                    held: entry.held,
                     unmounted: entry.unmounted,
                 });
                 if open {
@@ -342,6 +434,7 @@ impl Sidebar {
                 open,
                 heading: None,
                 device: None,
+                held: None,
                 unmounted: false,
             });
             if open {
@@ -532,6 +625,7 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         open: false,
         heading: None,
         device: None,
+        held: None,
         unmounted: false,
     };
     let mut rows = vec![
@@ -581,6 +675,7 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         depth: 0,
         open: false,
         device: Some(PathBuf::from("/dev/sda2")),
+        held: None,
         unmounted: false,
     });
     // **And one nothing has mounted** — ADR 0030. A row with a device, no path
@@ -597,6 +692,7 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
         open: false,
         heading: None,
         device: Some(PathBuf::from("/dev/sdb1")),
+        held: None,
         unmounted: true,
     });
     rows
@@ -680,6 +776,7 @@ fn trash_row(path: PathBuf, label: String) -> Entry {
         free: None,
         pinned: false,
         device: None,
+        held: None,
         unmounted: false,
     }
 }
@@ -698,6 +795,7 @@ fn row(place: &Place) -> Entry {
         free: None,
         pinned: false,
         device: None,
+        held: None,
         unmounted: false,
     }
 }
@@ -726,6 +824,7 @@ fn volume(volume: &sk_fs::Volume) -> Entry {
         free: volume.free,
         pinned: false,
         device: volume.device.clone(),
+        held: None,
         unmounted: !volume.is_mounted(),
     }
 }
@@ -746,6 +845,7 @@ mod tests {
     fn laid_out(sections: Vec<Section>) -> Sidebar {
         let waker = sk_util::Waker::new().expect("eventfd");
         let (sender, loaded) = std::sync::mpsc::channel();
+        let (count_tx, count_rx) = std::sync::mpsc::channel();
         let mut sidebar = Sidebar {
             sections,
             visible: Vec::new(),
@@ -757,6 +857,9 @@ mod tests {
             loads: 0,
             loaded,
             sender,
+            count_rx,
+            count_tx,
+            counting: None,
             wake: waker.handle(),
         };
         sidebar.settle();
@@ -776,6 +879,7 @@ mod tests {
                     free: None,
                     pinned: false,
                     device: None,
+                    held: None,
                     unmounted: false,
                 })
                 .collect(),
@@ -859,6 +963,7 @@ mod tests {
             free: None,
             pinned: false,
             device: Some(PathBuf::from("/dev/sdb1")),
+            held: None,
             unmounted: !mounted,
         };
         let place = |at: &str| Entry {
@@ -869,6 +974,7 @@ mod tests {
             free: None,
             pinned: true,
             device: None,
+            held: None,
             unmounted: false,
         };
         let sections = |entries: Vec<Entry>| vec![Section { title: "sidebar.volumes", entries }];
@@ -975,6 +1081,7 @@ mod tests {
                     free: None,
                     pinned: false,
                     device: None,
+                    held: None,
                     unmounted: false,
                 }],
             },
@@ -990,6 +1097,7 @@ mod tests {
                         free: None,
                         pinned: true,
                         device: None,
+                        held: None,
                         unmounted: false,
                     })
                     .collect(),

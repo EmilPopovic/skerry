@@ -4773,6 +4773,55 @@ def dragging_between_panes(run: Run, fixture: Path) -> None:
         raise Failure("undo did not bring file-1.txt back")
 
 
+@scenario("an-alt-drag-asks-where-it-lands", fresh=True)
+def an_alt_drag_asks(run: Run, fixture: Path) -> None:
+    """`Alt` held across a drag opens a menu at the drop instead of moving.
+
+    **A modifier, not the other button.** GTK's convention: plain moves, `Ctrl`
+    copies, `Alt` asks. The answer here is Link, the one verb no modifier gives,
+    chosen with the pointer — and the original stays where it was, because a
+    link consumes nothing, and `Ctrl+Z` takes the link back.
+    """
+    listed(run)
+    run.drive("text alpha\n")
+    until(run, cursor="alpha")
+    run.drive("key shift+enter\n")
+    until(run, panes="2", pane_focus="0")
+    run.drive("sleep 1100\ntext file-1.txt\n")
+    chosen = until(run, selected="1", cursor="file-1.txt")
+    held = point_at(run, int(chosen["cursor_row"]))
+    x, y, width, height = (float(part) for part in held["pane_body"].split(",")[1].split(":"))
+    from_point = aim(run, held, name_x(held), row_y(held, int(chosen["cursor_row"])))
+    to_point = aim(run, held, x + width / 2.0, y + height - 24.0)
+    run.drive(
+        f"move {from_point[0]:.1f} {from_point[1]:.1f}\nsleep 200\nhold alt\nsleep 100\n"
+        f"drag {from_point[0]:.1f} {from_point[1]:.1f} {to_point[0]:.1f} {to_point[1]:.1f}\n"
+        "sleep 100\nlet-go alt\n"
+    )
+    asked = holds(run, lambda it: bool(it.get("menu_aim")), "the question a drop asks")
+    for wanted in ("drop.move", "drop.copy", "drop.link", "drop.cancel"):
+        if wanted not in asked["menu_aim"]:
+            raise Failure(f"{wanted} is not on the drop's menu: {asked['menu_aim']!r}")
+    expect(asked, undo="false", dragging="false")
+    if (fixture / "alpha" / "file-1.txt").exists(follow_symlinks=False):
+        raise Failure("the drop did something before it was answered")
+
+    aimed = menu_aim(run, asked, "drop.link")
+    run.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\n")
+    until(run, undo="true", menu="0")
+    link = fixture / "alpha" / "file-1.txt"
+    if not link.is_symlink() or link.resolve() != (fixture / "file-1.txt").resolve():
+        raise Failure(f"alpha/file-1.txt is not a link to the original: {link.exists()=}")
+    if not (fixture / "file-1.txt").is_file():
+        raise Failure("the original went, so the drop moved rather than linked")
+
+    run.drive("key ctrl+z\n")
+    until(run, undo="false")
+    settled(run)
+    if link.exists(follow_symlinks=False):
+        raise Failure("undo left the link behind")
+
+
 def creep(frm: tuple[float, float], to: tuple[float, float], steps: int = 8) -> str:
     """Driver lines that walk the pointer from one point to another.
 
@@ -10104,6 +10153,196 @@ def a_picture_that_will_not_decode_is_asked_for_once(run: Run, fixture: Path) ->
             f"an untouched window with one undecodable picture drew {drawn} frames and "
             f"spent {spent} ticks of CPU in three seconds — the refusal is being asked for again"
         )
+
+
+@scenario("keyboard-new-file", fresh=True)
+def keyboard_new_file(run: Run, fixture: Path) -> None:
+    """`Ctrl+Alt+N` makes an empty file and names it — and `Ctrl+Z` will not take
+    back one somebody has written in.
+
+    The same two steps a new folder takes, made under its placeholder and then
+    renamed, and one refusal a folder gets from `rmdir` for free: once the file
+    holds anything, its undo stops, because an undo that deleted what somebody
+    typed would not be one.
+    """
+    expect(listed(run), rows="9", undo="false")
+
+    # Made and abandoned under its placeholder, then undone: an empty file goes.
+    run.drive("key ctrl+alt+n\n")
+    expect(until(run, naming="New file"), rows="10")
+    run.drive("key escape\n")
+    until(run, naming="", undo="true")
+    if not (fixture / "New file").is_file():
+        raise Failure("the new file is not on the disk")
+    run.drive("key ctrl+z\n")
+    expect(until(run, rows="9", redo="true"), undo="false")
+    if (fixture / "New file").exists():
+        raise Failure("undo left an empty new file behind")
+
+    # Made, named, and written in by somebody else before the undo.
+    run.drive("key ctrl+alt+n\n")
+    until(run, naming="New file")
+    run.drive("key ctrl+u\ntext notes.txt\nsleep 200\nkey enter\n")
+    expect(until(run, naming="", undo="true"), rows="10")
+    made = fixture / "notes.txt"
+    if not made.is_file() or made.stat().st_size != 0:
+        raise Failure("notes.txt is not an empty file on the disk")
+    made.write_text("a line somebody typed")
+    run.drive("key ctrl+z\n")
+    until(run, cursor="New file", redo="true")
+    run.drive("key ctrl+z\nsleep 600\nkey f12\nsleep 200\n")
+    said = settled(run)
+    kept = fixture / "New file"
+    if not kept.is_file() or kept.read_text() != "a line somebody typed":
+        raise Failure(f"undo removed a file somebody had written in: {said.get('notice')!r}")
+    if not said.get("notice"):
+        raise Failure("the refused undo said nothing")
+
+
+@scenario("paste-as-link-makes-a-link-where-it-is-pasted", fresh=True)
+def paste_as_link(run: Run, fixture: Path) -> None:
+    """Copy a file, go somewhere else, `Ctrl+Alt+V` — and a link to it is there.
+
+    `beta` already has an `inner.txt`, so the link is `inner.txt link`: the
+    name it points at is tried first and refused by the create, which is the
+    loop's whole mechanism. The free-name half is `edit`'s unit test, against
+    real files. One `Ctrl+Z` takes the link away and leaves both files alone.
+    """
+    target = fixture / "alpha" / "inner.txt"
+    if not target.is_file():
+        raise Failure(f"the fixture has no {target}")
+    listed(run)
+    run.drive("text alpha\nsleep 500\nkey enter\nsleep 900\n")
+    listed(run)
+    run.drive("text inner.txt\nsleep 400\nkey ctrl+c\nsleep 400\nkey alt+up\nsleep 900\n")
+    listed(run)
+    run.drive("text beta\nsleep 500\nkey enter\nsleep 900\n")
+    listed(run)
+
+    run.drive("key ctrl+alt+v\nsleep 1200\nkey f12\nsleep 300\n")
+    until(run, undo="true")
+    link = fixture / "beta" / "inner.txt link"
+    if not link.is_symlink():
+        raise Failure(f"no link at {link}: {sorted(p.name for p in link.parent.iterdir())}")
+    if Path(os.readlink(link)) != target:
+        raise Failure(f"the link points at {os.readlink(link)!r}, not {target}")
+
+    run.drive("key ctrl+z\n")
+    until(run, redo="true")
+    if link.is_symlink() or link.exists():
+        raise Failure("undo left the link behind")
+    if not target.is_file() or (fixture / "beta" / "inner.txt").is_symlink():
+        raise Failure("undoing the link took what it pointed at, or the file beside it")
+
+
+@scenario("emptying-the-trash-asks-and-ctrl-z-says-it-was-emptied", fresh=True)
+def emptying_the_trash(run: Run, fixture: Path) -> None:
+    """`Ctrl+Shift+Delete` asks, and afterwards `Ctrl+Z` says the Trash was emptied.
+
+    **The second half is row 4's real content.** The stack still holds the
+    trash that put the file there, and after an empty its way back is gone — so
+    the undo has to say so, rather than fail about a path inside the Trash
+    nobody has looked at, and rather than do nothing at all.
+
+    Its own data home, so the Trash emptied is this scenario's and not the one
+    belonging to whoever runs the suite.
+    """
+    run.close()
+    place = own_config(run, "empty")
+    files = Path(place["XDG_DATA_HOME"]) / "Trash" / "files"
+    doomed = fixture / "receipt.txt"
+    doomed.write_text("kept for tax")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("text receipt\nsleep 400\nkey delete\n")
+        until(own, undo="true", trash_held="1")
+        if doomed.exists():
+            raise Failure("Move to Trash left the file where it was")
+
+        own.drive("key ctrl+shift+delete\n")
+        expect(until(own, erasing="1"), erasing_on="cancel")
+        if not any(files.iterdir()):
+            raise Failure("asking emptied the Trash")
+        own.drive("key escape\n")
+        until(own, erasing="0")
+        if not any(files.iterdir()):
+            raise Failure("cancelling emptied the Trash")
+
+        # The second press is the answer, as it is for Delete permanently.
+        own.drive("key ctrl+shift+delete\nkey ctrl+shift+delete\n")
+        until(own, erasing="0", trash_held="0")
+        if not files.is_dir():
+            raise Failure("emptying took the directory a restore's undo writes into")
+        if any(files.iterdir()):
+            raise Failure(f"the Trash still holds {sorted(p.name for p in files.iterdir())}")
+
+        own.drive("key ctrl+z\nsleep 600\nkey f12\nsleep 200\n")
+        said = settled(own).get("notice", "")
+        if "emptied" not in said:
+            raise Failure(f"Ctrl+Z after an empty said {said!r}")
+        if doomed.exists():
+            raise Failure("an emptied file came back")
+    finally:
+        own.close()
+
+
+@scenario("new-from-template-copies-it-in-and-names-it", fresh=True)
+def new_from_template(run: Run, fixture: Path) -> None:
+    """The background menu's New from template lists the templates folder, and a
+    press makes a copy here, names it, and `Ctrl+Z` takes it back.
+
+    The folder is named in `user-dirs.dirs` the way `xdg-user-dirs-update` writes
+    it, and holds a hidden file too, because a template list that offered
+    `.directory` would be listing editor droppings as documents.
+    """
+    run.close()
+    place = own_config(run, "templates")
+    templates = run.log.parent / "templates-here"
+    templates.mkdir(parents=True, exist_ok=True)
+    (templates / "Letter.txt").write_text("Dear ,\n")
+    (templates / ".directory").write_text("[Desktop Entry]\n")
+    Path(place["XDG_CONFIG_HOME"], "user-dirs.dirs").write_text(
+        f'XDG_TEMPLATES_DIR="{templates}"\n'
+    )
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        state = listed(own)
+        below = float(state["body_top"]) + float(state["row_h"]) * (int(state["rows"]) + 1)
+        if below >= float(state["body_top"]) + float(state["body_height"]):
+            raise Failure("no empty space below the last row to click in")
+        where = aim(own, state, float(state["name_x"]) + 40.0, below)
+        own.drive(
+            f"move {where[0]:.1f} {where[1]:.1f}\n"
+            "sleep 150\nclick right\nsleep 400\nkey f12\nsleep 150\n"
+        )
+        opened = holds(own, lambda it: bool(it.get("menu_aim")), "the background menu")
+        open_submenu(own, opened, "menu.from_template")
+        letter = str(templates / "Letter.txt")
+        ready = holds(
+            own,
+            lambda it: letter in it.get("submenu_aim", ""),
+            "the New from template submenu to list the template",
+        )
+        if ".directory" in ready.get("submenu_aim", ""):
+            raise Failure("a hidden file was offered as a template")
+        aimed = aim_in_panel(own, ready, letter, "submenu")
+        own.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 900\n")
+        until(own, menu="0", naming="Letter.txt")
+        own.drive("key enter\n")
+        until(own, naming="", undo="true")
+        made = fixture / "Letter.txt"
+        if not made.is_file() or made.read_text() != "Dear ,\n":
+            raise Failure("the copy is not on the disk with the template's contents")
+
+        own.drive("key ctrl+z\n")
+        until(own, redo="true")
+        if made.exists():
+            raise Failure("undo left the copy behind")
+        if (templates / "Letter.txt").read_text() != "Dear ,\n":
+            raise Failure("the template itself was touched")
+    finally:
+        own.close()
 
 
 @scenario("a-panel-blocks-the-hover-under-it", fresh=True)

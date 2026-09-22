@@ -393,7 +393,7 @@ const SAMPLE_EDITS: usize = 5;
 fn sample_history(edits: &mut crate::edit::Edits, root: &std::path::Path) {
     use sk_fs::ops::Change;
     let at = |name: &str| root.join(name);
-    edits.history.record(Change::Created { path: at("build") });
+    edits.history.record(Change::Created { path: at("build"), made: sk_fs::ops::Made::Directory });
     edits.history.record(Change::Renamed { from: at("old.txt"), to: at("étude.txt") });
     edits.history.record(Change::Batch(vec![
         Change::Copied { source: at("a"), destination: at("img2.png") },
@@ -602,7 +602,15 @@ fn sample_menu(here: &crate::panes::PaneLayout) -> Option<crate::menu::Menu> {
             // `index.forget` among them: a fresh window has no index, so a
             // frame that drew that row bright would be a frame of a state this
             // menu is never opened in.
-            !matches!(id, "edit.undo" | "edit.redo" | "file.paste" | "file.cut" | "index.forget")
+            !matches!(
+                id,
+                "edit.undo"
+                    | "edit.redo"
+                    | "file.paste"
+                    | "file.paste_link"
+                    | "file.cut"
+                    | "index.forget"
+            )
         })?;
     menu.step(true);
     menu.step(true);
@@ -1105,7 +1113,7 @@ fn sample_overlays(
             name: "quarterly-report.pdf".to_owned(),
             count: 3,
             directory: false,
-            copying: false,
+            verb: crate::view::DropVerb::Move,
         }),
     }
 }
@@ -1259,7 +1267,7 @@ struct Sample<'a> {
     leaves: &'a [crate::panes::PaneLayout],
     dividers: &'a [crate::panes::Divider],
     drop_tab: Option<(crate::panes::PaneId, usize)>,
-    erasing: Option<(&'a [String], usize, bool, bool)>,
+    erasing: Option<(&'a [String], usize, bool, crate::view::Ask)>,
     /// The undo stack the history strip lists, with a sample on it.
     edits: &'a crate::edit::Edits,
     /// The quick look, if this frame is of one.
@@ -1477,7 +1485,7 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
             doomed.as_slice(),
             9,
             false,
-            request.erase,
+            if request.erase { crate::view::Ask::Forever } else { crate::view::Ask::Trash },
         )),
     };
     let stats = warm_and_draw(

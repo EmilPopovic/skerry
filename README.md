@@ -226,9 +226,9 @@ the first bug report on one of them.
   tested against a real GTK peer and a real Qt peer, which is not the same as
   testing against Nautilus and Dolphin themselves. Portal file transfers are not
   implemented, so a sandboxed Flatpak peer receives nothing.
-- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag says
-  whether it will move or copy, but there is no right-drag menu, no link action
-  and no drop onto an executable.
+- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag
+  moves, `Ctrl` copies and `Alt` asks where it lands — Move, Copy or Link — but
+  only for a drop this window takes, and there is no drop onto an executable.
 - **"Always open with this" writes one line and nothing else.** The choice goes
   into `$XDG_CONFIG_HOME/mimeapps.list` for the type under the cursor, preserving
   every line another program wrote and refusing a file whose syntax Skerry cannot

@@ -115,9 +115,10 @@ pub struct Chrome<'a> {
     pub search: Option<&'a crate::search::Search>,
     /// The name-taken question, while one is open.
     pub clash: Option<&'a crate::edit::Clash>,
-    /// What a permanent deletion is asking about: the names it would erase, how
-    /// many there are in total, and whether the keyboard is on Delete.
-    pub erasing: Option<(&'a [String], usize, bool, bool)>,
+    /// What a deletion is asking about: the names it would erase, how many
+    /// there are in total, whether the keyboard is on the destructive button,
+    /// and which of the three questions it is.
+    pub erasing: Option<(&'a [String], usize, bool, Ask)>,
     /// Which answer it is on.
     pub answering: usize,
     /// Whether the answer would cover the rest of the queue.
@@ -499,8 +500,8 @@ pub fn draw(
     // The same place, for the same reason: a question with no dismissal must be
     // the thing on top. The two cannot be open at once — one is a queue asking
     // about a name, the other is a queue that has not started.
-    if let Some((names, total, on_delete, forever)) = chrome.erasing {
-        erase_panel(painter, layout, names, (total, on_delete, forever), hits);
+    if let Some((names, total, on_delete, ask)) = chrome.erasing {
+        erase_panel(painter, layout, names, (total, on_delete, ask), hits);
     } else {
         hits.erase_cancel = None;
         hits.erase_delete = None;
@@ -2634,29 +2635,34 @@ fn erase_panel(
     painter: &mut Painter<'_>,
     layout: &Layout,
     names: &[String],
-    asking: (usize, bool, bool),
+    asking: (usize, bool, Ask),
     hits: &mut Hits,
 ) {
-    let (total, on_delete, forever) = asking;
+    let (total, on_delete, ask) = asking;
     let theme = *painter.theme;
     let metrics = theme.metrics;
     // **The same panel, three strings apart.** A Move to Trash somebody asked to
     // be asked about is this question with a different verb and a sentence that
-    // says the opposite: that it *can* be taken back. See `Erasing::forever`.
-    let one = if forever { "erase.title_one" } else { "trash.title_one" };
-    let many = if forever { "erase.title_many" } else { "trash.title_many" };
-    let title = if total == 1 {
-        i18n::format(one, &[&names.first().cloned().unwrap_or_default()])
-    } else {
-        i18n::format(many, &[&total])
+    // says the opposite: that it *can* be taken back. See [`Ask`].
+    let title = match ask {
+        Ask::Empty => i18n::lookup("erase.title_trash").to_owned(),
+        _ if total == 1 => i18n::format(
+            if ask == Ask::Forever { "erase.title_one" } else { "trash.title_one" },
+            &[&names.first().cloned().unwrap_or_default()],
+        ),
+        Ask::Forever => i18n::format("erase.title_many", &[&total]),
+        Ask::Trash => i18n::format("trash.title_many", &[&total]),
     };
+    let forever = ask != Ask::Trash;
     let warning = i18n::lookup(if forever { "erase.forever" } else { "trash.undoable" });
-    // A single file is named by the title and listing it again says nothing.
-    let listed: &[String] = if total == 1 { &[] } else { names };
+    // A single file is named by the title and listing it again says nothing —
+    // but the Trash question names no files at all, so its one line is how much
+    // is in it and has to be drawn whatever the count is.
+    let listed: &[String] = if total == 1 && ask != Ask::Empty { &[] } else { names };
     // Only where something *is* left out. With one file the title has named it
     // and `listed` is empty on purpose, which the arithmetic alone read as one
     // name unlisted — a panel saying "and 1 more" about the file in its title.
-    let more = (!listed.is_empty() && total > listed.len())
+    let more = (!listed.is_empty() && ask != Ask::Empty && total > listed.len())
         .then(|| i18n::format("erase.and_more", &[&(total - listed.len())]));
 
     let mut widest = text_width(painter, &title, metrics.path_size, false).max(text_width(
@@ -2733,24 +2739,42 @@ fn erase_panel(
     );
     top += ERASE_LINE + ERASE_PAD;
 
-    erase_buttons(painter, (area, top), (on_delete, forever), hits);
+    erase_buttons(painter, (area, top), (on_delete, ask), hits);
+}
+
+/// Which of the three questions the panel is asking.
+///
+/// **One panel and one value, not three panels.** All three ask about a list
+/// with the same two buttons; what differs is the sentence under the names,
+/// the word on the button, and whether the action is on the undo stack — and a
+/// second copy of this machinery would be a second place for the keyboard's
+/// two-press fast path to be got wrong.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ask {
+    /// A permanent deletion of what is selected.
+    Forever,
+    /// A Move to Trash somebody asked to be asked about — the one that *can* be
+    /// taken back, and the one drawn in the accent rather than the danger colour.
+    Trash,
+    /// Everything in the Trash, for good.
+    Empty,
 }
 
 /// The question's two answers, and the rectangles a press tests against.
-fn erase_buttons(
-    painter: &mut Painter<'_>,
-    at: (Area, f32),
-    asking: (bool, bool),
-    hits: &mut Hits,
-) {
+fn erase_buttons(painter: &mut Painter<'_>, at: (Area, f32), asking: (bool, Ask), hits: &mut Hits) {
     let (area, top) = at;
-    let (on_delete, forever) = asking;
+    let (on_delete, ask) = asking;
+    let forever = ask != Ask::Trash;
     let theme = *painter.theme;
     let metrics = theme.metrics;
     let (w, h) = ERASE_BUTTON;
     let delete = Area { x: area.right() - ERASE_PAD - w, y: top, width: w, height: h };
     let cancel = Area { x: delete.x - w - ERASE_GAP, y: top, width: w, height: h };
-    let go = if forever { "erase.delete" } else { "trash.move" };
+    let go = match ask {
+        Ask::Forever => "erase.delete",
+        Ask::Trash => "trash.move",
+        Ask::Empty => "erase.empty",
+    };
     for (button, label, is_delete) in [(cancel, "erase.cancel", false), (delete, go, true)] {
         let shape = painter.rect(button.x, button.y, button.width, button.height);
         // **The accent and not the danger colour for a Move to Trash.** Red is
@@ -3190,10 +3214,40 @@ fn scope_switch(
 /// The summary line between the field and the results.
 const SEARCH_SUMMARY: f32 = 22.0;
 
+/// What a drop of files this window is carrying will do.
+///
+/// **Chosen by what is held when the button comes up**, and changed by pressing
+/// or letting go of a modifier mid-drag — the card says which, because a
+/// modifier nobody can see the effect of is a guess.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DropVerb {
+    /// Nothing held.
+    Move,
+    /// `Ctrl`.
+    Copy,
+    /// `Alt`, which is GTK's: the drop opens a menu at the pointer that asks.
+    Ask,
+}
+
+impl DropVerb {
+    /// The verb what is held means: `Alt` over `Ctrl`, because asking includes
+    /// copying and the reverse is not true.
+    #[must_use]
+    pub fn held(mods: sk_plat::Modifiers) -> Self {
+        if mods.alt {
+            Self::Ask
+        } else if mods.ctrl {
+            Self::Copy
+        } else {
+            Self::Move
+        }
+    }
+}
+
 /// What a drag of files is carrying, for the card under the pointer.
 pub struct Carrying {
     /// The action the current drop would perform.
-    pub copying: bool,
+    pub verb: DropVerb,
     /// Where the pointer is, in logical pixels.
     pub at: Point,
     /// The first file's name.
@@ -3221,7 +3275,11 @@ fn drag_card(painter: &mut Painter<'_>, layout: &Layout, carrying: &Carrying) {
     let badge = (carrying.count > 1).then(|| format!("+{}", carrying.count - 1));
     let badge_width =
         badge.as_ref().map_or(0.0, |it| text_width(painter, it, metrics.header_size, true) + 10.0);
-    let key = if carrying.copying { "drag.copy" } else { "drag.move" };
+    let key = match carrying.verb {
+        DropVerb::Move => "drag.move",
+        DropVerb::Copy => "drag.copy",
+        DropVerb::Ask => "drag.ask",
+    };
     let name = sk_model::i18n::format(key, &[&carrying.name]);
     let name_width = text_width(painter, &name, metrics.text_size, false);
     let width = (CARD_ICON + CARD_INSET * 3.0 + name_width + badge_width).clamp(64.0, CARD_WIDEST);
@@ -3787,6 +3845,25 @@ fn place_row(
         // figure and the name were competing with it for: a bar is a proportion
         // and a proportion is easier to read the longer it is.
         fullness(painter, (free, total), (text_at, box_.right() - 10.0), box_, current);
+    }
+    // **How much is in the Trash, where a volume puts how much is left on it.**
+    // A figure and no gauge: a trash has no capacity, so there is no proportion
+    // to draw and a bar would be inventing one. Nothing at all while the walk
+    // that counts it is still going, and nothing when it is empty — a row saying
+    // `0 B` is a row spending the eye's attention on the answer "no".
+    if let Some(held) = row.held.filter(|held| held.any()) {
+        let text = format::size(held.bytes);
+        let ink = if current { theme.palette.selected_text } else { theme.palette.dim };
+        // All of it or none of it, and measured against the name, for the two
+        // reasons the volume's figure above is.
+        let width = text_width(painter, &text, metrics.header_size, false) + 3.0;
+        let name = text_width(painter, &row.label, metrics.text_size, false) + 3.0;
+        if name + width <= room {
+            let at = box_.right() - 10.0 - width;
+            let style = TextStyle::new(metrics.header_size, ink).right();
+            line(painter, &text, style, at, width, baseline);
+            room = (room - width - 6.0).max(0.0);
+        }
     }
     let box_rect = painter.rect(text_at, 0.0, room, 0.0);
     painter.label(&row.label, TextStyle::new(metrics.text_size, ink), box_rect, baseline);
@@ -6473,5 +6550,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn alt_asks_ctrl_copies_and_nothing_held_moves() {
+        use super::DropVerb;
+        let held = |ctrl, alt| sk_plat::Modifiers { ctrl, alt, ..sk_plat::Modifiers::default() };
+        assert_eq!(DropVerb::held(held(false, false)), DropVerb::Move);
+        assert_eq!(DropVerb::held(held(true, false)), DropVerb::Copy);
+        assert_eq!(DropVerb::held(held(false, true)), DropVerb::Ask);
+        assert_eq!(DropVerb::held(held(true, true)), DropVerb::Ask);
     }
 }

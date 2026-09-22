@@ -36,6 +36,7 @@ pub fn registry() -> Registry<App> {
     zoom(&mut registry);
     file(&mut registry);
     edit(&mut registry);
+    hand_over(&mut registry);
     recovery(&mut registry);
     window(&mut registry);
     help(&mut registry);
@@ -527,29 +528,10 @@ fn directions(registry: &mut Registry<App>) {
     }
 }
 
-/// Making, naming and removing things — and taking any of it back.
-fn edit(registry: &mut Registry<App>) {
+/// Handing a file to something else: an application, the properties panel, a
+/// terminal.
+fn hand_over(registry: &mut Registry<App>) {
     for spec in [
-        CommandSpec {
-            id: "file.new_folder",
-            name: "action.new_folder",
-            group: Group::File,
-            keys: &["ctrl+shift+n"],
-            enabled: |app: &App| !app.busy() && !app.trash_context(),
-            run: App::new_folder,
-        },
-        CommandSpec {
-            id: "file.rename",
-            name: "action.rename",
-            group: Group::File,
-            // F2 in every file manager on every desktop, which is why the frame
-            // statistics moved off it.
-            keys: &["f2"],
-            enabled: |app: &App| {
-                app.panes.focused().focused().is_some() && !app.busy() && !app.trash_context()
-            },
-            run: App::start_rename,
-        },
         CommandSpec {
             id: "file.open_with",
             name: "action.open_with",
@@ -587,6 +569,44 @@ fn edit(registry: &mut Registry<App>) {
             keys: &["ctrl+shift+`", "f4"],
             enabled: |_| true,
             run: App::open_terminal,
+        },
+    ] {
+        registry.add(spec);
+    }
+}
+
+/// Making, naming and removing things — and taking any of it back.
+fn edit(registry: &mut Registry<App>) {
+    for spec in [
+        CommandSpec {
+            id: "file.new_folder",
+            name: "action.new_folder",
+            group: Group::File,
+            keys: &["ctrl+shift+n"],
+            enabled: |app: &App| !app.busy() && !app.trash_context(),
+            run: App::new_folder,
+        },
+        CommandSpec {
+            id: "file.new_file",
+            name: "action.new_file",
+            group: Group::File,
+            // New folder's letter, one modifier further out — the family
+            // `Ctrl+Alt` already holds for the second form of a thing.
+            keys: &["ctrl+alt+n"],
+            enabled: |app: &App| !app.busy() && !app.trash_context(),
+            run: App::new_file,
+        },
+        CommandSpec {
+            id: "file.rename",
+            name: "action.rename",
+            group: Group::File,
+            // F2 in every file manager on every desktop, which is why the frame
+            // statistics moved off it.
+            keys: &["f2"],
+            enabled: |app: &App| {
+                app.panes.focused().focused().is_some() && !app.busy() && !app.trash_context()
+            },
+            run: App::start_rename,
         },
         CommandSpec {
             id: "file.delete",
@@ -1143,6 +1163,26 @@ fn file(registry: &mut Registry<App>) {
             run: App::paste_files,
         },
         CommandSpec {
+            id: "file.paste_link",
+            name: "action.paste_link",
+            group: Group::File,
+            keys: &["ctrl+alt+v"],
+            enabled: |app: &App| app.can_paste() && !app.busy() && !app.trash_context(),
+            run: App::paste_link,
+        },
+        CommandSpec {
+            id: "trash.empty",
+            name: "action.empty_trash",
+            group: Group::File,
+            // Delete permanently's chord with one more modifier, because this is
+            // the larger form of it. **The chord opens the question, not the
+            // deed**: the panel names how much goes and waits, so a press
+            // nobody meant costs an Escape.
+            keys: &["ctrl+shift+delete"],
+            enabled: |app: &App| !app.busy() && app.can_empty_trash(),
+            run: App::empty_trash,
+        },
+        CommandSpec {
             id: "file.paste_location",
             name: "action.paste_location",
             group: Group::Navigate,
@@ -1307,6 +1347,9 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
                 reach
                     .push((crate::menu::OPEN_WITH_COMMAND, "the context menu's Open with submenu"));
                 reach.push((crate::menu::OPEN_WITH_TAIL, "the last row of the Open with submenu"));
+            } else if *id == crate::menu::FROM_TEMPLATE {
+                // Its rows are templates, not commands, and the command it dims
+                // with is on the same menu in its own right.
             } else if let Some(sub) = crate::menu::submenu(id) {
                 for child in sub.groups.iter().flat_map(|group| group.iter()) {
                     reach.push((child, "a submenu of the context menu"));

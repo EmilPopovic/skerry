@@ -123,6 +123,30 @@ impl<T> History<T> {
         }
     }
 
+    /// Rewrites every entry in place, on both branches.
+    ///
+    /// **For the one thing that can happen to a change after it is recorded**:
+    /// something outside the stack takes away its way back, and the entry has to
+    /// say so rather than fail about it later. It is a rewrite rather than a
+    /// removal because the history is also a *list a person reads* — an entry
+    /// that vanished would leave them looking for the edit they remember making.
+    ///
+    /// The present does not move: this changes what the entries say, never how
+    /// many there are or which of them are applied.
+    ///
+    /// **`rewrite` is told whether each entry is applied**, because what took an
+    /// entry's way back depends on which way it would next be walked: an applied
+    /// entry's next step is its undo, an undone one's is its redo, and the two can
+    /// need different things.
+    pub fn amend(&mut self, mut rewrite: impl FnMut(&mut T, bool)) {
+        for entry in &mut self.done {
+            rewrite(entry, true);
+        }
+        for entry in &mut self.undone {
+            rewrite(entry, false);
+        }
+    }
+
     /// Whether there is anything to undo.
     #[must_use]
     pub fn can_undo(&self) -> bool {
@@ -315,6 +339,30 @@ mod tests {
         assert!(history.undo(|entry| *entry == "two"));
         assert_eq!(history.peek_undo(), Some(&"one"));
         assert_eq!(history.peek_redo(), Some(&"two"));
+    }
+
+    /// An amendment reaches both branches and moves neither the present nor the
+    /// count — a marking that skipped the redo branch would leave a `Ctrl+Y`
+    /// walking into the failure the marking exists to replace.
+    #[test]
+    fn an_amendment_reaches_both_branches_and_moves_nothing() {
+        let mut history = History::new(8);
+        for entry in ["one", "two", "three"] {
+            history.record(entry);
+        }
+        assert!(history.undo(|_| true));
+
+        history.amend(|entry, _| {
+            if *entry != "two" {
+                *entry = "marked";
+            }
+        });
+        assert_eq!(
+            history.timeline().copied().collect::<Vec<_>>(),
+            vec!["marked", "two", "marked"]
+        );
+        assert_eq!(history.applied(), 2);
+        assert_eq!(history.len(), 3);
     }
 
     #[test]

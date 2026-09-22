@@ -390,6 +390,17 @@ fn play(input: &mut dyn Input, actions: &[Action]) {
                 std::thread::sleep(Duration::from_millis(u64::from(*hold)));
                 input.finger_stop();
             }
+            Action::Hold { held, down } => {
+                if let Some((code, mask)) = held.key() {
+                    if *down {
+                        input.key(code, true);
+                        input.modifiers(mask);
+                    } else {
+                        input.modifiers(0);
+                        input.key(code, false);
+                    }
+                }
+            }
             Action::Sleep { milliseconds } => {
                 input.flush();
                 std::thread::sleep(Duration::from_millis(u64::from(*milliseconds)));

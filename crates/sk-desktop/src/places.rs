@@ -107,6 +107,29 @@ pub fn user_dirs() -> Vec<Place> {
     places
 }
 
+/// The templates directory, if the account has one.
+///
+/// **`XDG_TEMPLATES_DIR` is a key in the file [`user_dirs`] already reads**, so
+/// this costs a lookup rather than a parser — and the reason it is a function of
+/// its own rather than a row of [`WANTED`] is the comment on that list: Templates
+/// is off the *sidebar* because a sidebar is a list of the places you go, and
+/// nobody goes there. A menu of what is *in* it is the opposite claim and is
+/// what the directory has always been for.
+///
+/// **Runs on a job**: it reads a file and stats a directory.
+#[must_use]
+pub fn templates() -> Option<PathBuf> {
+    let home = home()?;
+    let text = crate::config_dirs()
+        .into_iter()
+        .map(|dir| dir.join("user-dirs.dirs"))
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let path = assignment(&text, "XDG_TEMPLATES_DIR")
+        .map_or_else(|| home.join("Templates"), |value| expand(&value, &home));
+    (path.is_dir() && path != home).then_some(path)
+}
+
 /// Where the list lives. `gtk-3.0` and not `gtk-4.0`: GTK 4 kept the path.
 const BOOKMARKS: &str = "gtk-3.0/bookmarks";
 

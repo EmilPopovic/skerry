@@ -281,6 +281,18 @@ enum Queued {
     },
     /// Delete for good.
     Erase,
+    /// Erase everything in one trash, for good.
+    ///
+    /// **Its own verb rather than an [`Self::Erase`] of the trash directory**,
+    /// because the directory itself has to survive — `sk_fs::trash::empty` says
+    /// why — and because what it invalidates on the undo stack is settled when
+    /// this verb lands and by nothing else.
+    Empty,
+    /// Make a symbolic link to each path, in this directory.
+    Link {
+        /// Where the links go.
+        into: PathBuf,
+    },
     /// Move into this directory.
     Move {
         /// Where they end up.
@@ -307,6 +319,8 @@ impl Queued {
             Self::Restore => "verb.restoring",
             Self::Trash => "verb.trashing",
             Self::Erase => "verb.deleting",
+            Self::Empty => "verb.emptying",
+            Self::Link { .. } => "verb.linking",
             Self::Copy { .. } => "verb.copying",
             Self::Move { .. } => "verb.moving",
             Self::Unpack { .. } => "verb.extracting",
@@ -412,8 +426,48 @@ fn unpack_owned(
             change: Box::new(unpacked),
             note: refused(refusal, &done.note, archive).message(),
             retry: false,
+            stranded: false,
         },
     }
+}
+
+/// Makes a symbolic link to `target` inside `into`, under a free name.
+///
+/// **Runs on a job**, and the free name is chosen here for the reason
+/// `copy_into` chooses one here: a `statx` per candidate is not something the
+/// frame loop may do, and `create_link` refuses a taken name so the loop is the
+/// answer rather than a check that races with it.
+fn link_into(target: &Path, into: &Path) -> Result<Change, Problem> {
+    let Some(name) = target.file_name().and_then(|name| name.to_str()) else {
+        return Err(Problem::new(
+            sk_model::ProblemKind::BadName,
+            target.display().to_string(),
+            "no name to make a link under",
+        ));
+    };
+    // `report.pdf`, then `report.pdf link`, then `report.pdf link 2`. The plain
+    // name first, because a link pasted into another folder is called what it
+    // points at; beside its target that name is taken, and the create refusing
+    // it is what moves on to the next. Not `copy::free_name`, which would call it
+    // `report (copy).pdf`: a link is not a copy, and a name that says it is is a
+    // name somebody will act on wrongly.
+    let suffix = sk_model::i18n::lookup("name.link_suffix");
+    for attempt in 0..1000_u32 {
+        let candidate = match attempt {
+            0 => name.to_owned(),
+            1 => format!("{name} {suffix}"),
+            _ => format!("{name} {suffix} {attempt}"),
+        };
+        match ops::create_link(into, &candidate, target) {
+            Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
+            other => return other,
+        }
+    }
+    Err(Problem::new(
+        sk_model::ProblemKind::NameTaken,
+        target.display().to_string(),
+        "a thousand links of that name already exist",
+    ))
 }
 
 /// The refusal a child sent, as the sentence a person reads.
@@ -648,6 +702,58 @@ impl Edits {
         });
     }
 
+    /// Makes an empty file in `parent`, choosing a free name.
+    ///
+    /// The same loop [`Edits::new_directory`] uses, for the same reason: the
+    /// create is the check, and a `statx` first would race with whatever else
+    /// writes there.
+    pub fn new_file(&mut self, parent: PathBuf, jobs: &Jobs) {
+        self.start(Pending::Doing, jobs, move |_| {
+            let base = sk_model::i18n::lookup("name.new_file");
+            for attempt in 1..1000_u32 {
+                let name = if attempt == 1 { base.to_owned() } else { format!("{base} {attempt}") };
+                match ops::create_file(&parent, &name) {
+                    Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
+                    other => return Outcome::Did(other),
+                }
+            }
+            Outcome::Did(ops::create_file(&parent, base))
+        });
+    }
+
+    /// Makes a symbolic link to each path, in `into`.
+    pub fn link_all(&mut self, paths: Vec<PathBuf>, into: PathBuf, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Link { into }, paths, jobs)
+    }
+
+    /// Erases every trash in `files`, for good.
+    ///
+    /// **Nothing here asks whether the caller is sure**, which is the rule
+    /// [`Edits::erase_all`] already states: the question belongs to the command,
+    /// because the command is what knows what a person just answered.
+    pub fn empty_all(&mut self, files: Vec<PathBuf>, jobs: &Jobs) -> bool {
+        self.queue_all(Queued::Empty, files, jobs)
+    }
+
+    /// Marks every entry whose way back the emptied trash at `files` erased.
+    ///
+    /// **[Rule 3](../../../docs/03-principles.md#3-everything-is-reversible)'s
+    /// own failure test, met on purpose.** Emptying the Trash is the one thing
+    /// in this program that takes a way back away from a change already
+    /// recorded, and an entry that simply failed later would fail about a path
+    /// inside `Trash/files` that nobody has ever looked at. So the stack is told
+    /// at the moment it happens, in [ADR
+    /// 0036](../../../docs/adr/0036-operation-failures-retain-pending-work.md)'s
+    /// shape — kept, with a note on it — and `Ctrl+Z` answers with the note.
+    fn strand_what_the_empty_erased(&mut self, files: &Path) {
+        self.history.amend(|change, applied| {
+            let next = if applied { ops::Next::Undo } else { ops::Next::Redo };
+            if let Some(marked) = ops::stranded_by_empty(change, files, next) {
+                *change = marked;
+            }
+        });
+    }
+
     /// Renames `path` to `name`.
     pub fn rename(&mut self, path: PathBuf, name: String, jobs: &Jobs) {
         self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::rename(&path, &name)));
@@ -791,7 +897,12 @@ impl Edits {
         // line. Rule 7 would rather have no ETA than pay for one.
         if matches!(
             self.doing,
-            Queued::Restore | Queued::Trash | Queued::Erase | Queued::Unpack { .. }
+            Queued::Restore
+                | Queued::Trash
+                | Queued::Erase
+                | Queued::Empty
+                | Queued::Link { .. }
+                | Queued::Unpack { .. }
         ) {
             return;
         }
@@ -936,9 +1047,12 @@ impl Edits {
                 Queued::Move { into } => (Some(into.clone()), true),
                 // An unpack asks nothing about a taken name: the folder it makes
                 // is a free one, chosen on this job a moment from now.
-                Queued::Restore | Queued::Trash | Queued::Erase | Queued::Unpack { .. } => {
-                    (None, false)
-                }
+                Queued::Restore
+                | Queued::Trash
+                | Queued::Erase
+                | Queued::Empty
+                | Queued::Link { .. }
+                | Queued::Unpack { .. } => (None, false),
             };
             // **Asked here, on the job.** Whether a name is taken is a `statx`,
             // and rule 1 has no exemption for a fast one — so the question is
@@ -970,6 +1084,8 @@ impl Edits {
                 Queued::Restore => ops::restore(&path),
                 Queued::Trash => ops::trash(&path),
                 Queued::Erase => ops::erase(&path, cancel),
+                Queued::Empty => ops::empty_trash(&path, cancel),
+                Queued::Link { into } => link_into(&path, &into),
                 // **A paste into the folder the file came from renames**, with
                 // nothing asked: that is what Duplicate is and what pasting
                 // where you copied from means, and a panel asking "replace this
@@ -1178,6 +1294,14 @@ impl Edits {
                 let already_recorded = std::mem::take(&mut self.retrying_copy)
                     && self.history.peek_undo().is_some_and(|old| same_copy(old, &change));
                 let recordable = !matches!(change, Change::Erased { .. }) && !already_recorded;
+                // **The one place an empty owes the stack anything.** Told here
+                // rather than when the command was given, because a queue that
+                // was stopped before this trash was reached has taken nothing
+                // away from it.
+                if self.doing == Queued::Empty {
+                    let emptied = change.subject().to_path_buf();
+                    self.strand_what_the_empty_erased(&emptied);
+                }
                 // **One gesture is one undo.** A queue of two hundred pastes
                 // used to record two hundred entries, so `Ctrl+Z` after it took
                 // back the last file and left the other hundred and ninety-nine
@@ -1269,6 +1393,8 @@ impl Edits {
             Queued::Restore => "notice.restored",
             Queued::Trash => "notice.trashed",
             Queued::Erase => "notice.deleted",
+            Queued::Empty => "notice.emptied",
+            Queued::Link { .. } => "notice.linked",
             Queued::Copy { .. } => "notice.copied_in",
             Queued::Move { .. } => "notice.moved_in",
             Queued::Unpack { .. } => "notice.unpacked",
@@ -1570,6 +1696,27 @@ impl Edits {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+    /// A link pasted into another folder is called what it points at; beside
+    /// its target that name is taken, so it becomes `… link`, then `… link 2`.
+    #[test]
+    fn a_link_takes_the_plain_name_where_it_is_free() {
+        let root = std::env::temp_dir().join(format!("skerry-link-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (here, there) = (root.join("here"), root.join("there"));
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&there).unwrap();
+        let target = here.join("report.pdf");
+        std::fs::write(&target, b"%PDF").unwrap();
+
+        super::link_into(&target, &there).expect("a link into another folder");
+        assert!(there.join("report.pdf").is_symlink(), "the plain name was not taken first");
+        super::link_into(&target, &here).expect("a link beside its target");
+        assert!(here.join("report.pdf link").is_symlink());
+        super::link_into(&target, &here).expect("a second link beside its target");
+        assert!(here.join("report.pdf link 2").is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     use super::{Edits, Queued};
     use crate::pane::Jobs;
     use sk_util::{Pool, Waker};
@@ -1718,6 +1865,7 @@ mod tests {
                 }),
                 note: "xattr could not be preserved".into(),
                 retry: false,
+                stranded: false,
             })))
             .unwrap();
         harness.settle();
@@ -1753,6 +1901,7 @@ mod tests {
                 }),
                 note: "injected read failure".into(),
                 retry: true,
+                stranded: false,
             })))
             .unwrap();
         harness.settle();
@@ -1873,7 +2022,10 @@ mod tests {
     #[test]
     fn a_queue_error_records_earlier_successes() {
         let mut harness = Harness::new();
-        let completed = sk_fs::ops::Change::Created { path: "/fixture/created".into() };
+        let completed = sk_fs::ops::Change::Created {
+            path: "/fixture/created".into(),
+            made: sk_fs::ops::Made::Directory,
+        };
         harness.edits.batch.push(completed.clone());
         harness.edits.queued = 2;
         harness
