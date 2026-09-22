@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The frame loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,6 +41,58 @@ const DRAG_THRESHOLD: f32 = 4.0;
 /// Four seconds: long enough to read a sentence, short enough that it is gone
 /// before it becomes furniture.
 const NOTICE_WINDOW: Duration = Duration::from_secs(4);
+
+/// Whether a finished operation is one the desktop should be told about.
+///
+/// **Two conditions and not three.** *The queue is empty* is the caller's, because
+/// only the caller can see the queue; these two are the ones that decide whether
+/// a person saw the answer. A window with the keyboard has a status line in front
+/// of somebody, and an operation shorter than the threshold had its result on
+/// screen while they were still looking at it.
+const fn worth_telling_the_desktop(focused: bool, ran_for: Duration) -> bool {
+    !focused && ran_for.as_secs() >= LONG_ENOUGH_TO_TELL_THE_DESKTOP.as_secs()
+}
+
+/// How long an operation has to run before the desktop is told it finished.
+///
+/// **Eight seconds, which is [`NOTICE_WINDOW`] twice over.** The status line is
+/// the answer for anything a person is still watching, and it holds a sentence
+/// for four; an operation shorter than that is one whose result was on screen
+/// while they were looking at it. Twice that is the first span where a person
+/// who left has plausibly stopped expecting the window to answer — and it is a
+/// judgement about attention rather than a measurement, so it is written as one
+/// number in one place rather than argued about at each call.
+const LONG_ENOUGH_TO_TELL_THE_DESKTOP: Duration = Duration::from_secs(8);
+
+/// When the run of operations in flight began, for as long as one is.
+///
+/// **One span for a whole queue**: started when the engine goes from idle to
+/// busy, so forty files are one run rather than forty, which is the span
+/// [`LONG_ENOUGH_TO_TELL_THE_DESKTOP`] is measured against.
+///
+/// **And dropped when the engine is idle without anything having landed.** Not
+/// every run ends in a landing — answering *Stop* to a taken name clears the
+/// queue and returns — and a span that outlived its run would be the start of
+/// the next one too: a one-second rename measured from a copy stopped ten
+/// minutes before, and reported to the desktop.
+#[derive(Default)]
+struct OperationClock(Option<Instant>);
+
+impl OperationClock {
+    /// Once a turn, with whether the engine is busy.
+    fn tick(&mut self, busy: bool, now: Instant) {
+        match (busy, self.0) {
+            (true, None) => self.0 = Some(now),
+            (false, Some(_)) => self.0 = None,
+            _ => {}
+        }
+    }
+
+    /// The start of the run that has just finished, which ends it.
+    fn take(&mut self) -> Option<Instant> {
+        self.0.take()
+    }
+}
 
 /// The soonest a change notification may cause another read.
 ///
@@ -800,6 +852,11 @@ struct Replies {
     facts_rx: Receiver<sk_fs::facts::Facts>,
     openers_tx: std::sync::mpsc::Sender<(crate::openers::Asker, crate::openers::Handlers)>,
     openers_rx: Receiver<(crate::openers::Asker, crate::openers::Handlers)>,
+    /// What a write of a default association had to say — its own channel and
+    /// not the handler row's, because that one is also an *answer* about the
+    /// folder association and this is only ever a sentence.
+    default_tx: std::sync::mpsc::Sender<String>,
+    default_rx: Receiver<String>,
     /// A search report, and the query it is an answer to.
     found_tx: std::sync::mpsc::Sender<(String, sk_index::Found)>,
     found_rx: Receiver<(String, sk_index::Found)>,
@@ -855,6 +912,7 @@ impl Replies {
         let (found_tx, found_rx) = mpsc::channel();
         let (index_tx, index_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
+        let (default_tx, default_rx) = mpsc::channel();
         let (places_tx, places_rx) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::channel();
         let (handler_tx, handler_rx) = mpsc::channel();
@@ -873,6 +931,8 @@ impl Replies {
             facts_rx,
             openers_tx,
             openers_rx,
+            default_tx,
+            default_rx,
             found_tx,
             found_rx,
             index_tx,
@@ -1320,6 +1380,25 @@ pub struct App {
     title_press: Option<Point>,
     last_frame: Instant,
     started: Instant,
+    /// Whether this session has anything to send a notification to.
+    ///
+    /// **Probed once, on the first job that would use it** — [ADR
+    /// 0007](../../../docs/adr/0007-runtime-capability-detection.md). A `OnceLock`
+    /// rather than a field the UI thread fills, because the probe is a bus round
+    /// trip and the only threads that ask are the ones already off the frame
+    /// loop.
+    notifications: std::sync::Arc<std::sync::OnceLock<bool>>,
+    /// Whether the display server says this window has the keyboard.
+    ///
+    /// **`sk-plat`'s answer, kept because `sk-desktop` may not have one.** Which
+    /// window is in front is the display server's fact and the notification
+    /// decision's only input that is not about the operation. Assumed true until
+    /// told otherwise: a window that has just been mapped and has heard nothing
+    /// is a window somebody is looking at, and guessing the other way would
+    /// notify about the first copy of every session.
+    focused: bool,
+    /// When the run of operations in flight began.
+    operation: OperationClock,
     first_frame_reported: bool,
     open_time: (u128, u128, u128),
 }
@@ -1830,6 +1909,9 @@ impl App {
             title_press: None,
             last_frame: now,
             started: options.started,
+            notifications: std::sync::Arc::default(),
+            focused: true,
+            operation: OperationClock::default(),
             first_frame_reported: false,
             open_time: (window_us, gpu_us, font_us),
         };
@@ -1881,6 +1963,10 @@ impl App {
             // `render`.
             let turn = Instant::now();
             self.drain_platform(&commands);
+            // After the events that start operations and before the ones that
+            // finish them, which is the only ordering where a span covers the
+            // whole of what it measures.
+            self.operation.tick(self.edits.busy(), turn);
             self.drain_jobs();
             self.drain_changes();
             self.drain_desktop();
@@ -1889,6 +1975,7 @@ impl App {
             self.drain_launches();
             self.drain_facts();
             self.drain_openers();
+            self.drain_defaults();
             self.drain_handler();
             self.drain_mounted();
             self.drain_found();
@@ -2291,7 +2378,7 @@ impl App {
                 self.dirty = true;
             }
             Event::CloseRequested => self.closing = true,
-            Event::Focused(_) => self.dirty = true,
+            Event::Focused(has) => self.took_the_keyboard(*has),
             Event::KeyDown(key) => {
                 self.drag_modifier(key.mods.ctrl);
                 self.key(key, commands);
@@ -5880,12 +5967,30 @@ impl App {
     /// so it is read on a job — resolving the type opens the file when the name
     /// says nothing, and resolving handlers reads every XDG data directory.
     pub(crate) fn open_with(&mut self) {
+        self.ask_the_panel(crate::openers::Purpose::Once);
+    }
+
+    /// Asks which application should open this *kind* of file from now on.
+    ///
+    /// The same list and the same job as [`Self::open_with`]; what differs is
+    /// what choosing a row does, which is
+    /// [`sk_desktop::mimeapps::set_default`] rather than a launch.
+    pub(crate) fn open_always(&mut self) {
+        self.ask_the_panel(crate::openers::Purpose::Always);
+    }
+
+    /// Opens the list for one purpose, or closes whichever is open.
+    ///
+    /// A second press of *either* chord closes it, because one panel is on
+    /// screen and the chord that opened it is not the only thing a hand reaches
+    /// for to make it go away.
+    fn ask_the_panel(&mut self, purpose: crate::openers::Purpose) {
         if self.openers.take().is_some() {
             self.dirty = true;
             return;
         }
         let Some(path) = self.selected_paths().into_iter().next() else { return };
-        self.ask_which_applications(path, crate::openers::Asker::Panel);
+        self.ask_which_applications(path, crate::openers::Asker::Panel(purpose));
     }
 
     /// Starts the job that finds which applications open `path`, for whichever
@@ -6902,15 +7007,15 @@ impl App {
                         self.dirty = true;
                     }
                 }
-                crate::openers::Asker::Panel if found.rows.is_empty() => {
+                crate::openers::Asker::Panel(_) if found.rows.is_empty() => {
                     self.notice = Some((
                         sk_model::i18n::format("error.no_handler", &[&found.mime]),
                         Instant::now(),
                     ));
                     self.dirty = true;
                 }
-                crate::openers::Asker::Panel => {
-                    self.openers = Some(crate::openers::Openers::new(found));
+                crate::openers::Asker::Panel(purpose) => {
+                    self.openers = Some(crate::openers::Openers::new(found, purpose));
                     self.dirty = true;
                 }
             }
@@ -6922,7 +7027,45 @@ impl App {
         let Some(list) = self.openers.take() else { return };
         self.dirty = true;
         let Some(entry) = list.chosen().cloned() else { return };
-        self.start_application(entry, list.path.clone());
+        match list.purpose {
+            crate::openers::Purpose::Once => self.start_application(entry, list.path.clone()),
+            crate::openers::Purpose::Always => self.make_it_the_default(entry, list.mime.clone()),
+        }
+    }
+
+    /// Writes `entry` into `mimeapps.list` as the user's default for `mime`, on
+    /// a job, and says what it did.
+    ///
+    /// **On a job because it is a read, a rewrite and a rename**, which rule 1
+    /// does not allow the frame loop — the same reason the settings panel's
+    /// folder row has always been one.
+    ///
+    /// **The file is not opened as well.** It is one press from opening either
+    /// way, and a row that changed a setting *and* spawned a process would be two
+    /// actions behind one press.
+    fn make_it_the_default(&mut self, entry: sk_desktop::DesktopEntry, mime: String) {
+        let sender = self.replies.default_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            let said = match sk_desktop::mimeapps::set_default(&mime, &entry.id) {
+                Ok(_) => sk_model::i18n::format("notice.default_set", &[&mime, &entry.name]),
+                Err(sk_desktop::mimeapps::Refused::Unreadable(line)) => {
+                    sk_model::i18n::format("error.mimeapps_unreadable", &[&line])
+                }
+                Err(_) => sk_model::i18n::lookup("error.mimeapps_refused").to_owned(),
+            };
+            if sender.send(said).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of what a default-association write had to say.
+    fn drain_defaults(&mut self) {
+        while let Ok(said) = self.replies.default_rx.try_recv() {
+            self.notice = Some((said, Instant::now()));
+            self.dirty = true;
+        }
     }
 
     /// Hands `path` to `entry` on a job, and says so in the status line once it
@@ -8330,8 +8473,10 @@ scope_aim={scope_aim:?}",
             self.relayout();
         }
         self.settle_history();
+        let mut went_to = None;
         let message = match landed {
             crate::edit::Landed::Notice(message, subject) => {
+                went_to = subject.as_deref().and_then(Path::parent).map(Path::to_path_buf);
                 // The listing does not know yet — the watcher will bring it in
                 // within a quarter of a second — so the name to land the cursor
                 // on is remembered rather than looked up.
@@ -8362,8 +8507,72 @@ scope_aim={scope_aim:?}",
         // The next one in the queue starts here rather than in `drain`: the
         // engine has no pool and this is where one is in reach.
         self.edits.next_in_queue(&self.jobs);
+        if !self.edits.busy() {
+            self.tell_the_desktop_if_it_finished_unseen(&message, went_to.as_deref());
+        }
         self.notice = Some((message, Instant::now()));
         self.dirty = true;
+    }
+
+    /// The display server says this window has, or has lost, the keyboard.
+    ///
+    /// Kept rather than only redrawn, because it is the input to row 7's
+    /// decision — [`worth_telling_the_desktop`].
+    fn took_the_keyboard(&mut self, has: bool) {
+        self.focused = has;
+        self.dirty = true;
+    }
+
+    /// Tells the desktop that an operation finished, where the window cannot.
+    ///
+    /// **Three conditions, and all three are this crate's to ask.** The queue is
+    /// empty, so the sentence is the last one rather than one of forty. It took
+    /// longer than [`LONG_ENOUGH_TO_TELL_THE_DESKTOP`], because a copy that is
+    /// over before a hand leaves the keyboard was already answered by the status
+    /// line. And the window does not have the keyboard, which is `sk-plat`'s
+    /// answer — [04-architecture.md](../../../docs/04-architecture.md)'s crate
+    /// table gives `sk-desktop` the call and no policy about when to make it.
+    ///
+    /// **On a job**, because the call is a connection, an authentication and a
+    /// round trip to a daemon that may be doing anything at all — and rule 1 has
+    /// no exemption for a socket.
+    ///
+    /// A machine with no notification daemon is [ADR
+    /// 0007](../../../docs/adr/0007-runtime-capability-detection.md)'s probe and
+    /// a line in the log: the operation finished, the window said so, and there
+    /// is nothing a person can do about a facility their session does not have.
+    ///
+    /// The body is the folder the work went to, where it is known: the one thing
+    /// a notification cannot say by being on screen is *where*, and the folder
+    /// the focused pane shows by the time the queue empties may be one somebody
+    /// navigated to afterwards. A failure has no destination to name, and says
+    /// only what failed.
+    fn tell_the_desktop_if_it_finished_unseen(&mut self, said: &str, went_to: Option<&Path>) {
+        let Some(since) = self.operation.take() else { return };
+        if !worth_telling_the_desktop(self.focused, since.elapsed()) {
+            return;
+        }
+        let summary = said.to_owned();
+        let body = went_to.map(|it| it.display().to_string()).unwrap_or_default();
+        let known = std::sync::Arc::clone(&self.notifications);
+        self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
+            if !known.get_or_init(sk_desktop::notify::available) {
+                eprintln!("skerry: notifications: no daemon on this session");
+                return;
+            }
+            let told = sk_desktop::notify::send(
+                sk_model::i18n::lookup("app.name"),
+                crate::service::DESKTOP_ID,
+                crate::service::NAME,
+                &summary,
+                &body,
+            );
+            if let Err(refused) = told {
+                // Rule 8: the sentence was on screen before this job started,
+                // and the chain is in the log.
+                eprintln!("skerry: notifications: {}", refused.detail());
+            }
+        });
     }
 
     /// Takes delivery of a launch: its notice, and the child to reap.
@@ -9523,7 +9732,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
     ///
     /// Enough for a scenario to assert about either without depending on what
     /// this machine happens to have installed or on where the panel drew.
-    fn overlay_report(&self) -> (String, String, usize, String) {
+    fn overlay_report(&self) -> (String, String, usize, String, &'static str) {
         let facts = self.properties.as_ref().map_or_else(String::new, |panel| {
             panel
                 .rows(clock_seconds())
@@ -9541,7 +9750,16 @@ pane_body={bodies:?} pane_bar={bars:?}",
             .and_then(|list| list.chosen())
             .map(|entry| entry.name.clone())
             .unwrap_or_default();
-        (properties, facts, openers, opener)
+        // **Which question the panel is asking.** The two purposes draw the same
+        // rows, so a scenario that could only count them could not tell an Open
+        // with from an Always open with — and the one that writes a file is the
+        // one worth being sure about.
+        let openers_for = match self.openers.as_ref().map(|list| list.purpose) {
+            None => "none",
+            Some(crate::openers::Purpose::Once) => "once",
+            Some(crate::openers::Purpose::Always) => "always",
+        };
+        (properties, facts, openers, opener, openers_for)
     }
 
     /// What the list of places is showing, for the diagnostic line.
@@ -9679,7 +9897,7 @@ volumes={volumes:?} aside_grabbed={}",
         // What an input method is composing, if anything. The field it is in is
         // whichever has the keyboard, so one value answers for all three.
         let composing = self.field_preedit().map(|(text, _)| text.clone()).unwrap_or_default();
-        let (properties, facts, openers, opener) = self.overlay_report();
+        let (properties, facts, openers, opener, openers_for) = self.overlay_report();
         let panes_report = self.panes_report();
         let menu_report = self.menu_report();
         let palette_report = self.palette_report();
@@ -9706,6 +9924,7 @@ crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={c
 crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
+openers_for={openers_for} \
 composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_aim={settings_aim:?} \
 {places_report} \
 path_field={path_field} name_field={name_field} \
@@ -11552,7 +11771,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         // back. The submenu says `Reading…` for the frames the job takes, which
         // is what `Ctrl+Shift+O` has always cost.
         let asks = match menu.items.get(row).map(|item| &item.kind) {
-            Some(crate::menu::Kind::OpenWith { path, found: None }) if self.menu_job.is_none() => {
+            Some(crate::menu::Kind::OpenWith { path, found: None, .. })
+                if self.menu_job.is_none() =>
+            {
                 Some(path.clone())
             }
             _ => None,
@@ -12420,9 +12641,53 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+    /// A queue is one run, timed from its first operation rather than its last.
+    #[test]
+    fn a_queue_is_one_run_from_its_first_operation() {
+        let start = std::time::Instant::now();
+        let mut clock = super::OperationClock::default();
+        clock.tick(true, start);
+        clock.tick(true, start + std::time::Duration::from_secs(30));
+        assert_eq!(clock.take(), Some(start));
+        assert_eq!(clock.take(), None, "taking a run ends it");
+    }
 
-    use super::expand_home;
+    /// A run that ends without landing — *Stop* on a taken name — leaves no span
+    /// behind for the next one to be measured from.
+    #[test]
+    fn a_run_stopped_without_landing_does_not_time_the_next_one() {
+        let start = std::time::Instant::now();
+        let mut clock = super::OperationClock::default();
+        clock.tick(true, start);
+        clock.tick(false, start + std::time::Duration::from_secs(600));
+        let next = start + std::time::Duration::from_secs(601);
+        clock.tick(true, next);
+        assert_eq!(clock.take(), Some(next), "the rename was timed from the stopped copy");
+    }
+
+    use super::{LONG_ENOUGH_TO_TELL_THE_DESKTOP, expand_home, worth_telling_the_desktop};
     use std::path::Path;
+    use std::time::Duration;
+
+    /// Row 7's whole policy, which is two conditions and no timer.
+    ///
+    /// **The window having the keyboard is what decides it**, not how long the
+    /// operation took on its own: a person watching the status line is told
+    /// there, and telling them twice is the kind of noise that gets a file
+    /// manager's notifications turned off for good.
+    #[test]
+    fn only_a_long_operation_with_the_window_away_reaches_the_desktop() {
+        let long = LONG_ENOUGH_TO_TELL_THE_DESKTOP;
+        let short = long.saturating_sub(Duration::from_secs(1));
+        assert!(worth_telling_the_desktop(false, long));
+        assert!(worth_telling_the_desktop(false, long + Duration::from_secs(600)));
+        assert!(!worth_telling_the_desktop(false, short), "a short operation was announced");
+        assert!(!worth_telling_the_desktop(true, long), "a window somebody is looking at");
+        assert!(!worth_telling_the_desktop(true, short));
+        // A threshold of zero would notify for every rename, which is the
+        // failure this constant exists to make impossible to reach by accident.
+        assert!(long >= Duration::from_secs(1));
+    }
 
     /// `~other` is a shell feature that needs `getpwnam`. Expanding it as this
     /// user's home would send a person somewhere they did not ask for, and

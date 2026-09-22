@@ -256,6 +256,16 @@ pub const OPEN_WITH: &str = "menu.open_with";
 /// by all three, because three copies of a string are three ways to drift.
 pub const OPEN_WITH_COMMAND: &str = "file.open_with";
 
+/// The last row of the Open with submenu: the same question, asked for every
+/// file of the type rather than this one.
+///
+/// **A row inside Open with, not one beside it.** A second top-level row opening
+/// the same applications made every file's menu a row taller — enough, at
+/// 900×520 and 125%, to push *Colour* below the fold and make the menu scroll —
+/// for a question that is a variant of the one Open with already asks. It opens
+/// the panel in its *always* purpose, where choosing an application is one press.
+pub const OPEN_WITH_TAIL: &str = "file.open_always";
+
 /// The submenu a table's identifier names, if it names one.
 #[must_use]
 pub fn submenu(id: &str) -> Option<&'static Submenu> {
@@ -282,6 +292,10 @@ pub enum Kind {
         path: PathBuf,
         /// What the job found, once it has.
         found: Option<Handlers>,
+        /// The chord for [`OPEN_WITH_TAIL`], read from the registry when the row
+        /// was built — the submenu is built later, from an answer, where there is
+        /// no registry to ask, and a row without its chord is rule 4 unmet.
+        always: String,
     },
     /// One application on the Open with submenu, and the file to hand it.
     Launch {
@@ -358,7 +372,12 @@ impl Item {
                 sub.groups.iter().flat_map(|group| group.iter().copied()).collect()
             }
             Kind::OpenWith { found: Some(found), .. } => {
-                found.rows.iter().map(|entry| entry.id.as_str()).collect()
+                let mut held: Vec<&str> =
+                    found.rows.iter().map(|entry| entry.id.as_str()).collect();
+                if !held.is_empty() {
+                    held.push(OPEN_WITH_TAIL);
+                }
+                held
             }
             Kind::OpenWith { found: None, .. }
             | Kind::Command
@@ -429,13 +448,18 @@ pub fn build<C>(
 /// nor a submenu.
 fn row<C>(id: &str, registry: &Registry<C>, enabled: &impl Fn(&str) -> bool) -> Option<Item> {
     if id == OPEN_WITH {
+        let always = registry
+            .find(OPEN_WITH_TAIL)
+            .and_then(|command| registry.describe(command))
+            .map(|described| described.keys)
+            .unwrap_or_default();
         return Some(Item {
             id: id.to_owned(),
             name: i18n::lookup(OPEN_WITH).to_owned(),
             keys: String::new(),
             enabled: enabled(OPEN_WITH_COMMAND),
             starts_group: false,
-            kind: Kind::OpenWith { path: PathBuf::new(), found: None },
+            kind: Kind::OpenWith { path: PathBuf::new(), found: None, always },
         });
     }
     if let Some(sub) = submenu(id) {
@@ -461,7 +485,12 @@ fn row<C>(id: &str, registry: &Registry<C>, enabled: &impl Fn(&str) -> bool) -> 
 }
 
 /// The Open with submenu, in whichever of its three states the answer is in.
-fn applications(answer: Option<&Handlers>, at: Point) -> Menu {
+///
+/// [`OPEN_WITH_TAIL`] ends it only once there are applications to choose from:
+/// under `Reading…` it would be the first row a key could light, and a press
+/// meant for the list would open a panel instead; under *nothing opens this*
+/// it would open a panel that says the same thing again.
+fn applications(answer: Option<&Handlers>, at: Point, always: &str) -> Menu {
     let note = |id: &str, name: String| Item {
         id: id.to_owned(),
         name,
@@ -475,18 +504,29 @@ fn applications(answer: Option<&Handlers>, at: Point) -> Menu {
         Some(found) if found.rows.is_empty() => {
             vec![note("menu.nothing_opens", i18n::format("error.no_handler", &[&found.mime]))]
         }
-        Some(found) => found
-            .rows
-            .iter()
-            .map(|entry| Item {
-                id: entry.id.clone(),
-                name: entry.name.clone(),
-                keys: String::new(),
+        Some(found) => {
+            let mut rows: Vec<Item> = found
+                .rows
+                .iter()
+                .map(|entry| Item {
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                    keys: String::new(),
+                    enabled: true,
+                    starts_group: false,
+                    kind: Kind::Launch { entry: entry.clone(), path: found.path.clone() },
+                })
+                .collect();
+            rows.push(Item {
+                id: OPEN_WITH_TAIL.to_owned(),
+                name: i18n::lookup("action.open_always").to_owned(),
+                keys: always.to_owned(),
                 enabled: true,
-                starts_group: false,
-                kind: Kind::Launch { entry: entry.clone(), path: found.path.clone() },
-            })
-            .collect(),
+                starts_group: true,
+                kind: Kind::Command,
+            });
+            rows
+        }
     };
     Menu { at, items, active: None, scroll: 0, sub: None }
 }
@@ -556,7 +596,9 @@ impl Menu {
                 }
                 menu
             }),
-            Kind::OpenWith { found, .. } => Some(applications(found.as_ref(), self.at)),
+            Kind::OpenWith { found, always, .. } => {
+                Some(applications(found.as_ref(), self.at, always))
+            }
             Kind::Command | Kind::Launch { .. } | Kind::Note => None,
         };
         let Some(menu) = menu else { return false };
@@ -587,7 +629,10 @@ impl Menu {
         else {
             return false;
         };
-        item.kind = Kind::OpenWith { path: file, found: None };
+        if let Kind::OpenWith { path, found, .. } = &mut item.kind {
+            *path = file;
+            *found = None;
+        }
         true
     }
 
@@ -603,15 +648,20 @@ impl Menu {
         // A submenu already open on the row is showing `Reading…`, and the
         // answer is what it was waiting for. One a key opened was promised its
         // first row lit, and `Reading…` could not be.
+        let Kind::OpenWith { always, .. } = &self.items[index].kind else { return false };
+        let always = always.clone();
         if let Some(sub) = self.sub.as_mut()
             && sub.owner == index
         {
-            sub.menu = applications(Some(&found), self.at);
+            sub.menu = applications(Some(&found), self.at, &always);
             if sub.from.is_none() {
                 sub.menu.step(true);
             }
         }
-        self.items[index].kind = Kind::OpenWith { path: found.path.clone(), found: Some(found) };
+        if let Kind::OpenWith { path, found: held, .. } = &mut self.items[index].kind {
+            path.clone_from(&found.path);
+            *held = Some(found);
+        }
         true
     }
 
@@ -1110,6 +1160,24 @@ mod tests {
         assert_eq!(over_a_folder.active, Some(colour), "collapsing lost the owner");
     }
 
+    /// With nothing to choose from — still reading, or nothing installed opens
+    /// the file — there is no *Always open with* row: under `Reading…` it would
+    /// be the first row a key lights, and under *nothing opens this* it opens a
+    /// panel that says the same thing again.
+    #[test]
+    fn always_open_with_waits_for_applications_to_choose_from() {
+        let at = Point::new(0.0, 0.0);
+        let reading = super::applications(None, at, "Ctrl Alt O");
+        assert!(reading.items.iter().all(|item| item.id != super::OPEN_WITH_TAIL));
+        let nothing = Handlers {
+            path: PathBuf::from("/tmp/a.odd"),
+            mime: "application/x-odd".to_owned(),
+            rows: Vec::new(),
+        };
+        let none = super::applications(Some(&nothing), at, "Ctrl Alt O");
+        assert!(none.items.iter().all(|item| item.id != super::OPEN_WITH_TAIL));
+    }
+
     /// The row's owner stops being runnable — the selection moved off the
     /// folder — and the submenu hanging off it has to go with the highlight.
     #[test]
@@ -1155,11 +1223,23 @@ mod tests {
             rows: vec![entry("probe.desktop", "Probe"), entry("gedit.desktop", "Text Editor")],
         };
         assert!(menu.answer(found));
-        assert_eq!(menu.items[open_with].holds(), ["probe.desktop", "gedit.desktop"]);
+        assert_eq!(
+            menu.items[open_with].holds(),
+            ["probe.desktop", "gedit.desktop", super::OPEN_WITH_TAIL]
+        );
         let sub = menu.sub.as_ref().unwrap();
-        assert_eq!(sub.menu.items.len(), 2, "the open submenu was not rebuilt");
-        assert_eq!(sub.menu.active, Some(0), "a submenu a key opened has no row lit");
+        assert_eq!(sub.menu.items.len(), 3, "the open submenu was not rebuilt");
+        assert_eq!(
+            sub.menu.active,
+            Some(0),
+            "a key lit something other than the first application"
+        );
         assert_eq!(sub.menu.items[1].name, "Text Editor");
+        let tail = &sub.menu.items[2];
+        assert_eq!(tail.id, super::OPEN_WITH_TAIL, "the list does not end in Always open with");
+        assert!(matches!(tail.kind, Kind::Command), "Always open with is not a command");
+        assert!(tail.starts_group, "nothing separates the applications from the question");
+        assert!(!tail.keys.is_empty(), "the row carries no chord, which is rule 4 unmet");
         match sub.menu.items[0].choice() {
             Some(Choice::Launch { entry, path }) => {
                 assert_eq!(entry.id, "probe.desktop");

@@ -1021,15 +1021,18 @@ fn sample_openers() -> crate::openers::Openers {
         no_display: false,
         try_exec: None,
     };
-    crate::openers::Openers::new(crate::openers::Handlers {
-        path: std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
-        mime: "application/gzip".to_owned(),
-        rows: vec![
-            entry("Archive Manager", "org.gnome.FileRoller"),
-            entry("Ark", "org.kde.ark"),
-            entry("Text Editor", "org.gnome.TextEditor"),
-        ],
-    })
+    crate::openers::Openers::new(
+        crate::openers::Handlers {
+            path: std::path::PathBuf::from("/tmp/skerry-golden/fixture/archive.tar.gz"),
+            mime: "application/gzip".to_owned(),
+            rows: vec![
+                entry("Archive Manager", "org.gnome.FileRoller"),
+                entry("Ark", "org.kde.ark"),
+                entry("Text Editor", "org.gnome.TextEditor"),
+            ],
+        },
+        crate::openers::Purpose::Once,
+    )
 }
 
 /// The settings panel, with one value from each of the three sources.

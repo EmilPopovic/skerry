@@ -17,14 +17,38 @@
 //! choose. Both are the same job and the same [`Handlers`], and which one asked
 //! travels with the answer, so a menu that closed before its job finished does
 //! not leave a panel open for nobody.
+//!
+//! **And the same answer feeds two questions.** *Open with* opens the file once;
+//! *Always open with* writes the choice into `mimeapps.list` through
+//! [`sk_desktop::mimeapps::set_default`] and opens nothing. Which question was
+//! asked is a [`Purpose`], carried by the panel, because the list of
+//! applications is the same list either way. The context menu reaches the
+//! *always* panel from the last row of its Open with submenu.
 
 use sk_desktop::DesktopEntry;
+
+/// What choosing an application from the list is for.
+///
+/// **Two questions, deliberately not one control with a latch.** A tick box on
+/// the panel would be a second flag on a surface whose whole job is a list of
+/// rows, and rule 2 wants one command per question rather than one command with
+/// a mode — so *Always open with* is its own registry entry and the same list
+/// underneath.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Purpose {
+    /// Open this file now, and change nothing.
+    Once,
+    /// Make this application the user's default for the file's type, and open
+    /// nothing. The file is one press away from opening either way; a row that
+    /// also spawned a process would be two actions behind one press.
+    Always,
+}
 
 /// Who asked which applications open a file, which is where the answer goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Asker {
-    /// The command: the answer is this panel.
-    Panel,
+    /// A command: the answer is this panel, asking this.
+    Panel(Purpose),
     /// A context menu's Open with row: the answer is its submenu.
     Menu,
 }
@@ -48,6 +72,8 @@ pub(crate) const VISIBLE: usize = 10;
 
 /// The open list, once the job that built it has answered.
 pub(crate) struct Openers {
+    /// What choosing a row does.
+    pub(crate) purpose: Purpose,
     /// What was asked about.
     pub(crate) path: std::path::PathBuf,
     /// The type it turned out to be, shown as the list's subtitle so a person
@@ -63,8 +89,8 @@ pub(crate) struct Openers {
 }
 
 impl Openers {
-    pub(crate) fn new(found: Handlers) -> Self {
-        Self { path: found.path, mime: found.mime, rows: found.rows, active: 0, scroll: 0 }
+    pub(crate) fn new(found: Handlers, purpose: Purpose) -> Self {
+        Self { purpose, path: found.path, mime: found.mime, rows: found.rows, active: 0, scroll: 0 }
     }
 
     /// Moves the highlight, wrapping at both ends.
@@ -114,7 +140,7 @@ impl Openers {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Openers, VISIBLE};
+    use super::{Openers, Purpose, VISIBLE};
     use sk_desktop::DesktopEntry;
     use std::path::PathBuf;
 
@@ -133,11 +159,14 @@ mod tests {
 
     fn list(count: usize) -> Openers {
         let rows = (0..count).map(|index| entry(&format!("app-{index}"))).collect();
-        Openers::new(super::Handlers {
-            path: PathBuf::from("/tmp/thing.txt"),
-            mime: "text/plain".to_owned(),
-            rows,
-        })
+        Openers::new(
+            super::Handlers {
+                path: PathBuf::from("/tmp/thing.txt"),
+                mime: "text/plain".to_owned(),
+                rows,
+            },
+            Purpose::Once,
+        )
     }
 
     #[test]

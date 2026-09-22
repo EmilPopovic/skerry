@@ -131,7 +131,7 @@ const SENDER: u8 = 7;
 const SIGNATURE: u8 = 8;
 
 /// The bus's own object, interface and name.
-const BUS: (&str, &str, &str) =
+pub(crate) const BUS: (&str, &str, &str) =
     ("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus");
 
 /// A connection to a bus.
@@ -420,7 +420,7 @@ fn open(address: &str) -> Option<UnixStream> {
 }
 
 /// A message as bytes.
-fn marshal(message: &Message) -> Vec<u8> {
+pub(crate) fn marshal(message: &Message) -> Vec<u8> {
     let signature = message.signature();
     let mut fields: Vec<(u8, Value)> = Vec::new();
     if let Some(path) = &message.path {
@@ -495,7 +495,7 @@ fn header_bytes(message: &Message, fields: &[(u8, Value)], body: usize) -> Vec<u
 ///
 /// `None` where the buffer does not hold a whole one yet, which is every read
 /// that lands mid-message.
-fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
+pub(crate) fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
     if bytes.len() < 16 {
         return None;
     }

@@ -2306,6 +2306,12 @@ fn properties(
 /// file rather than about a place on screen — and with the type it resolved to
 /// under the title, because "why are these the choices" is the question a person
 /// asks when the list surprises them.
+///
+/// **The subtitle is where the two purposes differ**, and it is the only place
+/// they do: the same title, the same rows, and a line underneath that says
+/// whether a choice opens this file or every file of its type. A panel that
+/// looked identical either way would be a panel that writes `mimeapps.list`
+/// without saying so.
 fn open_with(
     painter: &mut Painter<'_>,
     layout: &Layout,
@@ -2316,9 +2322,13 @@ fn open_with(
     let metrics = theme.metrics;
     let (first, drawn) = list.window();
     let title = crate::panes::title_of(&list.path).to_owned();
+    let subtitle_text = match list.purpose {
+        crate::openers::Purpose::Once => list.mime.clone(),
+        crate::openers::Purpose::Always => i18n::format("openers.always", &[&list.mime]),
+    };
 
     let mut widest = text_width(painter, &title, metrics.path_size, true);
-    widest = widest.max(text_width(painter, &list.mime, metrics.header_size, false));
+    widest = widest.max(text_width(painter, &subtitle_text, metrics.header_size, false));
     for entry in drawn {
         widest = widest.max(text_width(painter, &entry.name, metrics.text_size, false));
     }
@@ -2339,7 +2349,7 @@ fn open_with(
     line(painter, &title, style, area.x + PROPERTIES_INSET, inner, baseline);
     let under = painter.baseline(area.y + PROPERTIES_TITLE - 14.0, 16.0, metrics.header_size);
     let subtitle = TextStyle::new(metrics.header_size, theme.palette.dim);
-    line(painter, &list.mime, subtitle, area.x + PROPERTIES_INSET, inner, under);
+    line(painter, &subtitle_text, subtitle, area.x + PROPERTIES_INSET, inner, under);
     painter.hairline(
         area.x + PROPERTIES_INSET,
         area.y + OPENERS_TITLE - 1.0,

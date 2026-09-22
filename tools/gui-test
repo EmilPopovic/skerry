@@ -9507,6 +9507,111 @@ def open_with(run: Run, fixture: Path) -> None:
         own.close()
 
 
+@scenario("always-open-with-writes-one-line-of-mimeapps-list")
+def always_open_with(run: Run, fixture: Path) -> None:
+    """`Ctrl+Alt+O` and Open with's last row both write the association and open nothing.
+
+    **Its own `XDG_CONFIG_HOME`, and that is not a convenience.** The file this
+    writes is `$XDG_CONFIG_HOME/mimeapps.list`, so a scenario that let the default
+    stand would rewrite the default applications of whoever ran the suite. The
+    directory is seeded with a line about another type and a comment, because
+    preserving what somebody else wrote is the property the whole module exists
+    for.
+    """
+    run.close()
+    own_data = run.log.parent / "always-handler"
+    applications = own_data / "applications"
+    applications.mkdir(parents=True, exist_ok=True)
+    (applications / "skerry-probe.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Probe\nExec=true %f\n"
+        "MimeType=text/plain;\n"
+    )
+    (applications / "mimeapps.list").write_text(
+        "[Added Associations]\ntext/plain=skerry-probe.desktop\n"
+    )
+    own_config = run.log.parent / "always-config"
+    own_config.mkdir(parents=True, exist_ok=True)
+    seed = "# somebody else's note\n[Default Applications]\ntext/html=firefox.desktop\n"
+    associations = own_config / "mimeapps.list"
+    associations.write_text(seed)
+
+    def written(how: str) -> None:
+        after = associations.read_text()
+        for line in seed.splitlines():
+            if line not in after:
+                raise Failure(f"{how} lost {line!r} from mimeapps.list:\n{after}")
+        if "text/plain=skerry-probe.desktop" not in after:
+            raise Failure(f"{how} wrote no association:\n{after}")
+
+    own = Run(
+        run.display,
+        run.log.parent,
+        fixture,
+        [],
+        run.instance,
+        {
+            "XDG_DATA_HOME": str(own_data),
+            "XDG_DATA_DIRS": str(own_data),
+            "XDG_CONFIG_HOME": str(own_config),
+        },
+    )
+    try:
+        own.drive("sleep 600\nkey f12\nsleep 200\n")
+        pointing = point_at(own, 3)
+        if not pointing["hover_name"].endswith(".txt"):
+            raise Failure(f"row 3 is {pointing['hover_name']!r}, which is not a document")
+        own.drive("click\nsleep 300\nkey ctrl+alt+o\nsleep 900\nkey f12\nsleep 300\n")
+        listed = holds(own, lambda it: it.get("openers") == "1", "the list of applications")
+        # The same rows as Open with, and a panel that says which question it is
+        # asking — the two are one keystroke apart and write different things.
+        expect(listed, opener="Probe", openers_for="always")
+
+        own.drive("key enter\nsleep 900\nkey f12\nsleep 300\n")
+        until(own, openers="0", openers_for="none")
+        chosen = holds(
+            own,
+            lambda it: "Probe" in it.get("notice", ""),
+            "the notice naming the application it wrote",
+        )
+        written("the panel")
+        # **Nothing was launched.** Open with says `Opening with …`; this row
+        # changes what opens the file from now on and starts no process.
+        if "Opening" in chosen.get("notice", ""):
+            raise Failure(f"the association also launched: {chosen.get('notice')!r}")
+
+        # And the pointer's way to the same thing: the last row of Open with's
+        # list, which opens the same panel asking the same question. The file
+        # goes back to what it was first, so the second write is a write and not a
+        # line that was already there.
+        associations.write_text(seed)
+        point_at(own, 3)
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        opened = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+        open_submenu(own, opened, "menu.open_with")
+        ready = holds(
+            own,
+            lambda it: "file.open_always" in it.get("submenu_aim", ""),
+            "the Open with submenu to end in Always open with",
+        )
+        aimed = aim_in_panel(own, ready, "file.open_always", "submenu")
+        own.drive(
+            f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 900\nkey f12\nsleep 300\n"
+        )
+        until(own, menu="0")
+        listed = holds(own, lambda it: it.get("openers") == "1", "the list the menu row opened")
+        expect(listed, opener="Probe", openers_for="always")
+        own.drive("key enter\nsleep 900\nkey f12\nsleep 300\n")
+        until(own, openers="0", openers_for="none")
+        holds(
+            own,
+            lambda it: "Probe" in it.get("notice", ""),
+            "the notice naming the application it wrote",
+        )
+        written("the menu row")
+    finally:
+        own.close()
+
+
 @scenario("properties-says-what-a-file-is", fresh=True)
 def properties(run: Run, fixture: Path) -> None:
     """`Ctrl+I` reads the facts on a job and shows them; any key dismisses it."""

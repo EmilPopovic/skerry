@@ -34,6 +34,7 @@ pub mod entry;
 pub mod launch;
 pub mod mime;
 pub mod mimeapps;
+pub mod notify;
 pub mod places;
 pub mod udisks;
 
