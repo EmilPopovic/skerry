@@ -654,6 +654,21 @@ struct Launched {
     child: Option<std::process::Child>,
 }
 
+/// The owner and group a Properties panel still needs names for, if a lookup
+/// should start: none while one is already out, none for a panel about several
+/// files, and none for an owner whose names are already known.
+fn who_to_ask(
+    asking: Option<(u32, u32)>,
+    showing: Option<(u32, u32)>,
+    known: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    if asking.is_some() {
+        return None;
+    }
+    let showing = showing?;
+    (known != Some(showing)).then_some(showing)
+}
+
 /// Where a pasted location went, and whether it was one.
 enum Pasted {
     /// A directory to open.
@@ -696,6 +711,13 @@ struct Replies {
     siblings_rx: Receiver<Siblings>,
     facts_tx: std::sync::mpsc::Sender<sk_fs::facts::Facts>,
     facts_rx: Receiver<sk_fs::facts::Facts>,
+    /// What the name service calls a path's owner and group.
+    ///
+    /// **Its own channel because it is its own job.** A `getpwuid_r` can reach a
+    /// directory server, and nothing else in the panel may wait behind one — see
+    /// [`sk_fs::facts::accounts`].
+    accounts_tx: std::sync::mpsc::Sender<sk_fs::facts::Accounts>,
+    accounts_rx: Receiver<sk_fs::facts::Accounts>,
     openers_tx: std::sync::mpsc::Sender<(crate::openers::Asker, crate::openers::Handlers)>,
     openers_rx: Receiver<(crate::openers::Asker, crate::openers::Handlers)>,
     /// A search report, and the query it is an answer to.
@@ -750,6 +772,7 @@ impl Replies {
         let (launched_tx, launched_rx) = mpsc::channel();
         let (siblings_tx, siblings_rx) = mpsc::channel();
         let (facts_tx, facts_rx) = mpsc::channel();
+        let (accounts_tx, accounts_rx) = mpsc::channel();
         let (found_tx, found_rx) = mpsc::channel();
         let (index_tx, index_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
@@ -769,6 +792,8 @@ impl Replies {
             siblings_rx,
             facts_tx,
             facts_rx,
+            accounts_tx,
+            accounts_rx,
             openers_tx,
             openers_rx,
             found_tx,
@@ -1026,6 +1051,16 @@ pub struct App {
     /// The token of the job finding the open menu's applications, so closing
     /// the menu can stop a job whose answer nobody is waiting for.
     menu_job: Option<sk_util::Cancel>,
+    /// The owner and group a name lookup is out for, while one is.
+    ///
+    /// **One at a time, because a name service can stop answering.** A
+    /// directory server that has gone away does not say *no*; it holds the
+    /// worker until NSS gives up — and every Properties panel, and every toggle
+    /// of a permission bit in one, would otherwise park another. The pool is
+    /// shared with every listing, so enough of them would look like a window
+    /// that had stopped reading folders. One lookup in flight costs one worker
+    /// however many panels ask.
+    asking_who: Option<(u32, u32)>,
     /// What the jobs a command starts answer on.
     replies: Replies,
     layout: Layout,
@@ -1675,6 +1710,7 @@ impl App {
             menu_wanted: None,
             submenu_wanted: None,
             menu_job: None,
+            asking_who: None,
             replies,
             frames: Frames::new(),
             last: FrameStats::default(),
@@ -2373,13 +2409,11 @@ impl App {
         if self.panel.is_some() && self.settings_key(event, commands) {
             return;
         }
-        // The Properties panel is a statement, not a field: any key dismisses
-        // it, and dismisses only. The diagnostic report passes through for the
-        // reason it passes through an open menu — it is the only way the harness
-        // can see the panel at all.
-        if self.properties.is_some() && named(commands, event) != Some("help.dump") {
-            self.properties = None;
-            self.dirty = true;
+        // The Properties panel is a statement with nine controls in it, and
+        // takes the keyboard on the settings panel's terms: the arrows walk the
+        // permission boxes, `Space` turns the one they are on, and every other
+        // key dismisses the panel and does only that.
+        if self.properties.is_some() && self.properties_key(event, commands) {
             return;
         }
         // Before the palette and before the list: a sibling menu is the most
@@ -6881,7 +6915,14 @@ impl App {
         } else {
             paths
         };
-        for path in &paths {
+        self.ask_about(&paths);
+        self.properties = Some(crate::properties::Properties::new(paths));
+        self.dirty = true;
+    }
+
+    /// Reads what each path is, on the lane its device queues on.
+    fn ask_about(&mut self, paths: &[PathBuf]) {
+        for path in paths {
             let sender = self.replies.facts_tx.clone();
             let wake = self.waker.handle();
             let path = path.clone();
@@ -6892,7 +6933,105 @@ impl App {
                 }
             });
         }
-        self.properties = Some(crate::properties::Properties::new(paths));
+    }
+
+    /// Asks what an owner and a group are called.
+    ///
+    /// **A second job, started once the numbers are known.** `getpwuid_r`
+    /// consults every source `nsswitch.conf` names and one of them can be a
+    /// network directory, so a panel that looked the name up beside the `statx`
+    /// would keep its size, its mode and its dates waiting on a server that may
+    /// never answer. On `Lane::Parallel` for the same reason: a lookup that
+    /// stalls must not take the device's turn from the listing behind the panel.
+    fn ask_who(&mut self, uid: u32, gid: u32) {
+        self.asking_who = Some((uid, gid));
+        let names = self.replies.accounts_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            if names.send(sk_fs::facts::accounts(uid, gid)).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// A key while the Properties panel is up. Whether it was taken.
+    ///
+    /// The diagnostic report passes through for the reason it passes through an
+    /// open menu — it is the only way the harness can see the panel at all.
+    fn properties_key(&mut self, event: &sk_plat::KeyEvent, commands: &Registry<Self>) -> bool {
+        use sk_plat::{Key, Named};
+        if named(commands, event) == Some("help.dump") {
+            return false;
+        }
+        let bare = event.mods.none();
+        // A panel whose bits are a statement — somebody else's file, a symlink,
+        // a selection — has nothing to walk between, so every key there still
+        // means what it meant before: dismiss.
+        let controls = self.properties.as_ref().is_some_and(|it| it.editable().is_some());
+        match event.key {
+            Key::Named(Named::Right | Named::Tab) if bare && controls => self.aim_a_bit(true),
+            Key::Named(Named::Left) if bare && controls => self.aim_a_bit(false),
+            Key::Named(Named::Enter) | Key::Character(' ') if controls => self.turn_a_bit(),
+            _ => self.properties = None,
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn aim_a_bit(&mut self, forward: bool) {
+        if let Some(panel) = self.properties.as_mut() {
+            panel.aim_next(forward);
+        }
+    }
+
+    /// Turns the box the keyboard is on, and puts it on the first one when it is
+    /// on none — so `Space` is the way in as well as the way to answer.
+    fn turn_a_bit(&mut self) {
+        let Some(panel) = self.properties.as_mut() else { return };
+        let Some(index) = panel.aim else {
+            panel.aim_next(true);
+            return;
+        };
+        self.set_a_bit(index);
+    }
+
+    /// One permission bit turned, as one entry on the one stack.
+    ///
+    /// The change carries both modes, so `Ctrl+Z` walks it back — which is what
+    /// makes a control that writes to a filesystem safe to press without being
+    /// asked about first.
+    fn set_a_bit(&mut self, index: usize) {
+        // Refused while an operation is in flight, like every other mutation
+        // here and for the same reason: the undo stack is driven asynchronously.
+        // And refused aloud, as a batch arriving during one is — a box that
+        // was pressed and did nothing and said nothing is a box that looks broken.
+        if self.edits.busy() {
+            self.said_it_is_busy(false);
+            self.dirty = true;
+            return;
+        }
+        let Some(panel) = self.properties.as_ref() else { return };
+        let (Some(mode), Some(facts)) = (panel.toggled(index), panel.only()) else { return };
+        let path = facts.path.clone();
+        self.edits.set_permissions(path, mode, &self.jobs);
+    }
+
+    /// A press while the Properties panel is up.
+    ///
+    /// A press on a permission box turns it; a press anywhere else closes the
+    /// panel and does nothing else, which is the rule every overlay here
+    /// follows.
+    fn press_in_the_properties(&mut self, position: Point) {
+        let box_ = self.hits.permissions.iter().position(|it| it.contains(position.x, position.y));
+        match box_ {
+            Some(index) => {
+                if let Some(panel) = self.properties.as_mut() {
+                    panel.aim = Some(index);
+                }
+                self.set_a_bit(index);
+            }
+            None => self.properties = None,
+        }
         self.dirty = true;
     }
 
@@ -7460,8 +7599,47 @@ scope_aim={scope_aim:?}",
             if !panel.paths.contains(&facts.path) {
                 continue;
             }
-            panel.facts.push(facts);
+            // **Replaced rather than appended.** A change to the mode asks again
+            // about the same path, and a second answer pushed behind the first
+            // would leave `only` reading the facts from before the change.
+            if panel.paths.len() == 1 {
+                // Whether the bits are controls is the answer to *is this
+                // account the owner*, which cannot change while a panel is open.
+                panel.writable = sk_fs::facts::mine(facts.uid);
+            }
+            match panel.facts.iter_mut().find(|it| it.path == facts.path) {
+                Some(held) => *held = facts,
+                None => panel.facts.push(facts),
+            }
             self.dirty = true;
+        }
+        while let Ok(accounts) = self.replies.accounts_rx.try_recv() {
+            self.asking_who = None;
+            let Some(panel) = self.properties.as_mut() else { continue };
+            // **An answer about the owner on screen, or no answer at all.** The
+            // lookup may have taken long enough for the panel to move on to
+            // another file, and a name that belonged to the last one would be
+            // this panel saying the wrong person owns this file.
+            if panel
+                .only()
+                .is_some_and(|facts| (facts.uid, facts.gid) == (accounts.uid, accounts.gid))
+            {
+                panel.accounts = Some(accounts);
+                self.dirty = true;
+            }
+        }
+        // Asked once the numbers are known, and again only if the panel is now
+        // about an owner it has no name for — so a permission toggle, which
+        // reads the facts again, does not ask the name service again.
+        let wanted = self.properties.as_ref().and_then(|panel| {
+            who_to_ask(
+                self.asking_who,
+                panel.only().map(|facts| (facts.uid, facts.gid)),
+                panel.accounts.as_ref().map(|known| (known.uid, known.gid)),
+            )
+        });
+        if let Some((uid, gid)) = wanted {
+            self.ask_who(uid, gid);
         }
         // A folder's real size is the measurer's answer, which it already has for
         // every folder on screen — so a panel over one asks the cache rather than
@@ -8262,6 +8440,12 @@ scope_aim={scope_aim:?}",
                 message
             }
         };
+        // **A panel open over what just changed is reading the mode from before
+        // it.** The listing learns from the watcher; the panel has no watch of
+        // its own, so it asks again.
+        if let Some(paths) = self.properties.as_ref().map(|panel| panel.paths.clone()) {
+            self.ask_about(&paths);
+        }
         // The next one in the queue starts here rather than in `drain`: the
         // engine has no pool and this is where one is in reach.
         self.edits.next_in_queue(&self.jobs);
@@ -9421,12 +9605,19 @@ pane_body={bodies:?} pane_bar={bars:?}",
             .join(",")
     }
 
+    /// What the nine permission boxes are called in the diagnostic report, in
+    /// the order they are drawn.
+    const BIT_NAMES: [&'static str; 9] = [
+        "owner_r", "owner_w", "owner_x", "group_r", "group_w", "group_x", "others_r", "others_w",
+        "others_x",
+    ];
+
     /// What the two panels are showing: the Properties title and its rows as
     /// `label=value` pairs, and the Open With list's length and highlight.
     ///
     /// Enough for a scenario to assert about either without depending on what
     /// this machine happens to have installed or on where the panel drew.
-    fn overlay_report(&self) -> (String, String, usize, String) {
+    fn overlay_report(&self) -> (String, String, usize, String, String, i64) {
         let facts = self.properties.as_ref().map_or_else(String::new, |panel| {
             panel
                 .rows(clock_seconds())
@@ -9437,6 +9628,24 @@ pane_body={bodies:?} pane_bar={bars:?}",
         });
         let properties =
             self.properties.as_ref().map_or_else(String::new, crate::properties::Properties::title);
+        // Where each permission box is, and which one the keyboard is on, so a
+        // scenario presses `others_w` by name rather than by arithmetic over the
+        // panel's own constants — the same trade `menu_aim` and `look_aim` make.
+        let boxes = self
+            .hits
+            .permissions
+            .iter()
+            .zip(Self::BIT_NAMES)
+            .map(|(area, name)| {
+                format!("{name}@{:.0}:{:.0}", area.x + area.width / 2.0, area.y + area.height / 2.0)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let aimed = self
+            .properties
+            .as_ref()
+            .and_then(|panel| panel.aim)
+            .map_or(-1, |index| i64::try_from(index).unwrap_or(-1));
         let openers = self.openers.as_ref().map_or(0, |list| list.rows.len());
         let opener = self
             .openers
@@ -9444,7 +9653,7 @@ pane_body={bodies:?} pane_bar={bars:?}",
             .and_then(|list| list.chosen())
             .map(|entry| entry.name.clone())
             .unwrap_or_default();
-        (properties, facts, openers, opener)
+        (properties, facts, openers, opener, boxes, aimed)
     }
 
     /// What the list of places is showing, for the diagnostic line.
@@ -9582,7 +9791,7 @@ volumes={volumes:?} aside_grabbed={}",
         // What an input method is composing, if anything. The field it is in is
         // whichever has the keyboard, so one value answers for all three.
         let composing = self.field_preedit().map(|(text, _)| text.clone()).unwrap_or_default();
-        let (properties, facts, openers, opener) = self.overlay_report();
+        let (properties, facts, openers, opener, bits, bit_aimed) = self.overlay_report();
         let panes_report = self.panes_report();
         let menu_report = self.menu_report();
         let palette_report = self.palette_report();
@@ -9608,7 +9817,8 @@ separators={separators} separator_hover={separator_hover} separator_aim={separat
 crumb_menu={crumb_menu} crumb_menu_depth={crumb_menu_depth} crumb_menu_active={crumb_menu_active:?} \
 crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
-properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
+properties={properties:?} facts={facts:?} bits={bits:?} bit_aimed={bit_aimed} \
+openers={openers} opener={opener:?} \
 composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_aim={settings_aim:?} \
 {places_report} \
 path_field={path_field} name_field={name_field} \
@@ -10534,8 +10744,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         if self.press_in_the_search(position, clicks) {
             return true;
         }
-        if self.properties.take().is_some() {
-            self.dirty = true;
+        if self.properties.is_some() {
+            self.press_in_the_properties(position);
             return true;
         }
         if self.press_in_the_openers(position) {
@@ -12323,6 +12533,24 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    /// A name service that never answers holds one worker, not one per panel
+    /// and per toggle: nothing new is asked while a lookup is out, and an owner
+    /// already named is not asked about again.
+    #[test]
+    fn a_name_is_asked_for_once_and_only_when_it_is_missing() {
+        let mine = (1000, 1000);
+        assert_eq!(super::who_to_ask(None, Some(mine), None), Some(mine));
+        assert_eq!(super::who_to_ask(Some(mine), Some(mine), None), None, "a second lookup");
+        assert_eq!(super::who_to_ask(Some((0, 0)), Some(mine), None), None, "one while one is out");
+        assert_eq!(super::who_to_ask(None, Some(mine), Some(mine)), None, "a toggle asked again");
+        assert_eq!(
+            super::who_to_ask(None, Some(mine), Some((0, 0))),
+            Some(mine),
+            "a stale name kept"
+        );
+        assert_eq!(super::who_to_ask(None, None, None), None, "a panel about several files");
+    }
 
     use super::expand_home;
     use std::path::Path;

@@ -1002,6 +1002,12 @@ fn sample_properties() -> crate::properties::Properties {
         target: None,
         filesystem: Some("ext2/3/4"),
     });
+    // **Stated `false`, like the uid above it.** Whether the nine bits are
+    // controls depends on which account is running, and a reference frame that
+    // drew boxes on one machine and a sentence on another would be a frame
+    // nobody could bless.
+    panel.writable = true; // TEMPORARY-LOOK
+    panel.aim = Some(4); // TEMPORARY-LOOK
     panel
 }
 

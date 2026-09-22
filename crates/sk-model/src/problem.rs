@@ -56,6 +56,14 @@ pub enum ProblemKind {
     AcrossFilesystems,
     /// A directory that has to be empty is not.
     NotEmpty,
+    /// What an undo or a redo would put back is not what it would be replacing:
+    /// somebody changed the file's bytes, or its mode, after this program did.
+    ///
+    /// **Its own kind because it is the one refusal whose cause is a person.**
+    /// It used to arrive as [`Self::NameTaken`], so an edit undone after another
+    /// program touched the file said something was already called that — a
+    /// sentence about a different problem, with advice that could not help.
+    ChangedSince,
     /// More bytes than the operation is willing to hold in memory.
     TooLarge,
     /// Not a file, a folder or a link, so there is nothing to copy.
@@ -128,6 +136,7 @@ impl ProblemKind {
             Self::NameTaken => "error.name_taken",
             Self::AcrossFilesystems => "error.across_filesystems",
             Self::NotEmpty => "error.not_empty",
+            Self::ChangedSince => "error.changed_since",
             Self::TooLarge => "error.too_large",
             Self::Full => "error.full",
             Self::NotCopyable => "error.not_copyable",

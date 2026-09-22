@@ -71,7 +71,9 @@ ones most likely to be reached for in the first week:
   coloured by MIME category, not the themed icon your desktop would draw.
 - **Creating things is thin.** New folder and single rename only — no new file,
   Templates, symlinks or batch rename.
-- **Properties is read-only**, and owners are shown as numeric ids.
+- **Properties changes the nine permission bits only** — no setuid, setgid or
+  sticky control, no recursive apply, no owner change. Owners are named where the
+  name service answers, and shown as numbers where it does not.
 - **Rebinding is by editing the config file.** No in-app rebinding UI, no hot
   reload, no key sequences or aliases.
 - **English only.** The catalogue is keyed and compiled in; there is no locale

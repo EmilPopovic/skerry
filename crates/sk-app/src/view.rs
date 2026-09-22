@@ -277,6 +277,12 @@ pub struct Hits {
     pub palette: Vec<Area>,
     /// The same, for the Open With list's drawn rows.
     pub openers: Vec<Area>,
+    /// The Properties panel's nine permission boxes, owner's read first.
+    ///
+    /// Empty where the bits are a statement rather than controls — somebody
+    /// else's file, a symlink, or several items — because a box that is drawn
+    /// dim and would be refused must not be pressable.
+    pub permissions: Vec<Area>,
     /// Every control in the settings panel: its row, which half of that row it
     /// is, and where.
     ///
@@ -2251,7 +2257,10 @@ fn properties(
     let mut widest = text_width(painter, &title, metrics.path_size, true);
     for row in &rows {
         let label = text_width(painter, &row.label, metrics.text_size, false);
-        let value = text_width(painter, &row.value, metrics.text_size, false);
+        let value = match row.bits {
+            Some(_) => permissions_width(),
+            None => text_width(painter, &row.value, metrics.text_size, false),
+        };
         widest = widest.max(label + PROPERTIES_GAP + value);
     }
     let width = (widest + PROPERTIES_INSET * 2.0)
@@ -2282,22 +2291,97 @@ fn properties(
         theme.palette.divider,
     );
 
+    hits.permissions.clear();
     for (index, row) in rows.iter().enumerate() {
         let top = area.y + PROPERTIES_TITLE + index as f32 * PROPERTIES_STEP;
         let baseline = painter.baseline(top, PROPERTIES_STEP, metrics.text_size);
         let label = TextStyle::new(metrics.text_size, theme.palette.dim);
         let column = (area.width - PROPERTIES_INSET * 2.0) * 0.38;
         line(painter, &row.label, label, area.x + PROPERTIES_INSET, column, baseline);
+        let left = area.x + PROPERTIES_INSET + column + PROPERTIES_GAP;
+        if let Some(mode) = row.bits {
+            permission_boxes(painter, (mode, panel.aim), (left, top), hits);
+            continue;
+        }
         let value = TextStyle::new(metrics.text_size, theme.palette.text);
         line(
             painter,
             &row.value,
             value,
-            area.x + PROPERTIES_INSET + column + PROPERTIES_GAP,
+            left,
             area.width - PROPERTIES_INSET * 2.0 - column - PROPERTIES_GAP,
             baseline,
         );
     }
+}
+
+/// The nine bits as nine boxes, `rwxrwxrwx` in the order every Unix tool prints.
+///
+/// **A letter in each box rather than a tick beside a word.** Nine ticks in a
+/// row say nothing about which is which, and three labelled triples would be
+/// three rows of a panel that is already twelve — the letters are the names, and
+/// they are the names a person already knows from `ls -l`.
+fn permission_boxes(
+    painter: &mut Painter<'_>,
+    state: (u16, Option<usize>),
+    at: (f32, f32),
+    hits: &mut Hits,
+) {
+    let (mode, aim) = state;
+    let (left, top) = at;
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let radius = painter.px(3.0);
+    let ring = painter.px(1.0).max(1.0);
+    for index in 0..9 {
+        let cell = permission_cell(index, left, top);
+        let on = mode & (1 << (8 - index)) != 0;
+        let shape = painter.rect(cell.x, cell.y, cell.width, cell.height);
+        let ink = if on {
+            painter.list.rect(shape, theme.palette.accent, radius);
+            theme.palette.selected_text
+        } else {
+            painter.list.stroke(shape, theme.palette.divider, radius, ring);
+            theme.palette.dim
+        };
+        if aim == Some(index) {
+            // Outside the box rather than inside it: a ring drawn on a box that
+            // is already filled with the accent is a ring nobody can see.
+            let around = painter.rect(
+                cell.x - PERMISSION_RING,
+                cell.y - PERMISSION_RING,
+                cell.width + PERMISSION_RING * 2.0,
+                cell.height + PERMISSION_RING * 2.0,
+            );
+            painter.list.stroke(around, theme.palette.accent, painter.px(5.0), ring);
+        }
+        let letter = ["r", "w", "x"][index % 3];
+        let style = TextStyle::new(metrics.text_size, ink).centred();
+        let baseline = painter.baseline(cell.y, PERMISSION_BOX, metrics.text_size);
+        line(painter, letter, style, cell.x, cell.width, baseline);
+        hits.permissions.push(cell);
+    }
+}
+
+/// Where one of the nine boxes is, counting from the owner's read.
+///
+/// **One function for the drawing and the hit test**, which is the rule the name
+/// field learned the hard way: a rectangle computed twice is a control that can
+/// be drawn in one place and pressed in another.
+fn permission_cell(index: usize, left: f32, top: f32) -> Area {
+    let step = index as f32 * (PERMISSION_BOX + PERMISSION_STEP);
+    let group = (index / 3) as f32 * PERMISSION_GROUP_GAP;
+    Area {
+        x: left + step + group,
+        y: top + (PROPERTIES_STEP - PERMISSION_BOX).max(0.0) / 2.0,
+        width: PERMISSION_BOX,
+        height: PERMISSION_BOX,
+    }
+}
+
+/// How wide the nine boxes are together, for measuring the panel.
+fn permissions_width() -> f32 {
+    9.0f32.mul_add(PERMISSION_BOX + PERMISSION_STEP, 2.0 * PERMISSION_GROUP_GAP)
 }
 
 /// Open With: the applications this machine says can open the file.
@@ -2930,6 +3014,13 @@ const OPENERS_STEP: f32 = 28.0;
 
 /// The title strip's height, one row, the inset, and the least space between a
 /// label and its value.
+/// One permission box, the space to the next, the wider space between triples,
+/// and how far outside a box its focus ring is drawn — all logical pixels.
+const PERMISSION_BOX: f32 = 17.0;
+const PERMISSION_STEP: f32 = 2.0;
+const PERMISSION_GROUP_GAP: f32 = 8.0;
+const PERMISSION_RING: f32 = 2.0;
+
 const PROPERTIES_TITLE: f32 = 38.0;
 const PROPERTIES_STEP: f32 = 24.0;
 const PROPERTIES_INSET: f32 = 16.0;
@@ -6106,6 +6197,35 @@ mod tests {
             assert!(x >= body.x, "in {mode} it starts under the sidebar");
             assert!(x + width <= body.right(), "in {mode} it runs past the pane");
             assert!(width > 100.0, "in {mode} a {width} box holds no sentence");
+        }
+    }
+
+    /// The nine boxes are nine separate targets in one row, inside the width the
+    /// panel was measured with — so a press lands on the bit it is aimed at and
+    /// the last box is not drawn off the panel's edge.
+    #[test]
+    fn the_nine_permission_boxes_are_nine_targets_that_fit_their_row() {
+        let (left, top) = (120.0, 48.0);
+        let mut previous: Option<super::Area> = None;
+        for index in 0..9 {
+            let cell = super::permission_cell(index, left, top);
+            assert!(cell.x >= left, "box {index} starts left of the value column");
+            assert!(
+                cell.x + cell.width <= left + super::permissions_width(),
+                "box {index} runs past the width the panel was measured with"
+            );
+            assert!(cell.y >= top, "box {index} is above its row");
+            assert!(
+                cell.y + cell.height <= top + super::PROPERTIES_STEP,
+                "box {index} is taller than its row"
+            );
+            if let Some(before) = previous {
+                assert!(
+                    cell.x >= before.x + before.width,
+                    "box {index} overlaps the one before it"
+                );
+            }
+            previous = Some(cell);
         }
     }
 

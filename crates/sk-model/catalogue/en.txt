@@ -78,6 +78,7 @@ error.bad_name = “{0}” cannot be a name. Names cannot be empty or contain �
 error.name_taken = Something is already called “{0}”. Choose another name.
 error.across_filesystems = {0} is on another filesystem. Moving it there is not possible yet — copy it instead.
 error.not_empty = {0} is not empty any more, so undoing that would delete what is in it.
+error.changed_since = {0} has changed since, so putting it back would lose that change. It was left as it is.
 error.too_large = {0} is too large to copy as text. Open it instead.
 error.full = There is no room for {0}. Free some space, or copy it somewhere else.
 error.not_copyable = {0} is a device or a pipe. There is nothing in it to copy.
@@ -413,6 +414,8 @@ history.trashed_many = Moved {0} items to Trash
 history.erased = Deleted {0} for good
 history.edited = Edited {0}
 history.edited_many = Edited {0} files
+history.permissions = Permissions of {0}
+history.permissions_many = Permissions of {0} files
 history.erased_many = Deleted {0} items for good
 history.changed_many = Changed {0} items
 # Where the present is: the row below this one is what a redo would do again.
