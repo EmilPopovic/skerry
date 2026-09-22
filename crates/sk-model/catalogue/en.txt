@@ -657,6 +657,10 @@ notice.opening = Opening with {0}
 # mimeapps.list rather than opening this one file. {0} is the type.
 openers.always = Always open {0} with
 notice.default_set = {0} files now open with {1}
+action.recent = Recent files
+action.forget_recent = Forget
+recent.title = Recent files
+notice.no_recents = Nothing has been opened recently
 
 # The clipboard.
 action.copy = Copy

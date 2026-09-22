@@ -92,8 +92,9 @@ ones most likely to be reached for in the first week:
   nothing drops onto an executable.
 - **"Always open with this" writes the association and opens nothing**, and a
   desktop notification carries no buttons — a button needs `ActionInvoked`, which
-  is a signal, and there is no subscribing bus connection. No recents.
-  `Ctrl+L` completes the directory being typed.
+  is a signal, and there is no subscribing bus connection. `Ctrl+L`
+  completes the directory being typed, and recents are `Ctrl+Alt+H`, a view with
+  no sidebar row, sorted like any other pane.
 - **Search has no ignore rules**, so it walks `.git`, and no extension facets.
 - **Four performance budget rows are missed** and recorded with their numbers
   rather than widened: cold start, the 1M sort, one scroll run in five at a

@@ -247,8 +247,14 @@ the first bug report on one of them.
   re-emit. There is no editor for the list afterwards: undoing it is choosing
   another application, and the folder handler has its own row in the settings
   panel.
-- **No recents.** `Ctrl+L` completes the directory being typed — `Tab` takes
-  what the matches share, the arrows walk them — but remembers nowhere it has been.
+- **Recents are a view and not a place.** `Ctrl+Alt+H` shows the files this
+  program opened merged with the desktop's own `recently-used.xbel`
+  ([ADR 0043](docs/adr/0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md)),
+  and a forgotten one stays forgotten. There is no sidebar row for it yet, the
+  view sorts the way the pane does rather than by when each file was opened, and
+  the desktop's file is read and never written.
+- **`Ctrl+L` completes the directory being typed** — `Tab` takes what the matches
+  share, the arrows walk them.
 - **Search has no ignore rules**, so a search over a checkout walks `.git`, and
   there are no extension facets. Both are M4.
 - **A desktop notification has no buttons.** An operation that ran longer than

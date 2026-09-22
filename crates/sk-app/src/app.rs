@@ -793,6 +793,9 @@ fn diagnostics_for<'a>(
 struct Launched {
     notice: String,
     child: Option<std::process::Child>,
+    /// The file that opened, where one did — which is what the recent list
+    /// records, and only once it is known to have opened.
+    opened: Option<PathBuf>,
 }
 
 /// What a paste of files does with them.
@@ -933,6 +936,9 @@ struct Replies {
     /// [`sk_fs::facts::accounts`].
     accounts_tx: std::sync::mpsc::Sender<sk_fs::facts::Accounts>,
     accounts_rx: Receiver<sk_fs::facts::Accounts>,
+    /// Both recent lists as one, for the Recent view.
+    recents_tx: std::sync::mpsc::Sender<Vec<crate::recents::Found>>,
+    recents_rx: Receiver<Vec<crate::recents::Found>>,
     openers_tx: std::sync::mpsc::Sender<(crate::openers::Asker, crate::openers::Handlers)>,
     openers_rx: Receiver<(crate::openers::Asker, crate::openers::Handlers)>,
     /// What a write of a default association had to say — its own channel and
@@ -1013,6 +1019,7 @@ impl Replies {
         let (index_tx, index_rx) = mpsc::channel();
         let (openers_tx, openers_rx) = mpsc::channel();
         let (default_tx, default_rx) = mpsc::channel();
+        let (recents_tx, recents_rx) = mpsc::channel();
         let (places_tx, places_rx) = mpsc::channel();
         let (opened_tx, opened_rx) = mpsc::channel();
         let (handler_tx, handler_rx) = mpsc::channel();
@@ -1035,6 +1042,8 @@ impl Replies {
             facts_rx,
             accounts_tx,
             accounts_rx,
+            recents_tx,
+            recents_rx,
             openers_tx,
             openers_rx,
             default_tx,
@@ -1322,6 +1331,13 @@ pub struct App {
     /// that had stopped reading folders. One lookup in flight costs one worker
     /// however many panels ask.
     asking_who: Option<(u32, u32)>,
+    /// The generation of the listing the Recent view put in a pane.
+    ///
+    /// **A pane's generation, not a flag of its own**: every read and every set of
+    /// results takes a new one, so the Recent view is the pane still showing
+    /// this generation and nothing else — navigating away ends it without anybody
+    /// having to remember to.
+    recent_generation: Option<u64>,
     /// What the jobs a command starts answer on.
     replies: Replies,
     layout: Layout,
@@ -2037,6 +2053,7 @@ impl App {
             submenu_wanted: None,
             menu_job: None,
             asking_who: None,
+            recent_generation: None,
             replies,
             frames: Frames::new(),
             last: FrameStats::default(),
@@ -2164,6 +2181,7 @@ impl App {
             self.drain_openers();
             self.drain_defaults();
             self.drain_templates();
+            self.drain_recents();
             self.drain_handler();
             self.drain_icons();
             self.drain_mounted();
@@ -6523,19 +6541,23 @@ impl App {
                 None => Launched {
                     notice: sk_model::i18n::format("error.no_handler", &[&mime]),
                     child: None,
+                    opened: None,
                 },
                 Some(entry) => match Launcher::start(&entry, std::slice::from_ref(&path)) {
                     Ok(child) => Launched {
                         notice: sk_model::i18n::format("notice.opening", &[&entry.name]),
                         child: Some(child),
+                        opened: Some(path.clone()),
                     },
                     Err(sk_desktop::launch::Refused::NoTerminal) => Launched {
                         notice: sk_model::i18n::format("error.no_terminal", &[&entry.name]),
                         child: None,
+                        opened: None,
                     },
                     Err(_) => Launched {
                         notice: sk_model::i18n::format("error.launch_failed", &[&entry.name]),
                         child: None,
+                        opened: None,
                     },
                 },
             };
@@ -7765,20 +7787,88 @@ impl App {
                 Ok(child) => Launched {
                     notice: sk_model::i18n::format("notice.opening", &[&entry.name]),
                     child: Some(child),
+                    opened: Some(path.clone()),
                 },
                 Err(sk_desktop::launch::Refused::NoTerminal) => Launched {
                     notice: sk_model::i18n::format("error.no_terminal", &[&entry.name]),
                     child: None,
+                    opened: None,
                 },
                 Err(_) => Launched {
                     notice: sk_model::i18n::format("error.launch_failed", &[&entry.name]),
                     child: None,
+                    opened: None,
                 },
             };
             if sender.send(launched).is_ok() {
                 wake.wake();
             }
         });
+    }
+
+    /// Puts the files opened recently into the pane — [ADR
+    /// 0043](../../../docs/adr/0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md)'s
+    /// two stores as one list.
+    ///
+    /// **As a set of results**, so every command already works on the rows: each
+    /// carries the folder it is in, which is all `Pane::path_of` ever needed.
+    pub(crate) fn show_recent(&mut self) {
+        let sender = self.replies.recents_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            if sender.send(crate::recents::load()).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Whether the focused pane is showing the Recent view.
+    pub(crate) fn in_recent(&self) -> bool {
+        self.recent_generation == Some(self.panes.focused().generation())
+    }
+
+    /// Forgets the selected files from the recent list, and shows it again.
+    ///
+    /// **Not on the undo stack** — ADR 0043, for ADR 0021's reason: forgetting a
+    /// row of a list of things somebody opened moves no bytes, and rule 3's list is
+    /// the file mutations.
+    pub(crate) fn forget_recent(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let sender = self.replies.recents_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Control, sk_util::Cancel::new(), move |_| {
+            crate::recents::forget(&paths);
+            if sender.send(crate::recents::load()).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of the recent list, into the focused pane.
+    fn drain_recents(&mut self) {
+        let Some(found) = self.replies.recents_rx.try_iter().last() else { return };
+        if found.is_empty() {
+            self.notice =
+                Some((sk_model::i18n::lookup("notice.no_recents").to_owned(), Instant::now()));
+        }
+        let mut listing = sk_model::Listing::with_capacity(found.len());
+        for file in &found {
+            let (Some(parent), Some(name)) = (file.path.parent(), file.path.file_name()) else {
+                continue;
+            };
+            let id = listing.push_from(parent, &name.to_string_lossy(), sk_model::Flags::NONE);
+            listing.set_raw_name(id, name);
+            listing.set_meta(id, file.size, file.modified, sk_model::Flags::NONE);
+        }
+        let label = sk_model::i18n::lookup("recent.title").to_owned();
+        let mime = self.desktop.clone();
+        self.panes.focused_mut().show_results(label, listing, mime.as_deref().map(|it| &*it.mime));
+        self.recent_generation = Some(self.panes.focused().generation());
+        self.settle_panes();
+        self.dirty = true;
     }
 
     /// Opens the Properties panel over what is selected.
@@ -8555,10 +8645,12 @@ scope_aim={scope_aim:?}",
                 Ok(child) => Launched {
                     notice: sk_model::i18n::lookup("notice.terminal").to_owned(),
                     child: Some(child),
+                    opened: None,
                 },
                 Err(_) => Launched {
                     notice: sk_model::i18n::lookup("error.no_terminal_at_all").to_owned(),
                     child: None,
+                    opened: None,
                 },
             };
             if sender.send(launched).is_ok() {
@@ -9638,6 +9730,11 @@ scope_aim={scope_aim:?}",
             if let Some(child) = launched.child {
                 self.launcher.adopt(child);
             }
+            if let Some(path) = launched.opened {
+                self.jobs.pool.spawn(sk_util::Lane::Control, sk_util::Cancel::new(), move |_| {
+                    crate::recents::opened(&path);
+                });
+            }
             self.notice = Some((launched.notice, Instant::now()));
             self.dirty = true;
         }
@@ -9656,6 +9753,7 @@ scope_aim={scope_aim:?}",
             let _ = sender.send(Launched {
                 child: child.ok(),
                 notice: sk_model::i18n::lookup(key).to_owned(),
+                opened: None,
             });
             wake.wake();
         });
@@ -12605,6 +12703,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         }
         let groups = if self.trash_context() && row.is_some() {
             crate::menu::IN_TRASH
+        } else if self.in_recent() && row.is_some() {
+            crate::menu::IN_RECENT
         } else if row.is_some() {
             crate::menu::ON_ROW
         } else {
@@ -12656,7 +12756,13 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             None => Point::new(self.placement.here.body.x + 8.0, self.placement.here.body.y + 8.0),
         };
         let groups = if self.panes.focused().cursor_row().is_some() {
-            if self.trash_context() { crate::menu::IN_TRASH } else { crate::menu::ON_ROW }
+            if self.trash_context() {
+                crate::menu::IN_TRASH
+            } else if self.in_recent() {
+                crate::menu::IN_RECENT
+            } else {
+                crate::menu::ON_ROW
+            }
         } else {
             crate::menu::ON_BACKGROUND
         };
