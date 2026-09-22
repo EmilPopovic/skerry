@@ -293,9 +293,10 @@ fn navigate(registry: &mut Registry<App>) {
             name: "action.open_new_tab",
             group: Group::Navigate,
             // `Ctrl Enter` because it is Open with a modifier, which is the
-            // shape a browser gave every "…but in a tab" ten years ago. Not the
-            // middle click that does this in Nautilus: that button is owed to
-            // splitting, and one of the two has to be second.
+            // shape a browser gave every "…but in a tab" ten years ago. **And
+            // the middle button, which is what it means in Nautilus and in every
+            // browser** — through this entry rather than beside it, so the
+            // gesture and the chord cannot drift.
             keys: &["ctrl+enter"],
             enabled: App::focused_is_a_directory,
             run: App::open_in_new_tab,
@@ -1330,6 +1331,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     reach.push(("go.home", "the sidebar's Home row"));
     reach.push(("go.search_results", "the label at the end of the search's summary line"));
     reach.push(("view.path_entry", "a click on a pane's bar beside the breadcrumbs"));
+    reach.push(("field.paste_primary", "the middle pointer button inside a field"));
     reach.push(("tab.close", "the cross on a tab, or a double click on it"));
     reach.push(("config.write", "a row in the settings panel"));
     for groups in [
@@ -1401,9 +1403,9 @@ const POINTER_EXEMPT: &[(&str, &str)] = &[
     // open field without closing it, so a row for these would be a row that can
     // never be reached.
     ("field.select_all", "a pointer selects text by dragging across it"),
-    ("field.copy", "a pointer has the middle-click selection and the drag"),
+    ("field.copy", "a pointer publishes PRIMARY by selecting, which is the gesture"),
     ("field.cut", "a pointer has the drag; a menu over a field would close it"),
-    ("field.paste", "a pointer has the middle-click paste"),
+    ("field.paste", "the clipboard's own paste; a menu over a field would close it"),
     ("field.undo", "a field action; the pointer has no gesture for it either"),
     ("field.redo", "a field action; the pointer has no gesture for it either"),
 ];
@@ -1516,6 +1518,19 @@ fn field(registry: &mut Registry<App>) {
             keys: &["ctrl+v"],
             enabled: App::in_a_field,
             run: App::paste_text,
+        },
+        CommandSpec {
+            id: "field.paste_primary",
+            name: "action.paste_primary_text",
+            group: Group::Edit,
+            // **`Shift+Insert`, which is what PRIMARY has answered to since X11
+            // named it** — every terminal on this desktop still pastes the
+            // middle-click selection with it. Its own command rather than a
+            // branch inside `field.paste`, because the two read different
+            // selections and a keymap has to be able to say which.
+            keys: &["shift+insert"],
+            enabled: App::in_a_field,
+            run: App::paste_primary_text,
         },
     ] {
         registry.add_in(sk_cmd::Scope::Field, spec);

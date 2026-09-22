@@ -160,6 +160,7 @@ fn chrome_of<'a>(
         window: sk_plat::WindowState::default(),
         menu: None,
         path_entry: None,
+        completion: None,
         palette: None,
         properties: None,
         openers: None,

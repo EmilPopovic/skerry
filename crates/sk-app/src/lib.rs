@@ -31,6 +31,7 @@ mod capture;
 mod cells;
 mod colours;
 mod commands;
+mod complete;
 mod config;
 mod crumbs;
 mod edit;

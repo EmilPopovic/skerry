@@ -698,20 +698,6 @@ fn report_globals(window: &Window) {
     }
 }
 
-/// `~` and `~/x` to a path under `$HOME`, or `None` for anything else.
-///
-/// Only the current user's home: `~other` is a shell feature that needs
-/// `getpwnam`, and a path bar that silently treated `~other` as a relative
-/// directory of that name would be worse than one that does not expand it.
-fn expand_home(typed: &str) -> Option<PathBuf> {
-    let rest = typed.strip_prefix('~')?;
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    match rest {
-        "" | "/" => Some(home),
-        _ => Some(home.join(rest.strip_prefix('/')?)),
-    }
-}
-
 /// Which field is claiming the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Claim {
@@ -904,6 +890,9 @@ struct Replies {
     launched_rx: Receiver<Launched>,
     siblings_tx: std::sync::mpsc::Sender<Siblings>,
     siblings_rx: Receiver<Siblings>,
+    /// The directories that could finish the path being typed.
+    completed_tx: std::sync::mpsc::Sender<Completed>,
+    completed_rx: Receiver<Completed>,
     facts_tx: std::sync::mpsc::Sender<sk_fs::facts::Facts>,
     facts_rx: Receiver<sk_fs::facts::Facts>,
     /// What the name service calls a path's owner and group.
@@ -968,12 +957,22 @@ struct Siblings {
     rows: Vec<String>,
 }
 
+/// What the directory the path field is typing into turned out to hold.
+struct Completed {
+    /// The directory that was read, which is what says whether the answer is
+    /// still the one being asked for.
+    parent: PathBuf,
+    /// Every subdirectory of it, hidden ones included, unsorted.
+    rows: Vec<String>,
+}
+
 impl Replies {
     fn new() -> Self {
         let (paste_tx, paste_rx) = mpsc::channel();
         let (content_tx, content_rx) = mpsc::channel();
         let (launched_tx, launched_rx) = mpsc::channel();
         let (siblings_tx, siblings_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
         let (facts_tx, facts_rx) = mpsc::channel();
         let (accounts_tx, accounts_rx) = mpsc::channel();
         let (found_tx, found_rx) = mpsc::channel();
@@ -995,6 +994,8 @@ impl Replies {
             launched_rx,
             siblings_tx,
             siblings_rx,
+            completed_tx,
+            completed_rx,
             facts_tx,
             facts_rx,
             accounts_tx,
@@ -1139,6 +1140,20 @@ pub struct App {
     /// A separator whose directory is still being read, so a second press on it
     /// does not queue a second read.
     crumb_pending: Option<usize>,
+    /// What the path field is offering to finish the name being typed.
+    ///
+    /// **The list existing is one question and the keyboard being in it is
+    /// another** — `crate::complete::Completion::chosen` is the second flag, and
+    /// [rule 2](../../../docs/03-principles.md#2-everything-is-a-command) is why
+    /// there are two. The field keeps the keyboard throughout: this is a list
+    /// under a caret, not a mode over one.
+    completion: Option<crate::complete::Completion>,
+    /// The directory a completion read is in flight for.
+    ///
+    /// Separate from the list itself, because the rows on screen stay the
+    /// previous directory's until the new ones land — a list that emptied for
+    /// the length of a `readdir` would flicker on every `/`.
+    completing: Option<PathBuf>,
     /// The navigation button under the pointer.
     hovered_tool: Option<(crate::panes::PaneId, crate::layout::Tool)>,
     /// The quick look's control under the pointer, while one is open.
@@ -1913,6 +1928,8 @@ impl App {
             hovered_separator: None,
             crumb_menu: None,
             crumb_pending: None,
+            completion: None,
+            completing: None,
             hovered_tool: None,
             hovered_look: None,
             hovered_mode: None,
@@ -2278,6 +2295,7 @@ impl App {
     /// Applies whatever came back from a clipboard read.
     fn drain_paste(&mut self) {
         self.drain_siblings();
+        self.drain_completions();
         let Ok(pasted) = self.replies.paste_rx.try_recv() else { return };
         match pasted {
             Pasted::Folder(path) => self.panes.focused_mut().open(path, &self.jobs),
@@ -2542,6 +2560,7 @@ impl App {
                     self.release();
                 }
                 Button::Secondary if *pressed => self.open_menu(*position),
+                Button::Middle if *pressed => self.middle_press(*position, commands),
                 _ => {}
             },
             Event::Scroll { delta, precise, time, mods } => {
@@ -2876,20 +2895,39 @@ impl App {
     }
 
     /// Inserts the clipboard's text into the field with the keyboard.
+    pub(crate) fn paste_text(&mut self) {
+        self.paste_into_field(Selection::Clipboard);
+    }
+
+    /// Inserts the primary selection into the field with the keyboard.
+    ///
+    /// **The middle button's clipboard.** X11 called it PRIMARY and Wayland kept
+    /// it: whatever a pointer last selected anywhere on the desktop, written
+    /// where the caret is. A separate command rather than a modifier on the
+    /// other one, because the two read different selections and rule 2 wants a
+    /// keymap able to say so.
+    pub(crate) fn paste_primary_text(&mut self) {
+        self.paste_into_field(Selection::Primary);
+    }
+
+    /// Inserts one of the two selections into the field with the keyboard.
     ///
     /// **Read on a job**, like every other clipboard read: the peer writes into a
     /// pipe at its own pace, and a read on the frame loop is a frame loop waiting
     /// on another process. The field may be gone by the time the bytes arrive, and
     /// then the paste is dropped — the place it was going no longer exists.
-    pub(crate) fn paste_text(&mut self) {
-        let offered = self.window.clipboard().offered().to_vec();
+    fn paste_into_field(&mut self, selection: Selection) {
+        let offered = match selection {
+            Selection::Clipboard => self.window.clipboard().offered().to_vec(),
+            Selection::Primary => self.window.clipboard().primary_offered().to_vec(),
+        };
         let Some(mime) = ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "text/uri-list"]
             .into_iter()
             .find(|want| offered.iter().any(|have| have == want))
         else {
             return;
         };
-        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        let Some(fd) = self.window.request_selection(selection, mime) else { return };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
@@ -3162,6 +3200,71 @@ impl App {
         false
     }
 
+    /// The middle button: the primary selection into a field, or a folder into
+    /// a tab.
+    ///
+    /// **Both go through the registry** — [rule
+    /// 2](../../../docs/03-principles.md#2-everything-is-a-command). A gesture
+    /// that opened a tab by calling the method would be a binding no palette can
+    /// find and no keymap can rebind, which is the drift `sk_cmd::Scope` exists
+    /// to stop.
+    ///
+    /// A field first, because X11's PRIMARY is what this button has meant over
+    /// text since before either display server — and the path field is drawn
+    /// across the bar the row test below would otherwise answer for.
+    fn middle_press(&mut self, position: Point, commands: &Registry<Self>) {
+        if self.over_a_field(position) {
+            self.run_by_id(commands, "field.paste_primary");
+            return;
+        }
+        let Some(leaf) = self.pane_under(position) else { return };
+        self.focus_pane(leaf);
+        let Some(id) =
+            self.row_under(position).and_then(|row| self.panes.focused().listing.at(row))
+        else {
+            return;
+        };
+        // **The row under the pointer, not whatever was selected.** The same
+        // rule a secondary click follows, and the only one under which a gesture
+        // that opens something is safe to have on a button nobody aims carefully.
+        self.panes.focused_mut().selection.replace_with(id);
+        self.run_by_id(commands, "go.open_new_tab");
+        self.dirty = true;
+    }
+
+    /// Whether the pointer is inside the one field that has the keyboard.
+    ///
+    /// **The rectangle the frame drew**, through the accessor the accessibility
+    /// tree already reads: one answer for all four fields rather than a fifth
+    /// copy of where each of them is.
+    fn over_a_field(&self, position: Point) -> bool {
+        self.a11y_field().is_some_and(|(_, _, area)| area.contains(position.x, position.y))
+    }
+
+    /// Runs the command `id` names, if it is one and it is enabled.
+    fn run_by_id(&mut self, commands: &Registry<Self>, id: &str) {
+        if let Some(command) = commands.find(id) {
+            commands.run(command, self);
+        }
+    }
+
+    /// Publishes what a pointer has just selected in `which` on PRIMARY.
+    ///
+    /// **What makes the middle button work at all**, here and in every other
+    /// window on the desktop: the convention is that selecting text *is*
+    /// publishing it, so a selection nobody published is a middle click that
+    /// pastes whatever was copied an hour ago. `Ctrl+C` is a separate act and
+    /// goes to the clipboard, which is why this is not in `copy_text`.
+    fn publish_the_field_selection(&mut self, which: Claim) {
+        let Some(text) = self.field_for(which).map(|field| field.selected().to_owned()) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.window.set_selection(Selection::Primary, Content::text(&text));
+    }
+
     /// Extends the field's selection to where the pointer is.
     ///
     /// The same measurement `place_caret_in` makes, and then the caret moves with
@@ -3294,6 +3397,7 @@ impl App {
         let Some(offset) = at else { return false };
         let Some(field) = self.field_for(which) else { return false };
         field.select_run(offset, clicks > 2);
+        self.publish_the_field_selection(which);
         self.dirty = true;
         true
     }
@@ -3322,18 +3426,34 @@ impl App {
     /// Feeds one key to the path being typed. Returns whether it was consumed.
     ///
     /// Enter goes there and Escape puts the breadcrumbs back.
+    ///
+    /// **Four keys are the completion list's and the rest are still the
+    /// field's.** `Tab` and the two arrows reach the list, and `Enter` changes
+    /// meaning only while a row is chosen — which is the flag, not a mode. Every
+    /// character is typed into the field whether a list is up or not, and typing
+    /// is what puts the keyboard back in it: [`crate::complete`].
     fn path_key(&mut self, event: &sk_plat::KeyEvent) -> bool {
         use sk_plat::{Key, Named};
+        let bare = event.mods.none();
+        // A list that is not drawn is not the arrows': they go on being
+        // swallowed by the field, which is what they did before there was a list
+        // at all.
+        let walking =
+            self.completion.as_ref().is_some_and(crate::complete::Completion::offers_anything);
+        let chosen = self.completion.as_ref().is_some_and(|list| list.chosen.is_some());
         match event.key {
+            Key::Named(Named::Tab) if bare => self.finish_the_path(),
+            Key::Named(Named::Down) if bare && walking => self.step_completion(1),
+            Key::Named(Named::Up) if bare && walking => self.step_completion(-1),
+            Key::Named(Named::Enter) if chosen => self.take_the_completion(),
             Key::Named(Named::Enter) => self.go_to_typed_path(),
-            Key::Named(Named::Escape) => {
-                self.typing_path = None;
-            }
+            Key::Named(Named::Escape) => self.close_path_entry(),
             _ => {
                 let Some(field) = self.typing_path.as_mut() else { return false };
                 if !field.key(event) {
                     return false;
                 }
+                self.complete_the_path();
             }
         }
         self.dirty = true;
@@ -3363,8 +3483,8 @@ impl App {
         if keep != Claim::Naming && self.edits.naming.is_some() {
             self.commit_name();
         }
-        if keep != Claim::Path && self.typing_path.take().is_some() {
-            self.dirty = true;
+        if keep != Claim::Path {
+            self.close_path_entry();
         }
         if keep != Claim::Search && self.search.is_some() {
             self.close_search();
@@ -3382,7 +3502,7 @@ impl App {
     fn abandon_fields(&mut self) {
         let closed = [
             self.edits.stop_naming(),
-            self.typing_path.take().is_some(),
+            self.take_path_entry().is_some(),
             self.menu.take().is_some(),
             self.palette.take().is_some(),
             std::mem::take(&mut self.filtering),
@@ -3399,13 +3519,33 @@ impl App {
     /// of what typing a path is for.
     pub(crate) fn toggle_path_entry(&mut self) {
         self.claim_keyboard(Claim::Path);
-        self.typing_path = match self.typing_path {
-            Some(_) => None,
-            None => Some(crate::field::Field::new(
+        if self.typing_path.is_some() {
+            self.close_path_entry();
+        } else {
+            self.typing_path = Some(crate::field::Field::new(
                 self.panes.focused().path.to_string_lossy().into_owned(),
-            )),
-        };
+            ));
+            self.complete_the_path();
+        }
         self.dirty = true;
+    }
+
+    /// Closes the path field, and the list of names that belongs to it.
+    ///
+    /// **One way out, and it takes both.** The completion is the field's own
+    /// state, so the field going takes it — nothing is left on screen pointing
+    /// at a caret that is not there, and no second `Escape` is owed.
+    fn close_path_entry(&mut self) {
+        if self.take_path_entry().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Takes the path field away, with its completion, and hands it back.
+    fn take_path_entry(&mut self) -> Option<crate::field::Field> {
+        self.completion = None;
+        self.completing = None;
+        self.typing_path.take()
     }
 
     /// Goes where the path bar says, and puts the breadcrumbs back.
@@ -3414,12 +3554,12 @@ impl App {
     /// opened anyway and the read fails with a message that says so, which is
     /// the same answer a directory deleted a moment ago gives.
     fn go_to_typed_path(&mut self) {
-        let Some(field) = self.typing_path.take() else { return };
+        let Some(field) = self.take_path_entry() else { return };
         let typed = field.text.trim();
         if typed.is_empty() {
             return;
         }
-        let path = expand_home(typed).unwrap_or_else(|| {
+        let path = crate::complete::expand_home(typed).unwrap_or_else(|| {
             let path = std::path::Path::new(typed);
             if path.is_absolute() {
                 path.to_path_buf()
@@ -3430,6 +3570,131 @@ impl App {
         if path != self.panes.focused().path {
             self.panes.focused_mut().open(path, &self.jobs);
         }
+    }
+
+    /// Asks for the directories that could finish the path being typed.
+    ///
+    /// **A `readdir` on the job pool**, because rule 1 gives the UI thread no
+    /// filesystem syscalls at all and a half-typed path is where an
+    /// unresponsive mount is met. One read per *directory* and not per
+    /// keystroke: a name that grew inside the same directory is narrowed here,
+    /// and only a new parent goes back to the pool.
+    fn complete_the_path(&mut self) {
+        let Some(field) = self.typing_path.as_ref() else { return };
+        // **Before the caret, not the whole line.** A completion finishes what is
+        // being typed, and a caret moved back into the middle of a path is
+        // finishing the component it is in rather than the last one.
+        let (parent, typed) =
+            crate::complete::split(field.before_caret(), &self.panes.focused().path);
+        if let Some(list) = self.completion.as_mut()
+            && list.parent == parent
+        {
+            list.narrow(&typed);
+            return;
+        }
+        // **One read out at a time**, whichever directory it is for. A path typed
+        // down a mount that has stopped answering would otherwise start a read
+        // per component, and each would hold a worker of the one pool every
+        // listing shares until the mount came back. The read that lands asks
+        // again for whatever the text says by then, so the list still arrives
+        // for the directory being typed — see `drain_completions`.
+        if self.completing.is_some() {
+            return;
+        }
+        self.completing = Some(parent.clone());
+        let sender = self.replies.completed_tx.clone();
+        let wake = self.waker.handle();
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |cancel| {
+            // Hidden directories are read whether the pane shows them or not:
+            // which of them to offer is a question about the name being typed,
+            // and asking it here would mean another read the moment a `.`
+            // arrives.
+            let rows = crate::crumbs::children(&parent, true, cancel).unwrap_or_default();
+            if sender.send(Completed { parent, rows }).is_ok() {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of the directory the path field asked about.
+    fn drain_completions(&mut self) {
+        let Ok(found) = self.replies.completed_rx.try_recv() else { return };
+        self.completing = None;
+        let Some(field) = self.typing_path.as_ref() else { return };
+        let (parent, typed) =
+            crate::complete::split(field.before_caret(), &self.panes.focused().path);
+        // The answer to a question nobody is asking any more: the name grew past
+        // this directory, or went back to one before it, while the read ran. The
+        // question that *is* being asked has not been, because only one read is
+        // ever out — so it is asked now.
+        if parent != found.parent {
+            self.complete_the_path();
+            return;
+        }
+        self.completion = Some(crate::complete::Completion::new(found.parent, found.rows, &typed));
+        self.dirty = true;
+    }
+
+    /// Moves the keyboard into the list of names, and then along it.
+    fn step_completion(&mut self, delta: isize) {
+        if let Some(list) = self.completion.as_mut() {
+            list.step(delta);
+        }
+    }
+
+    /// `Tab`: writes as much of the offered names as they agree on.
+    ///
+    /// One match is completed whole and left with a `/`, which is what asks for
+    /// the level below it — so a path is typed one press per directory, and the
+    /// press still earns its keystroke when the name was already complete.
+    /// Several matches give only what they share, and the list narrows to show
+    /// what is left to choose between.
+    fn finish_the_path(&mut self) {
+        let only = self
+            .completion
+            .as_ref()
+            .filter(|list| list.len() == 1)
+            .and_then(|list| list.name(0))
+            .map(str::to_owned);
+        if let Some(name) = only {
+            self.write_into_the_path(&name, true);
+            return;
+        }
+        let Some(shared) = self.completion.as_ref().and_then(crate::complete::Completion::common)
+        else {
+            return;
+        };
+        self.write_into_the_path(&shared, false);
+    }
+
+    /// `Enter` on a chosen row: writes that name, and asks for what is in it.
+    fn take_the_completion(&mut self) {
+        let Some(name) =
+            self.completion.as_ref().and_then(|list| list.chosen_name()).map(str::to_owned)
+        else {
+            return;
+        };
+        self.write_into_the_path(&name, true);
+    }
+
+    /// Replaces the name being typed with `name`, and re-asks for the list.
+    ///
+    /// The field is not committed: a completion is a name arriving, and where to
+    /// go is still `Enter`'s question. `whole` marks a name that is now a
+    /// directory rather than a fragment, so it takes the separator that asks for
+    /// the level under it.
+    ///
+    /// **Through the field's own edit**, so `Ctrl+Z` inside the field takes a
+    /// completion back the way it takes typing back — the history rule
+    /// [`crate::field`] states, which a write straight into `text` would walk
+    /// around.
+    fn write_into_the_path(&mut self, name: &str, whole: bool) {
+        let Some(field) = self.typing_path.as_mut() else { return };
+        let (_, typed) = crate::complete::split(field.before_caret(), &self.panes.focused().path);
+        field.anchor = Some(field.caret - typed.len());
+        field.insert(&if whole { format!("{name}/") } else { name.to_owned() });
+        self.complete_the_path();
+        self.dirty = true;
     }
 
     /// Feeds one key to the open filter. Returns whether it was consumed.
@@ -9664,6 +9929,19 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
         )
     }
 
+    /// The completion list, as the two flags a scenario has to tell apart.
+    ///
+    /// The names on offer, and which of them — if any — the keyboard is on.
+    /// `-1` is "the keyboard is still in the field", which is a different state
+    /// from an empty list and reads identically from the text alone.
+    fn completion_state(&self) -> (String, i64) {
+        let Some(list) = self.completion.as_ref().filter(|list| list.offers_anything()) else {
+            return (String::new(), -1);
+        };
+        let chosen = list.chosen.map_or(-1, |at| i64::try_from(at).unwrap_or(-1));
+        (list.window().1.join(","), chosen)
+    }
+
     /// What the pane is showing.
     #[expect(clippy::unnecessary_debug_formatting, reason = "the quoting is the point")]
     fn listing_state(&mut self) -> String {
@@ -9755,6 +10033,7 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
             self.edits.naming.as_ref().map(|it| it.field.selected().to_owned()).unwrap_or_default();
         let naming_row =
             self.edits.naming.as_ref().map_or(-1, |it| i64::try_from(it.row).unwrap_or(-1));
+        let (completing, completion_chosen) = self.completion_state();
         let queues = self.queue_state();
         let transfers = self.transfer_state();
         let a11y = self.a11y_report();
@@ -9767,6 +10046,7 @@ selected={} scroll={:.1} loading={} watching={} watch_reason={:?} thumbs_missing
 hover={hover} hover_name={hover_name:?} \
 naming={naming:?} naming_row={naming_row} naming_selected={naming_selected:?} \
 path_entry={typing_path:?} path_caret={path_caret} path_selected={path_selected:?} \
+completing={completing:?} completion_chosen={completion_chosen} \
 undo={} redo={} busy={} {queues} \
 progress={progress:?} \
 asking={asking} clash={clash:?} clash_rest={clash_rest} answer={answer:?} \
@@ -10522,8 +10802,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             if field.contains(position.x, position.y) {
                 self.place_path_caret(position.x);
             } else {
-                self.typing_path = None;
-                self.dirty = true;
+                self.close_path_entry();
             }
             return;
         }
@@ -11296,6 +11575,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         if self.press_in_the_settings(position) {
             return true;
         }
+        if self.press_in_the_completion(position) {
+            return true;
+        }
         if self.press_in_the_crumb_menu(position) {
             return true;
         }
@@ -11387,7 +11669,11 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         // time that stops being true.
         let ended = self.band.take().is_some();
         let released = self.thumb_grab.take().is_some();
-        let dragged = self.text_drag.take().is_some();
+        let text_drag = self.text_drag.take();
+        let dragged = text_drag.is_some();
+        if let Some(which) = text_drag {
+            self.publish_the_field_selection(which);
+        }
         let chose = self.quick_look.as_mut().is_some_and(|look| {
             // Both, for the reason above: two selection models, one release.
             let text = std::mem::take(&mut look.dragging);
@@ -11617,6 +11903,38 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         }
         self.follow_crumb_menu();
         true
+    }
+
+    /// A press on a row of the path field's list of names. Whether it was one.
+    ///
+    /// **The row the pointer is on, not the row the keyboard chose.** They are
+    /// two questions with two answers, and a press that took `chosen` would
+    /// write whichever name an arrow had last reached rather than the one under
+    /// the finger.
+    fn press_in_the_completion(&mut self, position: Point) -> bool {
+        if self.completion.is_none() || self.completion_at(position).is_none() {
+            return false;
+        }
+        let over = self.completion_at(position);
+        if let Some(list) = self.completion.as_mut() {
+            list.hover(over);
+        }
+        let Some(name) = self
+            .completion
+            .as_ref()
+            .and_then(crate::complete::Completion::under_the_pointer)
+            .map(str::to_owned)
+        else {
+            return false;
+        };
+        self.write_into_the_path(&name, true);
+        true
+    }
+
+    /// Which drawn row of the completion list is under a point, as an offset
+    /// from the first drawn.
+    fn completion_at(&self, position: Point) -> Option<usize> {
+        self.hits.completion.iter().position(|area| area.contains(position.x, position.y))
     }
 
     /// Which drawn row of the sibling menu is under a point, as an offset from
@@ -12502,6 +12820,20 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             self.point(if clickable { sk_plat::Cursor::Hand } else { sk_plat::Cursor::Arrow });
             return true;
         }
+        // The path field's list of names. **Claimed only while the pointer is
+        // actually on a row**, unlike the menus above: this list is up for as
+        // long as a path is being typed, and taking every move would stop the
+        // rest of the window tracking the pointer for that whole time.
+        if self.completion.is_some() {
+            let over = self.completion_at(position);
+            if self.completion.as_mut().is_some_and(|list| list.hover(over)) {
+                self.dirty = true;
+            }
+            if over.is_some() {
+                self.point(sk_plat::Cursor::Hand);
+                return true;
+            }
+        }
         // **A quick look is over the whole window, so nothing under it hovers.**
         // The panel already keeps the *rows* beneath it from lighting up —
         // `hits.panels` — but the chrome, the sidebar, the tab strips and the
@@ -12892,6 +13224,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             hint,
             menu,
             typing_path,
+            completion,
             palette,
             erasing,
             search,
@@ -13022,6 +13355,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             window: *window_state,
             menu: menu.as_ref(),
             path_entry: typing_path.as_ref(),
+            completion: completion.as_ref(),
             palette: palette.as_ref(),
             properties: properties.as_ref(),
             openers: openers.as_ref(),
@@ -13145,8 +13479,7 @@ mod tests {
         assert_eq!(super::who_to_ask(None, None, None), None, "a panel about several files");
     }
 
-    use super::{LONG_ENOUGH_TO_TELL_THE_DESKTOP, expand_home, worth_telling_the_desktop};
-    use std::path::Path;
+    use super::{LONG_ENOUGH_TO_TELL_THE_DESKTOP, worth_telling_the_desktop};
     use std::time::Duration;
 
     /// Row 7's whole policy, which is two conditions and no timer.
@@ -13167,33 +13500,5 @@ mod tests {
         // A threshold of zero would notify for every rename, which is the
         // failure this constant exists to make impossible to reach by accident.
         assert!(long >= Duration::from_secs(1));
-    }
-
-    /// `~other` is a shell feature that needs `getpwnam`. Expanding it as this
-    /// user's home would send a person somewhere they did not ask for, and
-    /// treating it as a relative directory called `~other` at least fails with a
-    /// message that names what it looked for.
-    #[test]
-    fn only_this_users_home_is_expanded() {
-        // SAFETY: single-threaded test, and the value is restored below.
-        let saved = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", "/home/tester") };
-
-        assert_eq!(expand_home("~").as_deref(), Some(Path::new("/home/tester")));
-        assert_eq!(expand_home("~/").as_deref(), Some(Path::new("/home/tester")));
-        assert_eq!(
-            expand_home("~/Downloads/x").as_deref(),
-            Some(Path::new("/home/tester/Downloads/x"))
-        );
-        assert_eq!(expand_home("~other").as_deref(), None);
-        assert_eq!(expand_home("~other/files").as_deref(), None);
-        assert_eq!(expand_home("/etc").as_deref(), None);
-        assert_eq!(expand_home("relative").as_deref(), None);
-
-        match saved {
-            // SAFETY: as above.
-            Some(home) => unsafe { std::env::set_var("HOME", home) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
     }
 }

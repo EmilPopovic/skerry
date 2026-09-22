@@ -230,16 +230,19 @@ the first bug report on one of them.
   tested against a real GTK peer and a real Qt peer, which is not the same as
   testing against Nautilus and Dolphin themselves. Portal file transfers are not
   implemented, so a sandboxed Flatpak peer receives nothing.
-- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag
-  moves, `Ctrl` copies and `Alt` asks where it lands — Move, Copy or Link — but
-  only for a drop this window takes, and there is no drop onto an executable.
+- **Middle click opens and pastes; a drag asks only with `Alt`.** The middle
+  button opens a folder in a new tab and pastes the primary selection into a
+  field — `Shift+Insert` does the second too. A drag moves, `Ctrl` copies and
+  `Alt` asks where it lands — Move, Copy or Link — but only for a drop this
+  window takes, and there is no drop onto an executable.
 - **"Always open with this" writes one line and nothing else.** The choice goes
   into `$XDG_CONFIG_HOME/mimeapps.list` for the type under the cursor, preserving
   every line another program wrote and refusing a file whose syntax Skerry cannot
   re-emit. There is no editor for the list afterwards: undoing it is choosing
   another application, and the folder handler has its own row in the settings
   panel.
-- **No recents, no path completion.** `Ctrl+L` takes a path and that is all it does.
+- **No recents.** `Ctrl+L` completes the directory being typed — `Tab` takes
+  what the matches share, the arrows walk them — but remembers nowhere it has been.
 - **Search has no ignore rules**, so a search over a checkout walks `.git`, and
   there are no extension facets. Both are M4.
 - **A desktop notification has no buttons.** An operation that ran longer than

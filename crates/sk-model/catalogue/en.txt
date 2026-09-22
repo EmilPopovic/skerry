@@ -149,6 +149,7 @@ action.select_all_text = Select the whole name, in a field
 action.copy_text = Copy the selected text, in a field
 action.cut_text = Cut the selected text, in a field
 action.paste_text = Paste text, in a field
+action.paste_primary_text = Paste the middle-click selection, in a field
 action.undo_text = Undo the last edit, in a field
 action.redo_text = Redo the last edit, in a field
 find.prompt = Filter this folder
