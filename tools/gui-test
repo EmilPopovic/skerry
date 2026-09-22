@@ -9762,6 +9762,43 @@ def permanent_delete(run: Run, fixture: Path) -> None:
         raise Failure("undo brought back a permanent delete")
 
 
+@scenario("a-picture-that-will-not-decode-is-asked-for-once", fresh=True)
+def a_picture_that_will_not_decode_is_asked_for_once(run: Run, fixture: Path) -> None:
+    """One truncated PNG in view, and a window nobody touches stays still.
+
+    **Measured before the fix: 535 ticks of CPU in five idle seconds**, more than
+    a core, because a row the atlas does not hold is asked for on every frame and
+    a refusal lands, marks the window dirty and is asked for again — so the
+    helper decoded the same broken file for as long as it stayed on screen.
+
+    **Frames as well as ticks**, and that is why the idle scenario did not catch
+    it. That gate excuses CPU spent on drawing, because a stray event draws a
+    frame and that is correct; this loop draws a frame every cycle, so it read as
+    a busy window rather than an idle one. Here nothing should be drawn at all.
+    """
+    (fixture / "broken.png").write_bytes(b"\x89PNG\r\n\x1a\nnot a picture at all")
+    run.drive("key f5\nsleep 900\n")
+    listed(run)
+    # Long enough for the one refusal to arrive and be drawn as a mark.
+    run.drive("sleep 2000\nkey f12\nsleep 200\n")
+    before = run.state()
+    ticks = lambda: sum(
+        int(value) for value in Path(f"/proc/{run.process.pid}/stat").read_text().split()[13:15]
+    )
+    start = ticks()
+    time.sleep(3.0)
+    spent = ticks() - start
+    run.drive("key f12\nsleep 200\n")
+    after = run.state()
+    # One frame is the `F12` that reads the state.
+    drawn = int(after["frames"]) - int(before["frames"]) - 1
+    if drawn > 5 or spent > 30:
+        raise Failure(
+            f"an untouched window with one undecodable picture drew {drawn} frames and "
+            f"spent {spent} ticks of CPU in three seconds — the refusal is being asked for again"
+        )
+
+
 @scenario("a-panel-blocks-the-hover-under-it", fresh=True)
 def panels_block_hover(run: Run, fixture: Path) -> None:
     """A row under a panel does not light up as the pointer crosses it.

@@ -113,6 +113,16 @@ fn is_archive(mime: &str) -> bool {
 pub(crate) struct Thumbs {
     named: HashMap<sk_preview::Key, ImageKey>,
     next: u64,
+    /// The files whose thumbnail the helper refused, at the modification time it
+    /// refused them at.
+    ///
+    /// **So a refusal is asked for once.** A row the atlas does not hold is asked
+    /// for on every frame, and a refusal lands, marks the window dirty and is
+    /// asked for again: measured on one truncated PNG, an untouched window spent
+    /// 535 ticks of CPU in five seconds decoding it over and over. The key holds
+    /// the modification time, so a file that is replaced or repaired is a new key
+    /// and is tried again.
+    refused: std::collections::HashSet<sk_preview::Key>,
 }
 
 impl Thumbs {
@@ -136,6 +146,16 @@ impl Thumbs {
     pub(crate) fn name_preview(&mut self) -> ImageKey {
         self.next += 1;
         ImageKey(self.next)
+    }
+
+    /// Remembers that the helper refused `key`, so it is not asked again.
+    pub(crate) fn refuse(&mut self, key: sk_preview::Key) {
+        self.refused.insert(key);
+    }
+
+    /// Whether the helper has already refused `key`.
+    pub(crate) fn was_refused(&self, key: &sk_preview::Key) -> bool {
+        self.refused.contains(key)
     }
 
     /// The atlas key an answer belongs to, if anything still wants it.
@@ -162,6 +182,9 @@ impl Thumbs {
         for (_, key) in held.iter().take(self.named.len() - KEEP) {
             self.named.remove(key);
         }
+        // A refusal is remembered as long as the name is, so this is bounded by
+        // what bounds the names.
+        self.refused.retain(|key| self.named.contains_key(key));
     }
 }
 
@@ -184,6 +207,19 @@ pub(crate) fn thumbnail(path: PathBuf, mtime: i64) -> Want {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    /// A refusal is remembered for the file at the time it was refused, and a
+    /// changed file is a new question.
+    #[test]
+    fn a_refused_thumbnail_is_asked_for_once_per_version_of_the_file() {
+        let mut thumbs = super::Thumbs::default();
+        let (key, _) = thumbs.name(std::path::Path::new("/tmp/broken.png"), 10);
+        assert!(!thumbs.was_refused(&key));
+        thumbs.refuse(key.clone());
+        assert!(thumbs.was_refused(&key), "a refusal was not remembered");
+        let (changed, _) = thumbs.name(std::path::Path::new("/tmp/broken.png"), 11);
+        assert!(!thumbs.was_refused(&changed), "a file that changed is not asked again");
+    }
 
     use super::{Shows, Thumbs, shows};
     use sk_desktop::Category;
