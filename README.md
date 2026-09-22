@@ -225,12 +225,14 @@ the first bug report on one of them.
   tested against a real GTK peer and a real Qt peer, which is not the same as
   testing against Nautilus and Dolphin themselves. Portal file transfers are not
   implemented, so a sandboxed Flatpak peer receives nothing.
-- **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag says
-  whether it will move or copy, but there is no right-drag menu, no link action
-  and no drop onto an executable.
+- **A drag cannot ask.** The middle button opens a folder in a new tab and
+  pastes the primary selection into a field — `Shift+Insert` does the second
+  too — and a drag says whether it will move or copy. There is no right-drag
+  menu, no link action by drag, and no drop onto an executable.
 - **No "always open with this."** Open With opens once. The only default this
   writes is the folder handler, from the settings panel.
-- **No recents, no path completion.** `Ctrl+L` takes a path and that is all it does.
+- **No recents.** `Ctrl+L` completes the directory being typed — `Tab` takes
+  what the matches share, the arrows walk them — but remembers nowhere it has been.
 - **Search has no ignore rules**, so a search over a checkout walks `.git`, and
   there are no extension facets. Both are M4.
 - **No desktop notification** when a copy finishes with the window unfocused. The

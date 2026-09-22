@@ -1429,7 +1429,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 149
+FEWEST_SCENARIOS = 151
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -5951,6 +5951,114 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
     away = aim(run, field, 300.0, float(field["body_top"]) + 40.0)
     run.drive(f"move {away[0]:.1f} {away[1]:.1f}\nsleep 150\nclick\nsleep 250\nkey f12\nsleep 150\n")
     expect(run.state(), path_entry="", path=str(fixture))
+
+
+@scenario("path-completion-is-a-list-and-not-a-mode")
+def path_completion(run: Run, fixture: Path) -> None:
+    """Tab finishes a path, and the list never becomes a second keyboard.
+
+    **The gate for the two flags.** `completing` is what is on offer and
+    `completion_chosen` is which row the keyboard is on, and the whole of row 9
+    is that those are different questions: the list can be up with the keyboard
+    still in the field, an arrow moves it into the list, and typing a character
+    brings it straight back. One flag for both makes the list a mode, and rule 2
+    names the field that was already caught in one.
+
+    **The names arrive from a job**, which is why every assertion here is a poll
+    rather than a read: the `readdir` is on the pool because rule 1 gives the UI
+    thread no filesystem syscalls, so the list appears a frame or more after the
+    key that asked for it.
+    """
+    run.drive("sleep 500\nkey ctrl+l\nsleep 250\nkey f12\nsleep 150\n")
+    opened = run.state()
+    # A complete name is not a list: `Ctrl+L` opens holding the whole path, and a
+    # panel repeating its last component back would cover the rows underneath.
+    expect(opened, path_entry=str(fixture), completing="")
+
+    # A separator asks what is inside, and three folders answer.
+    run.drive("text /\nsleep 200\n")
+    until(run, completing="alpha,beta,gamma", completion_chosen="-1")
+
+    # One character narrows it, and the keyboard is still in the field.
+    run.drive("text a\nsleep 200\n")
+    until(run, completing="alpha", completion_chosen="-1")
+
+    # Tab finishes the one match, leaves the separator that asks for the level
+    # under it, and the list is that level.
+    run.drive("key tab\nsleep 250\n")
+    until(run, path_entry=f"{fixture / 'alpha'}/", completing="nested")
+
+    # The two flags, in both directions.
+    run.drive("key down\nsleep 200\n")
+    until(run, completion_chosen="0", completing="nested")
+    run.drive("text n\nsleep 200\n")
+    until(run, completion_chosen="-1", completing="nested")
+
+    # Enter on a chosen row writes that name and goes nowhere: the field is still
+    # open and the pane has not moved.
+    run.drive("key down\nsleep 200\n")
+    until(run, completion_chosen="0")
+    run.drive("key enter\nsleep 250\n")
+    until(run, path_entry=f"{fixture / 'alpha' / 'nested'}/", path=str(fixture))
+
+    # And one Escape takes the field and the list together — no second press owed.
+    run.drive("key escape\nsleep 250\n")
+    until(run, path_entry="", completing="", path=str(fixture))
+
+
+@scenario("middle-click-opens-a-tab-and-pastes-the-primary-selection")
+def middle_click(run: Run, fixture: Path) -> None:
+    """Row 10's two halves, both of them registry commands rather than branches.
+
+    Over a row the middle button is `go.open_new_tab`, on the row it is *on*; in
+    a field it is `field.paste_primary`, which is what X11 named PRIMARY and
+    Wayland kept. The second half also proves the publishing side: a pointer
+    selection in a field has to reach PRIMARY, or the paste has nothing to find.
+    """
+    run.drive("sleep 500\nkey f12\nsleep 150\n")
+    start = run.state()
+    expect(start, tabs="1")
+
+    onto = point_at(run, 0)
+    if onto["hover_name"] != "alpha":
+        raise Failure(f"row 0 is {onto['hover_name']!r}, wanted the alpha folder")
+    run.drive("click middle\nsleep 700\n")
+    # Behind, the way a browser opens one: the tab exists and the keyboard has
+    # not moved to it.
+    opened = until(run, tabs="2", tab="0")
+    expect(opened, path=str(fixture))
+    run.drive("key ctrl+shift+tab\nsleep 300\n")
+    until(run, tab="1", path=str(fixture / "alpha"))
+    run.drive("key ctrl+w\nsleep 400\n")
+    until(run, tabs="1", path=str(fixture))
+
+    # The field half. A drag across the whole box selects the path, which is the
+    # gesture that publishes it; End drops the selection and leaves the caret at
+    # the end, so what arrives can only have come from the selection.
+    run.drive("key ctrl+l\nsleep 400\nkey f12\nsleep 150\n")
+    field = run.state()
+    if not field["path_entry"]:
+        raise Failure("Ctrl+L opened no path field")
+    left, top, width, height = (float(value) for value in field["path_field"].split(","))
+    middle = top + height / 2.0
+    start_at = aim(run, field, left + 4, middle)
+    end_at = aim(run, field, left + width * 0.95, middle)
+    run.drive(
+        f"move {start_at[0]:.2f} {start_at[1]:.2f}\nsleep 200\n"
+        f"drag {start_at[0]:.2f} {start_at[1]:.2f} {end_at[0]:.2f} {end_at[1]:.2f}\n"
+        "sleep 300\nkey f12\nsleep 200\n"
+    )
+    if run.state()["path_selected"] != field["path_entry"]:
+        raise Failure("the drag selected none of the path, so nothing was published")
+
+    inside = aim(run, field, left + width * 0.5, middle)
+    run.drive(
+        f"key end\nsleep 200\nmove {inside[0]:.2f} {inside[1]:.2f}\nsleep 200\n"
+        "click middle\nsleep 500\n"
+    )
+    until(run, path_entry=f"{fixture}{fixture}")
+    run.drive("key escape\nsleep 250\n")
+    until(run, path_entry="", path=str(fixture))
 
 
 @scenario("two-fields-never-open-at-once", fresh=True)

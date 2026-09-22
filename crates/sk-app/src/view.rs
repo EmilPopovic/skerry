@@ -157,6 +157,9 @@ pub struct Chrome<'a> {
     pub menu: Option<&'a Menu>,
     /// The path being typed, which replaces the breadcrumbs while it is up.
     pub path_entry: Option<&'a Field>,
+    /// The names that could finish it, while the job that read them has an
+    /// answer and anything matches.
+    pub completion: Option<&'a crate::complete::Completion>,
     /// The command palette, while it is open.
     pub palette: Option<&'a Palette>,
     /// The Properties panel, while it is open.
@@ -230,6 +233,9 @@ pub struct Hits {
     /// One rectangle per *drawn* row of a separator's menu, in draw order — so
     /// the index a click reports is an offset from the menu's scroll.
     pub crumb_menu: Vec<Area>,
+    /// One rectangle per *drawn* row of the path field's completion list, in
+    /// draw order — so an index a click reports is an offset from its scroll.
+    pub completion: Vec<Area>,
     /// One region per **separator**, `depth` naming the component on its left.
     ///
     /// A separator is a target of its own — clicking one lists the directories
@@ -476,6 +482,7 @@ pub fn draw(
     if let Some(menu) = chrome.crumb_menu {
         crumb_menu(painter, layout, here, menu, hits);
     }
+    completion_list(painter, layout, here, chrome.completion, hits);
     if let Some(palette) = chrome.palette {
         command_palette(painter, layout, palette, hits);
     }
@@ -1141,6 +1148,66 @@ const CRUMB_MENU_INSET: f32 = 10.0;
 const CRUMB_MENU_MARK: f32 = 16.0;
 /// How wide the menu may be, whatever its widest name is.
 const CRUMB_MENU_WIDTH: (f32, f32) = (160.0, 420.0);
+
+/// The directories that could finish the path being typed.
+///
+/// Under the field's own left edge rather than under the pointer, because the
+/// thing it is finishing is the text at that edge — and the same width as the
+/// field, so the panel reads as part of it rather than as a menu that happens to
+/// be nearby.
+///
+/// The row the *keyboard* is on takes the pill; the row the pointer is over
+/// takes it only while the keyboard is still in the field. Two questions, and
+/// the one being answered is "what would the next press write".
+/// **The hit rectangles are cleared whether one is drawn or not**, which is why
+/// the `None` case is here rather than at the call: a rectangle that outlives
+/// the panel it was in is a row the pointer can still press with nothing on
+/// screen under it.
+fn completion_list(
+    painter: &mut Painter<'_>,
+    layout: &Layout,
+    here: &PaneLayout,
+    offered: Option<&crate::complete::Completion>,
+    hits: &mut Hits,
+) {
+    hits.completion.clear();
+    let Some(list) = offered.filter(|list| list.offers_anything()) else { return };
+    let theme = *painter.theme;
+    let metrics = theme.metrics;
+    let (first, drawn) = list.window();
+    let field = path_field(here, &metrics);
+    let height = drawn.len() as f32 * CRUMB_MENU_STEP + CRUMB_MENU_PAD * 2.0;
+    let area = Area {
+        x: field.x.clamp(8.0, (layout.window.width - field.width - 8.0).max(8.0)),
+        y: field.bottom() + 4.0,
+        width: field.width,
+        height,
+    };
+    panel_shape(painter, area, hits);
+
+    let pill_on = list.chosen.or(list.hovered);
+    for (offset, name) in drawn.iter().enumerate() {
+        let top = area.y + CRUMB_MENU_PAD + offset as f32 * CRUMB_MENU_STEP;
+        let row = Area { x: area.x, y: top, width: area.width, height: CRUMB_MENU_STEP };
+        hits.completion.push(row);
+        let highlighted = pill_on == Some(first + offset);
+        if highlighted {
+            let pill = painter.rect(area.x + 4.0, top, area.width - 8.0, CRUMB_MENU_STEP);
+            painter.list.rect(pill, theme.palette.accent, painter.px(5.0));
+        }
+        let colour = if highlighted { theme.palette.selected_text } else { theme.palette.text };
+        let style = TextStyle::new(metrics.path_size, colour);
+        let baseline = painter.baseline(top, CRUMB_MENU_STEP, metrics.path_size);
+        line(
+            painter,
+            name,
+            style,
+            area.x + CRUMB_MENU_INSET,
+            area.width - CRUMB_MENU_INSET * 2.0,
+            baseline,
+        );
+    }
+}
 
 /// How much of the window a quick look takes.
 ///
@@ -6047,6 +6114,7 @@ mod tests {
                 window: sk_plat::WindowState::default(),
                 menu: None,
                 path_entry: None,
+                completion: None,
                 palette: None,
                 properties: None,
                 openers: None,

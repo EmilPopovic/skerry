@@ -1340,6 +1340,9 @@ fn sample_chrome<'a>(request: &Capture, sample: &Sample<'a>) -> Chrome<'a> {
         },
         menu: sample.overlays.menu.as_ref(),
         path_entry: sample.overlays.path_entry.as_ref(),
+        // No capture asks for one: a completion list is a job answering, and a
+        // frame built from a request has no job behind it.
+        completion: None,
         palette: sample.overlays.palette.as_ref(),
         properties: sample.overlays.properties.as_ref(),
         openers: sample.overlays.openers.as_ref(),
