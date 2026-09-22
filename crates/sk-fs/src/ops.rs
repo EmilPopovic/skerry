@@ -24,7 +24,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
 use sk_model::{Problem, ProblemKind};
 
 /// What a [`Change::Created`] made.
@@ -138,6 +138,21 @@ pub enum Change {
         /// What it holds now.
         after: String,
     },
+    /// The nine permission bits, as they were and as they are.
+    ///
+    /// **Both modes, for [`Change::Edited`]'s reason.** A mode is not a place, so
+    /// there is nowhere to move a file back to; the old bits have to travel on
+    /// the change or `Ctrl+Z` has nothing to restore. Whole modes rather than the
+    /// nine alone, because what is put back has to be what was there — a file
+    /// that was setuid before is setuid after an undo.
+    Permissions {
+        /// The file.
+        path: PathBuf,
+        /// What it allowed before.
+        before: u16,
+        /// What it allows now.
+        after: u16,
+    },
     /// An archive unpacked into a directory of its own.
     ///
     /// **A copy whose source is inside a file** — [ADR
@@ -206,9 +221,12 @@ impl Change {
             Self::Restored(entry) => &entry.original,
             Self::Noted { change, .. } => change.subject(),
             Self::Batch(changes) => changes.last().map_or(Path::new(""), Change::subject),
-            // The folder that was made, and the file that was edited: two
-            // different changes whose subject happens to be the path they carry.
-            Self::Created { path, .. } | Self::Edited { path, .. } => path,
+            // The folder that was made, the file that was edited, and the file
+            // whose bits changed: three changes whose subject happens to be the
+            // path they carry.
+            Self::Created { path, .. }
+            | Self::Edited { path, .. }
+            | Self::Permissions { path, .. } => path,
             Self::Renamed { to, .. } => to,
             Self::Copied { destination, .. } => destination,
             // The folder the files went into, which is what a person is looking
@@ -266,6 +284,7 @@ impl Change {
             Self::Trashed { original, .. } => ("history.trashed", named(original)),
             Self::Erased { path } => ("history.erased", named(path)),
             Self::Edited { path, .. } => ("history.edited", named(path)),
+            Self::Permissions { path, .. } => ("history.permissions", named(path)),
         }
     }
 
@@ -293,8 +312,9 @@ impl Change {
             // Neither did the archive, and it is the row the folder came from.
             Self::Unpacked { archive, .. } => Some(archive),
             Self::Trashed { original, .. } => Some(original),
-            // An edit moves nothing, so undoing one leaves the cursor where it is.
-            Self::Edited { path, .. } => Some(path),
+            // Neither an edit nor a chmod moves anything, so undoing one leaves
+            // the cursor where it is.
+            Self::Edited { path, .. } | Self::Permissions { path, .. } => Some(path),
         }
     }
 }
@@ -317,6 +337,7 @@ fn many_key(one: &'static str) -> &'static str {
         "history.trashed" => "history.trashed_many",
         "history.erased" => "history.erased_many",
         "history.edited" => "history.edited_many",
+        "history.permissions" => "history.permissions_many",
         _ => "history.changed_many",
     }
 }
@@ -768,6 +789,75 @@ pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
     }
 }
 
+/// Sets the nine permission bits, and records what they were.
+///
+/// **The nine, and nothing above them.** The setuid, setgid and sticky bits are
+/// read off the file and written back untouched, so a person answering *may
+/// others write this* can never silently clear the bit that makes a directory a
+/// shared drop box. Those three, a recursive apply and an ACL editor are the
+/// *permissions editor*
+/// [11-non-goals.md](../../../docs/11-non-goals.md) declines; the nine are the
+/// basics it admits.
+///
+/// **A symlink is refused rather than followed.** `chmod` has no form that acts
+/// on the link itself — Linux answers `AT_SYMLINK_NOFOLLOW` with `ENOTSUP` — so
+/// the alternative to refusing is changing a file nobody pointed at.
+///
+/// **Runs on a job.**
+pub fn set_permissions(path: &Path, nine: u16) -> Result<Change, Problem> {
+    crate::trash::writable(path)?;
+    let before = mode_now(path)?;
+    let after = (before & 0o7000) | (nine & 0o777);
+    chmod(path, after)?;
+    Ok(Change::Permissions { path: path.to_path_buf(), before, after })
+}
+
+/// The whole mode a path has right now, refusing a symlink.
+fn mode_now(path: &Path) -> Result<u16, Problem> {
+    let stat = rustix::fs::statx(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+        StatxFlags::TYPE | StatxFlags::MODE,
+    )
+    .map_err(|error| problem(error, path))?;
+    if u32::from(stat.stx_mode) & libc::S_IFMT == libc::S_IFLNK {
+        return Err(Problem::new(
+            ProblemKind::Unreadable,
+            path.display().to_string(),
+            "a symlink has no permissions of its own",
+        ));
+    }
+    Ok(stat.stx_mode & 0o7777)
+}
+
+fn chmod(path: &Path, mode: u16) -> Result<(), Problem> {
+    rustix::fs::chmodat(
+        rustix::fs::CWD,
+        path,
+        Mode::from_bits_truncate(u32::from(mode)),
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(|error| problem(error, path))
+}
+
+/// Puts a recorded mode back, refusing if the file has moved on since.
+///
+/// The same refusal [`Change::Edited`] makes about bytes, for the same reason: a
+/// mode somebody else changed in between is not one this undo has an inverse
+/// for, and writing over it would lose their change without saying so.
+fn restore_mode(path: &Path, expected: u16, wanted: u16) -> Result<(), Problem> {
+    let now = mode_now(path)?;
+    if now != expected {
+        return Err(Problem::new(
+            ProblemKind::ChangedSince,
+            path.display().to_string(),
+            "permissions changed since",
+        ));
+    }
+    chmod(path, wanted)
+}
+
 /// Whether something is already called that.
 ///
 /// `SYMLINK_NOFOLLOW`, so a dangling symlink counts as taken — which it is, to
@@ -883,13 +973,15 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         Change::Edited { path, before, after } => {
             if crate::read_text(path, crate::TEXT_LIMIT)? != *after {
                 return Err(Problem::new(
-                    ProblemKind::NameTaken,
+                    ProblemKind::ChangedSince,
                     path.display().to_string(),
                     "contents changed after edit",
                 ));
             }
             write_text(path, before)
         }
+        // The bits it had, put back only if nothing else has moved them.
+        Change::Permissions { path, before, after } => restore_mode(path, *after, *before),
         Change::Trashed { .. } => revert_recorded(change).map(|_| ()),
     }
 }
@@ -915,12 +1007,18 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
         Change::Edited { path, before, after } => {
             if crate::read_text(path, crate::TEXT_LIMIT)? != *before {
                 return Err(Problem::new(
-                    ProblemKind::NameTaken,
+                    ProblemKind::ChangedSince,
                     path.display().to_string(),
                     "contents changed after undo",
                 ));
             }
             edit_text(path, after)
+        }
+        // And the bits it had after the change, put back after an undo took them
+        // away.
+        Change::Permissions { path, before, after } => {
+            restore_mode(path, *before, *after)?;
+            Ok(change.clone())
         }
         // **Redone by the caller, not here** — ADR 0032. Unpacking means a
         // sandboxed child, and this crate is level 1 with no business spawning
@@ -1198,7 +1296,8 @@ mod tests {
 
     use super::{
         Change, Conflict, Made, Next, apply, copy_into, create_directory, create_file, create_link,
-        empty_trash, encode_path, move_into, rename, revert, stranded_by_empty, trash,
+        empty_trash, encode_path, move_into, rename, revert, set_permissions, stranded_by_empty,
+        trash,
     };
     use sk_model::ProblemKind;
     use std::path::{Path, PathBuf};
@@ -1571,6 +1670,108 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The mode a file has now, as `0o644`.
+    fn mode_of(path: &Path) -> u16 {
+        use std::os::unix::fs::PermissionsExt as _;
+        (std::fs::metadata(path).unwrap().permissions().mode() & 0o7777) as u16
+    }
+
+    #[test]
+    fn nine_bits_are_set_and_walked_back() {
+        let root = scratch("chmod");
+        let path = root.join("script.sh");
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        set_permissions(&path, 0o600).expect("set");
+
+        let change = set_permissions(&path, 0o751).expect("set");
+        assert_eq!(change, Change::Permissions { path: path.clone(), before: 0o600, after: 0o751 });
+        assert_eq!(mode_of(&path), 0o751);
+
+        revert(&change).expect("undone");
+        assert_eq!(mode_of(&path), 0o600, "the undo did not put the old bits back");
+
+        apply(&change).expect("redone");
+        assert_eq!(mode_of(&path), 0o751);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The three bits above the nine belong to the *permissions editor*
+    /// `docs/11-non-goals.md` declines, so they are carried through untouched
+    /// rather than cleared by a person answering a question about the nine.
+    #[test]
+    fn the_bits_above_the_nine_are_carried_through_untouched() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("chmod-high");
+        let path = root.join("shared");
+        std::fs::create_dir(&path).unwrap();
+        if set_permissions(&path, 0o755).is_err() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o1755)).unwrap();
+
+        let change = set_permissions(&path, 0o770).expect("set");
+        assert_eq!(mode_of(&path), 0o1770, "the sticky bit went with the nine");
+        assert_eq!(
+            change,
+            Change::Permissions { path: path.clone(), before: 0o1755, after: 0o1770 }
+        );
+        revert(&change).expect("undone");
+        assert_eq!(mode_of(&path), 0o1755);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A symlink's bits are the target's on Linux, and `chmod` has no form that
+    /// acts on the link — so the alternative to refusing is changing a file
+    /// nobody pointed at.
+    #[test]
+    fn a_symlink_is_refused_rather_than_followed() {
+        let root = scratch("chmod-link");
+        let target = root.join("target.txt");
+        let link = root.join("link");
+        std::fs::write(&target, b"contents").unwrap();
+        set_permissions(&target, 0o644).expect("set");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let refused = set_permissions(&link, 0o600).expect_err("a symlink was accepted");
+        assert_eq!(refused.kind(), ProblemKind::Unreadable);
+        assert_eq!(mode_of(&target), 0o644, "the target was changed through the link");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The refusal `Change::Edited` makes about bytes, for the same reason: an
+    /// undo whose starting point has moved is not an undo.
+    #[test]
+    fn an_undo_refuses_when_somebody_else_has_changed_the_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("chmod-raced");
+        let path = root.join("notes.txt");
+        std::fs::write(&path, b"contents").unwrap();
+        set_permissions(&path, 0o644).expect("set");
+        let change = set_permissions(&path, 0o600).expect("set");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let refused = revert(&change).expect_err("an undo overwrote somebody else's change");
+        assert_eq!(refused.kind(), ProblemKind::ChangedSince);
+        assert_eq!(mode_of(&path), 0o640);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One press is one row on the history, named after the file it was about.
+    #[test]
+    fn a_permission_change_names_itself_on_the_history() {
+        let change = Change::Permissions {
+            path: PathBuf::from("/tmp/notes.txt"),
+            before: 0o644,
+            after: 0o600,
+        };
+        assert_eq!(change.summary(), ("history.permissions", "notes.txt".to_owned()));
+        assert_eq!(change.subject(), Path::new("/tmp/notes.txt"));
+        assert_eq!(change.origin(), Some(Path::new("/tmp/notes.txt")));
+        let (key, count) = Change::Batch(vec![change.clone(), change]).summary();
+        assert_eq!((key, count.as_str()), ("history.permissions_many", "2"));
     }
 
     #[test]

@@ -799,6 +799,16 @@ impl Edits {
         self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::edit_text(&path, &after)));
     }
 
+    /// Sets the nine permission bits, as one undoable change.
+    ///
+    /// One entry on the one stack per press, like every other mutation here, and
+    /// the old mode travels on the change for [`sk_fs::ops::Change::Edited`]'s
+    /// reason: a mode is not a place, so there is nowhere else to read it back
+    /// from.
+    pub fn set_permissions(&mut self, path: PathBuf, nine: u16, jobs: &Jobs) {
+        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::set_permissions(&path, nine)));
+    }
+
     /// Copies or moves several paths into `into`, one at a time.
     ///
     /// `moving` is what tells a paste after Cut from a paste after Copy. The same

@@ -205,8 +205,12 @@ the first bug report on one of them.
   the themed icon the rest of the desktop would draw for it.
 - **Creating things is thin.** New folder and a single rename. No new file, no
   Templates, no symlinks, and no batch rename — which M3 names and this is not.
-- **Properties is read-only**, and it shows owners as numeric ids rather than
-  account names. Nothing about a file's permissions can be changed from it.
+- **Properties changes the nine permission bits and nothing else.** Each one is
+  a box the keyboard or the pointer turns, and `Ctrl+Z` walks it back; setuid,
+  setgid and sticky are carried through untouched and shown by no control, and
+  there is no recursive apply, owner change or ACL editor — the *permissions
+  editor* [11-non-goals.md](docs/11-non-goals.md) declines. Owners are named
+  where the name service answers and shown as numbers where it does not.
 - **Rebinding means editing the config file.** Every command and its chords are
   written to `$XDG_CONFIG_HOME/skerry/config` and a line rebinds one
   ([ADR 0025](docs/adr/0025-the-config-file-is-the-keymap-written-out.md)), but

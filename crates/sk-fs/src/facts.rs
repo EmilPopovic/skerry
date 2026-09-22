@@ -140,6 +140,116 @@ fn read_link(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(OsString::from(raw.into_string().ok()?)))
 }
 
+/// What the name service calls one path's owner and group.
+///
+/// Both are optional because a number with no account behind it is ordinary: a
+/// file written inside a container, or an account deleted after its files.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Accounts {
+    /// The identifiers these names were asked about, so an answer that arrives
+    /// after the panel moved on can be recognised as stale.
+    pub uid: u32,
+    /// The group these names were asked about.
+    pub gid: u32,
+    /// What the owner is called.
+    pub owner: Option<String>,
+    /// What the group is called.
+    pub group: Option<String>,
+}
+
+/// Asks the name service what a `uid` and a `gid` are called.
+///
+/// **Its own call, and its own job** — which is what [`Facts`]'s numbers say in
+/// their own comment. `getpwuid_r` consults every source `/etc/nsswitch.conf`
+/// names, and on a machine joined to a directory one of them is a network: the
+/// answer can take as long as that server takes, and a caller that wanted a mode
+/// and a size should not wait for it.
+///
+/// **Runs on a job.**
+#[must_use]
+pub fn accounts(uid: u32, gid: u32) -> Accounts {
+    if sk_util::disabled("names") {
+        // **The injection [ADR
+        // 0037](../../../docs/adr/0037-runtime-degradation-is-visible-and-injectable.md)
+        // asks for, in the shape this facility really fails in.** A directory
+        // server that has gone away does not answer *no such account*; it does
+        // not answer, and the caller waits — which is `tools/hung-mount` with a
+        // socket in place of a mount. Ten minutes rather than forever, so a
+        // worker parked by a test is given back to the pool.
+        // A pool worker, not the UI thread, and only when `SKERRY_DISABLE` names
+        // it: this is the hang being simulated, and the one-lookup-at-a-time bound
+        // in `sk-app` keeps it to one worker.
+        std::thread::sleep(std::time::Duration::from_secs(600)); // skerry-allow: no-blocking-ui
+        return Accounts { uid, gid, owner: None, group: None };
+    }
+    Accounts { uid, gid, owner: owner_name(uid), group: group_name(gid) }
+}
+
+/// How much room a name lookup is given before it is treated as unanswerable.
+///
+/// `getpwuid_r` asks for a bigger buffer with `ERANGE` rather than truncating.
+/// A megabyte is past any real passwd record and stops a broken NSS module from
+/// being answered with an unbounded allocation.
+const NAME_BUFFER_LIMIT: usize = 1 << 20;
+
+fn owner_name(uid: u32) -> Option<String> {
+    with_buffer(|buffer, buffer_len| {
+        let mut record: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `getpwuid_r` writes `record` and the buffer it is handed, and
+        // sets `found` to `record` or to null. Nothing else is read.
+        let code =
+            unsafe { libc::getpwuid_r(uid, &raw mut record, buffer, buffer_len, &raw mut found) };
+        (code, (!found.is_null()).then_some(record.pw_name))
+    })
+}
+
+fn group_name(gid: u32) -> Option<String> {
+    with_buffer(|buffer, buffer_len| {
+        let mut record: libc::group = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        // SAFETY: as above, for the group file's record.
+        let code =
+            unsafe { libc::getgrgid_r(gid, &raw mut record, buffer, buffer_len, &raw mut found) };
+        (code, (!found.is_null()).then_some(record.gr_name))
+    })
+}
+
+/// Runs one of the `_r` lookups, growing its buffer while it asks for more.
+///
+/// The name is copied out before the buffer it points into is dropped, which is
+/// the whole reason this is a function rather than two copies of a loop.
+fn with_buffer(
+    mut ask: impl FnMut(*mut libc::c_char, usize) -> (libc::c_int, Option<*mut libc::c_char>),
+) -> Option<String> {
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        let (code, name) = ask(buffer.as_mut_ptr().cast(), buffer.len());
+        if code == libc::ERANGE && buffer.len() < NAME_BUFFER_LIMIT {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if code != 0 {
+            return None;
+        }
+        let name = name?;
+        // SAFETY: a record the lookup filled in points its name at the buffer
+        // above, which is still alive here and outlives the copy.
+        let name = unsafe { std::ffi::CStr::from_ptr(name) };
+        return name.to_str().ok().map(str::to_owned);
+    }
+}
+
+/// Whether this process can change `uid`'s file without being refused.
+///
+/// `chmod` is the owner's or root's, and nobody else's — so a control that would
+/// always fail with `EPERM` is drawn as a statement rather than as a switch.
+#[must_use]
+pub fn mine(uid: u32) -> bool {
+    let me = rustix::process::geteuid();
+    me.is_root() || me.as_raw() == uid
+}
+
 /// The mode as `rwxr-xr-x`, which is the form every Unix tool prints.
 #[must_use]
 pub fn permissions(mode: u16) -> String {
@@ -158,7 +268,7 @@ pub fn permissions(mode: u16) -> String {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Kind, describe, permissions};
+    use super::{Kind, accounts, describe, mine, permissions};
     use std::path::PathBuf;
 
     fn fixture(label: &str) -> PathBuf {
@@ -216,5 +326,39 @@ mod tests {
         // The setuid and sticky bits are not in the nine, and must not shift the
         // others: `04755` is still `rwxr-xr-x` here.
         assert_eq!(permissions(0o4755), "rwxr-xr-x");
+    }
+
+    /// Root is the one account every Unix has, so it is the one name that can be
+    /// asserted — and only if this machine has a passwd source at all, because a
+    /// container with an empty one is a machine, not a failure.
+    #[test]
+    fn a_name_is_looked_up_and_an_identifier_nothing_owns_has_none() {
+        let root = accounts(0, 0);
+        assert_eq!(root.uid, 0);
+        if let Some(name) = root.owner.as_deref() {
+            assert_eq!(name, "root", "uid 0 resolved to something other than root");
+        }
+        // Past `nobody` and past any real account: a lookup that answered this
+        // would be reading past the record it was given.
+        let nobody = accounts(0xFFFF_FFFE, 0xFFFF_FFFE);
+        assert_eq!(nobody.owner, None);
+        assert_eq!(nobody.group, None);
+    }
+
+    /// A file this process just wrote is a file this process owns, which is the
+    /// only way to know an account here without asking who is running.
+    #[test]
+    fn a_file_this_process_does_not_own_is_not_this_processs_to_change() {
+        let root = fixture("owner");
+        let path = root.join("ours.txt");
+        std::fs::write(&path, b"contents").unwrap();
+        let facts = describe(&path).expect("described");
+        assert!(mine(facts.uid), "a file we just wrote was not ours to change");
+        assert_eq!(
+            mine(0xFFFF_FFFE),
+            facts.uid == 0,
+            "only root may change another account's file"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

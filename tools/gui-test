@@ -9687,6 +9687,154 @@ def properties(run: Run, fixture: Path) -> None:
     expect(after, cursor=before)
 
 
+def panel_facts(state: dict[str, str]) -> dict[str, str]:
+    """The Properties panel's rows, as `{label: value}`."""
+    return dict(pair.split("=", 1) for pair in state["facts"].split("|") if "=" in pair)
+
+
+def a_box(state: dict[str, str], name: str) -> tuple[float, float]:
+    """Where one permission box is, by the name the report gives it."""
+    for entry in state.get("bits", "").split(","):
+        which, _, point = entry.partition("@")
+        if which == name:
+            x, _, y = point.partition(":")
+            return (float(x), float(y))
+    raise Failure(f"no {name} box in {state.get('bits')!r}")
+
+
+@scenario("properties-writes-the-nine-permission-bits", fresh=True)
+def properties_writes_the_nine_permission_bits(run: Run, fixture: Path) -> None:
+    """**A permission is a control, and `Ctrl+Z` walks it back.**
+
+    Row 6 of [14-first-release.md](../docs/14-first-release.md): the nine bits,
+    and nothing above them. Three claims, and the last is the one rule 3 is about:
+
+    * the keyboard alone reaches a box and turns it — `→` walks the nine and
+      `Space` answers, which is the settings panel's contract over a panel that
+      used to take no key at all;
+    * the pointer alone reaches the same box, by the name the report gives it;
+    * and the mode on disk goes back to what it was when the change is undone,
+      because the change carries both modes.
+
+    The panel is still a statement to every *other* key, so `Escape` is what
+    closes it before `Ctrl+Z` — a panel that swallowed the undo it is about would
+    be a worse surprise than one press more.
+    """
+    room = fixture / "bits"
+    room.mkdir()
+    script = room / "script.sh"
+    script.write_text("#!/bin/sh\n")
+    script.chmod(0o644)
+
+    run.drive("key ctrl+l\nsleep 250\nkey ctrl+u\n")
+    run.drive(f"text {room}\nkey enter\nsleep 900\n")
+    listed(run)
+    run.drive("key down\nsleep 200\n")
+    until(run, cursor="script.sh")
+
+    run.drive("key ctrl+i\nsleep 800\n")
+    opened = until_the_panel(run)
+    if panel_facts(opened).get("Permissions") != "rw-r--r-- (0644)":
+        raise Failure(f"the panel opened on {panel_facts(opened).get('Permissions')!r}")
+
+    # Eight steps right is everyone else's write, counting from the owner's read.
+    run.drive("key right\n" * 8 + "sleep 200\n")
+    aimed = holds(run, lambda it: it.get("bit_aimed") == "7", "the keyboard on the eighth box")
+    run.drive("key space\nsleep 700\n")
+    written = holds(
+        run,
+        lambda it: panel_facts(it).get("Permissions") == "rw-r--rw- (0646)",
+        "the panel to report the bit that was turned",
+    )
+    if script.stat().st_mode & 0o777 != 0o646:
+        raise Failure(f"the file is {script.stat().st_mode & 0o777:04o}, not what the panel says")
+
+    # **Out of the panel first**, because every key but its own dismisses it.
+    run.drive("key escape\nsleep 200\nkey ctrl+z\nsleep 900\n")
+    until(run, properties="")
+    if script.stat().st_mode & 0o777 != 0o644:
+        raise Failure(f"the undo left {script.stat().st_mode & 0o777:04o} behind")
+
+    # And the same box with the pointer alone, by name rather than by arithmetic.
+    run.drive("key ctrl+i\nsleep 800\n")
+    drawn = holds(run, lambda it: bool(it.get("bits")), "a panel with drawn permission boxes")
+    where = aim(run, drawn, *a_box(drawn, "others_x"))
+    run.drive(f"move {where[0]:.2f} {where[1]:.2f}\nclick left\nsleep 700\n")
+    holds(
+        run,
+        lambda it: panel_facts(it).get("Permissions") == "rw-r--r-x (0645)",
+        "the box the pointer pressed to be turned",
+    )
+    if script.stat().st_mode & 0o777 != 0o645:
+        raise Failure(f"a pointer left {script.stat().st_mode & 0o777:04o} on disk")
+    expect(aimed, properties="script.sh")
+
+
+@scenario("a-name-service-that-never-answers-costs-no-frame", fresh=True)
+def a_name_service_that_never_answers_costs_no_frame(run: Run, fixture: Path) -> None:
+    """**Rule 1, one layer out from the filesystem.** `getpwuid_r` consults
+    whatever `nsswitch.conf` names, and on a machine joined to a directory one of
+    those is a network — so the lookup behind *Owner* is a call that can take as
+    long as a server that has gone away takes.
+
+    `SKERRY_DISABLE=names` is that server, in the shape
+    [`tools/hung-mount`](hung-mount) makes a filesystem: the facility does not
+    refuse, it does not answer. Three claims:
+
+    * the rest of the panel arrives anyway — the size, the mode and the dates are
+      a `statx` on another job and must not wait behind a name;
+    * the row falls back to the numbers rather than to nothing;
+    * and no frame drawn while the lookup is parked misses the 8 ms budget.
+
+    The budget claim is a **delta** on `over`, never a percentile, for the reason
+    `a-hung-mount-never-blocks-the-frame-loop` gives at length: this window has
+    drawn a dozen frames of the 480 the ring keeps, so a p99 over it is the worst
+    frame since start-up and includes opening the window.
+    """
+    import re
+
+    run.close()
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, {"SKERRY_DISABLE": "names"})
+    try:
+        opening = listed(own)
+        missed = int(opening["over"])
+        drawn = int(opening["frames"])
+
+        def inside_the_budget(answer: dict[str, str], when: str) -> None:
+            if int(answer["over"]) > missed:
+                raise Failure(
+                    f"{int(answer['over']) - missed} frame(s) of "
+                    f"{int(answer['frames']) - drawn} drawn {when} missed the 8 ms budget "
+                    f"(p99 {answer['frame_p99_us']}us)"
+                )
+
+        own.drive("key down\nsleep 200\nkey ctrl+i\nsleep 900\n")
+        panel = until_the_panel(own)
+        facts = panel_facts(panel)
+        if facts.get("Kind") not in ("File", "Folder"):
+            raise Failure(f"the panel says the kind is {facts.get('Kind')!r}")
+        if "(0" not in facts.get("Permissions", ""):
+            raise Failure(f"the permissions read {facts.get('Permissions')!r}")
+        if not re.fullmatch(r"\d+:\d+", facts.get("Owner", "")):
+            raise Failure(
+                f"the owner reads {facts.get('Owner')!r} — a name service that never "
+                "answered was answered"
+            )
+        inside_the_budget(panel, "with the name lookup parked")
+
+        # Three fresh answers with the lookup still parked, which is the claim
+        # stated as an experiment rather than as a structure.
+        for attempt in range(3):
+            alive = own.answered(settle=200)
+            if alive is None:
+                raise Failure(f"the window stopped answering while a name hung ({attempt})")
+            inside_the_budget(alive, "while a name lookup hung")
+        if not re.fullmatch(r"\d+:\d+", panel_facts(own.state()).get("Owner", "")):
+            raise Failure("a name arrived after all")
+    finally:
+        own.close()
+
+
 def until_the_panel(run: Run) -> dict[str, str]:
     """Waits for the Properties panel to be up, and returns that state."""
     deadline = time.time() + WAITING
