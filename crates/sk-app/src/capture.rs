@@ -1204,7 +1204,8 @@ fn settle_icons(
         let directory = pane.listing.flags(id).has(sk_model::Flags::DIR);
         let wants = crate::icons::names_for(directory, types.by_name(pane.listing.name(id)));
         let nominal = side.round().max(1.0) as u32;
-        let step = scale.round().max(1.0) as u32;
+        // Rounded up, for the reason `App::settle_icons` gives.
+        let step = scale.ceil().max(1.0) as u32;
         let Some(file) = wants.iter().find_map(|it| found.find(it, nominal, step)) else {
             continue;
         };

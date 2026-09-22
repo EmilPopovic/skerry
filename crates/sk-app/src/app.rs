@@ -8335,7 +8335,16 @@ scope_aim={scope_aim:?}",
                 .filter_map(|(leaf, id, directory, mime, side)| {
                     let nominal = side.round().max(1.0) as u32;
                     let band = sk_gpu::icon_band((side * scale).round().max(1.0) as u32);
-                    let step = scale.round().max(1.0) as u32;
+                    // **Rounded up, and it is not a rounding preference.** The
+                    // specification's scale is an integer and no theme ships an
+                    // `@1.25x` directory, so 125% asks for a `@2x` icon and the
+                    // GPU minifies it to the twenty device pixels the mark is.
+                    // Rounding *down* asks for 16-pixel art, and `image_quad`
+                    // never enlarges — so the mark drew at 16 device pixels in a
+                    // 20-pixel box, visibly smaller than every other mark in the
+                    // window. Captured at 125% and looked at, which is the only
+                    // way that one is visible.
+                    let step = scale.ceil().max(1.0) as u32;
                     let file = found
                         .entry((directory, mime.unwrap_or_default(), nominal))
                         .or_insert_with(|| {
