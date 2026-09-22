@@ -44,6 +44,11 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0034](0034-helper-execution-and-network-rights-are-explicit.md) | Helper execution and network rights are explicit | Accepted |
 | [0035](0035-trash-recovery-uses-filesystem-local-records.md) | Trash recovery uses filesystem-local records | Accepted |
 | [0036](0036-operation-failures-retain-pending-work.md) | Operation failures retain pending work | Accepted |
+| [0037](0037-runtime-degradation-is-visible-and-injectable.md) | Runtime degradation is visible and injectable | Accepted |
+| [0038](0038-independent-windows-own-separate-session-slots.md) | Independent windows own separate session slots | Accepted |
+| [0039](0039-file-clipboard-intent-belongs-to-one-offer.md) | File clipboard intent belongs to one offer | Accepted |
+| [0040](0040-bounded-parser-mutation-campaigns.md) | Bounded parser mutation campaigns | Accepted |
+| [0041](0041-panic-diagnostics-use-a-preopened-local-log.md) | Panic diagnostics use a preopened local log | Accepted |
 | [0042](0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md) | Where a mark comes from is a setting, and an icon is a band in its own atlas | Accepted |
 | [0043](0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md) | Recents are two stores read as one list, and ours is the one rule 6 counts | Accepted — the shared write is staged behind the measurement the record names |
 
@@ -62,13 +67,3 @@ GNOME advertises no `zxdg_decoration_manager_v1`, so the window draws its own
 frame — which is a thing to *have* implemented rather than to hope for from a
 crate — and the compositor's own GPU is read from `zwp_linux_dmabuf_v1`, which is
 a question a windowing crate does not know it is being asked.
-
-- [0037 — Runtime degradation is visible and injectable](0037-runtime-degradation-is-visible-and-injectable.md)
-
-- [0038 — Independent windows own separate session slots](0038-independent-windows-own-separate-session-slots.md)
-
-- [0039 — File clipboard intent belongs to one offer](0039-file-clipboard-intent-belongs-to-one-offer.md)
-
-- [0040 — Bounded parser mutation campaigns](0040-bounded-parser-mutation-campaigns.md)
-
-- [0041 — Panic diagnostics use a preopened local log](0041-panic-diagnostics-use-a-preopened-local-log.md)
