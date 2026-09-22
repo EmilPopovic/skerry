@@ -6,3 +6,6 @@ Cargo.lock.bak
 # Frames written by `skerry --capture`. Useful to look at, too large to track:
 # the PNG writer uses stored deflate blocks, so a 1250x775 frame is about 4 MB.
 captures/
+
+# Worktrees created for parallel agent work. Branches persist; these do not.
+.claude/worktrees/

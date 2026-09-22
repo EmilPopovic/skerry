@@ -349,6 +349,7 @@ immutable: a decision that changes is superseded by a new one that links back.
 | Is it fast enough? | [09-performance-budgets](docs/09-performance-budgets.md) |
 | Why was this decided? | [docs/adr/](docs/adr/) |
 | What is being built next? | [08-roadmap](docs/08-roadmap.md) |
+| What must land before the first release? | [14-first-release](docs/14-first-release.md) |
 
 Numbered documents are living and edited in place. ADRs are not.
 

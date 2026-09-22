@@ -126,6 +126,7 @@ Read in order; each document is self-contained enough to review on its own.
 | [09-performance-budgets.md](docs/09-performance-budgets.md) | The numbers that decide whether it worked, and the method behind each |
 | [10-risks.md](docs/10-risks.md) | What is most likely to go wrong, and the mitigation for each |
 | [11-non-goals.md](docs/11-non-goals.md) | What Skerry deliberately will not do |
+| [14-first-release.md](docs/14-first-release.md) | Which features the first public release is allowed to be missing |
 | [adr/](docs/adr/) | Architecture decision records — the *why* behind each irreversible choice |
 
 ## Planned repository layout
