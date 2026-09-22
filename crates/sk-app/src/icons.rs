@@ -221,7 +221,9 @@ mod tests {
         assert_eq!(want.ask, sk_preview::Ask::Preview);
         assert_eq!(want.within, (32, 32));
         assert_eq!(want.page, 0);
-        assert!(!want.ahead, "an icon is wanted, not guessed");
+        // **Never urgent.** A press has to reach the child before a mark does,
+        // and the queue's only word for that is `ahead`.
+        assert!(!want.is_urgent(), "an icon would take the batch a `Space` needs");
         // And it is the key a reply is matched against.
         let mut names = super::Names::default();
         let (key, image) = names.name(&want.path, 32);
@@ -400,6 +402,12 @@ fn key_for(path: &Path, band: u32) -> sk_preview::Key {
 /// two things an icon must not do; `Ask::Preview` already names a box in device
 /// pixels and already returns straight `RGBA8`. **The wire does not change and
 /// the protocol version stays 4.**
+///
+/// **`ahead`, because nobody is waiting for this one.** An icon is a preview in
+/// the child's terms and not in the queue's: `Space` is a press somebody made and
+/// an icon is a mark that will arrive. Without this the eight icons a new
+/// directory asks for take the urgent batch and the quick look waits a round trip
+/// behind them, which is what the scenario saw as a preview that never opened.
 pub(crate) fn wanted(path: PathBuf, band: u32) -> Want {
     Want {
         kind: sk_preview::Kind::Image,
@@ -408,6 +416,6 @@ pub(crate) fn wanted(path: PathBuf, band: u32) -> Want {
         mtime: 0,
         within: (band, band),
         page: 0,
-        ahead: false,
+        ahead: true,
     }
 }

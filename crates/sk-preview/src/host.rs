@@ -87,7 +87,10 @@ pub struct Want {
     /// **A page rendered before it is asked for** — [ADR
     /// 0020](../../../docs/adr/0020-a-preview-is-a-few-textures-bounded-by-bytes.md).
     /// It queues behind everything a person actually pressed, because what was
-    /// guessed must never overtake what was asked.
+    /// guessed must never overtake what was asked — which is also what a themed
+    /// icon is in this queue's terms, though not in the child's: it is a preview
+    /// request and nobody is waiting for it. See [ADR
+    /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
     pub ahead: bool,
 }
 
