@@ -1194,7 +1194,11 @@ fn settle_icons(
     let mut previews = sk_preview::Previews::new();
     let mut names = crate::icons::Names::default();
     let mut asked: Vec<(sk_model::EntryId, sk_gpu::ImageKey)> = Vec::new();
-    let mut wanted = 0usize;
+    // **Distinct pictures, not rows.** Every text file in a directory resolves to
+    // one `text-x-generic` file at one band, and `Previews::want` dedupes — so a
+    // count of rows is a count of answers that can never arrive, and the loop
+    // below waits out the whole deadline every time.
+    let mut wanted: Vec<sk_gpu::ImageKey> = Vec::new();
     for row in 0..pane.listing.rows().min(MEASURED) {
         let Some(id) = pane.listing.at(row) else { continue };
         if pane.thumbs.contains_key(&id) {
@@ -1212,13 +1216,15 @@ fn settle_icons(
         let band = sk_gpu::icon_band((side * scale).round().max(1.0) as u32);
         let (_, image) = names.name(&file, band);
         asked.push((id, image));
-        previews.want(crate::icons::wanted(file, band));
-        wanted += 1;
+        if !wanted.contains(&image) {
+            wanted.push(image);
+            previews.want(crate::icons::wanted(file, band));
+        }
     }
 
     let deadline = std::time::Instant::now() + READ_DEADLINE;
     let mut landed = 0usize;
-    while landed < wanted && std::time::Instant::now() < deadline {
+    while landed < wanted.len() && std::time::Instant::now() < deadline {
         previews.pump(&session.jobs.pool, &session.waker.handle());
         for answer in previews.drain() {
             landed += 1;

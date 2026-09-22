@@ -591,10 +591,11 @@ struct Held {
 /// is not its 16-pixel art doubled and drawing it as if it were is the one thing
 /// an icon theme exists to avoid.
 ///
-/// Above 128 it is the 128 band and the picture is magnified, which is ADR 0018's
-/// own revisit trigger restated: a view that draws a mark larger than that wants
-/// either a bigger largest band or a fifth size, and the second is a different
-/// decision.
+/// Above 128 it is the 128 band, and the picture is drawn at 128 and centred in
+/// the larger box rather than blown up to fill it — `icon_quad` never enlarges.
+/// That is ADR 0018's own revisit trigger restated: a view that draws a mark
+/// larger than that wants either a bigger largest band or a fifth size, and the
+/// second is a different decision.
 #[must_use]
 pub fn icon_band(device_px: u32) -> u32 {
     BANDS.into_iter().rev().find(|side| *side >= device_px).unwrap_or(BANDS[0])

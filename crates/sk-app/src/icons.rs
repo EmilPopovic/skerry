@@ -36,8 +36,10 @@ pub(crate) enum Source {
     /// The setting says `marks`. Nothing is parsed, nothing is held, and the
     /// lookup is never called.
     Ours,
-    /// A theme is being loaded on a job and has not come back.
-    Loading,
+    /// A theme is being loaded on a job and has not come back. The name is what
+    /// the setting asked for, or nothing where it said `desktop` and the job has
+    /// not yet asked the desktop.
+    Loading(Option<String>),
     /// A theme is loaded. A name it does not hold is a *miss* — the mark is drawn
     /// for that one file and the next name may still hit.
     Ready(Theme),
@@ -60,7 +62,8 @@ impl Source {
         use sk_model::i18n;
         match self {
             Self::Ours => i18n::lookup("icons.ours").to_owned(),
-            Self::Loading => i18n::lookup("icons.loading").to_owned(),
+            Self::Loading(None) => i18n::lookup("icons.loading").to_owned(),
+            Self::Loading(Some(theme)) => i18n::format("icons.loading_named", &[theme]),
             Self::Ready(theme) => i18n::format("icons.ready", &[&theme.name()]),
             Self::Failed { theme, why: Refused::Unknown } => {
                 i18n::format("icons.unknown", &[theme])
@@ -73,7 +76,7 @@ impl Source {
     pub(crate) const fn theme(&self) -> Option<&Theme> {
         match self {
             Self::Ready(theme) => Some(theme),
-            Self::Ours | Self::Loading | Self::Failed { .. } => None,
+            Self::Ours | Self::Loading(_) | Self::Failed { .. } => None,
         }
     }
 
@@ -81,7 +84,8 @@ impl Source {
     pub(crate) fn token(&self) -> String {
         match self {
             Self::Ours => "ours".to_owned(),
-            Self::Loading => "loading".to_owned(),
+            Self::Loading(None) => "loading".to_owned(),
+            Self::Loading(Some(theme)) => format!("loading:{theme}"),
             Self::Ready(theme) => format!("ready:{}:{}", theme.name(), theme.holds()),
             Self::Failed { theme, why } => {
                 let why = match why {
@@ -109,7 +113,11 @@ pub(crate) struct Loaded {
 /// start-up by [`crate::service`] on the connection that already exists — the
 /// call is level 4's because the bus is, and this is the file half of the same
 /// question.
-pub(crate) fn load(icons: &Icons, from_the_portal: Option<String>) -> Option<Loaded> {
+pub(crate) fn load(
+    icons: &Icons,
+    from_the_portal: Option<String>,
+    cancel: &sk_util::Cancel,
+) -> Option<Loaded> {
     let theme = match icons {
         Icons::Marks => return None,
         Icons::Named(name) => name.clone(),
@@ -119,7 +127,7 @@ pub(crate) fn load(icons: &Icons, from_the_portal: Option<String>) -> Option<Loa
             .or_else(sk_desktop::icons::from_the_desktop_files)
             .unwrap_or_else(|| sk_desktop::icons::FALLBACK.to_owned()),
     };
-    let outcome = Theme::load(&theme);
+    let outcome = Theme::load_cancellably(&theme, &sk_desktop::icons::icon_dirs(), cancel);
     Some(Loaded { theme, outcome })
 }
 
@@ -149,7 +157,8 @@ mod tests {
     fn every_source_says_something_different() {
         let said = [
             Source::Ours,
-            Source::Loading,
+            Source::Loading(None),
+            Source::Loading(Some("Adwaita".to_owned())),
             Source::Failed { theme: "Adwaita".to_owned(), why: Refused::Unknown },
             Source::Failed { theme: "Adwaita".to_owned(), why: Refused::Empty },
         ]
@@ -161,9 +170,9 @@ mod tests {
                 assert_ne!(one, other, "two sources say the same thing");
             }
         }
-        // The two failures both name the theme, which is what makes the sentence
-        // actionable rather than a shrug.
-        assert!(said[2].contains("Adwaita") && said[3].contains("Adwaita"), "{said:?}");
+        // Everything that knows a theme's name says it, which is what makes the
+        // sentence actionable rather than a shrug.
+        assert!(said[2..].iter().all(|it| it.contains("Adwaita")), "{said:?}");
     }
 
     /// **`marks` asks for no load at all.** Not a load that is skipped later — the
@@ -171,8 +180,9 @@ mod tests {
     /// an icon directory.
     #[test]
     fn under_marks_nothing_is_loaded() {
-        assert!(super::load(&Icons::Marks, None).is_none());
-        assert!(super::load(&Icons::Marks, Some("Adwaita".to_owned())).is_none());
+        let none = sk_util::Cancel::new();
+        assert!(super::load(&Icons::Marks, None, &none).is_none());
+        assert!(super::load(&Icons::Marks, Some("Adwaita".to_owned()), &none).is_none());
     }
 
     /// A theme nothing declares fails under its own name, so the panel can say
@@ -181,7 +191,8 @@ mod tests {
     #[test]
     fn a_theme_that_cannot_be_had_fails_under_the_name_that_was_asked_for() {
         let asked = "no-theme-is-called-this-anywhere";
-        let loaded = super::load(&Icons::Named(asked.to_owned()), None).unwrap();
+        let none = sk_util::Cancel::new();
+        let loaded = super::load(&Icons::Named(asked.to_owned()), None, &none).unwrap();
         assert_eq!(loaded.theme, asked);
         assert_eq!(loaded.outcome.as_ref().unwrap_err(), &Refused::Unknown);
         let source = loaded.settle();
@@ -189,7 +200,7 @@ mod tests {
         assert!(matches!(source, Source::Failed { .. }), "a failed load is not a loaded theme");
         assert_eq!(source.token(), format!("failed:{asked}:unknown"));
 
-        let from_portal = super::load(&Icons::Desktop, Some(asked.to_owned())).unwrap();
+        let from_portal = super::load(&Icons::Desktop, Some(asked.to_owned()), &none).unwrap();
         assert_eq!(from_portal.theme, asked, "the portal's answer was not the one asked for");
     }
 
@@ -235,6 +246,22 @@ mod tests {
         assert_ne!(image, bigger);
     }
 
+    /// **Only what the atlas has stopped holding is forgotten.** `folder` and
+    /// `text-x-generic` are the first two names minted in any session and the two
+    /// most drawn, so dropping by mint order would drop exactly them.
+    #[test]
+    fn a_name_the_atlas_still_holds_is_kept_however_old_it_is() {
+        let mut names = super::Names::default();
+        let (_, oldest) = names.name(std::path::Path::new("/icons/a/folder.png"), 16);
+        for at in 0..3000 {
+            names.name(std::path::Path::new(&format!("/icons/a/{at}.png")), 16);
+        }
+        names.forget_the_oldest(|image| image == oldest);
+        let (_, again) = names.name(std::path::Path::new("/icons/a/folder.png"), 16);
+        assert_eq!(again, oldest, "the most-drawn name was re-minted");
+        assert_eq!(names.held(), 1, "a name nothing holds was kept");
+    }
+
     /// **An icon the child cannot draw is asked for once.** Without this a single
     /// `.xpm` in a theme is a window that queues a decode on every frame and is
     /// woken by the refusal — which is rule 1's idle promise broken by a picture
@@ -267,7 +294,8 @@ mod tests {
     #[test]
     fn every_state_has_its_own_word_in_the_diagnostic() {
         assert_eq!(Source::Ours.token(), "ours");
-        assert_eq!(Source::Loading.token(), "loading");
+        assert_eq!(Source::Loading(None).token(), "loading");
+        assert_eq!(Source::Loading(Some("Yaru".to_owned())).token(), "loading:Yaru");
         let failed = Loaded { theme: "x".to_owned(), outcome: Err(Refused::Empty) }.settle();
         assert_eq!(failed.token(), "failed:x:empty");
     }
@@ -352,6 +380,12 @@ impl Names {
         self.named.get(key).copied()
     }
 
+    /// How many names are held, for the test below.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.named.len()
+    }
+
     /// Records that this one will never reach the atlas.
     ///
     /// **Bounded, and cleared whole when it fills.** A theme has a few hundred
@@ -372,24 +406,27 @@ impl Names {
         self.refused.contains(key)
     }
 
-    /// Forgets the names minted longest ago, once there are more than the atlas
-    /// could hold.
+    /// Forgets the names the atlas no longer holds, once there are more than the
+    /// four bands could hold.
     ///
     /// **Bounded by what the four bands hold**, for the reason the thumbnail
     /// names are bounded by the one grid: this map would otherwise grow for the
     /// life of a session, one entry per kind ever scrolled past at every size the
     /// window has been.
-    pub(crate) fn forget_the_oldest(&mut self) {
+    ///
+    /// **And dropped by what the atlas has, not by what was minted first.** The
+    /// thumbnail map sorts on mint order because for a thumbnail that is scroll
+    /// order; the first names minted here are `folder` and `text-x-generic`, which
+    /// are the two most drawn in any session, so the same sort would drop exactly
+    /// those and the marks would flicker back to geometric while they were
+    /// re-minted.
+    pub(crate) fn forget_the_oldest(&mut self, holds: impl Fn(ImageKey) -> bool) {
         const KEEP: usize = 1_360 * 2;
         if self.named.len() <= KEEP {
             return;
         }
-        let mut held: Vec<(ImageKey, sk_preview::Key)> =
-            self.named.iter().map(|(key, image)| (*image, key.clone())).collect();
-        held.sort_unstable_by_key(|(image, _)| *image);
-        for (_, key) in held.iter().take(self.named.len() - KEEP) {
-            self.named.remove(key);
-        }
+        self.named.retain(|_, image| holds(*image));
+        self.refused.retain(|key| !self.named.contains_key(key));
     }
 }
 

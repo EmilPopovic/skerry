@@ -203,6 +203,24 @@ impl Theme {
         Self::load_from(name, &icon_dirs())
     }
 
+    /// The same, abandoning the walk when `cancel` is tripped.
+    ///
+    /// **Because holding `→` on the icons row queues one of these per repeat**,
+    /// and each is the 51.9 ms and 5,200 directory opens the head of this file
+    /// measures. A walk nobody wants the answer to should stop walking.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::load`]; a cancelled walk reports what it had, which is
+    /// [`Refused::Empty`] unless the theme's own directories came first.
+    pub fn load_cancellably(
+        name: &str,
+        bases: &[PathBuf],
+        cancel: &sk_util::Cancel,
+    ) -> Result<Self, Refused> {
+        Self::within(name, bases, cancel)
+    }
+
     /// The same, over base directories the caller names.
     ///
     /// **The seam the tests use.** Pointing `XDG_DATA_DIRS` at a fixture instead
@@ -213,6 +231,10 @@ impl Theme {
     ///
     /// As [`Self::load`].
     pub fn load_from(name: &str, bases: &[PathBuf]) -> Result<Self, Refused> {
+        Self::within(name, bases, &sk_util::Cancel::new())
+    }
+
+    fn within(name: &str, bases: &[PathBuf], cancel: &sk_util::Cancel) -> Result<Self, Refused> {
         let chain = inheritance(name, bases);
         if declarations(name, bases).is_empty() {
             return Err(Refused::Unknown);
@@ -223,6 +245,9 @@ impl Theme {
             let Ok(step) = u16::try_from(step) else { break };
             theme.themes = step + 1;
             for group in searchable(link, bases) {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 theme.take(step, group);
             }
         }

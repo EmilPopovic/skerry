@@ -230,7 +230,15 @@ pub struct Pane {
     /// **Only what the atlas actually has**, like `thumbs` beside it: an entry
     /// whose icon has not been rasterised yet is an entry with no icon, and the
     /// geometric mark is what draws at the same rectangle until it arrives.
+    ///
+    /// **And only for the listing it was built against**, which `icons_at`
+    /// carries. `thumbs` needs no such field because every visible row is
+    /// re-derived from the current listing each frame; this map is read by a warm
+    /// path that skips that work, so a listing replaced under it would leave one
+    /// row's `EntryId` pointing at the icon of whatever used to be at that index.
     pub icons: std::collections::HashMap<sk_model::EntryId, sk_gpu::ImageKey>,
+    /// Which listing `icons` was filled against. See it.
+    pub icons_at: u32,
     /// The colour of each entry somebody has given one, in this listing.
     ///
     /// **Per pane, filled by `App::settle_colours` when the listing or the
@@ -428,6 +436,7 @@ impl Pane {
             closed: crate::groups::Closed::default(),
             thumbs: std::collections::HashMap::new(),
             icons: std::collections::HashMap::new(),
+            icons_at: 0,
             colours: Vec::new(),
             kinds: Vec::new(),
             filter: String::new(),
@@ -549,6 +558,7 @@ impl Pane {
         // The pictures go with the listing they were keyed against: an `EntryId`
         // is an index into arrays the next read rebuilds.
         self.thumbs.clear();
+        self.icons.clear();
         // The filter goes too. It narrows *this* directory, and following you
         // into the next one means arriving somewhere that silently hides most
         // of what is there — with the only explanation a line in the status bar

@@ -197,6 +197,7 @@ settings.icons_desktop = The desktop
 # chose the marks.
 icons.ours = Skerry draws its own marks.
 icons.loading = Looking for the desktop's icon theme…
+icons.loading_named = Loading the icon theme {0}…
 icons.ready = Icons from {0}.
 icons.unknown = No icon theme called {0} is installed, so Skerry is drawing its own marks.
 icons.empty = The icon theme {0} has no icons Skerry can draw, so it is drawing its own marks.

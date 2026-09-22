@@ -1175,6 +1175,8 @@ pub struct App {
     /// What that resolved to: our marks, a theme, or a theme that could not be
     /// had. See [`crate::icons::Source`].
     icon_theme: crate::icons::Source,
+    /// The theme walk in flight, so a second ask can abandon the first.
+    icon_walk: Option<sk_util::Cancel>,
     /// What the settings portal said the desktop's icon theme is called.
     ///
     /// Asked once, at start-up, on the connection that already exists — the same
@@ -1769,6 +1771,7 @@ impl App {
             icons: crate::settings::Icons::default(),
             icon_named: None,
             icon_theme: crate::icons::Source::Ours,
+            icon_walk: None,
             desktop_icons: None,
             panel: None,
             confirm_trash: false,
@@ -6114,19 +6117,36 @@ impl App {
     /// Under `marks` no job is started at all, so nothing parses an `index.theme`
     /// and nothing walks an icon directory.
     fn ask_for_the_icons(&mut self) {
+        // **The walk in flight is abandoned first.** Holding `→` on the icons row
+        // is one of these per key repeat, and `drain_icons` throws all but the
+        // last away by design — so without this a key repeat is a queue of
+        // 51.9 ms walks nobody will read the answer to.
+        if let Some(walking) = self.icon_walk.take() {
+            walking.cancel();
+        }
         let asked = self.icons.clone();
         if asked == crate::settings::Icons::Marks {
             self.icon_theme = crate::icons::Source::Ours;
             self.dirty = true;
             return;
         }
-        self.icon_theme = crate::icons::Source::Loading;
+        self.icon_theme = crate::icons::Source::Loading(match &asked {
+            crate::settings::Icons::Named(name) => Some(name.clone()),
+            crate::settings::Icons::Desktop | crate::settings::Icons::Marks => None,
+        });
         self.dirty = true;
         let from_the_portal = self.desktop_icons.clone();
         let sender = self.replies.icons_tx.clone();
         let wake = self.waker.handle();
-        self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let Some(loaded) = crate::icons::load(&asked, from_the_portal) else { return };
+        let walking = sk_util::Cancel::new();
+        self.icon_walk = Some(walking.clone());
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, walking, move |cancel| {
+            let Some(loaded) = crate::icons::load(&asked, from_the_portal, cancel) else {
+                return;
+            };
+            if cancel.is_cancelled() {
+                return;
+            }
             if sender.send(loaded).is_ok() {
                 wake.wake();
             }
@@ -8281,6 +8301,22 @@ scope_aim={scope_aim:?}",
         let Some(desktop) = self.desktop.clone() else { return };
         let types = desktop.mime.as_ref();
         let scale = self.window.scale().max(1.0);
+        // **A listing replaced under the map takes the map with it.** An
+        // `EntryId` is an index into arrays the next read rebuilds, and the warm
+        // path below trusts `Pane::icons` without re-deriving the row — so a
+        // folder that arrived where a text file used to be would draw a document
+        // for as long as the window was open. `Pane::arrive` clears it on a
+        // navigation; this is the same rule for a listing replaced in place,
+        // which is what an inotify re-read is.
+        for leaf in self.placement.leaves.clone() {
+            let Some(tabs) = self.panes.leaf_mut(leaf.id) else { continue };
+            let pane = tabs.showing_mut();
+            let version = pane.listing.version();
+            if pane.icons_at != version {
+                pane.icons.clear();
+                pane.icons_at = version;
+            }
+        }
         let mut asking = Vec::new();
         for leaf in &self.placement.leaves {
             let Some(pane) = self.panes.leaf(leaf.id).map(crate::panes::Tabs::showing) else {
@@ -8381,7 +8417,8 @@ scope_aim={scope_aim:?}",
                 self.previews.want(crate::icons::wanted(path, band));
             }
         }
-        self.icon_names.forget_the_oldest();
+        let atlas = &self.renderer;
+        self.icon_names.forget_the_oldest(|image| atlas.holds_icon(image));
     }
 
     /// Takes delivery of a text preview's read.

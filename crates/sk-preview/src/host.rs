@@ -229,7 +229,16 @@ impl Previews {
         // rendered for a panel that has changed shape is a page nobody will draw.
         // One stale render can still be in flight, because a batch cannot be
         // recalled, and that is the bound.
-        if want.ask == Ask::Preview {
+        //
+        // **Only what somebody is waiting for supersedes.** The rule above is
+        // about a panel that changed shape, and a panel has one box at a time. A
+        // themed icon is the other case — [ADR
+        // 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)
+        // draws one file at several bands at once, all of them on screen — so a
+        // split wanting `folder.svg` at 16 and at 64 would have each want delete
+        // the other, neither would arrive, and both would be queued again on the
+        // next frame for as long as the panes were open.
+        if want.is_urgent() {
             self.queue.retain(|queued| {
                 queued.ask != Ask::Preview
                     || queued.path != want.path
@@ -582,6 +591,16 @@ mod tests {
         host.want(preview(1100, 1, false));
         assert_eq!(host.waiting(), 1);
         assert_eq!(host.queued()[0].within, (1100, 900));
+
+        // **And neither is a themed icon**, which is a preview request nobody is
+        // waiting for and which really is wanted at several boxes at once — ADR
+        // 0042. A split showing one file's icon at two bands would otherwise have
+        // each want delete the other, and neither would ever arrive.
+        let mut marks = Previews::new();
+        for band in [16u32, 32, 64, 128] {
+            marks.want(Want { within: (band, band), ahead: true, ..preview(0, 0, true) });
+        }
+        assert_eq!(marks.waiting(), 4, "one file's icon at four bands is four pictures");
 
         // **A thumbnail is not a preview and is left alone**, or scrolling a grid
         // while a panel is open would throw away the thumbnails it asked for.
