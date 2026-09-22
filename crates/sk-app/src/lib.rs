@@ -44,6 +44,7 @@ mod indexing;
 mod keys;
 mod layout;
 mod markdown;
+mod marks;
 mod mdlayout;
 mod menu;
 mod openers;

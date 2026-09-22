@@ -128,20 +128,34 @@ impl Category {
 /// that is not a folder or a program is `Unknown`.
 #[must_use]
 pub fn kind_of(listing: &Listing, id: EntryId, mime: Option<&MimeDatabase>) -> Category {
+    kind_and_type_of(listing, id, mime).0
+}
+
+/// [`kind_of`], and the type the name answered to on the way.
+///
+/// **One lookup for both**, for a caller that wants the type as well as the
+/// kind — a mark that tells a spreadsheet from a letter — and would otherwise
+/// ask the database twice for every visible row of every frame.
+#[must_use]
+pub fn kind_and_type_of<'m>(
+    listing: &Listing,
+    id: EntryId,
+    mime: Option<&'m MimeDatabase>,
+) -> (Category, Option<&'m str>) {
     let flags = listing.flags(id);
     if flags.has(Flags::DIR) {
-        return Category::Folder;
+        return (Category::Folder, None);
     }
-    let by_name =
-        mime.and_then(|mime| mime.by_name(listing.name(id))).map_or(Category::Unknown, category);
+    let found = mime.and_then(|mime| mime.by_name(listing.name(id)));
+    let by_name = found.map_or(Category::Unknown, category);
     // The mode bit after the name: a program is usually called something with no
     // extension at all — `runme`, `configure`, half of `/usr/bin` — so a
     // name-only answer calls it unknown, and what it is is the one thing about it
     // worth marking.
     if by_name == Category::Unknown && flags.has(Flags::EXEC) {
-        Category::Executable
+        (Category::Executable, found)
     } else {
-        by_name
+        (by_name, found)
     }
 }
 
@@ -394,6 +408,13 @@ impl MimeDatabase {
             format!("{media}-x-generic")
         });
         [own, generic]
+    }
+
+    /// The `generic-icon` the database names for a type, and only where it names
+    /// one — borrowed, because a row's mark asks this every frame.
+    #[must_use]
+    pub fn generic_icon(&self, mime: &str) -> Option<&str> {
+        self.generic_icons.get(mime).map(String::as_str)
     }
 
     /// Parses one `globs2` file: `weight:type:glob[:flags]` per line.

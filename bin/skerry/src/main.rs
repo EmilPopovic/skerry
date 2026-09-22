@@ -52,6 +52,7 @@ struct Overlays {
     grouped_kind: bool,
     search: bool,
     carrying: bool,
+    marks: bool,
     path_entry: bool,
     palette: bool,
     filter: bool,
@@ -120,6 +121,7 @@ impl Overlays {
             "--history" => &mut self.history,
             "--search" => &mut self.search,
             "--carrying" => &mut self.carrying,
+            "--marks" => &mut self.marks,
             "--path-entry" => &mut self.path_entry,
             "--palette" => &mut self.palette,
             "--filter" => &mut self.filter,
@@ -206,6 +208,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         looking: shape.looking.clone(),
         search: overlays.search,
         carrying: overlays.carrying,
+        marks: overlays.marks,
         path_entry: overlays.path_entry,
         palette: overlays.palette,
         filter: overlays.filter,
@@ -491,6 +494,7 @@ skerry [OPTIONS] [PATH]
   --stopped        show the strip after a stop: what is owed, and Pick up
   --search         show the search over everything under this folder
   --carrying       show the card that follows a drag of files
+  --marks          draw every one of Skerry's own marks, at every size
   --path-entry     show the path bar as a field, for a golden frame of it
   --palette        show the command palette, for a golden frame of it
   --filter         show the find popup, for a golden frame of it

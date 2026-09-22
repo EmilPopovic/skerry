@@ -460,6 +460,13 @@ FRAMES = [
     # something attached to a position rather than to a rectangle of the layout,
     # and the only one that would catch the card sliding under a panel.
     ("carrying", ["--size", "900x520", "--scale", "125", "--carrying"]),
+    # Skerry's own marks, every one at the four sizes the window draws them —
+    # the sheet a change to any shape in `sk_ui::marks` is looked at on. At 150%
+    # so a unit of the grid is a fractional pixel at thirteen, which is where a
+    # mark that is only right on whole pixels shows it; and in both palettes,
+    # because the recessed emblem is a darker tone of the ink on either ground.
+    ("marks", ["--size", "1230x470", "--scale", "150", "--marks"]),
+    ("marks-light", ["--size", "1230x470", "--scale", "150", "--marks", "--light"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.

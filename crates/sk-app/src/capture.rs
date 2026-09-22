@@ -77,16 +77,20 @@ fn warm_and_draw(
         {
             let mut painter =
                 Painter { list, fonts: &mut session.fonts, cache, theme, scale: session.scale };
-            let chrome = sample_chrome(drawing.request, drawing.sample);
-            view::draw(
-                &mut painter,
-                drawing.panes,
-                drawing.layout,
-                drawing.now,
-                &chrome,
-                &mut diagnostics,
-                &mut crate::view::Hits::default(),
-            );
+            if drawing.request.marks {
+                crate::marks::specimen(&mut painter, drawing.layout.window);
+            } else {
+                let chrome = sample_chrome(drawing.request, drawing.sample);
+                view::draw(
+                    &mut painter,
+                    drawing.panes,
+                    drawing.layout,
+                    drawing.now,
+                    &chrome,
+                    &mut diagnostics,
+                    &mut crate::view::Hits::default(),
+                );
+            }
         }
         stats = session.renderer.draw(list, &mut session.fonts, theme.palette.background);
     }
@@ -524,6 +528,9 @@ pub struct Capture {
     pub search: bool,
     /// Whether to draw the card that follows a drag of files.
     pub carrying: bool,
+    /// Whether to draw the specimen sheet of Skerry's own marks instead of a
+    /// directory — [`crate::marks::specimen`].
+    pub marks: bool,
     /// Whether to draw the path bar as a field being typed into.
     pub path_entry: bool,
     /// Whether to draw the command palette, with a query typed into it.

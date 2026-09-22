@@ -47,7 +47,7 @@ pub use apps::Applications;
 pub use entry::DesktopEntry;
 pub use icons::Theme as IconTheme;
 pub use launch::Launcher;
-pub use mime::{Category, MimeDatabase, category, is_text, kind_of, kinds};
+pub use mime::{Category, MimeDatabase, category, is_text, kind_and_type_of, kind_of, kinds};
 pub use places::{Kind, Place, bookmarks, file_uri, pin, reorder, unpin, user_dirs};
 
 use std::path::{Path, PathBuf};
