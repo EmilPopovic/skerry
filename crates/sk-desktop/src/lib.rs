@@ -34,6 +34,7 @@ pub mod launch;
 pub mod mime;
 pub mod mimeapps;
 pub mod places;
+pub mod recent;
 pub mod udisks;
 
 pub use apps::Applications;

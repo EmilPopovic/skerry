@@ -121,6 +121,25 @@ fn colours(registry: &mut Registry<App>) {
 fn places(registry: &mut Registry<App>) {
     for spec in [
         CommandSpec {
+            id: "go.recent",
+            name: "action.recent",
+            group: Group::Navigate,
+            // H for history, which is what a browser calls the same list.
+            keys: &["ctrl+alt+h"],
+            enabled: |_: &App| true,
+            run: App::show_recent,
+        },
+        CommandSpec {
+            id: "recent.forget",
+            name: "action.forget_recent",
+            group: Group::File,
+            // Beside Delete, because it is the Recent view's own way of making a
+            // row go — and one modifier out, because it moves no file.
+            keys: &["alt+delete"],
+            enabled: |app: &App| app.in_recent() && app.panes.focused().focused().is_some(),
+            run: App::forget_recent,
+        },
+        CommandSpec {
             id: "place.pin",
             name: "action.pin",
             group: Group::Navigate,
@@ -1284,6 +1303,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
     for groups in [
         crate::menu::ON_ROW,
         crate::menu::IN_TRASH,
+        crate::menu::IN_RECENT,
         crate::menu::ON_BACKGROUND,
         crate::menu::IN_A_LOOK,
         crate::menu::ON_A_PLACE,

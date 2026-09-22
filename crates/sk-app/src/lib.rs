@@ -53,6 +53,7 @@ mod panes;
 mod previews;
 mod properties;
 mod quicklook;
+mod recents;
 mod search;
 mod service;
 mod session;

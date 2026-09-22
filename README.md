@@ -230,7 +230,13 @@ the first bug report on one of them.
   and no drop onto an executable.
 - **No "always open with this."** Open With opens once. The only default this
   writes is the folder handler, from the settings panel.
-- **No recents, no path completion.** `Ctrl+L` takes a path and that is all it does.
+- **No path completion.** `Ctrl+L` takes a path and that is all it does.
+- **Recents are a view and not a place.** `Ctrl+Alt+H` shows the files this
+  program opened merged with the desktop's own `recently-used.xbel`
+  ([ADR 0043](docs/adr/0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md)),
+  and a forgotten one stays forgotten. There is no sidebar row for it yet, the
+  view sorts the way the pane does rather than by when each file was opened, and
+  the desktop's file is read and never written.
 - **Search has no ignore rules**, so a search over a checkout walks `.git`, and
   there are no extension facets. Both are M4.
 - **No desktop notification** when a copy finishes with the window unfocused. The

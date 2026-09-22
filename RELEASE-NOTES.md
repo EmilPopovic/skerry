@@ -86,8 +86,9 @@ ones most likely to be reached for in the first week:
   sandboxed Flatpak peer receives nothing.
 - **No middle-click open-in-tab and no PRIMARY paste.** No right-drag menu, link
   action or drop onto an executable.
-- **No "always open with this"**, no recents, no path completion, no desktop
-  notification when a copy finishes unfocused.
+- **No "always open with this"**, no path completion, no desktop notification
+  when a copy finishes unfocused. Recents are `Ctrl+Alt+H`, a view with no
+  sidebar row, sorted like any other pane.
 - **Search has no ignore rules**, so it walks `.git`, and no extension facets.
 - **Four performance budget rows are missed** and recorded with their numbers
   rather than widened: cold start, the 1M sort, one scroll run in five at a

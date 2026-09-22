@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Written by GLib 2.88 GBookmarkFile through PyGObject, not by hand: the recents
+     reader is tested against what the de facto implementation emits. -->
+<xbel version="1.0"
+      xmlns:bookmark="http://www.freedesktop.org/standards/desktop-bookmarks"
+      xmlns:mime="http://www.freedesktop.org/standards/shared-mime-info"
+>
+  <bookmark href="file:///home/tester/Documents/report.pdf" added="2026-09-22T20:33:33.361468Z" modified="2026-09-22T20:33:33.361485Z" visited="2026-09-22T20:33:33.361470Z">
+    <info>
+      <metadata owner="http://freedesktop.org">
+        <mime:mime-type type="application/pdf"/>
+        <bookmark:applications>
+          <bookmark:application name="org.gnome.Papers" exec="&apos;org.gnome.Papers %u&apos;" modified="2026-09-22T20:33:33.361482Z" count="1"/>
+        </bookmark:applications>
+      </metadata>
+    </info>
+  </bookmark>
+  <bookmark href="file:///home/tester/Q&amp;A%20&apos;notes&apos;%20%3Cdraft%3E.txt" added="2026-09-22T20:33:33.361498Z" modified="2026-09-22T20:33:33.361501Z" visited="2026-09-22T20:33:33.361498Z">
+    <info>
+      <metadata owner="http://freedesktop.org">
+        <mime:mime-type type="text/plain"/>
+        <bookmark:applications>
+          <bookmark:application name="org.gnome.TextEditor" exec="&apos;org.gnome.TextEditor %u&apos;" modified="2026-09-22T20:33:33.361500Z" count="1"/>
+        </bookmark:applications>
+      </metadata>
+    </info>
+  </bookmark>
+  <bookmark href="file:///home/tester/%C3%A9t%C3%A9%202024/photo.jpg" added="2026-09-22T20:33:33.361509Z" modified="2026-09-22T20:33:33.361512Z" visited="2026-09-22T20:33:33.361509Z">
+    <info>
+      <metadata owner="http://freedesktop.org">
+        <mime:mime-type type="image/jpeg"/>
+        <bookmark:applications>
+          <bookmark:application name="org.gnome.Loupe" exec="&apos;org.gnome.Loupe %u&apos;" modified="2026-09-22T20:33:33.361511Z" count="1"/>
+        </bookmark:applications>
+      </metadata>
+    </info>
+  </bookmark>
+  <bookmark href="file:///home/tester/secret.txt" added="2026-09-22T20:33:33.361518Z" modified="2026-09-22T20:33:33.361530Z" visited="2026-09-22T20:33:33.361518Z">
+    <info>
+      <metadata owner="http://freedesktop.org">
+        <mime:mime-type type="text/plain"/>
+        <bookmark:applications>
+          <bookmark:application name="org.gnome.TextEditor" exec="&apos;org.gnome.TextEditor %u&apos;" modified="2026-09-22T20:33:33.361520Z" count="1"/>
+        </bookmark:applications>
+        <bookmark:private/>
+      </metadata>
+    </info>
+  </bookmark>
+  <bookmark href="file:///home/tester/Documents" added="2026-09-22T20:33:33.361535Z" modified="2026-09-22T20:33:33.361537Z" visited="2026-09-22T20:33:33.361535Z">
+    <info>
+      <metadata owner="http://freedesktop.org">
+        <mime:mime-type type="inode/directory"/>
+        <bookmark:applications>
+          <bookmark:application name="org.gnome.Nautilus" exec="&apos;org.gnome.Nautilus %u&apos;" modified="2026-09-22T20:33:33.361537Z" count="1"/>
+        </bookmark:applications>
+      </metadata>
+    </info>
+  </bookmark>
+</xbel>

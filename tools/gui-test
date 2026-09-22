@@ -6468,6 +6468,113 @@ def own_config(run: Run, label: str) -> dict:
     }
 
 
+def a_desktops_recents(entries: list[tuple[Path, str, bool]]) -> str:
+    """A `recently-used.xbel` in the shape GLib writes, naming `entries`.
+
+    Each is a path, its type and whether it is private. The paths are fixture
+    paths, which spell the same as their URIs: nothing in them needs escaping.
+    """
+    stamp = "2020-01-01T00:00:00.000000Z"
+    bookmarks = "".join(
+        f'  <bookmark href="file://{path}" added="{stamp}" modified="{stamp}" visited="{stamp}">\n'
+        f'    <info><metadata owner="http://freedesktop.org">'
+        f'<mime:mime-type type="{mime}"/><bookmark:applications>'
+        f'<bookmark:application name="probe" exec="&apos;probe %u&apos;" modified="{stamp}" count="1"/>'
+        f"</bookmark:applications>{'<bookmark:private/>' if private else ''}</metadata></info>\n"
+        "  </bookmark>\n"
+        for path, mime, private in entries
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<xbel version="1.0"\n'
+        '      xmlns:bookmark="http://www.freedesktop.org/standards/desktop-bookmarks"\n'
+        '      xmlns:mime="http://www.freedesktop.org/standards/shared-mime-info"\n>\n'
+        f"{bookmarks}</xbel>\n"
+    )
+
+
+@scenario("recent-files-are-both-lists-and-survive-kill-9", fresh=True)
+def recent_files(run: Run, fixture: Path) -> None:
+    """Rule 6 names recents, and ADR 0043 says there are two lists read as one.
+
+    Three windows over one data home. The first opens a file — through a probe
+    application, so the launch is real and does nothing — and the Recent view
+    then holds it and the one entry the desktop's file lists that is neither
+    private nor a folder. The second comes back after `kill -9` with the same
+    two, which is rule 6, and forgets the desktop's entry. The third, after
+    another `kill -9`, still does not show it: a forgotten entry is a tombstone
+    in *our* file, because a union over two stores would bring it back on the
+    next read. And the desktop's file is exactly what it was, because it is read
+    and never written.
+    """
+    run.close()
+    place = own_config(run, "recent")
+    data = Path(place["XDG_DATA_HOME"])
+    (data / "applications").mkdir(parents=True, exist_ok=True)
+    (data / "applications" / "skerry-probe.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Probe\nExec=true %f\nMimeType=text/plain;\n"
+    )
+    place["XDG_DATA_DIRS"] = str(data)
+    Path(place["XDG_CONFIG_HOME"], "mimeapps.list").write_text(
+        "[Default Applications]\ntext/plain=skerry-probe.desktop\n"
+    )
+    mine, theirs, private = fixture / "opened.txt", fixture / "theirs.txt", fixture / "private.txt"
+    for file in (mine, theirs, private):
+        file.write_text(file.name)
+    shared = data / "recently-used.xbel"
+    shared.write_text(
+        a_desktops_recents(
+            [(theirs, "text/plain", False), (private, "text/plain", True), (fixture, "inode/directory", False)]
+        )
+    )
+    written_by_the_desktop = shared.read_bytes()
+    ours = Path(place["XDG_STATE_HOME"]) / "skerry" / "recents"
+
+    def recent_view(window: Run, rows: str) -> dict[str, str]:
+        window.drive("key ctrl+alt+h\nsleep 600\nkey f12\nsleep 200\n")
+        return until(window, results="Recent files", rows=rows)
+
+    first = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(first)
+        first.drive("text opened\nsleep 400\nkey enter\nsleep 900\nkey f12\nsleep 200\n")
+        holds(first, lambda it: "Probe" in it.get("notice", ""), "the file to open with the probe")
+        deadline = time.time() + WAITING
+        while time.time() < deadline and not (ours.is_file() and "opened.txt" in ours.read_text()):
+            time.sleep(0.1)
+        if not ours.is_file() or f"file://{mine}" not in ours.read_text():
+            raise Failure(f"opening a file recorded nothing in {ours}")
+        recent_view(first, "2")
+        first.kill()
+    finally:
+        first.close()
+
+    second = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(second)
+        recent_view(second, "2")
+        second.drive("text theirs\nsleep 400\nkey f12\nsleep 200\n")
+        until(second, cursor="theirs.txt")
+        second.drive("key alt+delete\nsleep 700\nkey f12\nsleep 200\n")
+        until(second, results="Recent files", rows="1")
+        second.kill()
+    finally:
+        second.close()
+
+    third = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(third)
+        left = recent_view(third, "1")
+        if left.get("cursor") != "opened.txt":
+            raise Failure(f"the list that survived holds {left.get('cursor')!r}, not opened.txt")
+    finally:
+        third.close()
+    if shared.read_bytes() != written_by_the_desktop:
+        raise Failure("the desktop's recently-used.xbel was written, and it is only ever read")
+    if not theirs.is_file():
+        raise Failure("forgetting a recent file removed the file")
+
+
 @scenario("pinning-a-folder-keeps-it-through-kill-9", fresh=True)
 def pinning_a_folder(run: Run, fixture: Path) -> None:
     """Rule 6, at the signal it names: `kill -9` does not lose a bookmark.

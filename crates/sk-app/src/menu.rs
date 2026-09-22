@@ -63,6 +63,18 @@ pub const ON_ROW: &[&[&str]] = &[
 pub const IN_TRASH: &[&[&str]] =
     &[&["file.restore"], &["view.quick_look", "file.properties", "file.copy", "file.copy_path"]];
 
+/// What a secondary click on a row of the Recent view offers.
+///
+/// **Its own table, as the trash has one.** Forget is the row that belongs to
+/// this view alone, and on every other row's menu it would be a dimmed row that
+/// menu has no room for — it is at its height at 900×520.
+pub const IN_RECENT: &[&[&str]] = &[
+    &["go.open", "menu.open_with", "view.quick_look"],
+    &["recent.forget"],
+    &["file.copy", "file.copy_path"],
+    &["file.properties"],
+];
+
 /// What a secondary click inside a text preview offers.
 ///
 /// **Two rows, and they are the pointer's way to the look's own scope.** `Ctrl+A`
@@ -114,7 +126,14 @@ pub const ON_BACKGROUND: &[&[&str]] = &[
     &["select.all", "view.filter", "go.search", "go.search_everywhere", "menu.index"],
     &["menu.view", "menu.sort", "menu.group"],
     &["menu.panes"],
-    &["place.pin", "file.terminal", "view.path_entry", "file.paste_location", "go.reload"],
+    &[
+        "place.pin",
+        "file.terminal",
+        "view.path_entry",
+        "go.recent",
+        "file.paste_location",
+        "go.reload",
+    ],
     &["view.palette", "help.keys", "settings.open"],
 ];
 
@@ -877,8 +896,9 @@ mod tests {
     use sk_plat::{Point, Size};
 
     use super::{
-        COLOUR, Choice, IN_A_LOOK, IN_TRASH, Item, Kind, Menu, ON_A_PLACE, ON_BACKGROUND, ON_ROW,
-        OPEN_WITH, SUBMENUS, Sub, height, inside, place, place_beside, row_tops, submenu,
+        COLOUR, Choice, IN_A_LOOK, IN_RECENT, IN_TRASH, Item, Kind, Menu, ON_A_PLACE,
+        ON_BACKGROUND, ON_ROW, OPEN_WITH, SUBMENUS, Sub, height, inside, place, place_beside,
+        row_tops, submenu,
     };
     use crate::layout::Area;
     use crate::openers::Handlers;
@@ -1004,7 +1024,7 @@ mod tests {
     /// draws.
     #[test]
     fn every_submenu_row_names_a_submenu_and_no_submenu_nests() {
-        for table in [ON_ROW, IN_TRASH, IN_A_LOOK, ON_A_PLACE, ON_BACKGROUND] {
+        for table in [ON_ROW, IN_TRASH, IN_RECENT, IN_A_LOOK, ON_A_PLACE, ON_BACKGROUND] {
             for id in table.iter().flat_map(|group| group.iter()) {
                 if id.starts_with("menu.") {
                     assert!(*id == OPEN_WITH || submenu(id).is_some(), "`{id}` opens nothing");
