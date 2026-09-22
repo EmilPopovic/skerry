@@ -539,6 +539,16 @@ fn edit(registry: &mut Registry<App>) {
             run: App::new_folder,
         },
         CommandSpec {
+            id: "file.new_file",
+            name: "action.new_file",
+            group: Group::File,
+            // New folder's letter, one modifier further out — the family
+            // `Ctrl+Alt` already holds for the second form of a thing.
+            keys: &["ctrl+alt+n"],
+            enabled: |app: &App| !app.busy() && !app.trash_context(),
+            run: App::new_file,
+        },
+        CommandSpec {
             id: "file.rename",
             name: "action.rename",
             group: Group::File,
@@ -1132,6 +1142,26 @@ fn file(registry: &mut Registry<App>) {
             run: App::paste_files,
         },
         CommandSpec {
+            id: "file.paste_link",
+            name: "action.paste_link",
+            group: Group::File,
+            keys: &["ctrl+alt+v"],
+            enabled: |app: &App| app.can_paste() && !app.busy() && !app.trash_context(),
+            run: App::paste_link,
+        },
+        CommandSpec {
+            id: "trash.empty",
+            name: "action.empty_trash",
+            group: Group::File,
+            // Delete permanently's chord with one more modifier, because this is
+            // the larger form of it. **The chord opens the question, not the
+            // deed**: the panel names how much goes and waits, so a press
+            // nobody meant costs an Escape.
+            keys: &["ctrl+shift+delete"],
+            enabled: |app: &App| !app.busy() && app.can_empty_trash(),
+            run: App::empty_trash,
+        },
+        CommandSpec {
             id: "file.paste_location",
             name: "action.paste_location",
             group: Group::Navigate,
@@ -1294,6 +1324,9 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
             if *id == crate::menu::OPEN_WITH {
                 reach
                     .push((crate::menu::OPEN_WITH_COMMAND, "the context menu's Open with submenu"));
+            } else if *id == crate::menu::FROM_TEMPLATE {
+                // Its rows are templates, not commands, and the command it dims
+                // with is on the same menu in its own right.
             } else if let Some(sub) = crate::menu::submenu(id) {
                 for child in sub.groups.iter().flat_map(|group| group.iter()) {
                     reach.push((child, "a submenu of the context menu"));

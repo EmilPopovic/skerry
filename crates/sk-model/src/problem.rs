@@ -111,6 +111,15 @@ pub enum ProblemKind {
     /// thing you asked about": a JPEG has no text to copy, and saying so names
     /// the file rather than blaming the operation.
     NotText,
+    /// An undo entry's way back was erased by Empty Trash.
+    ///
+    /// Its own kind because it is the only failure here that a person *caused on
+    /// purpose*, and [`Self::Gone`]'s advice — "it may have been moved or
+    /// deleted" — is a guess where this one knows. Without it, `Ctrl+Z` after an
+    /// Empty Trash named a path inside `Trash/files` that nobody had ever looked
+    /// at, which is [rule 3](../../../docs/03-principles.md#3-everything-is-reversible)'s
+    /// failure test arriving as a sentence about the wrong thing.
+    TrashEmptied,
 }
 
 impl ProblemKind {
@@ -138,6 +147,7 @@ impl ProblemKind {
             Self::UnsupportedArchive => "error.unsupported_archive",
             Self::NotUnpackable => "error.not_unpackable",
             Self::NotText => "error.not_text",
+            Self::TrashEmptied => "error.trash_emptied",
         }
     }
 }

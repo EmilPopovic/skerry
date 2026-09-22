@@ -24,8 +24,31 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 use std::path::{Path, PathBuf};
 
-use rustix::fs::Mode;
+use rustix::fs::{AtFlags, Mode, OFlags};
 use sk_model::{Problem, ProblemKind};
+
+/// What a [`Change::Created`] made.
+///
+/// **One variant per inverse, not per icon.** The three are together because
+/// making something out of nothing is one gesture with one undo entry; they are
+/// distinguished because `rmdir` is not `unlink`, and because a redo has to make
+/// the same thing again — a link with no target is a link to `""`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Made {
+    /// A directory. Undone with `rmdir`, which refuses once something is in it.
+    Directory,
+    /// An empty file. Undone with `unlink`, and **only while it is still
+    /// empty** — the same refusal `rmdir` gives a directory somebody has since
+    /// put files in, for the same reason: an undo that deletes what somebody
+    /// typed is not an undo.
+    File,
+    /// A symbolic link, and what it points at.
+    ///
+    /// Undone with `unlink` and no emptiness check, because removing a link
+    /// removes nothing but the link — and a link whose target has been replaced
+    /// since is still this link.
+    Link(PathBuf),
+}
 
 /// What a mutation did, and enough to undo it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -40,6 +63,21 @@ pub enum Change {
         note: String,
         /// Partial copied data can be retried using the copy engine's resume checks.
         retry: bool,
+        /// Whether the note is the **answer** to an undo rather than a remark
+        /// beside one: the way back is gone, so [`revert`] says this instead of
+        /// moving files that are no longer there.
+        ///
+        /// **Set by [`stranded_by_empty`] and by nothing else.** Emptying the
+        /// Trash is the one thing in this program that takes the way back from a
+        /// change already on the stack, and [rule
+        /// 3](../../../docs/03-principles.md#3-everything-is-reversible)'s
+        /// failure test is a mutation `Ctrl+Z` cannot walk back — which an entry
+        /// that fails with `Trash/files/receipt.pdf: no such file` meets in
+        /// letter and breaks in spirit, because nobody has ever looked at that
+        /// path. [ADR
+        /// 0036](../../../docs/adr/0036-operation-failures-retain-pending-work.md)
+        /// is the shape: the work stays in the history with a note on it.
+        stranded: bool,
     },
     /// Several changes made by one gesture, oldest first.
     ///
@@ -50,10 +88,12 @@ pub enum Change {
     /// others: a move that replaced a name has to be put back before the thing
     /// it displaced can be.
     Batch(Vec<Change>),
-    /// A directory that did not exist before.
+    /// Something that did not exist before: a directory, a file, or a link.
     Created {
         /// Where it is.
         path: PathBuf,
+        /// What was made there. See [`Made`].
+        made: Made,
     },
     /// A name that moved.
     Renamed {
@@ -168,7 +208,7 @@ impl Change {
             Self::Batch(changes) => changes.last().map_or(Path::new(""), Change::subject),
             // The folder that was made, and the file that was edited: two
             // different changes whose subject happens to be the path they carry.
-            Self::Created { path } | Self::Edited { path, .. } => path,
+            Self::Created { path, .. } | Self::Edited { path, .. } => path,
             Self::Renamed { to, .. } => to,
             Self::Copied { destination, .. } => destination,
             // The folder the files went into, which is what a person is looking
@@ -212,7 +252,14 @@ impl Change {
                     (many_key(key), many.len().to_string())
                 }
             },
-            Self::Created { path } => ("history.created", named(path)),
+            Self::Created { path, made } => (
+                match made {
+                    Made::Directory => "history.created",
+                    Made::File => "history.created_file",
+                    Made::Link(_) => "history.created_link",
+                },
+                named(path),
+            ),
             Self::Renamed { to, .. } => ("history.renamed", named(to)),
             Self::Copied { destination, .. } => ("history.copied", named(destination)),
             Self::Unpacked { root, .. } => ("history.unpacked", named(root)),
@@ -262,6 +309,8 @@ fn many_key(one: &'static str) -> &'static str {
     match one {
         "history.restored" => "history.restored_many",
         "history.created" => "history.created_many",
+        "history.created_file" => "history.created_file_many",
+        "history.created_link" => "history.created_link_many",
         "history.renamed" => "history.renamed_many",
         "history.copied" => "history.copied_many",
         "history.unpacked" => "history.unpacked_many",
@@ -286,7 +335,73 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<Change, Problem> {
     // race between them, and the create already answers the question.
     rustix::fs::mkdir(&path, Mode::from_bits_truncate(0o755))
         .map_err(|error| problem(error, &path))?;
-    Ok(Change::Created { path })
+    Ok(Change::Created { path, made: Made::Directory })
+}
+
+/// The name a creation is allowed to use, or why it is not one.
+fn usable(parent: &Path, name: &str) -> Result<PathBuf, Problem> {
+    crate::trash::writable(parent)?;
+    if name.is_empty() || name.contains('/') {
+        return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
+    }
+    Ok(parent.join(name))
+}
+
+/// Makes an empty file called `name` inside `parent`.
+///
+/// `O_EXCL`, which is the file's version of the reason `create_directory` does
+/// not look first: the create is the check, and a `statx` before it is a window
+/// somebody else can write in.
+///
+/// **Runs on a job.**
+pub fn create_file(parent: &Path, name: &str) -> Result<Change, Problem> {
+    let path = usable(parent, name)?;
+    rustix::fs::open(
+        &path,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+        Mode::from_bits_truncate(0o644),
+    )
+    .map_err(|error| problem(error, &path))?;
+    Ok(Change::Created { path, made: Made::File })
+}
+
+/// Makes a symbolic link called `name` inside `parent`, pointing at `target`.
+///
+/// **The target is not resolved and not checked.** A link to something that is
+/// not there yet is a link a person may have meant — `symlinkat` makes one, and
+/// refusing here would be this program deciding what the filesystem already
+/// allows.
+///
+/// **Runs on a job.**
+pub fn create_link(parent: &Path, name: &str, target: &Path) -> Result<Change, Problem> {
+    let path = usable(parent, name)?;
+    rustix::fs::symlink(target, &path).map_err(|error| problem(error, &path))?;
+    Ok(Change::Created { path, made: Made::Link(target.to_path_buf()) })
+}
+
+/// Takes back a [`Change::Created`].
+///
+/// **Each of the three refuses rather than guessing**, which is what the module
+/// header means by an inverse that is not a guess: a directory has to be empty,
+/// and so does a file — somebody who typed into the file this made would
+/// otherwise lose it to a keystroke meant to remove an empty one.
+fn unmake(path: &Path, made: &Made) -> Result<(), Problem> {
+    match made {
+        Made::Directory => rustix::fs::rmdir(path).map_err(|error| problem(error, path)),
+        Made::File => {
+            let stat = rustix::fs::statat(rustix::fs::CWD, path, AtFlags::SYMLINK_NOFOLLOW)
+                .map_err(|error| problem(error, path))?;
+            if stat.st_size != 0 {
+                return Err(Problem::new(
+                    ProblemKind::NotEmpty,
+                    path.display().to_string(),
+                    "the file has been written to since it was made",
+                ));
+            }
+            rustix::fs::unlink(path).map_err(|error| problem(error, path))
+        }
+        Made::Link(_) => rustix::fs::unlink(path).map_err(|error| problem(error, path)),
+    }
 }
 
 /// Renames `from` to `name`, in the same directory.
@@ -316,7 +431,9 @@ pub fn trash(path: &Path) -> Result<Change, Problem> {
     let change =
         Change::Trashed { original: entry.original, stored: entry.stored, info: entry.info };
     Ok(match entry.warning {
-        Some(note) => Change::Noted { change: Box::new(change), note, retry: false },
+        Some(note) => {
+            Change::Noted { change: Box::new(change), note, retry: false, stranded: false }
+        }
         None => change,
     })
 }
@@ -327,7 +444,9 @@ pub fn restore(stored: &Path) -> Result<Change, Problem> {
     let warning = entry.warning.clone();
     let change = Change::Restored(entry);
     Ok(match warning {
-        Some(note) => Change::Noted { change: Box::new(change), note, retry: false },
+        Some(note) => {
+            Change::Noted { change: Box::new(change), note, retry: false, stranded: false }
+        }
         None => change,
     })
 }
@@ -369,6 +488,7 @@ pub fn copy_into(
                 change: Box::new(Change::Copied { source: source.to_path_buf(), destination }),
                 note: problem.message(),
                 retry: problem.kind() != ProblemKind::Preservation,
+                stranded: false,
             }),
             Err(problem) => Err(problem),
         };
@@ -404,6 +524,7 @@ pub fn copy_into(
             change: Box::new(Change::Copied { source: source.to_path_buf(), destination }),
             note: problem.message(),
             retry: problem.kind() != ProblemKind::Preservation,
+            stranded: false,
         }),
         Err(problem) => Err(problem),
     }
@@ -429,6 +550,7 @@ pub fn resume_copy(
             change: Box::new(change),
             note: problem.message(),
             retry: problem.kind() != ProblemKind::Preservation,
+            stranded: false,
         }),
     }
 }
@@ -476,6 +598,89 @@ pub enum Conflict {
 pub fn erase(path: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
     crate::copy::remove_tree(path, cancel)?;
     Ok(Change::Erased { path: path.to_path_buf() })
+}
+
+/// Erases everything in one trash's `files` directory, for good.
+///
+/// **An [`Change::Erased`], which the stack does not hold** — the same shape a
+/// permanent delete has, because it is one: [rule
+/// 3](../../../docs/03-principles.md#3-everything-is-reversible) calls permanent
+/// deletion "an explicit, differently-shaped action" and emptying the Trash is
+/// the largest one this program offers. What it *does* owe the stack is
+/// [`stranded_by_empty`], which the caller runs over the history afterwards.
+///
+/// **Runs on a job.**
+pub fn empty_trash(files: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
+    crate::trash::empty(files, cancel)?;
+    Ok(Change::Erased { path: files.to_path_buf() })
+}
+
+/// Which way a change on the undo stack would next be walked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Next {
+    /// It is applied, so the next thing that can happen to it is its undo.
+    Undo,
+    /// It was undone, so the next thing that can happen to it is its redo.
+    Redo,
+}
+
+/// The same change with every part an emptied trash took the way forward or
+/// back from marked, or `None` where it took nothing.
+///
+/// **Which part depends on [`Next`]**, because an undo and a redo need
+/// different things from the trash:
+///
+/// - An applied [`Change::Trashed`] is undone from the copy under `files`,
+///   which is what was erased — stranded. Undone, its redo is
+///   [`trash`] of the file at its original path, which needs nothing the empty
+///   took — not stranded.
+/// - An applied [`Change::Restored`] is undone by [`crate::trash::put_back`],
+///   which needs the file at its *original* path and the two storage
+///   directories [`crate::trash::empty`] deliberately leaves standing — not
+///   stranded. Undone, the file went back under `files` and the empty erased it,
+///   so its redo is — stranded.
+///
+/// **Leaf by leaf, not entry by entry.** A `Replace` is a batch whose first half
+/// trashed what it displaced; marking the whole batch would refuse the undo of
+/// the copy beside it, which is still perfectly reversible.
+#[must_use]
+pub fn stranded_by_empty(change: &Change, files: &Path, next: Next) -> Option<Change> {
+    let stranded = |original: &Path| Change::Noted {
+        change: Box::new(change.clone()),
+        note: sk_model::i18n::format("notice.trash_emptied", &[&original.display()]),
+        retry: false,
+        stranded: true,
+    };
+    match change {
+        Change::Trashed { original, stored, .. }
+            if next == Next::Undo && stored.starts_with(files) =>
+        {
+            Some(stranded(original))
+        }
+        Change::Restored(entry) if next == Next::Redo && entry.stored.starts_with(files) => {
+            Some(stranded(&entry.original))
+        }
+        Change::Batch(changes) => {
+            let marked: Vec<Change> = changes
+                .iter()
+                .map(|change| {
+                    stranded_by_empty(change, files, next).unwrap_or_else(|| change.clone())
+                })
+                .collect();
+            (marked != *changes).then_some(Change::Batch(marked))
+        }
+        // Already marked, or carrying a warning of its own: the inner change is
+        // what an undo would act on, so that is what is asked.
+        Change::Noted { change: inner, note, retry, stranded } => {
+            stranded_by_empty(inner, files, next).map(|marked| Change::Noted {
+                change: Box::new(marked),
+                note: note.clone(),
+                retry: *retry,
+                stranded: *stranded,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Moves `source` into the directory `into`.
@@ -552,7 +757,12 @@ pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
         Err(problem)
             if crate::read_text(path, crate::TEXT_LIMIT).is_ok_and(|text| text == after) =>
         {
-            Ok(Change::Noted { change: Box::new(change), note: problem.message(), retry: false })
+            Ok(Change::Noted {
+                change: Box::new(change),
+                note: problem.message(),
+                retry: false,
+                stranded: false,
+            })
         }
         Err(problem) => Err(problem),
     }
@@ -636,6 +846,15 @@ fn replace_into(
 pub fn revert(change: &Change) -> Result<(), Problem> {
     match change {
         Change::Restored(entry) => crate::trash::put_back(entry),
+        // **The note is the answer, not a remark beside one.** Whatever this
+        // would have put back was erased by an Empty Trash, so saying that is
+        // the whole of the undo — `Ctrl+Z` reports a sentence about the Trash
+        // rather than a path under it that nobody has looked at.
+        Change::Noted { change, note, stranded: true, .. } => Err(Problem::new(
+            ProblemKind::TrashEmptied,
+            change.subject().display().to_string(),
+            note.clone(),
+        )),
         Change::Noted { change, .. } => revert(change),
         // Backwards, and the first failure stops it: a batch half undone is a
         // state somebody can look at and act on, where carrying on past an
@@ -649,10 +868,7 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
             path.display().to_string(),
             "a permanent delete cannot be undone",
         )),
-        // `rmdir`, not a recursive remove: if something has been put in it since,
-        // this fails with `ENOTEMPTY` and the undo refuses. An undo that deletes
-        // files somebody added is not an undo.
-        Change::Created { path } => rustix::fs::rmdir(path).map_err(|error| problem(error, path)),
+        Change::Created { path, made } => unmake(path, made),
         // Through the copy engine rather than `move_no_replace`: a rename inside
         // one directory can never cross a filesystem, but a *move* between two
         // can, and its undo has to be able to come back the same way it went.
@@ -684,6 +900,13 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
 pub fn apply(change: &Change) -> Result<Change, Problem> {
     match change {
         Change::Restored(entry) => restore(&entry.stored),
+        // The same refusal `revert` gives, and for the same reason: there is
+        // nothing left to do again either.
+        Change::Noted { change, note, stranded: true, .. } => Err(Problem::new(
+            ProblemKind::TrashEmptied,
+            change.subject().display().to_string(),
+            note.clone(),
+        )),
         Change::Noted { change, .. } => apply(change),
         Change::Batch(changes) => {
             changes.iter().map(apply).collect::<Result<_, _>>().map(Change::Batch)
@@ -709,7 +932,7 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             archive.display().to_string(),
             "an unpack is redone through the queue, not through ops::apply",
         )),
-        Change::Created { path } => {
+        Change::Created { path, made } => {
             let (Some(parent), Some(name)) =
                 (path.parent(), path.file_name().and_then(|name| name.to_str()))
             else {
@@ -719,7 +942,11 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
                     "no parent or no name",
                 ));
             };
-            create_directory(parent, name)
+            match made {
+                Made::Directory => create_directory(parent, name),
+                Made::File => create_file(parent, name),
+                Made::Link(target) => create_link(parent, name, target),
+            }
         }
         Change::Renamed { from, to } => {
             crate::copy::move_to(from, to, &sk_util::Cancel::new(), &mut |_| {})?;
@@ -738,6 +965,7 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
                     change: Box::new(fresh),
                     note: problem.message(),
                     retry: problem.kind() != ProblemKind::Preservation,
+                    stranded: false,
                 }),
                 Err(problem) => Err(problem),
             }
@@ -779,7 +1007,12 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
         }
         let restored = crate::trash::restore(stored)?;
         return Ok(match restored.warning {
-            Some(note) => Change::Noted { change: Box::new(change.clone()), note, retry: false },
+            Some(note) => Change::Noted {
+                change: Box::new(change.clone()),
+                note,
+                retry: false,
+                stranded: false,
+            },
             None => change.clone(),
         });
     }
@@ -793,9 +1026,12 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
             ));
         }
         return match edit_text(path, before)? {
-            Change::Noted { note, .. } => {
-                Ok(Change::Noted { change: Box::new(change.clone()), note, retry: false })
-            }
+            Change::Noted { note, .. } => Ok(Change::Noted {
+                change: Box::new(change.clone()),
+                note,
+                retry: false,
+                stranded: false,
+            }),
             _ => Ok(change.clone()),
         };
     }
@@ -818,6 +1054,11 @@ pub fn replay(
                     flatten(change, out);
                 }
             }
+            // **A stranded note is a leaf.** Unwrapping it here would drop the
+            // marking on the way to `step`, and the undo would go back to
+            // failing about a path inside the Trash — which is the whole thing
+            // the marking exists to replace.
+            Change::Noted { stranded: true, .. } => out.push(change.clone()),
             Change::Noted { change, .. } => flatten(change, out),
             change => out.push(change.clone()),
         }
@@ -956,8 +1197,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{
-        Change, Conflict, apply, copy_into, create_directory, encode_path, move_into, rename,
-        revert, trash,
+        Change, Conflict, Made, Next, apply, copy_into, create_directory, create_file, create_link,
+        empty_trash, encode_path, move_into, rename, revert, stranded_by_empty, trash,
     };
     use sk_model::ProblemKind;
     use std::path::{Path, PathBuf};
@@ -1061,11 +1302,282 @@ mod tests {
         root
     }
 
+    /// The failure that started row 4: `Ctrl+Z` after an Empty Trash.
+    ///
+    /// Unmarked, the undo answered `…/Trash/files/receipt.pdf` — a path nobody
+    /// has ever looked at, about a file the person deliberately destroyed. The
+    /// assertion is that the answer is a *sentence about the Trash*, and that it
+    /// is an answer at all: a refusal the caller can show, not a silent no-op.
+    #[test]
+    fn emptying_the_trash_strands_what_it_erased_and_says_so() {
+        with_trash("empty-strands", |root| {
+            let file = root.join("receipt.pdf");
+            std::fs::write(&file, b"%PDF-1.4").unwrap();
+            let change = trash(&file).expect("trashed");
+            let Change::Trashed { stored, .. } = &change else { panic!("{change:?}") };
+            let files = stored.parent().expect("files").to_path_buf();
+
+            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            assert!(!stored.exists(), "the trashed file survived the empty");
+
+            let marked =
+                stranded_by_empty(&change, &files, Next::Undo).expect("the entry was not marked");
+            let refused = revert(&marked).expect_err("an erased file came back");
+            assert_eq!(refused.kind(), ProblemKind::TrashEmptied);
+            let said = refused.message();
+            assert!(said.contains("receipt.pdf"), "{said:?} does not name the file");
+            assert!(
+                !said.contains("Trash/files"),
+                "{said:?} names a path inside the Trash rather than what happened"
+            );
+            // And the history still says what happened, which is ADR 0036's shape.
+            assert_eq!(marked.summary().0, "history.trashed");
+            assert!(marked.warning().is_some_and(|note| note.contains("receipt.pdf")));
+        });
+    }
+
+    /// The other half, and the reason the empty takes the contents rather than
+    /// the directories: a restore stays undoable across one.
+    #[test]
+    fn a_restore_is_still_undoable_after_the_trash_is_emptied() {
+        with_trash("empty-restore", |root| {
+            let kept = root.join("kept.txt");
+            let other = root.join("other.txt");
+            std::fs::write(&kept, b"mine").unwrap();
+            std::fs::write(&other, b"theirs").unwrap();
+            let Change::Trashed { stored, .. } = trash(&kept).expect("trashed") else {
+                panic!("trash")
+            };
+            let _ = trash(&other).expect("trashed the second");
+            let restored = super::restore(&stored).expect("restored");
+            let files = stored.parent().expect("files").to_path_buf();
+
+            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            assert!(files.is_dir(), "the empty took the directory `put_back` writes into");
+            assert!(
+                stranded_by_empty(&restored, &files, Next::Undo).is_none(),
+                "a restore that is still undoable was marked as stranded"
+            );
+            revert(&restored).expect("the restore could not be undone");
+            assert!(!kept.exists(), "undoing the restore left the file where it was");
+            assert_eq!(std::fs::read(&stored).unwrap(), b"mine");
+        });
+    }
+
+    /// Undone, a trash is redone by trashing the file again from where the undo
+    /// put it, which needs nothing the empty took — so marking it would refuse
+    /// a `Ctrl+Shift+Z` that works.
+    #[test]
+    fn an_undone_trash_is_still_redoable_after_the_trash_is_emptied() {
+        with_trash("empty-undone-trash", |root| {
+            let file = root.join("draft.txt");
+            std::fs::write(&file, b"draft").unwrap();
+            let change = trash(&file).expect("trashed");
+            let Change::Trashed { stored, .. } = &change else { panic!("{change:?}") };
+            let files = stored.parent().expect("files").to_path_buf();
+            revert(&change).expect("the trash could not be undone");
+            assert!(file.exists(), "the undo did not put the file back");
+
+            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            assert!(
+                stranded_by_empty(&change, &files, Next::Redo).is_none(),
+                "an undone trash was marked, and its redo refused, though it still works"
+            );
+            apply(&change).expect("the redo of an undone trash failed after an empty");
+            assert!(!file.exists(), "the redo did not trash the file again");
+        });
+    }
+
+    /// Undone, a restore put the file back under `files`, and the empty erased
+    /// it there — so its redo is stranded, and the answer is the sentence rather
+    /// than a path inside the Trash.
+    #[test]
+    fn an_undone_restore_is_stranded_by_an_empty() {
+        with_trash("empty-undone-restore", |root| {
+            let file = root.join("photo.jpg");
+            std::fs::write(&file, b"jpeg").unwrap();
+            let Change::Trashed { stored, .. } = trash(&file).expect("trashed") else {
+                panic!("trash")
+            };
+            let restored = super::restore(&stored).expect("restored");
+            revert(&restored).expect("the restore could not be undone");
+            assert!(stored.exists(), "undoing the restore did not put it back in the Trash");
+            let files = stored.parent().expect("files").to_path_buf();
+
+            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            let marked = stranded_by_empty(&restored, &files, Next::Redo)
+                .expect("an undone restore whose file was erased was not marked");
+            let refused = apply(&marked).expect_err("an erased file came back");
+            assert_eq!(refused.kind(), ProblemKind::TrashEmptied);
+            assert!(refused.message().contains("photo.jpg"), "{:?}", refused.message());
+            assert!(!refused.message().contains("Trash/files"), "{:?}", refused.message());
+        });
+    }
+
+    /// A replace is a batch, and only the half the empty erased is marked.
+    #[test]
+    fn only_the_erased_half_of_a_batch_is_stranded() {
+        with_trash("empty-batch", |root| {
+            let from = root.join("from");
+            let into = root.join("into");
+            std::fs::create_dir_all(&from).unwrap();
+            std::fs::create_dir_all(&into).unwrap();
+            std::fs::write(from.join("report.pdf"), b"the new one").unwrap();
+            std::fs::write(into.join("report.pdf"), b"the old one").unwrap();
+            let change = copy_into(
+                &from.join("report.pdf"),
+                &into,
+                Conflict::Replace,
+                &sk_util::Cancel::new(),
+                &mut |_| {},
+            )
+            .expect("replaced");
+            let files = root.join("data/Trash/files");
+
+            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            let Change::Batch(marked) =
+                stranded_by_empty(&change, &files, Next::Undo).expect("marked")
+            else {
+                panic!("a batch stopped being a batch")
+            };
+            assert!(matches!(marked[0], Change::Noted { stranded: true, .. }), "{marked:?}");
+            assert!(matches!(marked[1], Change::Copied { .. }), "{marked:?}");
+        });
+    }
+
+    /// An empty leaves no record with nothing behind it, which every other
+    /// desktop's tools read as a corrupt trash.
+    #[test]
+    fn emptying_takes_the_records_with_the_files() {
+        with_trash("empty-records", |root| {
+            let file = root.join("note.txt");
+            std::fs::write(&file, b"x").unwrap();
+            let Change::Trashed { stored, info, .. } = trash(&file).expect("trashed") else {
+                panic!("trash")
+            };
+            let files = stored.parent().expect("files").to_path_buf();
+
+            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            assert!(!info.exists(), "a record with no file behind it: {info:?}");
+            assert_eq!(crate::trash::held(&files, &sk_util::Cancel::new()).items, 0);
+        });
+    }
+
+    /// A directory that is not a trash is not emptied, whatever it is called.
+    #[test]
+    fn a_directory_that_merely_looks_like_a_trash_is_refused() {
+        with_trash("empty-hostile", |root| {
+            let pretend = root.join("Trash/files");
+            std::fs::create_dir_all(&pretend).unwrap();
+            std::fs::write(pretend.join("theirs.txt"), b"important").unwrap();
+
+            let refused = empty_trash(&pretend, &sk_util::Cancel::new()).expect_err("emptied");
+            assert_eq!(refused.kind(), ProblemKind::TrashUnavailable);
+            assert!(pretend.join("theirs.txt").is_file(), "somebody else's files were erased");
+        });
+    }
+
+    /// What a trash is holding, which is what the question "empty this?" is
+    /// about: the things a person threw away, and the bytes under them.
+    #[test]
+    fn a_trash_says_how_many_things_are_in_it_and_how_big_they_are() {
+        with_trash("empty-held", |root| {
+            let folder = root.join("pictures");
+            std::fs::create_dir_all(folder.join("inner")).unwrap();
+            std::fs::write(folder.join("inner/one.bin"), vec![0_u8; 300]).unwrap();
+            std::fs::write(folder.join("two.bin"), vec![0_u8; 700]).unwrap();
+            let alone = root.join("alone.bin");
+            std::fs::write(&alone, vec![0_u8; 24]).unwrap();
+
+            let Change::Trashed { stored, .. } = trash(&folder).expect("trashed") else {
+                panic!("trash")
+            };
+            let _ = trash(&alone).expect("trashed");
+            let files = stored.parent().expect("files");
+            let held = crate::trash::held(files, &sk_util::Cancel::new());
+            // Two things thrown away, not the four files under them.
+            assert_eq!(held.items, 2);
+            assert_eq!(held.bytes, 1024);
+        });
+    }
+
+    /// A file is made, undone, and made again — and the undo refuses once
+    /// somebody has typed into it, which is what makes the undo safe to have.
+    #[test]
+    fn a_file_is_made_and_unmade_while_it_is_still_empty() {
+        let root = scratch("mkfile");
+        let change = create_file(&root, "notes.txt").expect("made");
+        assert_eq!(change, Change::Created { path: root.join("notes.txt"), made: Made::File });
+        assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"");
+
+        revert(&change).expect("unmade");
+        assert!(!root.join("notes.txt").exists());
+        apply(&change).expect("made again");
+
+        std::fs::write(root.join("notes.txt"), b"words somebody typed").unwrap();
+        let refused = revert(&change).expect_err("it must refuse");
+        assert_eq!(refused.kind(), ProblemKind::NotEmpty);
+        assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"words somebody typed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A link is made, undone and made again — and undoing one removes the link
+    /// and never what it points at.
+    #[test]
+    fn a_link_is_made_and_unmade_without_touching_its_target() {
+        let root = scratch("mklink");
+        let target = root.join("report.pdf");
+        std::fs::write(&target, b"%PDF-1.4").unwrap();
+
+        let change = create_link(&root, "report link", &target).expect("linked");
+        assert_eq!(
+            change,
+            Change::Created { path: root.join("report link"), made: Made::Link(target.clone()) }
+        );
+        assert_eq!(std::fs::read_link(root.join("report link")).unwrap(), target);
+
+        revert(&change).expect("unlinked");
+        assert!(!root.join("report link").exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"%PDF-1.4", "the undo followed the link");
+
+        apply(&change).expect("linked again");
+        assert_eq!(std::fs::read_link(root.join("report link")).unwrap(), target);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A taken name is refused for all three creations, not only for a folder.
+    #[test]
+    fn a_creation_onto_a_taken_name_is_refused() {
+        let root = scratch("create-taken");
+        std::fs::write(root.join("keep.txt"), b"important").unwrap();
+
+        assert_eq!(
+            create_file(&root, "keep.txt").expect_err("made").kind(),
+            ProblemKind::NameTaken
+        );
+        assert_eq!(
+            create_link(&root, "keep.txt", Path::new("/etc/passwd")).expect_err("linked").kind(),
+            ProblemKind::NameTaken
+        );
+        assert_eq!(std::fs::read(root.join("keep.txt")).unwrap(), b"important");
+        for name in ["", "sub/deeper", "../escape"] {
+            assert_eq!(
+                create_file(&root, name).map(|_| ()).expect_err(name).kind(),
+                ProblemKind::BadName
+            );
+            assert_eq!(
+                create_link(&root, name, Path::new("/tmp")).map(|_| ()).expect_err(name).kind(),
+                ProblemKind::BadName
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_directory_is_made_and_unmade() {
         let root = scratch("mkdir");
         let change = create_directory(&root, "notes").expect("made");
-        assert_eq!(change, Change::Created { path: root.join("notes") });
+        assert_eq!(change, Change::Created { path: root.join("notes"), made: Made::Directory });
         assert!(root.join("notes").is_dir());
 
         revert(&change).expect("unmade");
@@ -1462,7 +1974,7 @@ mod tests {
         std::fs::rename(home.join("f"), folder.join("f")).expect("move it in");
 
         let batch = Change::Batch(vec![
-            Change::Created { path: folder.clone() },
+            Change::Created { path: folder.clone(), made: Made::Directory },
             Change::Renamed { from: home.join("f"), to: folder.join("f") },
         ]);
         revert(&batch).expect("the batch undoes");
@@ -1703,7 +2215,7 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("file"), "contents").unwrap();
         std::fs::write(folder.join("blocker"), "later work").unwrap();
-        let created = Change::Created { path: folder.clone() };
+        let created = Change::Created { path: folder.clone(), made: Made::Directory };
         let moved = Change::Renamed { from: root.join("file"), to: folder.join("file") };
         let batch = Change::Batch(vec![created.clone(), Change::Batch(vec![moved.clone()])]);
         let first =

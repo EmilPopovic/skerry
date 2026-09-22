@@ -49,12 +49,29 @@ size.dir = —
 # The name a new folder gets before anyone types one. Windows and Nautilus both
 # use this wording, so it is what a person expects to see appear.
 name.new_folder = New folder
+name.new_file = New file
+action.new_file = New file
+action.paste_link = Paste as link
+action.empty_trash = Empty the Trash…
+menu.from_template = New from template
+# Under New from template when the directory is there and empty: saying where a
+# file goes is the whole of how somebody learns what the row is for.
+menu.no_templates = Files in {0} appear here
+menu.no_templates_folder = There is no Templates folder
+# What a link is called, after the name of the thing it points at: `report.pdf
+# link`. One word rather than a pattern, because the thing before it is a
+# filename and a translation may want the word on the other side of it — which
+# is a decision for whoever writes `history.created_link`, not for a format
+# string assembled here.
+name.link_suffix = link
 
 # What the status line says after a mutation. Short, because it is replacing the
 # item count for a few seconds and the item count is what a person wants back.
 # More than one thing was selected and only the first was acted on. The queue
 # that does the rest is M3's; saying so is better than silently doing one.
 notice.deleted = Deleted {0} of {1}
+notice.emptied = Emptied {0} of {1}
+notice.linked = Linked {0} of {1}
 notice.trashed = Moved {0} of {1} to Trash
 notice.copied_in = Copied {0} of {1}
 notice.moved_in = Moved {0} of {1}
@@ -91,6 +108,12 @@ erase.and_more = and {0} more
 erase.forever = This cannot be undone.
 erase.cancel = Cancel
 erase.delete = Delete
+# Emptying the Trash names no files: what goes is everything in it, so the line
+# under the title is how much that is.
+erase.title_trash = Empty the Trash?
+erase.holds[one] = {0} item · {1}
+erase.holds[other] = {0} items · {1}
+erase.empty = Empty Trash
 # The same panel, asking about a Move to Trash — only when the setting says
 # to. The sentence says the opposite of the one above it, which is the whole
 # reason a person can be asked about something reversible without alarm.
@@ -104,6 +127,8 @@ error.clipboard_no_files = The clipboard holds no files to paste.
 verb.copying = Copying
 verb.moving = Moving
 verb.deleting = Deleting
+verb.emptying = Emptying the Trash
+verb.linking = Making links
 verb.trashing = Moving to Trash
 verb.extracting = Extracting
 notice.progress = {0}… {1} of {2}
@@ -402,6 +427,10 @@ action.history = Show the history
 history.nothing = Nothing yet
 history.created = New folder {0}
 history.created_many = {0} new folders
+history.created_file = New file {0}
+history.created_file_many = {0} new files
+history.created_link = Link to {0}
+history.created_link_many = {0} new links
 history.renamed = Renamed {0}
 history.renamed_many = Renamed {0} items
 history.copied = Copied {0}
@@ -679,6 +708,11 @@ error.unsupported_archive = {0} uses an unsupported archive variant. Use another
 archive.unsupported = This archive uses a variant Skerry cannot read safely. Use another archive tool.
 
 error.trash_unavailable = Cannot use Trash for {0}. The file has been kept. Check the volume is mounted and its trash is writable, then try again.
+# What Ctrl+Z says about an entry whose way back an Empty Trash erased. It names
+# the file rather than the slot it was in, because the slot is a path nobody has
+# ever looked at.
+error.trash_emptied = {0} cannot be brought back: the Trash was emptied.
+notice.trash_emptied = The Trash was emptied, so {0} can no longer be brought back.
 history.restored = Restored {0}
 history.restored_many[one] = Restored {0} item
 history.restored_many[other] = Restored {0} items

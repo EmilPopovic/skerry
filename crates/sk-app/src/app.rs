@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The frame loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -179,15 +179,16 @@ const FOLDERS: &str = "inode/directory";
 struct Erasing {
     paths: Vec<PathBuf>,
     on: Confirm,
-    /// Whether this is the permanent deletion, or a Move to Trash that somebody
-    /// asked to be asked about.
+    /// Which of the three questions it is — [`crate::view::Ask`], which is where
+    /// the reason one panel serves all three is written down.
+    ask: crate::view::Ask,
+    /// The line under the title, for the question that names no files: how many
+    /// things are in the Trash and how much they come to.
     ///
-    /// **One panel and one flag, not two panels.** Both ask the same question
-    /// about the same list with the same two buttons; what differs is the
-    /// sentence under the names and whether the action is on the undo stack —
-    /// and a second copy of this machinery would be a second place for the
-    /// keyboard's two-press fast path to be got wrong.
-    forever: bool,
+    /// Gathered when the question is asked rather than when it is answered,
+    /// because it is a figure the sidebar's own job already counted and nothing
+    /// on the frame loop may count again.
+    holds: Option<String>,
 }
 
 /// Which button the keyboard is on.
@@ -654,18 +655,58 @@ struct Launched {
     child: Option<std::process::Child>,
 }
 
+/// What a paste of files does with them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verb {
+    /// Copy them in.
+    Copy,
+    /// Move them in, because the peer said they were cut.
+    Move,
+    /// Link to each, whatever the peer said — *Paste as link*.
+    Link,
+}
+
+/// The files in the templates directory, by name.
+///
+/// Top level and files only: a folder of templates is a submenu of its own in
+/// Nautilus, and a depth this menu does not draw. Hidden names are left out,
+/// because `.directory` and editor droppings are not documents anybody meant.
+/// **The type is `d_type`'s**, through `sk_fs::scan::names`, so listing costs
+/// one `getdents64` and no `stat`; a filesystem that reports no type lists a
+/// folder here as a file, which is a row that copies a folder when chosen.
+fn templates_in(dir: &Path, cancel: &sk_util::Cancel) -> Vec<PathBuf> {
+    let Ok(found) = sk_fs::scan::names(dir, cancel) else { return Vec::new() };
+    let mut files: Vec<PathBuf> = found
+        .names
+        .iter()
+        .enumerate()
+        .filter(|(index, name)| {
+            let id = sk_model::EntryId(u32::try_from(*index).unwrap_or(u32::MAX));
+            !name.as_encoded_bytes().starts_with(b".")
+                && !found.listing.flags(id).has(sk_model::Flags::DIR)
+        })
+        .map(|(_, name)| dir.join(name))
+        .collect();
+    // The listing's own order, so `Letter 2` comes before `Letter 10` here too.
+    files.sort_by(|a, b| {
+        let name = |path: &PathBuf| path.file_name().map(|it| it.to_string_lossy().into_owned());
+        sk_model::natural_cmp(&name(a).unwrap_or_default(), &name(b).unwrap_or_default())
+    });
+    files
+}
+
 /// Where a pasted location went, and whether it was one.
 enum Pasted {
     /// A directory to open.
     Folder(PathBuf),
     /// The clipboard held something else, or nothing.
     NotAFolder,
-    /// Paths to copy or move in, and whether to move them.
+    /// Paths to copy, move or link in, and which.
     ///
     /// Read on a job like everything else that touches the clipboard: the peer
     /// writes into a pipe at its own pace, and a read on the frame loop is a
     /// frame loop waiting on another process.
-    Files(Vec<PathBuf>, bool, u64, PathBuf),
+    Files(Vec<PathBuf>, Verb, u64, PathBuf),
     KdeIntent(bool, u64, PathBuf),
     /// Paths dropped by another application, and the directory to put them in.
     ///
@@ -728,6 +769,9 @@ struct Replies {
     /// can put on screen. See [`Mounted`].
     mounted_tx: std::sync::mpsc::Sender<Mounted>,
     mounted_rx: Receiver<Mounted>,
+    /// What the templates directory holds, for the New from template row.
+    templates_tx: std::sync::mpsc::Sender<crate::menu::Templates>,
+    templates_rx: Receiver<crate::menu::Templates>,
 }
 
 /// What a breadcrumb separator's directory turned out to hold.
@@ -758,6 +802,7 @@ impl Replies {
         let (handler_tx, handler_rx) = mpsc::channel();
         let (mounted_tx, mounted_rx) = mpsc::channel();
         let (asked_tx, asked_rx) = mpsc::channel();
+        let (templates_tx, templates_rx) = mpsc::channel();
         Self {
             paste_tx,
             paste_rx,
@@ -785,6 +830,8 @@ impl Replies {
             handler_rx,
             mounted_tx,
             mounted_rx,
+            templates_tx,
+            templates_rx,
         }
     }
 }
@@ -1787,6 +1834,7 @@ impl App {
             self.drain_launches();
             self.drain_facts();
             self.drain_openers();
+            self.drain_templates();
             self.drain_handler();
             self.drain_mounted();
             self.drain_found();
@@ -1803,7 +1851,11 @@ impl App {
             self.drain_the_look_text();
             if let Some(gone) = self.sidebar.drain() {
                 self.dirty = true;
+                self.sidebar.count_the_trashes(&self.jobs);
                 self.leave_the_drives_that_went(&gone);
+            }
+            if self.sidebar.took_the_count() {
+                self.dirty = true;
             }
             self.drain_sizes();
             self.advance();
@@ -2012,19 +2064,27 @@ impl App {
             }
             Pasted::KdeIntent(moving, generation, into) => {
                 if self.paste_offer_is_current(generation) {
-                    self.read_file_paste("text/uri-list", moving, generation, into);
+                    let verb = if moving { Verb::Move } else { Verb::Copy };
+                    self.read_file_paste("text/uri-list", verb, generation, into);
                 }
             }
-            Pasted::Files(paths, moving, generation, into) => {
+            Pasted::Files(paths, verb, generation, into) => {
                 if !self.paste_offer_is_current(generation) {
                     return;
                 }
-                // Cleared here rather than where the cut was made: a paste is
-                // what consumes it, and a second paste of the same clipboard has
-                // to copy — the originals are not where the clipboard says any
-                // more.
-                self.cutting = false;
-                let took = self.edits.paste_all(paths, into, moving, &self.jobs);
+                let took = if verb == Verb::Link {
+                    // **A link consumes nothing.** The originals are still where
+                    // the clipboard says, so a cut stays a cut for the paste
+                    // that comes after.
+                    self.edits.link_all(paths, into, &self.jobs)
+                } else {
+                    // Cleared here rather than where the cut was made: a paste
+                    // is what consumes it, and a second paste of the same
+                    // clipboard has to copy — the originals are not where the
+                    // clipboard says any more.
+                    self.cutting = false;
+                    self.edits.paste_all(paths, into, verb == Verb::Move, &self.jobs)
+                };
                 self.said_it_is_busy(took);
             }
             Pasted::Dropped(paths, into) => {
@@ -3252,6 +3312,100 @@ impl App {
         self.edits.naming_owed = true;
     }
 
+    /// Makes an empty file in the directory being shown, and names it — the
+    /// same two steps [`Self::new_folder`] takes.
+    pub(crate) fn new_file(&mut self) {
+        let parent = self.panes.focused().path.clone();
+        self.edits.new_file(parent, &self.jobs);
+        self.edits.naming_owed = true;
+    }
+
+    /// Whether any trash holds anything, which is whether emptying is a
+    /// question worth asking.
+    pub(crate) fn can_empty_trash(&self) -> bool {
+        self.sidebar.trashes().iter().any(|(_, held)| held.any())
+    }
+
+    /// Asks whether to empty every trash that holds anything, saying how much
+    /// that is.
+    ///
+    /// **Every trash, not the one the menu opened in.** A file trashed from a
+    /// USB stick is in that stick's trash, and *Empty the Trash* that left it
+    /// there would be a Trash that still says it holds something after being
+    /// emptied — which is what every other desktop's Empty Trash also means.
+    pub(crate) fn empty_trash(&mut self) {
+        // A second press answers, the way Delete permanently's does — one
+        // question, one contract, wherever it is asked.
+        if self.erasing.as_ref().is_some_and(|asking| asking.ask == crate::view::Ask::Empty) {
+            self.answer_the_question();
+            return;
+        }
+        let full: Vec<(PathBuf, sk_fs::trash::Held)> =
+            self.sidebar.trashes().into_iter().filter(|(_, held)| held.any()).collect();
+        if full.is_empty() {
+            return;
+        }
+        let items: u64 = full.iter().map(|(_, held)| held.items).sum();
+        let bytes: u64 = full.iter().map(|(_, held)| held.bytes).sum();
+        let holds =
+            sk_model::i18n::plural("erase.holds", items, &[&items, &sk_ui::format::size(bytes)]);
+        self.erasing = Some(Erasing {
+            paths: full.into_iter().map(|(path, _)| path).collect(),
+            on: Confirm::Cancel,
+            ask: crate::view::Ask::Empty,
+            holds: Some(holds),
+        });
+        self.dirty = true;
+    }
+
+    /// Makes a file here from `template` — a copy under a free name, named
+    /// straight after the way a new folder is.
+    ///
+    /// **A copy, and recorded as one**: `Ctrl+Z` removes what it made and
+    /// nothing else, and the template itself is never touched.
+    fn new_from_template(&mut self, template: PathBuf) {
+        let into = self.panes.focused().path.clone();
+        let took = self.edits.paste_all(vec![template], into, false, &self.jobs);
+        if took {
+            self.edits.naming_owed = true;
+        }
+        self.said_it_is_busy(took);
+    }
+
+    /// Starts the job that lists the templates directory, for the menu's New
+    /// from template row.
+    ///
+    /// **When the row opens, not when the menu does**, for the reason Open
+    /// with's job waits: the menu is usually opened to do something else, and a
+    /// file dropped into the directory a moment ago should be on the list —
+    /// which a list cached at start-up would not have.
+    fn list_the_templates(&mut self) {
+        let sender = self.replies.templates_tx.clone();
+        let wake = self.waker.handle();
+        let cancel = sk_util::Cancel::new();
+        if let Some(previous) = self.menu_job.replace(cancel.clone()) {
+            previous.cancel();
+        }
+        self.jobs.pool.spawn(sk_util::Lane::Parallel, cancel, move |cancel| {
+            let dir = sk_desktop::places::templates();
+            let files = dir.as_deref().map(|dir| templates_in(dir, cancel)).unwrap_or_default();
+            if !cancel.is_cancelled() && sender.send(crate::menu::Templates { dir, files }).is_ok()
+            {
+                wake.wake();
+            }
+        });
+    }
+
+    /// Takes delivery of what the templates directory holds.
+    fn drain_templates(&mut self) {
+        while let Ok(found) = self.replies.templates_rx.try_recv() {
+            self.menu_job = None;
+            if self.menu.as_mut().is_some_and(|menu| menu.templates_found(found)) {
+                self.dirty = true;
+            }
+        }
+    }
+
     /// Starts renaming whatever the cursor is on.
     pub(crate) fn start_rename(&mut self) {
         self.claim_keyboard(Claim::Naming);
@@ -3315,11 +3469,20 @@ impl App {
         // **The second press is the fast path, not the mechanism.** A person who
         // knows what they are doing presses Delete twice; the panel is what makes
         // that safe for everybody else, and it is what a pointer answers.
-        if self.erasing.as_ref().is_some_and(|asking| asking.paths == paths && asking.forever) {
+        if self
+            .erasing
+            .as_ref()
+            .is_some_and(|asking| asking.paths == paths && asking.ask == crate::view::Ask::Forever)
+        {
             self.answer_the_question();
             return;
         }
-        self.erasing = Some(Erasing { paths, on: Confirm::Cancel, forever: true });
+        self.erasing = Some(Erasing {
+            paths,
+            on: Confirm::Cancel,
+            ask: crate::view::Ask::Forever,
+            holds: None,
+        });
         self.dirty = true;
     }
 
@@ -3331,10 +3494,10 @@ impl App {
     pub(crate) fn answer_the_question(&mut self) {
         let Some(asking) = self.erasing.take() else { return };
         self.step_off_the_selection(&asking.paths);
-        let took = if asking.forever {
-            self.edits.erase_all(asking.paths, &self.jobs)
-        } else {
-            self.edits.trash_all(asking.paths, &self.jobs)
+        let took = match asking.ask {
+            crate::view::Ask::Forever => self.edits.erase_all(asking.paths, &self.jobs),
+            crate::view::Ask::Trash => self.edits.trash_all(asking.paths, &self.jobs),
+            crate::view::Ask::Empty => self.edits.empty_all(asking.paths, &self.jobs),
         };
         self.said_it_is_busy(took);
         self.dirty = true;
@@ -3882,9 +4045,17 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let asked = self.erasing.as_ref().is_some_and(|it| it.paths == paths && !it.forever);
+        let asked = self
+            .erasing
+            .as_ref()
+            .is_some_and(|it| it.paths == paths && it.ask == crate::view::Ask::Trash);
         if self.confirm_trash && !asked {
-            self.erasing = Some(Erasing { paths, on: Confirm::Cancel, forever: false });
+            self.erasing = Some(Erasing {
+                paths,
+                on: Confirm::Cancel,
+                ask: crate::view::Ask::Trash,
+                holds: None,
+            });
             self.dirty = true;
             return;
         }
@@ -5498,8 +5669,27 @@ impl App {
                 wake.wake();
             });
         } else {
-            self.read_file_paste(mime, false, generation, into);
+            self.read_file_paste(mime, Verb::Copy, generation, into);
         }
+    }
+
+    /// Links, in the directory being shown, to each file on the clipboard.
+    ///
+    /// **The same read as a paste**, because what is on the clipboard is the
+    /// same question and only what lands differs. The peer's verb is not asked
+    /// for: a link is neither a copy nor a move, which is also why no
+    /// `application/x-kde-cutselection` read is started.
+    pub(crate) fn paste_link(&mut self) {
+        let offered = self.window.clipboard().offered().to_vec();
+        let Some(mime) =
+            Self::PASTE_TYPES.into_iter().find(|want| offered.iter().any(|have| have == want))
+        else {
+            self.clipboard_failed();
+            return;
+        };
+        let generation = self.window.clipboard().generation();
+        let into = self.panes.focused().path.clone();
+        self.read_file_paste(mime, Verb::Link, generation, into);
     }
 
     fn paste_offer_is_current(&mut self, generation: u64) -> bool {
@@ -5518,7 +5708,7 @@ impl App {
         self.dirty = true;
     }
 
-    fn read_file_paste(&mut self, mime: &str, moving: bool, generation: u64, into: PathBuf) {
+    fn read_file_paste(&mut self, mime: &str, verb: Verb, generation: u64, into: PathBuf) {
         let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else {
             self.clipboard_failed();
             return;
@@ -5542,11 +5732,17 @@ impl App {
             if carries_verb && let Some((intent, paths)) = sk_plat::decode_copied_files(&bytes) {
                 let paths: Vec<PathBuf> =
                     paths.into_iter().filter(|path| path.symlink_metadata().is_ok()).collect();
-                let moving = matches!(intent, sk_plat::Intent::Cut);
+                // A link is asked for by the person, so the peer's verb does not
+                // turn it into a move.
+                let verb = match (verb, intent) {
+                    (Verb::Link, _) => Verb::Link,
+                    (_, sk_plat::Intent::Cut) => Verb::Move,
+                    _ => Verb::Copy,
+                };
                 let reply = if paths.is_empty() {
                     Pasted::NotFiles
                 } else {
-                    Pasted::Files(paths, moving, generation, into)
+                    Pasted::Files(paths, verb, generation, into)
                 };
                 if sender.send(reply).is_ok() {
                     wake.wake();
@@ -5569,7 +5765,7 @@ impl App {
             let reply = if paths.is_empty() {
                 Pasted::NotFiles
             } else {
-                Pasted::Files(paths, moving, generation, into)
+                Pasted::Files(paths, verb, generation, into)
             };
             if sender.send(reply).is_ok() {
                 wake.wake();
@@ -9035,6 +9231,9 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
         // nothing — the panel never opens on an empty selection.
         let erasing = self.erasing.as_ref().map_or(0, |asking| asking.paths.len());
         let (panel_area, erase_aim, erasing_on) = self.question_state();
+        // What every trash holds once the sidebar's count has landed, so a
+        // scenario waits for the count rather than guessing how long it takes.
+        let trash_held: u64 = self.sidebar.trashes().iter().map(|(_, held)| held.items).sum();
         let cursor = self
             .panes
             .focused()
@@ -9072,7 +9271,7 @@ pick_up_aim={pick_up_aim} coloured={coloured:?}"
         let raises = format!("{}/{}", self.raises.0, self.raises.1);
         format!(
             "{shape} \
-path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
+path={:?} results={results:?} erasing={erasing} erasing_on={erasing_on} trash_held={trash_held} erase_aim={erase_aim:?} panel_area={panel_area:?} rows={} hidden={} sort={:?} descending={} \
 cursor={cursor:?} cursor_row={cursor_row} \
 selected={} scroll={:.1} loading={} watching={} watch_reason={:?} thumbs_missing={} notice={:?} \
 hover={hover} hover_name={hover_name:?} \
@@ -11421,6 +11620,9 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             Some(crate::menu::Choice::Launch { entry, path }) => {
                 self.start_application(entry, path);
             }
+            Some(crate::menu::Choice::Instantiate { template }) => {
+                self.new_from_template(template);
+            }
             None => {}
         }
         self.place_target = None;
@@ -11460,9 +11662,17 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             }
             _ => None,
         };
+        let lists = self.menu_job.is_none()
+            && matches!(
+                menu.items.get(row).map(|item| &item.kind),
+                Some(crate::menu::Kind::Templates { found: None })
+            );
         self.menu = Some(menu);
         if let Some(path) = asks {
             self.ask_which_applications(path, crate::openers::Asker::Menu);
+        }
+        if lists {
+            self.list_the_templates();
         }
     }
 
@@ -12166,15 +12376,27 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             }
         });
         let progress = edits.progress_line().or(indexing);
-        let doomed: Option<(Vec<String>, usize, bool, bool)> = erasing.as_ref().map(|asking| {
-            let names = asking
-                .paths
-                .iter()
-                .take(crate::view::ERASE_NAMES)
-                .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
-                .collect();
-            (names, asking.paths.len(), asking.on == Confirm::Delete, asking.forever)
-        });
+        let doomed: Option<(Vec<String>, usize, bool, crate::view::Ask)> =
+            erasing.as_ref().map(|asking| {
+                // The Trash question names no files — what goes is everything in
+                // it — so its one line is how much that is, and its count is the
+                // number of things rather than the number of trashes.
+                let (names, total) = match (asking.ask, asking.holds.as_ref()) {
+                    (crate::view::Ask::Empty, Some(held)) => (vec![held.clone()], 0),
+                    _ => (
+                        asking
+                            .paths
+                            .iter()
+                            .take(crate::view::ERASE_NAMES)
+                            .map(|path| {
+                                path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+                            })
+                            .collect(),
+                        asking.paths.len(),
+                    ),
+                };
+                (names, total, asking.on == Confirm::Delete, asking.ask)
+            });
         let dropping = files_drag.as_ref().filter(|drag| drag.active);
         // Only for a drag this window started: a peer's carries paths we have
         // not read and names we would have to invent.

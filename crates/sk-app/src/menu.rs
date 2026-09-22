@@ -60,8 +60,14 @@ pub const ON_ROW: &[&[&str]] = &[
 ];
 
 /// Recoverable entries offer restore rather than mutations of their stored names.
-pub const IN_TRASH: &[&[&str]] =
-    &[&["file.restore"], &["view.quick_look", "file.properties", "file.copy", "file.copy_path"]];
+pub const IN_TRASH: &[&[&str]] = &[
+    &["file.restore"],
+    &["view.quick_look", "file.properties", "file.copy", "file.copy_path"],
+    // **Last and alone**, because it is the one row here that destroys
+    // anything, and it is about the whole Trash rather than the row it opened
+    // over — the panel it opens says how much that is.
+    &["trash.empty"],
+];
 
 /// What a secondary click inside a text preview offers.
 ///
@@ -109,7 +115,7 @@ pub const ON_A_PLACE: &[&[&str]] = &[
 /// window and scrolled; twenty-two still does, at 125%, so the frame of a
 /// scrolled menu is still this one.
 pub const ON_BACKGROUND: &[&[&str]] = &[
-    &["file.new_folder", "file.paste"],
+    &["file.new_folder", "file.new_file", FROM_TEMPLATE, "file.paste", "file.paste_link"],
     &["edit.undo", "edit.redo", "menu.operation"],
     &["select.all", "view.filter", "go.search", "go.search_everywhere", "menu.index"],
     &["menu.view", "menu.sort", "menu.group"],
@@ -256,6 +262,26 @@ pub const OPEN_WITH: &str = "menu.open_with";
 /// by all three, because three copies of a string are three ways to drift.
 pub const OPEN_WITH_COMMAND: &str = "file.open_with";
 
+/// The New from template row's identifier, which doubles as the catalogue key
+/// for its name. Not a [`Submenu`]: like [`OPEN_WITH`], its rows are what a job
+/// finds — the files in the templates directory.
+pub const FROM_TEMPLATE: &str = "menu.from_template";
+
+/// The command the New from template row dims with: both make a file here, and
+/// a row that could not is dimmed for the same reason the command is.
+pub const FROM_TEMPLATE_COMMAND: &str = "file.new_file";
+
+/// What the job that lists the templates directory found.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Templates {
+    /// The directory, where the account has one — so an empty list can say
+    /// where to put a file for it to appear, which is the whole of how a person
+    /// learns what the row is for.
+    pub dir: Option<PathBuf>,
+    /// The files in it, in the order the row lists them.
+    pub files: Vec<PathBuf>,
+}
+
 /// The submenu a table's identifier names, if it names one.
 #[must_use]
 pub fn submenu(id: &str) -> Option<&'static Submenu> {
@@ -289,6 +315,17 @@ pub enum Kind {
         entry: DesktopEntry,
         /// The file.
         path: PathBuf,
+    },
+    /// The New from template row, whose rows arrive late for the reason Open
+    /// with's do: listing a directory is a job.
+    Templates {
+        /// What the job found, once it has.
+        found: Option<Templates>,
+    },
+    /// One template on the New from template submenu.
+    Instantiate {
+        /// The file a new one is copied from.
+        template: PathBuf,
     },
     /// A row that says something and does nothing: `Reading…`, or that nothing
     /// installed opens the file. Never enabled.
@@ -325,13 +362,18 @@ pub enum Choice {
         /// The file.
         path: PathBuf,
     },
+    /// Make a file here from this template.
+    Instantiate {
+        /// The template.
+        template: PathBuf,
+    },
 }
 
 impl Item {
     /// Whether choosing it opens a submenu rather than running something.
     #[must_use]
     pub fn opens(&self) -> bool {
-        matches!(self.kind, Kind::Submenu(_) | Kind::OpenWith { .. })
+        matches!(self.kind, Kind::Submenu(_) | Kind::OpenWith { .. } | Kind::Templates { .. })
     }
 
     /// What choosing it does — nothing for a row that opens, says, or cannot run.
@@ -345,7 +387,10 @@ impl Item {
             Kind::Launch { entry, path } => {
                 Some(Choice::Launch { entry: entry.clone(), path: path.clone() })
             }
-            Kind::Submenu(_) | Kind::OpenWith { .. } | Kind::Note => None,
+            Kind::Instantiate { template } => {
+                Some(Choice::Instantiate { template: template.clone() })
+            }
+            Kind::Submenu(_) | Kind::OpenWith { .. } | Kind::Templates { .. } | Kind::Note => None,
         }
     }
 
@@ -360,9 +405,14 @@ impl Item {
             Kind::OpenWith { found: Some(found), .. } => {
                 found.rows.iter().map(|entry| entry.id.as_str()).collect()
             }
+            Kind::Templates { found: Some(found) } => {
+                found.files.iter().filter_map(|file| file.to_str()).collect()
+            }
             Kind::OpenWith { found: None, .. }
+            | Kind::Templates { found: None }
             | Kind::Command
             | Kind::Launch { .. }
+            | Kind::Instantiate { .. }
             | Kind::Note => Vec::new(),
         }
     }
@@ -438,6 +488,16 @@ fn row<C>(id: &str, registry: &Registry<C>, enabled: &impl Fn(&str) -> bool) -> 
             kind: Kind::OpenWith { path: PathBuf::new(), found: None },
         });
     }
+    if id == FROM_TEMPLATE {
+        return Some(Item {
+            id: id.to_owned(),
+            name: i18n::lookup(FROM_TEMPLATE).to_owned(),
+            keys: String::new(),
+            enabled: enabled(FROM_TEMPLATE_COMMAND),
+            starts_group: false,
+            kind: Kind::Templates { found: None },
+        });
+    }
     if let Some(sub) = submenu(id) {
         return Some(Item {
             id: id.to_owned(),
@@ -485,6 +545,53 @@ fn applications(answer: Option<&Handlers>, at: Point) -> Menu {
                 enabled: true,
                 starts_group: false,
                 kind: Kind::Launch { entry: entry.clone(), path: found.path.clone() },
+            })
+            .collect(),
+    };
+    Menu { at, items, active: None, scroll: 0, sub: None }
+}
+
+/// The New from template submenu, in whichever of its three states the answer
+/// is in.
+///
+/// **A row that names no template says where one would come from.** An empty
+/// list is how most accounts start, and a note that only said *none* would
+/// leave the row a mystery; naming the directory is the whole instruction.
+fn templates(answer: Option<&Templates>, at: Point) -> Menu {
+    let note = |id: &str, name: String| Item {
+        id: id.to_owned(),
+        name,
+        keys: String::new(),
+        enabled: false,
+        starts_group: false,
+        kind: Kind::Note,
+    };
+    let items = match answer {
+        None => vec![note("menu.reading", i18n::lookup("menu.reading").to_owned())],
+        Some(Templates { dir: None, .. }) => {
+            vec![note(
+                "menu.no_templates_folder",
+                i18n::lookup("menu.no_templates_folder").to_owned(),
+            )]
+        }
+        Some(Templates { dir: Some(dir), files }) if files.is_empty() => {
+            vec![note("menu.no_templates", i18n::format("menu.no_templates", &[&dir.display()]))]
+        }
+        Some(found) => found
+            .files
+            .iter()
+            .map(|file| Item {
+                id: file.display().to_string(),
+                // The stem, because the row is a *kind* of document — `Letter`,
+                // not `Letter.odt` — and the copy keeps the extension anyway.
+                name: file.file_stem().map_or_else(
+                    || file.display().to_string(),
+                    |it| it.to_string_lossy().into_owned(),
+                ),
+                keys: String::new(),
+                enabled: true,
+                starts_group: false,
+                kind: Kind::Instantiate { template: file.clone() },
             })
             .collect(),
     };
@@ -557,7 +664,8 @@ impl Menu {
                 menu
             }),
             Kind::OpenWith { found, .. } => Some(applications(found.as_ref(), self.at)),
-            Kind::Command | Kind::Launch { .. } | Kind::Note => None,
+            Kind::Templates { found } => Some(templates(found.as_ref(), self.at)),
+            Kind::Command | Kind::Launch { .. } | Kind::Instantiate { .. } | Kind::Note => None,
         };
         let Some(menu) = menu else { return false };
         self.active = Some(owner);
@@ -615,6 +723,28 @@ impl Menu {
         true
     }
 
+    /// Takes delivery of what the templates directory holds. Whether this menu
+    /// had a New from template row still waiting for it.
+    pub fn templates_found(&mut self, found: Templates) -> bool {
+        let Some(index) =
+            self.items.iter().position(|item| matches!(item.kind, Kind::Templates { found: None }))
+        else {
+            return false;
+        };
+        // An open submenu on the row is showing `Reading…`, and one a key opened
+        // was promised its first row lit — the rule Open with keeps.
+        if let Some(sub) = self.sub.as_mut()
+            && sub.owner == index
+        {
+            sub.menu = templates(Some(&found), self.at);
+            if sub.from.is_none() {
+                sub.menu.step(true);
+            }
+        }
+        self.items[index].kind = Kind::Templates { found: Some(found) };
+        true
+    }
+
     /// Asks again which rows can run, for every row of this menu and of the
     /// submenu it has open. Whether anything changed.
     ///
@@ -632,7 +762,8 @@ impl Menu {
                     sub.groups.iter().flat_map(|group| group.iter()).any(|child| enabled(child))
                 }
                 Kind::OpenWith { .. } => enabled(OPEN_WITH_COMMAND),
-                Kind::Launch { .. } => true,
+                Kind::Templates { .. } => enabled(FROM_TEMPLATE_COMMAND),
+                Kind::Launch { .. } | Kind::Instantiate { .. } => true,
                 Kind::Note => false,
             };
             moved |= item.enabled != now;
@@ -877,8 +1008,9 @@ mod tests {
     use sk_plat::{Point, Size};
 
     use super::{
-        COLOUR, Choice, IN_A_LOOK, IN_TRASH, Item, Kind, Menu, ON_A_PLACE, ON_BACKGROUND, ON_ROW,
-        OPEN_WITH, SUBMENUS, Sub, height, inside, place, place_beside, row_tops, submenu,
+        COLOUR, Choice, FROM_TEMPLATE, IN_A_LOOK, IN_TRASH, Item, Kind, Menu, ON_A_PLACE,
+        ON_BACKGROUND, ON_ROW, OPEN_WITH, SUBMENUS, Sub, height, inside, place, place_beside,
+        row_tops, submenu,
     };
     use crate::layout::Area;
     use crate::openers::Handlers;
@@ -1007,7 +1139,8 @@ mod tests {
         for table in [ON_ROW, IN_TRASH, IN_A_LOOK, ON_A_PLACE, ON_BACKGROUND] {
             for id in table.iter().flat_map(|group| group.iter()) {
                 if id.starts_with("menu.") {
-                    assert!(*id == OPEN_WITH || submenu(id).is_some(), "`{id}` opens nothing");
+                    let data = *id == OPEN_WITH || *id == FROM_TEMPLATE;
+                    assert!(data || submenu(id).is_some(), "`{id}` opens nothing");
                 }
             }
         }
@@ -1019,10 +1152,56 @@ mod tests {
         }
         let mut ids: Vec<&str> = SUBMENUS.iter().map(|sub| sub.id).collect();
         ids.push(OPEN_WITH);
+        ids.push(FROM_TEMPLATE);
         let count = ids.len();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "two submenus share an identifier");
+    }
+
+    /// New from template says `Reading…`, then lists each file by its stem —
+    /// and when there is nothing to list, says where a file would have to go,
+    /// or that there is nowhere.
+    #[test]
+    fn the_templates_row_reads_then_lists_or_says_where_templates_go() {
+        let registry = crate::commands::registry();
+        let mut menu =
+            super::build(ON_BACKGROUND, &registry, Point::new(0.0, 0.0), |_| true).unwrap();
+        let row = menu.items.iter().position(|item| item.id == FROM_TEMPLATE).unwrap();
+        assert!(menu.expand(row, &registry, |_| true, None));
+        assert!(matches!(menu.sub.as_ref().unwrap().menu.items[0].kind, Kind::Note));
+
+        let letter = PathBuf::from("/home/tester/Templates/Letter.odt");
+        let found = super::Templates {
+            dir: Some(PathBuf::from("/home/tester/Templates")),
+            files: vec![letter.clone()],
+        };
+        assert!(menu.templates_found(found));
+        let sub = &menu.sub.as_ref().unwrap().menu;
+        assert_eq!(sub.items.len(), 1, "the open submenu was not rebuilt");
+        assert_eq!(sub.items[0].name, "Letter", "a template is named by its stem");
+        assert_eq!(sub.active, Some(0), "a submenu a key opened has no row lit");
+        match sub.items[0].choice() {
+            Some(Choice::Instantiate { template }) => assert_eq!(template, letter),
+            _ => panic!("choosing a template does not make a file from it"),
+        }
+        assert!(!menu.templates_found(super::Templates { dir: None, files: Vec::new() }));
+
+        let empty = super::templates(
+            Some(&super::Templates { dir: Some(PathBuf::from("/t")), files: Vec::new() }),
+            Point::new(0.0, 0.0),
+        );
+        assert!(empty.items[0].name.contains("/t"), "{:?} does not say where", empty.items[0].name);
+        assert!(!empty.items[0].enabled);
+        let nowhere = super::templates(
+            Some(&super::Templates { dir: None, files: Vec::new() }),
+            Point::new(0.0, 0.0),
+        );
+        assert!(!nowhere.items[0].enabled);
+        assert_ne!(
+            nowhere.items[0].name, empty.items[0].name,
+            "no folder and an empty one read alike"
+        );
     }
 
     /// A lookup that misses returns its key, so a row would read `menu.colour`.

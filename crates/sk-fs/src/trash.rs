@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags};
@@ -323,6 +323,23 @@ fn origin(record: &str, root: &Path) -> Result<PathBuf, Problem> {
     Ok(resolved)
 }
 
+/// Whether `root` is a trash this user's desktop would restore from.
+///
+/// The home one, or one of the two the specification allows on a volume. A
+/// directory that merely looks like a trash is refused, because everything that
+/// reads a trash here also writes to it or erases inside it.
+fn recognised(root: &Path) -> Result<(), Problem> {
+    let mounts = mount_paths();
+    let valid_volume = mount_of(root, &mounts).is_some_and(|top| {
+        root == top.join(format!(".Trash-{}", uid()))
+            || shared(top).is_some_and(|shared| root == shared)
+    });
+    if absolute(root)? != absolute(&home()?)? && !valid_volume {
+        return Err(failure(root, "not a recognized trash location"));
+    }
+    Ok(())
+}
+
 /// Validate metadata for a direct trash child without following information-file symlinks.
 pub fn read(stored: &Path) -> Result<Entry, Problem> {
     let files = stored.parent().ok_or_else(|| failure(stored, "no trash directory"))?;
@@ -330,15 +347,7 @@ pub fn read(stored: &Path) -> Result<Entry, Problem> {
         return Err(failure(stored, "not a trash entry"));
     }
     let root = files.parent().ok_or_else(|| failure(stored, "no trash root"))?;
-    let home_root = absolute(&home()?)?;
-    let mounts = mount_paths();
-    let valid_volume = mount_of(root, &mounts).is_some_and(|top| {
-        root == top.join(format!(".Trash-{}", uid()))
-            || shared(top).is_some_and(|shared| root == shared)
-    });
-    if absolute(root)? != home_root && !valid_volume {
-        return Err(failure(stored, "not a recognized trash location"));
-    }
+    recognised(root).map_err(|problem| failure(stored, problem.detail()))?;
     let storage = Storage::open(root, false)?;
     let mut name = stored.file_name().ok_or_else(|| failure(stored, "no name"))?.to_owned();
     name.push(".trashinfo");
@@ -421,6 +430,159 @@ pub fn put_back(entry: &Entry) -> Result<(), Problem> {
         return Err(crate::ops::problem(error, &entry.original));
     }
     Ok(())
+}
+
+/// What a trash is holding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Held {
+    /// How many entries somebody put there, counted at the top level.
+    ///
+    /// The top level and not the leaves: one folder of four hundred photographs
+    /// is *one* thing a person threw away, and it is the number the question
+    /// "empty this?" is asking about.
+    pub items: u64,
+    /// How many bytes everything under them comes to.
+    pub bytes: u64,
+}
+
+impl Held {
+    /// Whether there is anything in it.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.items != 0
+    }
+}
+
+/// How deep a walk of a trash goes before it calls the tree a cycle.
+///
+/// The same ceiling [`crate::copy`] uses, for the same reason: a hard link cycle
+/// is not expressible, but a bind mount inside a trash is.
+const MAX_DEPTH: u32 = 128;
+
+/// What `files` is holding, walked to the leaves.
+///
+/// **Runs on a job**, and answers with what it managed to count rather than with
+/// a failure: this is a figure beside a row, and a trash with one unreadable
+/// directory in it is still a trash whose size is worth saying.
+#[must_use]
+pub fn held(files: &Path, cancel: &sk_util::Cancel) -> Held {
+    let Ok(fd) = rustix::fs::open(
+        files,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return Held::default();
+    };
+    let Ok(dir) = rustix::fs::Dir::read_from(&fd) else { return Held::default() };
+    let mut total = Held::default();
+    for entry in dir.flatten() {
+        if cancel.is_cancelled() {
+            return total;
+        }
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        total.items += 1;
+        total.bytes += bytes_under(&fd, OsStr::from_bytes(name), cancel, 0);
+    }
+    total
+}
+
+/// How many bytes `name` under `parent` accounts for.
+fn bytes_under(
+    parent: &impl std::os::fd::AsFd,
+    name: &OsStr,
+    cancel: &sk_util::Cancel,
+    depth: u32,
+) -> u64 {
+    if depth > MAX_DEPTH || cancel.is_cancelled() {
+        return 0;
+    }
+    let Ok(stat) = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) else { return 0 };
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::Directory {
+        return stat.st_size.unsigned_abs();
+    }
+    let Ok(fd) = rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return 0;
+    };
+    let Ok(dir) = rustix::fs::Dir::read_from(&fd) else { return 0 };
+    let mut bytes = 0;
+    for entry in dir.flatten() {
+        let child = entry.file_name().to_bytes();
+        if child == b"." || child == b".." {
+            continue;
+        }
+        bytes += bytes_under(&fd, OsStr::from_bytes(child), cancel, depth + 1);
+    }
+    bytes
+}
+
+/// Erases everything in `files` and every record beside it.
+///
+/// **The contents and not the directories.** `files` and `info` stay, because
+/// [`put_back`] — the inverse of a restore that is already on the undo stack —
+/// opens them without creating them, and a trash emptied down to its own root
+/// would turn every one of those entries into a `TrashUnavailable` about a path
+/// nobody has looked at. Undoing a restore after an Empty Trash puts the file
+/// back into an empty trash, which is exactly what it says it does.
+///
+/// **The records go too, and they go second.** A record whose file is gone has
+/// nothing left to restore; a file whose record is gone has lost the one thing
+/// that says where it came from. So an interrupted empty leaves the first kind
+/// rather than the second — and emptying again takes what is left, because both
+/// directories are walked whole.
+///
+/// **Runs on a job.**
+pub fn empty(files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
+    if files.file_name() != Some(OsStr::new("files")) {
+        return Err(failure(files, "not a trash's files directory"));
+    }
+    let root = files.parent().ok_or_else(|| failure(files, "no trash root"))?;
+    recognised(root)?;
+    let storage = Storage::open(root, false)?;
+    for (directory, at) in
+        [(&storage.files, files.to_path_buf()), (&storage.info, root.join("info"))]
+    {
+        for name in children(directory)? {
+            if cancel.is_cancelled() {
+                return Err(failure(files, "cancelled"));
+            }
+            crate::copy::remove_tree(&at.join(&name), cancel)?;
+        }
+    }
+    Ok(())
+}
+
+/// Every name in an already-open directory, read before anything is removed.
+///
+/// Read first rather than removed as the walk goes: `getdents64` over a
+/// directory being unlinked from is what the manual page calls unspecified, and
+/// a trash half emptied for that reason is a trash whose second Empty finishes
+/// the job silently.
+fn children(directory: &impl std::os::fd::AsFd) -> Result<Vec<OsString>, Problem> {
+    let fd = rustix::fs::openat(
+        directory,
+        OsStr::new("."),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| failure(Path::new("."), error))?;
+    let dir = rustix::fs::Dir::read_from(&fd).map_err(|error| failure(Path::new("."), error))?;
+    let mut names = Vec::new();
+    for entry in dir {
+        let entry = entry.map_err(|error| failure(Path::new("."), error))?;
+        let raw = entry.file_name().to_bytes();
+        if raw != b"." && raw != b".." {
+            names.push(OsStr::from_bytes(raw).to_owned());
+        }
+    }
+    Ok(names)
 }
 
 /// Whether a path lies in a trash namespace. Pure path inspection for UI policy.
