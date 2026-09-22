@@ -304,6 +304,7 @@ action.clear_selection = Clear selection
 action.new_folder = New folder
 action.rename = Rename
 action.open_with = Open with…
+action.open_always = Always open with…
 action.properties = Properties
 action.terminal = Open a terminal here
 action.duplicate = Duplicate
@@ -597,6 +598,10 @@ error.no_terminal = {0} needs a terminal, and none was found. Set $TERMINAL.
 error.no_terminal_at_all = No terminal was found. Set $TERMINAL to the one you use.
 notice.terminal = Opening a terminal
 notice.opening = Opening with {0}
+# The Open With panel's subtitle when a choice will be written to
+# mimeapps.list rather than opening this one file. {0} is the type.
+openers.always = Always open {0} with
+notice.default_set = {0} files now open with {1}
 
 # The clipboard.
 action.copy = Copy

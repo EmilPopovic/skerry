@@ -228,13 +228,21 @@ the first bug report on one of them.
 - **Middle click does nothing** — no open-in-tab, no PRIMARY paste. A drag says
   whether it will move or copy, but there is no right-drag menu, no link action
   and no drop onto an executable.
-- **No "always open with this."** Open With opens once. The only default this
-  writes is the folder handler, from the settings panel.
+- **"Always open with this" writes one line and nothing else.** The choice goes
+  into `$XDG_CONFIG_HOME/mimeapps.list` for the type under the cursor, preserving
+  every line another program wrote and refusing a file whose syntax Skerry cannot
+  re-emit. There is no editor for the list afterwards: undoing it is choosing
+  another application, and the folder handler has its own row in the settings
+  panel.
 - **No recents, no path completion.** `Ctrl+L` takes a path and that is all it does.
 - **Search has no ignore rules**, so a search over a checkout walks `.git`, and
   there are no extension facets. Both are M4.
-- **No desktop notification** when a copy finishes with the window unfocused. The
-  result and its warnings stay in the app.
+- **A desktop notification has no buttons.** An operation that ran longer than
+  eight seconds and finished while the window did not have the keyboard sends one
+  through `org.freedesktop.Notifications`; a *Show in folder* button on it would
+  need `ActionInvoked`, which is a signal, and there is no subscribing bus
+  connection yet. A session with no notification daemon is probed for and gets
+  the status line, which is where the warnings stay either way.
 - **Fuzzing covers tar, ZIP and the D-Bus wire only**, as bounded mutation
   campaigns rather than coverage-guided fuzzing
   ([ADR 0040](docs/adr/0040-bounded-parser-mutation-campaigns.md)). The markdown,

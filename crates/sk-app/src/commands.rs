@@ -559,6 +559,17 @@ fn edit(registry: &mut Registry<App>) {
             run: App::open_with,
         },
         CommandSpec {
+            id: "file.open_always",
+            name: "action.open_always",
+            group: Group::File,
+            // The same letter as Open with, one modifier further out — the
+            // family `Ctrl+Alt` already holds for the second-order form of a
+            // thing: `Ctrl+Alt+R` beside Restore, `Ctrl+Alt+F` beside Find.
+            keys: &["ctrl+alt+o"],
+            enabled: |app: &App| app.panes.focused().focused().is_some(),
+            run: App::open_always,
+        },
+        CommandSpec {
             id: "file.properties",
             name: "action.properties",
             group: Group::File,
@@ -1289,11 +1300,13 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
         crate::menu::ON_A_PLACE,
     ] {
         for id in groups.iter().flat_map(|group| group.iter()) {
-            // A row that opens a submenu reaches everything on it, and the Open
-            // with row reaches what its command would have asked.
+            // A row that opens a submenu reaches everything on it. Open with
+            // reaches what its command would have asked, and — through the last
+            // row of its list — the same question asked for the whole type.
             if *id == crate::menu::OPEN_WITH {
                 reach
                     .push((crate::menu::OPEN_WITH_COMMAND, "the context menu's Open with submenu"));
+                reach.push((crate::menu::OPEN_WITH_TAIL, "the last row of the Open with submenu"));
             } else if let Some(sub) = crate::menu::submenu(id) {
                 for child in sub.groups.iter().flat_map(|group| group.iter()) {
                     reach.push((child, "a submenu of the context menu"));

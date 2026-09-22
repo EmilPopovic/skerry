@@ -14,6 +14,12 @@
 //! alone rather than rewritten. The failure mode of getting that wrong is
 //! somebody's default browser.
 //!
+//! **Two callers, one function.** The settings panel's folder row was the first
+//! and asks about `inode/directory`; *Always open with* asks about whatever the
+//! entry under the cursor turned out to be. The type was a parameter from the
+//! first commit, so the second caller adds no file handling — which is why the
+//! tests below round-trip an arbitrary type rather than the one the panel uses.
+//!
 //! The grammar is the desktop-entry specification's own key-value form: `#`
 //! comments, `[Section]` headers, and `key=value` under them. Nothing else is
 //! legal, and anything else is why [`Refused::Unreadable`] exists.
@@ -71,26 +77,39 @@ pub fn is_default(mime: &str, id: &str) -> bool {
 /// preference without discarding what the person had before it — which is what
 /// [`clear_default`] restores them to.
 pub fn set_default(mime: &str, id: &str) -> Result<PathBuf, Refused> {
-    edit(mime, |ids| {
-        let mut out = vec![id.to_owned()];
-        out.extend(ids.iter().filter(|it| *it != id).cloned());
-        out
-    })
+    let path = place().ok_or(Refused::NoConfigHome)?;
+    edit_at(&path, mime, |ids| preferring(ids, id))
 }
 
 /// Stops `id` being the user's default for `mime`. The file, or why not.
 pub fn clear_default(mime: &str, id: &str) -> Result<PathBuf, Refused> {
-    edit(mime, |ids| ids.iter().filter(|it| *it != id).cloned().collect())
+    let path = place().ok_or(Refused::NoConfigHome)?;
+    edit_at(&path, mime, |ids| without(ids, id))
 }
 
-/// Reads the file, applies `change` to the ids under `mime`, and writes it back.
-fn edit(mime: &str, change: impl Fn(&[String]) -> Vec<String>) -> Result<PathBuf, Refused> {
-    let path = place().ok_or(Refused::NoConfigHome)?;
-    let text = crate::read(&path).unwrap_or_default();
+/// `ids` with `id` first and named once.
+fn preferring(ids: &[String], id: &str) -> Vec<String> {
+    let mut out = vec![id.to_owned()];
+    out.extend(ids.iter().filter(|it| *it != id).cloned());
+    out
+}
+
+/// `ids` without `id`.
+fn without(ids: &[String], id: &str) -> Vec<String> {
+    ids.iter().filter(|it| *it != id).cloned().collect()
+}
+
+/// Reads `path`, applies `change` to the ids under `mime`, and writes it back.
+fn edit_at(
+    path: &std::path::Path,
+    mime: &str,
+    change: impl Fn(&[String]) -> Vec<String>,
+) -> Result<PathBuf, Refused> {
+    let text = crate::read(path).unwrap_or_default();
     let lines = parse(&text)?;
     let ids = change(&entry(&lines, mime));
     let out = render(&rewritten(lines, mime, &ids));
-    if sk_fs::atomically(&path, &out) { Ok(path) } else { Err(Refused::NotWritten) }
+    if sk_fs::atomically(path, &out) { Ok(path.to_path_buf()) } else { Err(Refused::NotWritten) }
 }
 
 /// One line of the file, kept in the shape that lets it be re-emitted verbatim.
@@ -230,11 +249,29 @@ fn render(lines: &[Line]) -> String {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{DEFAULTS, Refused, entry, first_default, parse, render, rewritten};
+    use super::{
+        DEFAULTS, Refused, edit_at, entry, first_default, parse, preferring, render, rewritten,
+        without,
+    };
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("skerry-mimeapps-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch directory");
+        root
+    }
 
     fn round(text: &str, mime: &str, ids: &[&str]) -> String {
         let lines = parse(text).expect("a file this grammar reads");
         let ids: Vec<String> = ids.iter().map(|it| (*it).to_owned()).collect();
+        render(&rewritten(lines, mime, &ids))
+    }
+
+    /// What [`set_default`](super::set_default) does, without the file.
+    fn prefer(text: &str, mime: &str, id: &str) -> String {
+        let lines = parse(text).expect("a file this grammar reads");
+        let ids = preferring(&entry(&lines, mime), id);
         render(&rewritten(lines, mime, &ids))
     }
 
@@ -321,6 +358,84 @@ mod tests {
             parse("[Default Applications]\nthis is not a pair\n"),
             Err(Refused::Unreadable(2))
         );
+    }
+
+    /// The type is a parameter, and the settings panel's `inode/directory` is
+    /// one value of it. Every claim the folder row rests on holds for a type
+    /// somebody's cursor happened to be over.
+    #[test]
+    fn an_arbitrary_type_round_trips_like_the_folder_one_does() {
+        let before = "# a note somebody left\n\
+                      [Default Applications]\n\
+                      inode/directory=nautilus.desktop\n\
+                      text/markdown=gedit.desktop;kate.desktop\n\
+                      \n\
+                      [Added Associations]\n\
+                      text/markdown=gedit.desktop;\n";
+        let after = prefer(before, "text/markdown", "helix.desktop");
+        for line in before.lines().filter(|it| *it != "text/markdown=gedit.desktop;kate.desktop") {
+            assert!(after.contains(line), "the rewrite lost {line:?}");
+        }
+        let lines = parse(&after).expect("a file we just wrote");
+        assert_eq!(
+            entry(&lines, "text/markdown"),
+            ["helix.desktop", "gedit.desktop", "kate.desktop"],
+            "the choice is first and what was there is behind it:\n{after}"
+        );
+        assert_eq!(
+            first_default(&lines, "inode/directory"),
+            Some("nautilus.desktop".to_owned()),
+            "another type moved"
+        );
+    }
+
+    /// Choosing the application that is already first is a write that changes
+    /// nothing, and choosing it twice does not name it twice.
+    #[test]
+    fn choosing_the_same_application_again_is_idempotent() {
+        let ids = vec!["one.desktop".to_owned(), "two.desktop".to_owned()];
+        assert_eq!(preferring(&ids, "one.desktop"), ids);
+        assert_eq!(
+            preferring(&preferring(&ids, "two.desktop"), "two.desktop"),
+            ["two.desktop", "one.desktop"]
+        );
+        assert_eq!(without(&ids, "one.desktop"), ["two.desktop"]);
+        assert_eq!(without(&without(&ids, "one.desktop"), "one.desktop"), ["two.desktop"]);
+    }
+
+    /// The whole path, against a real file: a write lands, and a file holding a
+    /// line this grammar cannot re-emit is refused with its number and left
+    /// exactly as it was.
+    #[test]
+    fn a_file_we_cannot_reemit_is_left_on_disk_untouched() {
+        let root = scratch("write");
+        let path = root.join("mimeapps.list");
+
+        std::fs::write(&path, "[Default Applications]\nimage/png=eog.desktop\n").expect("write");
+        let written = edit_at(&path, "image/png", |ids| preferring(ids, "gimp.desktop"))
+            .expect("a file this grammar reads");
+        assert_eq!(written, path);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[Default Applications]\nimage/png=gimp.desktop;eog.desktop\n"
+        );
+
+        let broken = "[Default Applications]\nimage/png=gimp.desktop\nthis is not a pair\n";
+        std::fs::write(&path, broken).expect("write");
+        assert_eq!(
+            edit_at(&path, "image/png", |ids| preferring(ids, "krita.desktop")),
+            Err(Refused::Unreadable(3))
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), broken, "it was rewritten");
+
+        // A file that is not there yet is not a refusal: it is the first write.
+        std::fs::remove_file(&path).expect("remove");
+        edit_at(&path, "image/png", |ids| preferring(ids, "gimp.desktop")).expect("a fresh file");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "[Default Applications]\nimage/png=gimp.desktop\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Section names are case-insensitive in the specification, and a file

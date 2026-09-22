@@ -42,7 +42,7 @@ portability contract, and each row has a test that forces the fallback path.
 | Landlock, seccomp | Kernel version + `prctl` probe | Helper processes run unsandboxed **and log a warning**; never silently unsandboxed |
 | `io_uring` | Probe, and only used if it measurably wins | Threaded syscalls, which is the default path anyway |
 | `fanotify` with FID | Requires privilege | inotify, which is the default path |
-| A notification daemon | D-Bus name | In-app toasts only |
+| A notification daemon | `NameHasOwner`, then `ListActivatableNames`, on the session bus — asked once and cached, because `GetServerInformation` would *start* a daemon a probe has no business starting | The status line and nothing else. An operation that finished unfocused says so where it always did, and the log names the absent facility once |
 | `ffmpeg` / document renderer helpers | `PATH` lookup at first use | That preview kind is unavailable; nothing else changes |
 | `wl_pointer.axis_source` and `.axis_stop` | The events arrive, or they do not | No flick: a touchpad's deltas are still tracked 1:1, and a gesture that ends has no end to detect, so the list stops where the fingers stopped. **X11 is this case permanently** — core buttons 4 to 7 are notches with no source and no end |
 
@@ -54,8 +54,8 @@ Two rules govern this table:
    developer tooling, and the `tracing` instrumentation.
 2. **Every fallback path is tested.** CI forces each degradation with an environment
    override rather than trusting that the code compiles. The comma-separated names are
-   `vulkan`, `portal`, `udisks2`, `watch`, `helpers`, and any single helper by program
-   name. **`landlock` is deliberately not one of them**: confinement is mandatory, and
+   `vulkan`, `portal`, `udisks2`, `watch`, `notifications`, `helpers`, and any single
+   helper by program name. **`landlock` is deliberately not one of them**: confinement is mandatory, and
    [ADR 0037](adr/0037-runtime-degradation-is-visible-and-injectable.md) makes the
    override able to simulate an absent optional facility and unable to relax a required
    one. A scenario asserts the *visible* outcome of the two a person would notice — an
