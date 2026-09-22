@@ -510,3 +510,412 @@ mod tests {
         assert!(images.insert(ImageKey(9999), 8, 8, &pixels(8, 8)).is_none());
     }
 }
+
+/// The icon atlas: four bands of equal slots in one texture.
+///
+/// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
+/// and it is not [`Images`].** That grid is 128×128 slots keyed by path,
+/// modification time and size, and its whole argument rests on one sentence: a
+/// thumbnail is one size. An icon is not. It is keyed by theme, name, size and
+/// scale, and it is drawn from 16 device pixels in a details row to something
+/// near 92 in a grid cell at 200%; the freedesktop per-size directories exist
+/// precisely because 16-pixel art is not 48-pixel art downscaled. A 16-pixel icon
+/// in a 64 KiB slot spends 1/64th of the pixels it paid for.
+///
+/// So: one 1024×1024 RGBA8 texture — 4 MiB — cut into four equal bands of 256
+/// rows. **The slot count quadruples as the side halves**, which is the right way
+/// round: a details list shows the most rows and draws the smallest mark, a grid
+/// draws the largest mark in the fewest cells.
+///
+/// | Band | Slot | Slots | A slot | The band |
+/// | --- | --- | --- | --- | --- |
+/// | 128 device px | 128×128 | 16 | 64 KiB | 1 MiB |
+/// | 64 device px | 64×64 | 64 | 16 KiB | 1 MiB |
+/// | 32 device px | 32×32 | 256 | 4 KiB | 1 MiB |
+/// | 16 device px | 16×16 | 1,024 | 1 KiB | 1 MiB |
+///
+/// Eviction and the upload budget are [`Images`]', unchanged: least recently
+/// drawn, never a slot drawn this frame, and the same 256 KiB a frame. At the 16
+/// band a slot is 1 KiB, so 256 icons arrive inside the budget that carries four
+/// thumbnails.
+///
+/// **One texel until the first icon**, like the thumbnail atlas — a window under
+/// `icons = marks` allocates none of the four megabytes.
+#[derive(Default)]
+pub struct Icons {
+    entries: HashMap<ImageKey, Held>,
+    pending: Vec<Queued>,
+    /// Slots never yet handed out, per band. Once a band reaches its end,
+    /// eviction begins *within that band* — a 16-pixel icon can never take a
+    /// 128-pixel slot, because it would leave 63/64ths of it unread.
+    next: [u32; BANDS.len()],
+    frame: u64,
+    used: bool,
+}
+
+/// The atlas texture's side, in texels.
+pub const ICON_SIDE: u32 = 1024;
+
+/// How tall one band is. Four equal quarters of [`ICON_SIDE`].
+const BAND_ROWS: u32 = ICON_SIDE / 4;
+
+/// Each band's slot side, largest first — which is also top to bottom.
+const BANDS: [u32; 4] = [128, 64, 32, 16];
+
+/// An icon waiting for the queue, at the corner it goes to.
+///
+/// **Its corner rather than its slot**, because a slot index means nothing
+/// without the band it is in and this list is drained by a caller that has
+/// neither.
+struct Queued {
+    at: (u32, u32),
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+/// Where one icon is: which band, and which slot of it.
+struct Held {
+    band: u8,
+    slot: u32,
+    width: u32,
+    height: u32,
+    /// The frame this was last drawn in, which is what eviction sorts on.
+    seen: u64,
+}
+
+/// The band an icon of `device_px` is drawn from.
+///
+/// **At or above, never upscaled.** A 24-pixel mark comes from the 32 band and a
+/// 92-pixel grid mark at 200% from the 128 band, because a theme's 32-pixel art
+/// is not its 16-pixel art doubled and drawing it as if it were is the one thing
+/// an icon theme exists to avoid.
+///
+/// Above 128 it is the 128 band and the picture is magnified, which is ADR 0018's
+/// own revisit trigger restated: a view that draws a mark larger than that wants
+/// either a bigger largest band or a fifth size, and the second is a different
+/// decision.
+#[must_use]
+pub fn icon_band(device_px: u32) -> u32 {
+    BANDS.into_iter().rev().find(|side| *side >= device_px).unwrap_or(BANDS[0])
+}
+
+impl Icons {
+    /// A new frame. Everything drawn from now on is marked with this number.
+    pub fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// Whether anything has ever been inserted, which is what makes the renderer
+    /// swap its one-texel placeholder for the real atlas.
+    #[must_use]
+    pub fn in_use(&self) -> bool {
+        self.used
+    }
+
+    /// How many icons are held, and how full the four bands are together.
+    #[must_use]
+    pub fn stats(&self) -> (usize, f32) {
+        let slots: u32 = BANDS.into_iter().map(slots_in).sum();
+        (self.entries.len(), self.entries.len() as f32 / slots as f32)
+    }
+
+    /// Whether `key` is held, without marking it as drawn.
+    ///
+    /// A separate call from [`Self::get`] for the reason [`Images::holds`] is: a
+    /// caller deciding whether to *fetch* something must not make it look more
+    /// recently used than it is.
+    #[must_use]
+    pub fn holds(&self, key: ImageKey) -> bool {
+        self.entries.contains_key(&key)
+    }
+
+    /// How many uploads are waiting, for the diagnostic line.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Where `key` is, marking it as wanted this frame.
+    pub fn get(&mut self, key: ImageKey) -> Option<Slot> {
+        let frame = self.frame;
+        let held = self.entries.get_mut(&key)?;
+        held.seen = frame;
+        Some(place_in_band(held.band, held.slot, held.width, held.height))
+    }
+
+    /// Puts an icon in the band that fits it, evicting the least recently drawn
+    /// of that band if it must.
+    ///
+    /// `pixels` is straight `RGBA8`. An image larger than the largest band is
+    /// refused rather than scaled: the caller asked the child for a box, so a
+    /// bigger answer is a protocol violation.
+    pub fn insert(
+        &mut self,
+        key: ImageKey,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Option<Slot> {
+        if width == 0 || height == 0 || width > BANDS[0] || height > BANDS[0] {
+            return None;
+        }
+        if pixels.len() != (width * height * 4) as usize {
+            return None;
+        }
+        if let Some(slot) = self.get(key) {
+            return Some(slot);
+        }
+        let side = icon_band(width.max(height));
+        let band = u8::try_from(BANDS.iter().position(|it| *it == side)?).ok()?;
+        let slot = self.free_slot(band)?;
+        self.used = true;
+        self.entries.insert(key, Held { band, slot, width, height, seen: self.frame });
+        self.pending.push(Queued {
+            at: corner(band, slot),
+            width,
+            height,
+            pixels: pixels.to_vec(),
+        });
+        Some(place_in_band(band, slot, width, height))
+    }
+
+    /// A slot nobody is using in `band`, or the one drawn longest ago in it.
+    fn free_slot(&mut self, band: u8) -> Option<u32> {
+        let side = *BANDS.get(band as usize)?;
+        let at = band as usize;
+        let taken = *self.next.get(at)?;
+        if taken < slots_in(side) {
+            *self.next.get_mut(at)? = taken + 1;
+            return Some(taken);
+        }
+        // **Never a slot this frame has drawn**, which is `Images`' rule: taking
+        // one would replace an icon that is on screen with a different picture in
+        // the same row.
+        let frame = self.frame;
+        let (oldest, _) = self
+            .entries
+            .iter()
+            .filter(|(_, held)| held.band == band && held.seen != frame)
+            .min_by_key(|(key, held)| (held.seen, **key))?;
+        let oldest = *oldest;
+        let held = self.entries.remove(&oldest)?;
+        // Anything queued for that corner is queued for an icon nobody wants any
+        // more.
+        let freed = corner(band, held.slot);
+        self.pending.retain(|it| it.at != freed);
+        Some(held.slot)
+    }
+
+    /// Uploads what fits in this frame's budget.
+    pub fn flush(&mut self, queue: &wgpu::Queue, texture: &wgpu::Texture) {
+        let mut spent = 0usize;
+        let mut at = 0usize;
+        while at < self.pending.len() {
+            let Some(image) = self.pending.get(at) else { break };
+            let bytes = image.pixels.len();
+            if spent > 0 && spent + bytes > UPLOAD_BUDGET_BYTES {
+                break;
+            }
+            spent += bytes;
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: image.at.0, y: image.at.1, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &image.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(image.width * 4),
+                    rows_per_image: Some(image.height),
+                },
+                wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            at += 1;
+        }
+        self.pending.drain(..at);
+    }
+}
+
+/// How many slots a band of `side`-texel squares holds.
+const fn slots_in(side: u32) -> u32 {
+    (ICON_SIDE / side) * (BAND_ROWS / side)
+}
+
+/// One slot's top-left corner in texels.
+fn corner(band: u8, slot: u32) -> (u32, u32) {
+    let at = band as usize;
+    let Some(side) = BANDS.get(at).copied() else { return (0, 0) };
+    let across = ICON_SIDE / side;
+    let top = u32::try_from(at).unwrap_or(0) * BAND_ROWS;
+    ((slot % across) * side, top + (slot / across) * side)
+}
+
+fn place_in_band(band: u8, slot: u32, width: u32, height: u32) -> Slot {
+    let (x, y) = corner(band, slot);
+    Slot { x, y, width, height }
+}
+
+#[cfg(test)]
+mod band_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{BAND_ROWS, BANDS, ICON_SIDE, Icons, ImageKey, corner, icon_band, slots_in};
+
+    fn pixels(width: u32, height: u32) -> Vec<u8> {
+        vec![9u8; (width * height * 4) as usize]
+    }
+
+    /// The table in [`Icons`]' own documentation, asserted rather than claimed:
+    /// four megabytes, four equal quarters, and 1,360 slots.
+    #[test]
+    fn the_four_bands_are_the_ones_the_record_names() {
+        assert_eq!(ICON_SIDE, 1024);
+        assert_eq!(ICON_SIDE * ICON_SIDE * 4, 4 * 1024 * 1024, "the texture is not 4 MiB");
+        assert_eq!(BAND_ROWS * 4, ICON_SIDE, "the bands are not four equal quarters");
+        let counts: Vec<u32> = BANDS.into_iter().map(slots_in).collect();
+        assert_eq!(counts, vec![16, 64, 256, 1024]);
+        assert_eq!(counts.iter().sum::<u32>(), 1360);
+        // Each band is a megabyte: the slot count quadruples as its side halves.
+        for (side, count) in BANDS.into_iter().zip(counts) {
+            assert_eq!(side * side * 4 * count, 1024 * 1024, "the {side} band is not 1 MiB");
+        }
+    }
+
+    /// **At or above the device size, never upscaled.** A 24-pixel mark comes
+    /// from the 32 band and a 92-pixel grid mark at 200% from the 128 band.
+    #[test]
+    fn a_mark_is_drawn_from_the_band_at_or_above_it() {
+        assert_eq!(icon_band(1), 16);
+        assert_eq!(icon_band(16), 16);
+        assert_eq!(icon_band(17), 32);
+        assert_eq!(icon_band(24), 32);
+        assert_eq!(icon_band(32), 32);
+        assert_eq!(icon_band(33), 64);
+        assert_eq!(icon_band(92), 128);
+        assert_eq!(icon_band(128), 128);
+        // ADR 0018's own revisit trigger in this atlas's terms: above the largest
+        // band there is nowhere else to go.
+        assert_eq!(icon_band(200), 128);
+    }
+
+    /// Every slot of every band has its own corner, all of them inside the
+    /// texture, and no two anywhere near each other.
+    #[test]
+    fn every_slot_of_every_band_has_its_own_corner() {
+        let mut seen = Vec::new();
+        for (at, side) in BANDS.into_iter().enumerate() {
+            let band = u8::try_from(at).unwrap();
+            for slot in 0..slots_in(side) {
+                let (x, y) = corner(band, slot);
+                assert!(x + side <= ICON_SIDE, "band {side} slot {slot} runs off the right");
+                assert!(y + side <= ICON_SIDE, "band {side} slot {slot} runs off the bottom");
+                // A band owns its own quarter and nothing else.
+                let top = u32::try_from(at).unwrap() * BAND_ROWS;
+                assert!((top..top + BAND_ROWS).contains(&y), "band {side} left its quarter");
+                assert!(!seen.contains(&(x, y)), "band {side} slot {slot} lands on another");
+                seen.push((x, y));
+            }
+        }
+        assert_eq!(seen.len(), 1360);
+    }
+
+    /// **One texel until the first icon.** A window under `icons = marks` never
+    /// inserts one and so allocates none of the four megabytes.
+    #[test]
+    fn an_atlas_nobody_has_used_is_not_in_use() {
+        let mut icons = Icons::default();
+        assert!(!icons.in_use());
+        assert!(icons.get(ImageKey(1)).is_none());
+        assert!(!icons.holds(ImageKey(1)));
+        assert!(!icons.in_use(), "asking about an absent icon allocated one");
+        assert_eq!(icons.stats(), (0, 0.0));
+
+        icons.insert(ImageKey(1), 16, 16, &pixels(16, 16));
+        assert!(icons.in_use());
+    }
+
+    /// An icon lands in the band its own size names, which is what stops a
+    /// 16-pixel mark spending a 64 KiB slot.
+    #[test]
+    fn an_icon_lands_in_its_own_band() {
+        let mut icons = Icons::default();
+        for (key, side) in [(1u64, 16u32), (2, 32), (3, 64), (4, 128)] {
+            let slot = icons.insert(ImageKey(key), side, side, &pixels(side, side)).unwrap();
+            let at = BANDS.iter().position(|it| *it == side).unwrap();
+            let top = u32::try_from(at).unwrap() * BAND_ROWS;
+            assert_eq!(slot.y, top, "a {side}-pixel icon is not in the {side} band");
+            assert_eq!((slot.width, slot.height), (side, side));
+        }
+        // A picture that is not square takes the band its longer side needs.
+        let wide = icons.insert(ImageKey(5), 48, 20, &pixels(48, 20)).unwrap();
+        assert_eq!(wide.y, BAND_ROWS, "a 48-pixel icon is not in the 64 band");
+    }
+
+    /// The same key twice is the same slot and one upload, and a buffer that
+    /// disagrees with the dimensions beside it is refused.
+    #[test]
+    fn an_icon_goes_in_once_and_comes_back_from_the_same_slot() {
+        let mut icons = Icons::default();
+        let first = icons.insert(ImageKey(1), 32, 24, &pixels(32, 24)).unwrap();
+        let again = icons.insert(ImageKey(1), 32, 24, &pixels(32, 24)).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(icons.pending(), 1, "the same icon was queued twice");
+        assert_eq!(icons.get(ImageKey(1)), Some(first));
+
+        assert!(icons.insert(ImageKey(2), 129, 8, &pixels(129, 8)).is_none(), "129 fits no band");
+        assert!(icons.insert(ImageKey(3), 0, 8, &[]).is_none());
+        assert!(icons.insert(ImageKey(4), 8, 8, &pixels(4, 4)).is_none());
+    }
+
+    /// **A full band evicts within itself.** A 16-pixel icon can never take a
+    /// 128-pixel slot: it would leave sixty-three sixty-fourths of it unread, and
+    /// the whole argument for four bands is that it should not.
+    #[test]
+    fn a_full_band_takes_its_own_oldest_and_never_another_bands() {
+        let mut icons = Icons::default();
+        let all = slots_in(128);
+        for index in 0..all {
+            icons.begin_frame();
+            assert!(
+                icons.insert(ImageKey(u64::from(index)), 128, 128, &pixels(128, 128)).is_some()
+            );
+        }
+        // The other three bands are untouched by any of that.
+        assert_eq!(icons.stats().0 as u32, all);
+
+        icons.begin_frame();
+        assert!(icons.get(ImageKey(u64::from(all - 1))).is_some());
+        assert!(icons.insert(ImageKey(9999), 128, 128, &pixels(128, 128)).is_some());
+        assert!(icons.get(ImageKey(0)).is_none(), "the oldest was kept");
+        assert!(icons.get(ImageKey(u64::from(all - 1))).is_some(), "this frame's went");
+        assert_eq!(icons.stats().0 as u32, all, "the count moved");
+
+        // And a small icon still fits, because its band was never full.
+        icons.begin_frame();
+        let small = icons.insert(ImageKey(5000), 16, 16, &pixels(16, 16)).unwrap();
+        assert_eq!(small.y, 3 * BAND_ROWS, "a full 128 band cost the 16 band its slot");
+    }
+
+    /// A band every slot of which is on screen refuses rather than replacing one:
+    /// a row that stays blank for a frame is better than a row showing another
+    /// file's icon.
+    #[test]
+    fn a_band_entirely_in_use_this_frame_refuses() {
+        let mut icons = Icons::default();
+        icons.begin_frame();
+        for index in 0..slots_in(128) {
+            icons.insert(ImageKey(u64::from(index)), 128, 128, &pixels(128, 128));
+        }
+        assert!(icons.insert(ImageKey(9999), 128, 128, &pixels(128, 128)).is_none());
+        // The 64 band is not full and takes it, which is what makes the refusal a
+        // band's and not the atlas's.
+        assert!(icons.insert(ImageKey(9999), 64, 64, &pixels(64, 64)).is_some());
+    }
+}

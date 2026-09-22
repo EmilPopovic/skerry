@@ -1071,6 +1071,8 @@ pub struct App {
     previews: sk_preview::Previews,
     /// What the atlas knows each thumbnail by.
     thumbs: crate::previews::Thumbs,
+    /// The numbers the icon atlas knows themed icons by — ADR 0042.
+    icon_names: crate::icons::Names,
     /// Whether the history strip is showing its list or only its header.
     ///
     /// Collapsed by default and remembered across the process, which is
@@ -1740,6 +1742,7 @@ impl App {
             quick_look: None,
             previews: sk_preview::Previews::new(),
             thumbs: crate::previews::Thumbs::default(),
+            icon_names: crate::icons::Names::default(),
             history_open: false,
             hovered_edit: None,
             history_scroll: sk_ui::Scroll::default(),
@@ -2784,6 +2787,7 @@ impl App {
         measurer.update(panes.focused_mut(), visible, jobs);
         self.settle_colours();
         self.settle_thumbnails();
+        self.settle_icons();
         self.settle_quick_look();
         // **Last, because both of the above put things in the queue.** The pump
         // used to be the last line of `settle_thumbnails`, which ran first — so a
@@ -8257,6 +8261,113 @@ scope_aim={scope_aim:?}",
         }
     }
 
+    /// Asks for the themed icon of every visible entry, and records the ones the
+    /// atlas already has.
+    ///
+    /// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
+    /// and this crate is the only place it can be.** `sk-desktop` answers with a
+    /// path, `sk-preview` turns a path into pixels and `sk-gpu` holds the result;
+    /// all three are level 2 and none may see another, so the caller is the one
+    /// above them — the same shape kind detection already has.
+    ///
+    /// **No syscall on this thread.** The lookup is a hash and a `PathBuf::join`
+    /// over a theme a job read; the rasterisation is a child process.
+    fn settle_icons(&mut self) {
+        // Under `marks` the lookup is never called at all, and under a theme that
+        // failed to load there is nothing to call it on.
+        if self.icon_theme.theme().is_none() {
+            return;
+        }
+        let Some(desktop) = self.desktop.clone() else { return };
+        let types = desktop.mime.as_ref();
+        let scale = self.window.scale().max(1.0);
+        let mut asking = Vec::new();
+        for leaf in &self.placement.leaves {
+            let Some(pane) = self.panes.leaf(leaf.id).map(crate::panes::Tabs::showing) else {
+                continue;
+            };
+            let cells = self.cells_of(leaf, pane);
+            for row in cells.visible(pane.scroll.offset()) {
+                let Some(id) = pane.listing.at(row) else { continue };
+                // A row whose picture is its own mark wants no icon: the
+                // thumbnail is more specific than anything a theme has.
+                if pane.thumbs.contains_key(&id) {
+                    continue;
+                }
+                // **The warm path, and it is most frames.** A row whose icon the
+                // atlas still holds needs no name built, no lookup and no want —
+                // two hash lookups and nothing allocated. The atlas is asked
+                // rather than trusted, because a slot can be evicted and a key
+                // that outlived its picture would draw nothing at all.
+                if pane.icons.get(&id).is_some_and(|image| self.renderer.holds_icon(*image)) {
+                    continue;
+                }
+                let side = crate::view::mark_of(
+                    pane.mode,
+                    leaf,
+                    cells.at(row, pane.scroll.offset()),
+                    &self.theme.metrics,
+                )
+                .width;
+                let directory = pane.listing.flags(id).has(sk_model::Flags::DIR);
+                asking.push((leaf.id, id, directory, types.by_name(pane.listing.name(id)), side));
+            }
+        }
+        if asking.is_empty() {
+            return;
+        }
+
+        // **The theme's borrow ends here.** Resolving and then mutating in two
+        // passes is what lets a pane be written to while the theme that named its
+        // files is a field of the same struct.
+        //
+        // **One resolution per kind and size, not per row.** A directory of four
+        // hundred photographs asks about one name; without the memo it asks four
+        // hundred times, and each ask is three hash lookups and a path built.
+        let resolved: Vec<(crate::panes::PaneId, sk_model::EntryId, std::path::PathBuf, u32)> = {
+            let Some(theme) = self.icon_theme.theme() else { return };
+            let mut found: std::collections::HashMap<
+                (bool, &str, u32),
+                Option<std::path::PathBuf>,
+            > = std::collections::HashMap::new();
+            asking
+                .into_iter()
+                .filter_map(|(leaf, id, directory, mime, side)| {
+                    let nominal = side.round().max(1.0) as u32;
+                    let band = sk_gpu::icon_band((side * scale).round().max(1.0) as u32);
+                    let step = scale.round().max(1.0) as u32;
+                    let file = found
+                        .entry((directory, mime.unwrap_or_default(), nominal))
+                        .or_insert_with(|| {
+                            crate::icons::names_for(directory, mime)
+                                .iter()
+                                .find_map(|name| theme.find(name, nominal, step))
+                        })
+                        .clone()?;
+                    Some((leaf, id, file, band))
+                })
+                .collect()
+        };
+
+        for (leaf, id, path, band) in resolved {
+            let (key, image) = self.icon_names.name(&path, band);
+            // `holds_icon`, not `get`: asking whether to fetch must not stamp the
+            // frame the atlas evicts by.
+            let held = self.renderer.holds_icon(image);
+            if let Some(tabs) = self.panes.leaf_mut(leaf) {
+                if held {
+                    tabs.showing_mut().icons.insert(id, image);
+                } else {
+                    tabs.showing_mut().icons.remove(&id);
+                }
+            }
+            if !held && !self.icon_names.was_refused(&key) {
+                self.previews.want(crate::icons::wanted(path, band));
+            }
+        }
+        self.icon_names.forget_the_oldest();
+    }
+
     /// Takes delivery of a text preview's read.
     ///
     /// **In the loop, not in the frame**, which is the whole of the bug it fixes.
@@ -8340,7 +8451,23 @@ scope_aim={scope_aim:?}",
                 self.dirty = true;
                 continue;
             }
+            // **An icon the child could not draw is recorded before the guard
+            // below.** Nothing will ever put it in the atlas, so without this
+            // `settle_icons` asks again on the next frame — and the answer marks
+            // the window dirty, which is the next frame.
+            if answer.refusal != sk_preview::Refusal::None
+                && self.icon_names.look_up(&answer.key).is_some()
+            {
+                self.icon_names.refuse(&answer.key);
+            }
             if answer.refusal != sk_preview::Refusal::None || answer.pixels.is_empty() {
+                continue;
+            }
+            // An icon before a thumbnail, because the two maps are disjoint and
+            // this one is the cheaper question: an icon's key has no modification
+            // time in it, so nothing a listing produced can land here.
+            if let Some(icon) = self.icon_names.look_up(&answer.key) {
+                self.renderer.hold_icon(icon, answer.size.0, answer.size.1, &answer.pixels);
                 continue;
             }
             // A name nobody holds any more is an answer to a question about a
@@ -9729,6 +9856,7 @@ volumes={volumes:?} aside_grabbed={}",
         let settings = self.settings_report();
         let settings_aim = self.settings_aim();
         let icons = self.icon_theme.token();
+        let (icon_held, _, icon_owed) = self.renderer.icon_stats();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
@@ -9744,7 +9872,7 @@ crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
 composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_aim={settings_aim:?} \
-icons={icons} \
+icons={icons} icon_slots={icon_held}:{icon_owed} \
 {places_report} \
 path_field={path_field} name_field={name_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \

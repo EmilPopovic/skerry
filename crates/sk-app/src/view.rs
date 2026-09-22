@@ -5099,6 +5099,16 @@ fn icon_of(
         // thumbnail would be a second meaning for the colour a broken link uses.
         return (sk_ui::Icon::Picture(*image), theme.palette.text);
     }
+    // **The picture first, the theme second, our own mark last** — [ADR
+    // 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    // A thumbnail is more specific than anything a theme has; a themed icon is
+    // more specific than a kind. `Pane::icons` holds only what the atlas has
+    // confirmed, so an icon still being rasterised falls through to the mark
+    // below — drawn at the final position, to the logical pixel, which is what
+    // keeps the first frame honest.
+    if let Some(image) = pane.icons.get(&id) {
+        return (sk_ui::Icon::Themed(*image), theme.palette.text);
+    }
     // **A colour somebody chose beats the colour of what the thing is.** A folder
     // is blue because it is a folder; one that is red is red because a person
     // said so, and the whole point of saying so is that it stops looking like the

@@ -162,6 +162,8 @@ struct Shape {
     /// A subdirectory of `path` to capture, and where a column view's trail
     /// starts. See the `--at` line in the usage.
     at: Option<String>,
+    /// The icon theme `--icons` named, or nothing for our own marks.
+    icons: Option<String>,
     /// The name of a file to open a quick look at.
     looking: Option<String>,
 }
@@ -188,6 +190,7 @@ fn render_one(shape: &Shape, overlays: &Overlays) -> Result<(), sk_app::Problem>
         progress: overlays.progress,
         stopped: overlays.stopped,
         indexing: overlays.indexing,
+        icons: shape.icons.clone(),
         grid: overlays.grid,
         columns: overlays.columns,
         at: shape.at.clone(),
@@ -270,6 +273,7 @@ fn main() -> std::process::ExitCode {
     let mut forced_scale = None;
     let mut at: Option<String> = None;
     let mut looking: Option<String> = None;
+    let mut icons: Option<String> = None;
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -318,6 +322,10 @@ fn main() -> std::process::ExitCode {
             "--scale" => match arguments.next().as_deref().and_then(parse_scale) {
                 Some(scale) => forced_scale = Some(scale),
                 None => return usage_error("--scale needs a percentage, such as 125"),
+            },
+            "--icons" => match arguments.next() {
+                Some(name) if !name.is_empty() => icons = Some(name),
+                _ => return usage_error("--icons needs the name of an installed theme"),
             },
             "--look" | "--at" => match arguments.next() {
                 // Two flags, one shape: a name that follows. `--at` says which
@@ -375,6 +383,7 @@ fn main() -> std::process::ExitCode {
                 look_find,
                 at,
                 looking,
+                icons,
             },
             &overlays,
         )
@@ -503,6 +512,9 @@ skerry [OPTIONS] [PATH]
   --pinned         give the sidebar's sample a Pinned section, for a frame of it
   --tree           open one of the sidebar's places, for a frame of the tree
   --coloured       give two folders a colour, for a frame of the marks
+  --icons <theme>  draw the marks from an installed icon theme rather than from
+                   Skerry's own. Named rather than asked of the desktop, so the
+                   frame is a function of the theme and not of the machine
   --no-sidebar     start with the list of places closed. F9 toggles it
   --own-frame      draw the window frame here rather than asking the compositor
                    to. Always on where the compositor offers no decorations,

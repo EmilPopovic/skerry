@@ -66,11 +66,10 @@ These are the parts most worth knowing before you trust the alpha with real work
 The README carries the [full list](README.md#what-this-alpha-does-not-do). The
 ones most likely to be reached for in the first week:
 
-- **No themed icon is drawn yet.** `index.theme` is parsed and the freedesktop
-  search runs, and the `icons` setting says where a mark comes from — but nothing
-  has yet asked the decoder for the file it names, so a file's mark is a built-in
-  glyph coloured by MIME category rather than the themed icon your desktop would
-  draw.
+- **Icon themes reach the pane and nothing else.** A row's and a cell's mark comes
+  from the desktop's theme; the sidebar, the breadcrumb menus and the card under a
+  drag still draw the built-in marks. `icons = marks` keeps those everywhere and
+  is a value somebody chooses rather than a fallback.
 - **Creating things is thin.** New folder and single rename only — no new file,
   Templates, symlinks or batch rename.
 - **Properties is read-only**, and owners are shown as numeric ids.

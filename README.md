@@ -199,13 +199,15 @@ the first bug report on one of them.
   panel — the line is that a container Skerry can parse it parses, and a
   compressor is the machine's ([ADR
   0032](docs/adr/0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md)).
-- **No themed icon is drawn yet.** `index.theme` is parsed and the freedesktop
-  search runs — `icons = desktop` resolves a theme on a job, in 15.4 ms for
-  Adwaita and 51.9 ms for breeze, and says in the settings panel which one it
-  found — but nothing has yet asked the decoder for the file it names, so a file's
-  mark is still a page coloured by its MIME category. `icons = marks` is that
-  state chosen rather than suffered
+- **Icon themes reach the pane and nothing else.** A row's and a cell's mark comes
+  from the desktop's theme — `index.theme` parsed, the freedesktop search run on a
+  job, the file rasterised by the same sandboxed helper that decodes PNG, JPEG,
+  SVG and GIF, and held in a banded atlas of its own
   ([ADR 0042](docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)).
+  The sidebar's places, volumes and trash still draw the built-in marks, and so do
+  the breadcrumb menus and the card under a drag. `icons = marks` keeps the
+  built-in marks everywhere, and it is a value somebody chooses rather than the
+  branch that runs when nothing else worked.
 - **Creating things is thin.** New folder and a single rename. No new file, no
   Templates, no symlinks, and no batch rename — which M3 names and this is not.
 - **Properties is read-only**, and it shows owners as numeric ids rather than

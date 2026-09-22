@@ -224,6 +224,13 @@ pub struct Pane {
     /// Drawing cannot mint one: it has `&Pane`, and minting is a map insert. Keying
     /// by `EntryId` rather than by row means a sort moves nothing.
     pub thumbs: std::collections::HashMap<sk_model::EntryId, sk_gpu::ImageKey>,
+    /// The themed icon the atlas holds for each visible entry, where it holds one
+    /// — [ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    ///
+    /// **Only what the atlas actually has**, like `thumbs` beside it: an entry
+    /// whose icon has not been rasterised yet is an entry with no icon, and the
+    /// geometric mark is what draws at the same rectangle until it arrives.
+    pub icons: std::collections::HashMap<sk_model::EntryId, sk_gpu::ImageKey>,
     /// The colour of each entry somebody has given one, in this listing.
     ///
     /// **Per pane, filled by `App::settle_colours` when the listing or the
@@ -420,6 +427,7 @@ impl Pane {
             bands: Vec::new(),
             closed: crate::groups::Closed::default(),
             thumbs: std::collections::HashMap::new(),
+            icons: std::collections::HashMap::new(),
             colours: Vec::new(),
             kinds: Vec::new(),
             filter: String::new(),

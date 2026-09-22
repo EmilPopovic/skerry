@@ -482,13 +482,16 @@ impl Painter<'_> {
             // The tint carries only its alpha, so a caller can fade a thumbnail
             // in without a second code path — see [`Self::image`].
             Icon::Picture(key) => self.image(key, box_rect, color),
+            Icon::Themed(key) => self.themed(key, box_rect, color),
         }
     }
 
     /// The mark for a directory: a folder, from two rounded rectangles.
     ///
-    /// Geometric rather than from an icon theme, because icon themes belong to
-    /// `sk-desktop` and arrive in M7.
+    /// Geometric, and a first-class answer rather than a fallback — [ADR
+    /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    /// It is also what is drawn at the final position while a themed icon is
+    /// still being rasterised.
     ///
     /// **Two tones and not one.** An outline was tried and is what the objection
     /// that used to be in this comment described — at fifteen logical pixels it
@@ -548,6 +551,18 @@ impl Painter<'_> {
     /// without a second code path; its colour channels are ignored.
     pub fn image(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
         self.list.image(key, box_rect, tint);
+    }
+
+    /// A themed icon, fitted inside `box_rect` and centred in it.
+    ///
+    /// **A key and a rectangle**, like [`Self::image`] and for the same reason —
+    /// [ADR 0003](../../../docs/adr/0003-wgpu-first-backend.md). Which band it
+    /// came from and where in it is the renderer's; an icon the atlas does not
+    /// hold draws nothing, which is why the caller draws the geometric mark under
+    /// it — [ADR
+    /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
+    pub fn themed(&mut self, key: sk_gpu::ImageKey, box_rect: Rect, tint: Color) {
+        self.list.icon(key, box_rect, tint);
     }
 
     /// A thumbnail standing in for a picture, filling `box_rect` exactly.
@@ -653,9 +668,10 @@ impl Painter<'_> {
 /// [12-measurement.md](../../../docs/12-measurement.md#some-defects-are-only-visible-to-a-person-looking)
 /// already states.
 ///
-/// The other future kind is M7's icon theme, which is a `Themed` variant looked
-/// up from the desktop's own `index.theme` — and it arrives through this seam
-/// rather than around it, which is the other reason this is a value.
+/// The kind that was future when this was written has arrived: [`Icon::Themed`]
+/// is looked up from the desktop's own `index.theme`, and it came through this
+/// seam rather than around it — which is what the paragraph this replaces
+/// predicted, and the reason this is a value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     /// A directory.
@@ -664,6 +680,14 @@ pub enum Icon {
     Page,
     /// A filesystem, mounted or not: a stack of platters.
     Disk,
+    /// An icon from the desktop's theme, which the caller asked for by name.
+    ///
+    /// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
+    /// and it arrives through this seam rather than around it** — which is the
+    /// other reason [`Icon`] is a value. Drawn only where the icon atlas holds
+    /// it; until then the caller draws the geometric mark for the same file at
+    /// the same rectangle, so the first frame is honest.
+    Themed(sk_gpu::ImageKey),
     /// A thumbnail the atlas already holds, which stands in for the file itself.
     ///
     /// **Only where the atlas has it.** `Pane::thumbs` holds keys the renderer

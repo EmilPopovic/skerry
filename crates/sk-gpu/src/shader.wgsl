@@ -9,6 +9,7 @@ struct Uniforms {
     mask_size: vec2<f32>,
     color_size: vec2<f32>,
     image_size: vec2<f32>,
+    icon_size: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -24,6 +25,10 @@ struct Uniforms {
 // The one preview, which is not in the atlas because it is not the atlas's size —
 // ADR 0018. It shares the filtering sampler above.
 @group(0) @binding(6) var preview_texture: texture_2d<f32>;
+// The icon atlas, which is four bands of equal slots rather than one grid — ADR
+// 0042. Its own texture because an icon is keyed and sized differently from a
+// thumbnail, and it shares the filtering sampler above.
+@group(0) @binding(7) var icon_texture: texture_2d<f32>;
 
 const KIND_RECT: u32 = 0u;
 const KIND_MASK: u32 = 1u;
@@ -37,6 +42,8 @@ const KIND_PREVIEW: u32 = 8u;
 // half-width in `border`. Every mark made of straight strokes is one or two of
 // these — a chevron, an ×, a `+`.
 const KIND_SEGMENT: u32 = 9u;
+// A themed icon, from the banded atlas — ADR 0042.
+const KIND_ICON: u32 = 10u;
 
 struct Instance {
     @location(0) rect: vec4<f32>,   // device px: x, y, w, h
@@ -80,6 +87,9 @@ fn vs(@builtin(vertex_index) index: u32, instance: Instance) -> Vertex {
     var atlas = select(u.mask_size, u.color_size, instance.kind == KIND_COLOR);
     if instance.kind == KIND_IMAGE {
         atlas = u.image_size;
+    }
+    if instance.kind == KIND_ICON {
+        atlas = u.icon_size;
     }
     // A preview's texture is exactly its own size, so its uv is its own extent —
     // which the instance already carries, and dividing by it gives 0..1.
@@ -159,6 +169,13 @@ fn fs(in: Vertex) -> @location(0) vec4<f32> {
     }
     if in.kind == KIND_PREVIEW {
         let texel = textureSample(preview_texture, image_sampler, in.uv);
+        let alpha = texel.a * in.color.a;
+        return vec4<f32>(texel.rgb * alpha, alpha);
+    }
+    if in.kind == KIND_ICON {
+        // Premultiplied here for the reason the thumbnail below is, and it
+        // matters more: an icon is transparent almost everywhere.
+        let texel = textureSample(icon_texture, image_sampler, in.uv);
         let alpha = texel.a * in.color.a;
         return vec4<f32>(texel.rgb * alpha, alpha);
     }

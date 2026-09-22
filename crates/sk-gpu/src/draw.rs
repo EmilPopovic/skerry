@@ -229,6 +229,13 @@ pub(crate) enum Item {
         rect: Rect,
         alpha: Color,
     },
+    /// A themed icon, from the banded atlas — ADR 0042. Fitted like an image
+    /// and sampled from a texture of its own.
+    Icon {
+        key: crate::images::ImageKey,
+        rect: Rect,
+        alpha: Color,
+    },
     /// The one preview, drawn at a rectangle the caller has already fitted.
     Preview {
         key: crate::images::ImageKey,
@@ -297,9 +304,11 @@ impl DrawList {
     pub fn glyphs(&self) -> impl Iterator<Item = (GlyphKey, f32, f32)> + '_ {
         self.items.iter().filter_map(|item| match item {
             Item::Glyph { key, x, y, .. } => Some((*key, *x, *y)),
-            Item::Quad(_) | Item::Image { .. } | Item::Preview { .. } | Item::Standby { .. } => {
-                None
-            }
+            Item::Quad(_)
+            | Item::Image { .. }
+            | Item::Icon { .. }
+            | Item::Preview { .. }
+            | Item::Standby { .. } => None,
         })
     }
 
@@ -428,6 +437,23 @@ impl DrawList {
             return;
         }
         self.items.push(Item::Image { key, rect, alpha });
+    }
+
+    /// One themed icon, fitted inside `rect`.
+    ///
+    /// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).**
+    /// The same fit as [`Self::image`] over a different atlas: an icon comes from
+    /// the band at or above the size it is drawn at, so it is minified rather
+    /// than blown up.
+    ///
+    /// An icon the atlas does not hold draws nothing, which is what the caller
+    /// has drawn its own geometric mark under — the first frame is honest because
+    /// something is already at the final position.
+    pub fn icon(&mut self, key: crate::images::ImageKey, rect: Rect, alpha: Color) {
+        if rect.is_empty() || alpha.is_invisible() {
+            return;
+        }
+        self.items.push(Item::Icon { key, rect, alpha });
     }
 
     /// The one preview, filling `rect` exactly.
