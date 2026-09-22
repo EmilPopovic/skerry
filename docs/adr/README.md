@@ -44,6 +44,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0034](0034-helper-execution-and-network-rights-are-explicit.md) | Helper execution and network rights are explicit | Accepted |
 | [0035](0035-trash-recovery-uses-filesystem-local-records.md) | Trash recovery uses filesystem-local records | Accepted |
 | [0036](0036-operation-failures-retain-pending-work.md) | Operation failures retain pending work | Accepted |
+| [0043](0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md) | Recents are two stores read as one list, and ours is the one rule 6 counts | Accepted — the shared write is staged behind the measurement the record names |
 
 ## Triggers that have been answered
 
