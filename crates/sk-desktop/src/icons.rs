@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 pub enum Refused {
     /// Nothing in any icon directory declares a theme by that name.
     Unknown,
-    /// Its `index.theme` is there and names no directories this build can search.
+    /// Its `index.theme` is there, and neither it nor any theme it inherits —
+    /// short of the `hicolor` every chain ends at — names a directory this build
+    /// can search.
     Empty,
 }
 
@@ -255,10 +257,17 @@ impl Theme {
                 theme.take(step, group);
             }
         }
-        // **The theme that was asked for, not the chain.** `hicolor` is always in
-        // the chain and usually has files, so a chain-wide test would call an
-        // empty theme loaded and then draw `hicolor` under its name.
-        if theme.dirs.iter().any(|dir| dir.theme == 0) { Ok(theme) } else { Err(Refused::Empty) }
+        // **The theme that was asked for and what it inherits, but not the
+        // `hicolor` every chain ends at.** That one is always there and usually
+        // has files, so counting it would call an empty theme loaded and then draw
+        // `hicolor` under its name. Counting only the theme itself refused the
+        // other common shape: a theme that is nothing *but* an inheritance —
+        // `/usr/share/icons/default` is `Inherits=Adwaita` and not one line more.
+        let own = |dir: &Directory| {
+            dir.theme == 0
+                || chain.get(usize::from(dir.theme)).is_some_and(|link| link.name != FALLBACK)
+        };
+        if theme.dirs.iter().any(own) { Ok(theme) } else { Err(Refused::Empty) }
     }
 
     /// The name that was asked for.
@@ -745,6 +754,22 @@ mod tests {
         let theme = at.load("twice").unwrap();
         assert!(theme.find("folder", 16, 2).unwrap().starts_with(at.inside("twice/16x16@2x")));
         assert!(theme.find("folder", 16, 1).unwrap().starts_with(at.inside("twice/16x16/")));
+    }
+
+    /// A theme that is nothing but an inheritance is the theme it inherits —
+    /// `/usr/share/icons/default`'s shape, `Inherits=Adwaita` and no more.
+    #[test]
+    fn a_theme_that_only_inherits_is_the_theme_it_inherits() {
+        let at = Installed::new("stub");
+        hicolor(&at);
+        at.theme(
+            "base",
+            "[Icon Theme]\nName=Base\nDirectories=16x16/places\n\n[16x16/places]\nSize=16\nType=Fixed\n",
+        );
+        at.icon("base", "16x16/places", "folder.svg");
+        at.theme("stub", "[Icon Theme]\nInherits=base\n");
+        let theme = at.load("stub").expect("a stub that inherits a real theme was refused");
+        assert!(theme.find("folder", 16, 1).unwrap().starts_with(at.inside("base/16x16")));
     }
 
     /// A theme whose `index.theme` names nothing searchable is empty rather than

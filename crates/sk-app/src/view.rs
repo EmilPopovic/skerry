@@ -4622,6 +4622,23 @@ const CHEVRON: f32 = 14.0;
 /// **No size and no date, because a column has neither.** A trail level fetches no
 /// metadata — ADR 0015 — so there is nothing to draw in those columns and nothing
 /// that would be blank while it arrived.
+/// Where a column row's mark comes from — [ADR
+/// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md)'s
+/// one question, with its two answers.
+#[derive(Clone, Copy)]
+enum ColumnMark<'a> {
+    /// The theme's icon, which the atlas holds.
+    Themed(sk_gpu::ImageKey),
+    /// Our own mark, coloured by the type the database says it is.
+    Ours(Option<&'a sk_desktop::MimeDatabase>),
+}
+
+impl<'a> ColumnMark<'a> {
+    fn of(icon: Option<&sk_gpu::ImageKey>, types: Option<&'a sk_desktop::MimeDatabase>) -> Self {
+        icon.map_or(Self::Ours(types), |image| Self::Themed(*image))
+    }
+}
+
 fn column_row(
     painter: &mut Painter<'_>,
     listing: &sk_model::Listing,
@@ -4629,7 +4646,7 @@ fn column_row(
     layout: &PaneLayout,
     cell: Area,
     state: CellState,
-    types: Option<&sk_desktop::MimeDatabase>,
+    source: ColumnMark<'_>,
 ) {
     // The column's rectangle at this row's height. `area` is the column, `top` is
     // where this row starts in it, and every line below wants one or the other.
@@ -4665,11 +4682,18 @@ fn column_row(
     let (_, text_x, width) = column_parts(area, &metrics);
     let mark = mark_of(Mode::Columns, layout, cell, &metrics);
     let icon_box = painter.rect(mark.x, mark.y, mark.width, mark.height);
-    let ink = kind_colour_of(&theme, types, listing, id, directory, broken);
     // **No thumbnail here, and that is ADR 0015 rather than an omission**: a
     // column fetches no metadata, and a thumbnail is keyed on when the file
-    // changed. See `mark_at`.
-    let mark = if directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page };
+    // changed. See `mark_at`. **A themed icon is not a thumbnail** — it is keyed
+    // on the file's type and needs no `statx` — so a column draws one where the
+    // setting names a theme, the way Details and the grid do.
+    let (mark, ink) = match source {
+        ColumnMark::Themed(image) => (sk_ui::Icon::Themed(image), theme.palette.text),
+        ColumnMark::Ours(types) => (
+            if directory { sk_ui::Icon::Folder } else { sk_ui::Icon::Page },
+            kind_colour_of(&theme, types, listing, id, directory, broken),
+        ),
+    };
     painter.icon(mark, icon_box, ink);
 
     let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
@@ -4718,7 +4742,8 @@ fn ancestor_columns(
             let top = cells.at(row, level.scroll.offset()).y;
             let state = CellState { chosen: level.chosen == Some(id), ..CellState::default() };
             let cell = Area { y: top, height: metrics.row_height, ..area };
-            column_row(painter, &level.dir.listing, id, layout, cell, state, chrome.types);
+            let mark = ColumnMark::of(level.icons.get(&id), chrome.types);
+            column_row(painter, &level.dir.listing, id, layout, cell, state, mark);
         }
         if rows == 0 && !level.dir.loading {
             let message = level.dir.problem.as_ref().map_or_else(
@@ -4789,7 +4814,8 @@ fn body(
                     chosen: false,
                 };
                 let cell = Area { y: top, height: metrics.row_height, ..area };
-                column_row(painter, &pane.listing, id, layout, cell, state, chrome.types);
+                let mark = ColumnMark::of(pane.icons.get(&id), chrome.types);
+                column_row(painter, &pane.listing, id, layout, cell, state, mark);
                 // **The field, after the row it replaces.** A column view had
                 // none: `F2` opened a rename that drew nothing, so the name was
                 // typed blind — and a press had no box to land in, which is the

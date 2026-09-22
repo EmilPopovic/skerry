@@ -171,6 +171,12 @@ pub(crate) struct Level {
     /// The entry whose folder is open to the right, once the listing has arrived
     /// and the name has been found in it.
     pub(crate) chosen: Option<EntryId>,
+    /// The themed icons the atlas holds for this column's rows — `Pane::icons`
+    /// for a column that is not the pane's own.
+    pub(crate) icons: std::collections::HashMap<EntryId, sk_gpu::ImageKey>,
+    /// The listing version `icons` was keyed against, for the reason
+    /// `Pane::icons_at` gives: an `EntryId` outlives nothing it indexes.
+    pub(crate) icons_at: u32,
 }
 
 impl Level {
@@ -213,6 +219,8 @@ pub(crate) fn sync(levels: &mut Vec<Level>, path: &Path, jobs: &Jobs) {
             dir: Directory::read(want, jobs),
             scroll: sk_ui::Scroll::default(),
             chosen: None,
+            icons: std::collections::HashMap::new(),
+            icons_at: 0,
         });
     }
     mark(levels, path);
@@ -299,6 +307,8 @@ pub(crate) fn settled(
             },
             scroll: sk_ui::Scroll::default(),
             chosen: None,
+            icons: std::collections::HashMap::new(),
+            icons_at: 0,
         })
         .collect();
     mark(&mut levels, path);

@@ -6863,6 +6863,17 @@ def a_mark_comes_from_the_source_the_setting_names(run: Run, fixture: Path) -> N
         held = int(landed["icon_slots"].split(":")[0])
         if held > 8:
             raise Failure(f"{held} icons for two names — the key is not the file and the band")
+
+        # **And a column view's other columns.** They are listings of their own,
+        # so an icon reaching the pane's rows says nothing about them; under a
+        # theme every column draws it, or one view of a listing disagrees with
+        # the other two about what a file looks like — rule 8.
+        themed.drive("text alpha\nsleep 400\nkey enter\nsleep 900\nkey ctrl+3\nsleep 600\nkey f12\nsleep 200\n")
+        holds(
+            themed,
+            lambda it: int(it.get("trail_icons", "0")) > 0,
+            "the column view's other columns to draw the theme's icons",
+        )
     finally:
         themed.close()
 

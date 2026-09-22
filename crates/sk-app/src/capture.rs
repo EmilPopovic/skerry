@@ -1163,6 +1163,16 @@ fn settle_folder_totals(pane: &mut Pane, session: &Session) {
 /// silently drew no icon is a frame of the geometric marks, and blessing one of
 /// those as if it showed the feature is the mistake
 /// [12-measurement.md](../../../docs/12-measurement.md) keeps recording.
+/// A row a capture asks an icon for: which column it is in — `None` for the
+/// pane's own listing — which entry, and what the theme is asked about it.
+struct Wanting<'a> {
+    owner: Option<usize>,
+    id: sk_model::EntryId,
+    directory: bool,
+    mime: Option<&'a str>,
+    side: f32,
+}
+
 fn settle_icons(
     request: &Capture,
     pane: &mut Pane,
@@ -1193,12 +1203,17 @@ fn settle_icons(
 
     let mut previews = sk_preview::Previews::new();
     let mut names = crate::icons::Names::default();
-    let mut asked: Vec<(sk_model::EntryId, sk_gpu::ImageKey)> = Vec::new();
+    // `None` for the pane's own listing, a column view's other columns by index.
+    let mut asked: Vec<(Option<usize>, sk_model::EntryId, sk_gpu::ImageKey)> = Vec::new();
     // **Distinct pictures, not rows.** Every text file in a directory resolves to
     // one `text-x-generic` file at one band, and `Previews::want` dedupes — so a
     // count of rows is a count of answers that can never arrive, and the loop
     // below waits out the whole deadline every time.
     let mut wanted: Vec<sk_gpu::ImageKey> = Vec::new();
+    // The pane's own rows, and in a column view every other column's too — the
+    // same rows `App::icons_asked_for` asks about, so a capture draws what the
+    // window does.
+    let mut rows: Vec<Wanting<'_>> = Vec::new();
     for row in 0..pane.listing.rows().min(MEASURED) {
         let Some(id) = pane.listing.at(row) else { continue };
         if pane.thumbs.contains_key(&id) {
@@ -1206,16 +1221,33 @@ fn settle_icons(
         }
         let side = crate::view::mark_of(pane.mode, here, cells.at(row, 0.0), &theme.metrics).width;
         let directory = pane.listing.flags(id).has(sk_model::Flags::DIR);
-        let wants = crate::icons::names_for(directory, types.by_name(pane.listing.name(id)));
-        let nominal = side.round().max(1.0) as u32;
-        // Rounded up, for the reason `App::settle_icons` gives.
-        let step = scale.ceil().max(1.0) as u32;
+        let mime = types.by_name(pane.listing.name(id));
+        rows.push(Wanting { owner: None, id, directory, mime, side });
+    }
+    if pane.mode == crate::cells::Mode::Columns {
+        let areas = crate::trail::areas(here.body, pane.trail.len(), pane.across.offset());
+        for (index, (level, area)) in pane.trail.iter().zip(areas).enumerate() {
+            let column = crate::trail::cells_of(level, area, theme.metrics.row_height);
+            for row in 0..level.dir.listing.rows().min(MEASURED) {
+                let Some(id) = level.dir.listing.at(row) else { continue };
+                let at = column.at(row, level.scroll.offset());
+                let side =
+                    crate::view::mark_of(crate::cells::Mode::Columns, here, at, &theme.metrics)
+                        .width;
+                let directory = level.dir.listing.flags(id).has(sk_model::Flags::DIR);
+                let mime = types.by_name(level.dir.listing.name(id));
+                rows.push(Wanting { owner: Some(index), id, directory, mime, side });
+            }
+        }
+    }
+    for Wanting { owner, id, directory, mime, side } in rows {
+        let (nominal, step, band) = crate::icons::sizing(side, scale);
+        let wants = crate::icons::names_for(directory, mime, types);
         let Some(file) = wants.iter().find_map(|it| found.find(it, nominal, step)) else {
             continue;
         };
-        let band = sk_gpu::icon_band((side * scale).round().max(1.0) as u32);
         let (_, image) = names.name(&file, band);
-        asked.push((id, image));
+        asked.push((owner, id, image));
         if !wanted.contains(&image) {
             wanted.push(image);
             previews.want(crate::icons::wanted(file, band));
@@ -1237,9 +1269,19 @@ fn settle_icons(
         }
         std::thread::yield_now();
     }
-    for (id, image) in asked {
-        if session.renderer.holds_icon(image) {
-            pane.icons.insert(id, image);
+    for (owner, id, image) in asked {
+        if !session.renderer.holds_icon(image) {
+            continue;
+        }
+        match owner {
+            None => {
+                pane.icons.insert(id, image);
+            }
+            Some(index) => {
+                if let Some(level) = pane.trail.get_mut(index) {
+                    level.icons.insert(id, image);
+                }
+            }
         }
     }
     source.token()

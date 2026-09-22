@@ -654,6 +654,37 @@ struct Launched {
     child: Option<std::process::Child>,
 }
 
+/// Which map a themed icon belongs in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IconOwner {
+    /// The pane's own listing — the only one in Details and the grid, the last
+    /// column in a column view.
+    Pane,
+    /// One of a column view's other columns, by its place in `Pane::trail`.
+    Level(usize),
+}
+
+/// A visible row with no icon in the atlas yet.
+struct IconAsked<'a> {
+    leaf: crate::panes::PaneId,
+    owner: IconOwner,
+    id: sk_model::EntryId,
+    directory: bool,
+    mime: Option<&'a str>,
+    /// The mark's side in logical pixels, which the theme is asked for.
+    side: f32,
+}
+
+/// An asked-for icon, found in the theme.
+struct IconResolved {
+    leaf: crate::panes::PaneId,
+    owner: IconOwner,
+    id: sk_model::EntryId,
+    file: std::path::PathBuf,
+    /// The atlas band it goes in, as `sk_gpu::icon_band` names one.
+    band: u32,
+}
+
 /// Where a pasted location went, and whether it was one.
 enum Pasted {
     /// A directory to open.
@@ -8281,6 +8312,12 @@ scope_aim={scope_aim:?}",
         }
     }
 
+    /// The icons a column view's *other* columns hold — what `icon_slots` cannot
+    /// say, because the atlas does not know which column drew a slot.
+    fn trail_icons(&self) -> usize {
+        self.panes.focused().trail.iter().map(|level| level.icons.len()).sum()
+    }
+
     /// Asks for the themed icon of every visible entry, and records the ones the
     /// atlas already has.
     ///
@@ -8301,13 +8338,27 @@ scope_aim={scope_aim:?}",
         let Some(desktop) = self.desktop.clone() else { return };
         let types = desktop.mime.as_ref();
         let scale = self.window.scale().max(1.0);
-        // **A listing replaced under the map takes the map with it.** An
-        // `EntryId` is an index into arrays the next read rebuilds, and the warm
-        // path below trusts `Pane::icons` without re-deriving the row — so a
-        // folder that arrived where a text file used to be would draw a document
-        // for as long as the window was open. `Pane::arrive` clears it on a
-        // navigation; this is the same rule for a listing replaced in place,
-        // which is what an inotify re-read is.
+        self.forget_stale_icons();
+        let asking = self.icons_asked_for(types);
+        if asking.is_empty() {
+            return;
+        }
+        let resolved = self.resolve_icons(asking, types, scale);
+        self.hold_icons(resolved);
+        let atlas = &self.renderer;
+        self.icon_names.forget_the_oldest(|image| atlas.holds_icon(image));
+    }
+
+    /// Empties every icon map whose listing has been replaced under it.
+    ///
+    /// **A listing replaced under the map takes the map with it.** An `EntryId` is
+    /// an index into arrays the next read rebuilds, and the warm path trusts a map
+    /// without re-deriving the row — so a folder that arrived where a text file
+    /// used to be would draw a document for as long as the window was open.
+    /// `Pane::arrive` clears the pane's on a navigation; this is the same rule for
+    /// a listing replaced in place, which is what an inotify re-read is, and for
+    /// every column of a column view.
+    fn forget_stale_icons(&mut self) {
         for leaf in self.placement.leaves.clone() {
             let Some(tabs) = self.panes.leaf_mut(leaf.id) else { continue };
             let pane = tabs.showing_mut();
@@ -8316,19 +8367,30 @@ scope_aim={scope_aim:?}",
                 pane.icons.clear();
                 pane.icons_at = version;
             }
+            for level in &mut pane.trail {
+                let version = level.dir.listing.version();
+                if level.icons_at != version {
+                    level.icons.clear();
+                    level.icons_at = version;
+                }
+            }
         }
+    }
+
+    /// Every visible row that has no icon in the atlas yet, and which map it
+    /// belongs in.
+    ///
+    /// **The pane's own rows in every view, and a column view's other columns
+    /// too.** Details, the grid and the column view are three views of one
+    /// listing, and [rule 8](../../../docs/03-principles.md#8-one-selection-one-path-one-filter)
+    /// does not let one of them draw our marks while the setting names a theme.
+    fn icons_asked_for<'a>(&self, types: &'a sk_desktop::MimeDatabase) -> Vec<IconAsked<'a>> {
+        let metrics = &self.theme.metrics;
         let mut asking = Vec::new();
         for leaf in &self.placement.leaves {
             let Some(pane) = self.panes.leaf(leaf.id).map(crate::panes::Tabs::showing) else {
                 continue;
             };
-            // **Details and grid, which is where `icon_of` runs.** A column draws
-            // its mark through a call of its own and never reads `Pane::icons`,
-            // so asking here would start a child process for a picture nothing
-            // would put on screen.
-            if pane.mode == crate::cells::Mode::Columns {
-                continue;
-            }
             let cells = self.cells_of(leaf, pane);
             for row in cells.visible(pane.scroll.offset()) {
                 let Some(id) = pane.listing.at(row) else { continue };
@@ -8345,80 +8407,108 @@ scope_aim={scope_aim:?}",
                 if pane.icons.get(&id).is_some_and(|image| self.renderer.holds_icon(*image)) {
                     continue;
                 }
-                let side = crate::view::mark_of(
-                    pane.mode,
-                    leaf,
-                    cells.at(row, pane.scroll.offset()),
-                    &self.theme.metrics,
-                )
-                .width;
-                let directory = pane.listing.flags(id).has(sk_model::Flags::DIR);
-                asking.push((leaf.id, id, directory, types.by_name(pane.listing.name(id)), side));
+                let at = cells.at(row, pane.scroll.offset());
+                asking.push(IconAsked {
+                    leaf: leaf.id,
+                    owner: IconOwner::Pane,
+                    id,
+                    directory: pane.listing.flags(id).has(sk_model::Flags::DIR),
+                    mime: types.by_name(pane.listing.name(id)),
+                    side: crate::view::mark_of(pane.mode, leaf, at, metrics).width,
+                });
+            }
+            if pane.mode != crate::cells::Mode::Columns {
+                continue;
+            }
+            let areas = crate::trail::areas(leaf.body, pane.trail.len(), pane.across.offset());
+            for (index, (level, area)) in pane.trail.iter().zip(areas).enumerate() {
+                let cells = crate::trail::cells_of(level, area, metrics.row_height);
+                for row in cells.visible(level.scroll.offset()) {
+                    let Some(id) = level.dir.listing.at(row) else { continue };
+                    if level.icons.get(&id).is_some_and(|image| self.renderer.holds_icon(*image)) {
+                        continue;
+                    }
+                    let at = cells.at(row, level.scroll.offset());
+                    asking.push(IconAsked {
+                        leaf: leaf.id,
+                        owner: IconOwner::Level(index),
+                        id,
+                        directory: level.dir.listing.flags(id).has(sk_model::Flags::DIR),
+                        mime: types.by_name(level.dir.listing.name(id)),
+                        side: crate::view::mark_of(crate::cells::Mode::Columns, leaf, at, metrics)
+                            .width,
+                    });
+                }
             }
         }
-        if asking.is_empty() {
-            return;
-        }
+        asking
+    }
 
-        // **The theme's borrow ends here.** Resolving and then mutating in two
-        // passes is what lets a pane be written to while the theme that named its
-        // files is a field of the same struct.
-        //
-        // **One resolution per kind and size, not per row.** A directory of four
-        // hundred photographs asks about one name; without the memo it asks four
-        // hundred times, and each ask is three hash lookups and a path built.
-        let resolved: Vec<(crate::panes::PaneId, sk_model::EntryId, std::path::PathBuf, u32)> = {
-            let Some(theme) = self.icon_theme.theme() else { return };
-            let mut found: std::collections::HashMap<
-                (bool, &str, u32),
-                Option<std::path::PathBuf>,
-            > = std::collections::HashMap::new();
-            asking
-                .into_iter()
-                .filter_map(|(leaf, id, directory, mime, side)| {
-                    let nominal = side.round().max(1.0) as u32;
-                    let band = sk_gpu::icon_band((side * scale).round().max(1.0) as u32);
-                    // **Rounded up, and it is not a rounding preference.** The
-                    // specification's scale is an integer and no theme ships an
-                    // `@1.25x` directory, so 125% asks for a `@2x` icon and the
-                    // GPU minifies it to the twenty device pixels the mark is.
-                    // Rounding *down* asks for 16-pixel art, and `image_quad`
-                    // never enlarges — so the mark drew at 16 device pixels in a
-                    // 20-pixel box, visibly smaller than every other mark in the
-                    // window. Captured at 125% and looked at, which is the only
-                    // way that one is visible.
-                    let step = scale.ceil().max(1.0) as u32;
-                    let file = found
-                        .entry((directory, mime.unwrap_or_default(), nominal))
-                        .or_insert_with(|| {
-                            crate::icons::names_for(directory, mime)
-                                .iter()
-                                .find_map(|name| theme.find(name, nominal, step))
-                        })
-                        .clone()?;
-                    Some((leaf, id, file, band))
+    /// The file each asked-for icon is, and the band of the atlas it goes in.
+    ///
+    /// **One resolution per kind and size, not per row.** A directory of four
+    /// hundred photographs asks about one name; without the memo it asks four
+    /// hundred times, and each ask is three hash lookups and a path built.
+    fn resolve_icons(
+        &self,
+        asking: Vec<IconAsked<'_>>,
+        types: &sk_desktop::MimeDatabase,
+        scale: f32,
+    ) -> Vec<IconResolved> {
+        let Some(theme) = self.icon_theme.theme() else { return Vec::new() };
+        let mut found: std::collections::HashMap<(bool, &str, u32), Option<std::path::PathBuf>> =
+            std::collections::HashMap::new();
+        asking
+            .into_iter()
+            .filter_map(|asked| {
+                let (nominal, step, band) = crate::icons::sizing(asked.side, scale);
+                let file = found
+                    .entry((asked.directory, asked.mime.unwrap_or_default(), nominal))
+                    .or_insert_with(|| {
+                        crate::icons::names_for(asked.directory, asked.mime, types)
+                            .iter()
+                            .find_map(|name| theme.find(name, nominal, step))
+                    })
+                    .clone()?;
+                Some(IconResolved {
+                    leaf: asked.leaf,
+                    owner: asked.owner,
+                    id: asked.id,
+                    file,
+                    band,
                 })
-                .collect()
-        };
+            })
+            .collect()
+    }
 
-        for (leaf, id, path, band) in resolved {
-            let (key, image) = self.icon_names.name(&path, band);
+    /// Puts what the atlas holds into the map each icon belongs in, and asks the
+    /// helper for what it does not.
+    fn hold_icons(&mut self, resolved: Vec<IconResolved>) {
+        for icon in resolved {
+            let (key, image) = self.icon_names.name(&icon.file, icon.band);
             // `holds_icon`, not `get`: asking whether to fetch must not stamp the
             // frame the atlas evicts by.
             let held = self.renderer.holds_icon(image);
-            if let Some(tabs) = self.panes.leaf_mut(leaf) {
-                if held {
-                    tabs.showing_mut().icons.insert(id, image);
-                } else {
-                    tabs.showing_mut().icons.remove(&id);
+            if let Some(tabs) = self.panes.leaf_mut(icon.leaf) {
+                let pane = tabs.showing_mut();
+                let map = match icon.owner {
+                    IconOwner::Pane => Some(&mut pane.icons),
+                    IconOwner::Level(index) => {
+                        pane.trail.get_mut(index).map(|level| &mut level.icons)
+                    }
+                };
+                if let Some(map) = map {
+                    if held {
+                        map.insert(icon.id, image);
+                    } else {
+                        map.remove(&icon.id);
+                    }
                 }
             }
             if !held && !self.icon_names.was_refused(&key) {
-                self.previews.want(crate::icons::wanted(path, band));
+                self.previews.want(crate::icons::wanted(icon.file, icon.band));
             }
         }
-        let atlas = &self.renderer;
-        self.icon_names.forget_the_oldest(|image| atlas.holds_icon(image));
     }
 
     /// Takes delivery of a text preview's read.
@@ -9919,6 +10009,7 @@ volumes={volumes:?} aside_grabbed={}",
         let settings_aim = self.settings_aim();
         let icons = self.icon_theme.token();
         let (icon_held, _, icon_owed) = self.renderer.icon_stats();
+        let trail_icons = self.trail_icons();
         format!(
             "body_top={:.1} body_height={:.1} row_h={:.1} name_x={:.1} size_x={:.1} size_w={:.1} \
 header_y={:.1} header_h={:.1} modified_x={:.1} modified_w={:.1} \
@@ -9934,7 +10025,7 @@ crumb_menu_aim={crumb_menu_aim:?} \
 {panes_report} {menu_report} {palette_report} \
 properties={properties:?} facts={facts:?} openers={openers} opener={opener:?} \
 composing={composing:?} pointer={cursor_shape} settings={settings:?} settings_aim={settings_aim:?} \
-icons={icons} icon_slots={icon_held}:{icon_owed} \
+icons={icons} icon_slots={icon_held}:{icon_owed} trail_icons={trail_icons} \
 {places_report} \
 path_field={path_field} name_field={name_field} \
 logical={:.0}x{:.0} scale_120={} first_frame_scale_120={} \

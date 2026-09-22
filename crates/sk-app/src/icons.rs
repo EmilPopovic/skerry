@@ -204,23 +204,40 @@ mod tests {
         assert_eq!(from_portal.theme, asked, "the portal's answer was not the one asked for");
     }
 
-    /// The freedesktop convention, which is what every theme is built against.
+    /// The shared-mime-info convention: the type's own name, then the generic the
+    /// database names — read, not built — and the one every theme has.
     #[test]
-    fn a_file_answers_to_its_type_then_to_its_familys_generic() {
-        assert_eq!(super::names_for(true, Some("inode/directory")), vec!["folder"]);
-        assert_eq!(super::names_for(true, None), vec!["folder"]);
+    fn a_file_answers_to_its_type_then_to_the_generic_the_database_names() {
+        let mut types = sk_desktop::MimeDatabase::default();
+        types.absorb_generic_icons(
+            "application/pdf:x-office-document\napplication/x-compressed-tar:package-x-generic\n",
+        );
+        let names = |directory, mime| super::names_for(directory, mime, &types);
+        assert_eq!(names(true, Some("inode/directory")), vec!["folder"]);
+        assert_eq!(names(true, None), vec!["folder"]);
+        assert_eq!(names(false, Some("text/plain")), vec!["text-plain", "text-x-generic"]);
+        // **The case this test used to assert the other way.** A PDF asked for a
+        // built `application-x-generic`, which almost no theme ships, and fell to
+        // the text icon with `x-office-document` sitting in the theme.
         assert_eq!(
-            super::names_for(false, Some("text/plain")),
-            vec!["text-plain", "text-x-generic"]
+            names(false, Some("application/pdf")),
+            vec!["application-pdf", "x-office-document", "text-x-generic"]
         );
         assert_eq!(
-            super::names_for(false, Some("application/pdf")),
-            vec!["application-pdf", "application-x-generic", "text-x-generic"]
+            names(false, Some("application/x-compressed-tar"))[1],
+            "package-x-generic",
+            "an archive does not ask for the archive icon"
+        );
+        // A type the database names no generic for is the one place the built
+        // name is right.
+        assert_eq!(
+            names(false, Some("application/x-unknown-thing")),
+            vec!["application-x-unknown-thing", "application-x-generic", "text-x-generic"]
         );
         // The `+` stays: a theme's file really is called `image-svg+xml.png`.
-        assert_eq!(super::names_for(false, Some("image/svg+xml"))[0], "image-svg+xml");
+        assert_eq!(names(false, Some("image/svg+xml"))[0], "image-svg+xml");
         // A file the databases do not name still draws something.
-        assert_eq!(super::names_for(false, None), vec!["text-x-generic"]);
+        assert_eq!(names(false, None), vec!["text-x-generic"]);
     }
 
     /// **An icon asks for a preview and never for a thumbnail**, which is what
@@ -301,29 +318,54 @@ mod tests {
     }
 }
 
+/// What a mark `side` logical pixels across asks the theme for at `scale`: the
+/// nominal size, the step, and the atlas band the picture lands in.
+///
+/// **One answer for the window and the capture**, because the two used to derive
+/// it separately and a fix to one was a frame the other disagreed with.
+///
+/// **The step is rounded up, and it is not a rounding preference.** The
+/// specification's scale is an integer and no theme ships an `@1.25x`
+/// directory, so 125% asks for a `@2x` icon and the GPU minifies it to the twenty
+/// device pixels the mark is. Rounding *down* asks for 16-pixel art, and
+/// `image_quad` never enlarges — so the mark drew at 16 device pixels in a
+/// 20-pixel box, visibly smaller than every other mark in the window. Captured at
+/// 125% and looked at, which is the only way that one is visible.
+pub(crate) fn sizing(side: f32, scale: f32) -> (u32, u32, u32) {
+    let nominal = side.round().max(1.0) as u32;
+    let step = scale.ceil().max(1.0) as u32;
+    let band = sk_gpu::icon_band((side * scale).round().max(1.0) as u32);
+    (nominal, step, band)
+}
+
 /// The icon names a file answers to, most specific first.
 ///
-/// **The freedesktop convention, which is what every theme is built against.** A
-/// MIME type `text/plain` is `text-plain`, and a theme that does not ship that
-/// one ships `text-x-generic` — so the list is the specific name, its family's
-/// generic, and the generic every theme has. A directory is `folder`, which is
-/// the one name no theme is without.
+/// **The shared-mime-info convention, which is what every theme is built
+/// against**: the type's own icon, then the generic the MIME database names for
+/// it — [`sk_desktop::MimeDatabase::icon_names`] — and last the generic every
+/// theme has. A directory is `folder`, which is the one name no theme is
+/// without.
 ///
 /// A name the theme does not hold is a *miss* and the next is tried; when all of
 /// them miss, the geometric mark is what draws, which is
 /// [`Source::Ours`] arrived at for one file rather than for the window.
-pub(crate) fn names_for(directory: bool, mime: Option<&str>) -> Vec<String> {
+pub(crate) fn names_for(
+    directory: bool,
+    mime: Option<&str>,
+    types: &sk_desktop::MimeDatabase,
+) -> Vec<String> {
     /// The name every theme has, which is what a file the databases cannot type
     /// falls through to.
     const LAST: &str = "text-x-generic";
     if directory {
         return vec!["folder".to_owned()];
     }
-    let Some((top, sub)) = mime.and_then(|it| it.split_once('/')) else {
+    let Some(mime) = mime.filter(|it| it.contains('/')) else {
         return vec![LAST.to_owned()];
     };
-    let mut names = vec![format!("{top}-{sub}"), format!("{top}-x-generic")];
-    if top != "text" {
+    let mut names = types.icon_names(mime).to_vec();
+    names.dedup();
+    if !names.iter().any(|name| name == LAST) {
         names.push(LAST.to_owned());
     }
     names
