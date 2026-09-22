@@ -6039,7 +6039,7 @@ def path_entry_by_pointer(run: Run, fixture: Path) -> None:
     expect(run.state(), path_entry="", path=str(fixture))
 
 
-@scenario("path-completion-is-a-list-and-not-a-mode")
+@scenario("path-completion-is-a-list-and-not-a-mode", fresh=True)
 def path_completion(run: Run, fixture: Path) -> None:
     """Tab finishes a path, and the list never becomes a second keyboard.
 
@@ -6054,6 +6054,11 @@ def path_completion(run: Run, fixture: Path) -> None:
     rather than a read: the `readdir` is on the pool because rule 1 gives the UI
     thread no filesystem syscalls, so the list appears a frame or more after the
     key that asked for it.
+
+    **A fixture of its own**, because the shared one is called `fixture` and a
+    sweep leaves `fixture-<scenario>` beside it: a field holding `…/fixture` then
+    has real completions, and the first assertion below would be about the
+    harness's directory names rather than about the list.
     """
     run.drive("sleep 500\nkey ctrl+l\nsleep 250\nkey f12\nsleep 150\n")
     opened = run.state()
