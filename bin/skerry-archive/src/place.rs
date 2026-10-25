@@ -43,6 +43,28 @@ const KEEP_FREE: u64 = 64 * 1024 * 1024;
 /// entry, an archive of a million empty files would ask a million times.
 const CHECK_EVERY: u64 = 32 * 1024 * 1024;
 
+/// The most inodes that must be left on the destination filesystem.
+///
+/// **[`KEEP_FREE`] in four-kilobyte files**, so what is left after an unpack is
+/// the same 16,384 small files' worth whichever of the two ran out. Bytes alone
+/// never see this: an archive of empty files writes none, and this — not a count
+/// of entries — is what stops one, because a backup or a browser's source tarball
+/// is honestly hundreds of thousands of files.
+///
+/// **At most a sixty-fourth of the filesystem's inodes**, because the figure is
+/// absolute and some tables are small: `mkfs.ext4 -T largefile4` gives a 64 GiB
+/// filesystem 16,384 inodes in all, and a reserve larger than that refused every
+/// unpack onto it. See [`reserve`].
+const KEEP_FREE_FILES: u64 = KEEP_FREE / 4096;
+
+/// How often the filesystem is asked about inodes, in files, directories and
+/// links made.
+///
+/// **Counted per thing made rather than per entry**, because one entry can make
+/// thousands: a pax path may be a mebibyte long, and every directory in it that
+/// does not exist yet is an inode.
+pub(crate) const MAKE_EVERY: u64 = 1024;
+
 /// The destination, and what has been put in it.
 pub struct Place {
     root: OwnedFd,
@@ -52,7 +74,24 @@ pub struct Place {
     pub written: Progress,
     /// Entries this refused to create: a device node, or a path that escapes.
     pub skipped: u64,
+    /// Whether the filesystem has been asked at all, which the first entry does.
+    checked: bool,
     since_check: u64,
+    made_since_check: u64,
+    /// How the filesystem is asked: `statvfs`, or a test's filesystem that is
+    /// running out.
+    measure: fn(BorrowedFd<'_>) -> Result<Left, Refusal>,
+}
+
+/// What the destination's filesystem has left, as `statvfs` says it.
+#[derive(Clone, Copy, Debug)]
+pub struct Left {
+    /// Bytes an unprivileged writer may still use.
+    pub bytes: u64,
+    /// Inodes in all, or zero where the filesystem keeps no count.
+    pub files: u64,
+    /// Inodes an unprivileged writer may still use.
+    pub files_free: u64,
 }
 
 impl Place {
@@ -64,7 +103,22 @@ impl Place {
             Mode::empty(),
         )
         .map_err(|_| Refusal::Unreadable)?;
-        Ok(Self { root, at: None, written: Progress::default(), skipped: 0, since_check: 0 })
+        Ok(Self {
+            root,
+            at: None,
+            written: Progress::default(),
+            skipped: 0,
+            checked: false,
+            since_check: 0,
+            made_since_check: 0,
+            measure: measured,
+        })
+    }
+
+    /// This place, with its filesystem's answers coming from `measure`.
+    #[cfg(test)]
+    pub fn measured_by(self, measure: fn(BorrowedFd<'_>) -> Result<Left, Refusal>) -> Self {
+        Self { measure, ..self }
     }
 
     /// Makes the directory an entry names, and its parents.
@@ -73,12 +127,16 @@ impl Place {
             self.skipped += 1;
             return Ok(());
         };
+        self.room()?;
         if !self.reach(&dir)? {
             self.skipped += 1;
             return Ok(());
         }
         let made =
             rustix::fs::mkdirat(self.there(), name.as_str(), Mode::from_bits_truncate(0o755));
+        if made.is_ok() {
+            self.made_since_check += 1;
+        }
         match made {
             Ok(()) | Err(rustix::io::Errno::EXIST) => {
                 self.written.entries += 1;
@@ -123,6 +181,7 @@ impl Place {
             self.skipped += 1;
             return Ok(None);
         };
+        self.made_since_check += 1;
         Ok(Some(File::from(fd)))
     }
 
@@ -153,6 +212,7 @@ impl Place {
             self.skipped += 1;
             return Ok(());
         }
+        self.room()?;
         if !self.reach(&dir)? {
             self.skipped += 1;
             return Ok(());
@@ -165,6 +225,7 @@ impl Place {
             self.skipped += 1;
             return Ok(());
         }
+        self.made_since_check += 1;
         self.written.entries += 1;
         Ok(())
     }
@@ -231,15 +292,16 @@ impl Place {
             rustix::fs::utimensat(self.there(), name.as_str(), &times, AtFlags::SYMLINK_NOFOLLOW);
     }
 
-    /// Whether there is still room, asked every [`CHECK_EVERY`] bytes.
+    /// Whether there is still room, asked every [`CHECK_EVERY`] bytes and every
+    /// [`MAKE_EVERY`] things made.
     fn room(&mut self) -> Result<(), Refusal> {
-        if self.since_check < CHECK_EVERY && self.written.bytes > 0 {
+        if self.checked && self.since_check < CHECK_EVERY && self.made_since_check < MAKE_EVERY {
             return Ok(());
         }
+        self.checked = true;
         self.since_check = 0;
-        let space = rustix::fs::fstatvfs(&self.root).map_err(|_| Refusal::NoRoom)?;
-        let free = space.f_bavail.saturating_mul(space.f_frsize);
-        if free < KEEP_FREE + CHECK_EVERY { Err(Refusal::NoRoom) } else { Ok(()) }
+        self.made_since_check = 0;
+        if enough((self.measure)(self.root.as_fd())?) { Ok(()) } else { Err(Refusal::NoRoom) }
     }
 
     /// Makes `dir` under the destination and holds a descriptor on it.
@@ -262,9 +324,11 @@ impl Place {
         }
         let mut fd: Option<OwnedFd> = None;
         for component in dir.split('/') {
+            self.room()?;
             let here = fd.as_ref().map_or_else(|| self.root.as_fd(), AsFd::as_fd);
             match rustix::fs::mkdirat(here, component, Mode::from_bits_truncate(0o755)) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Ok(()) => self.made_since_check += 1,
+                Err(rustix::io::Errno::EXIST) => {}
                 Err(rustix::io::Errno::NOSPC | rustix::io::Errno::DQUOT) => {
                     return Err(Refusal::NoRoom);
                 }
@@ -313,6 +377,32 @@ impl std::io::Write for Output<'_> {
     fn flush(&mut self) -> std::io::Result<()> {
         self.file.flush()
     }
+}
+
+/// What the destination's filesystem has left, from `statvfs`.
+fn measured(root: BorrowedFd<'_>) -> Result<Left, Refusal> {
+    let space = rustix::fs::fstatvfs(root).map_err(|_| Refusal::NoRoom)?;
+    Ok(Left {
+        bytes: space.f_bavail.saturating_mul(space.f_frsize),
+        files: space.f_files,
+        files_free: space.f_favail,
+    })
+}
+
+/// The inodes to keep free on a filesystem with `files` of them in all.
+fn reserve(files: u64) -> u64 {
+    KEEP_FREE_FILES.min(files / 64)
+}
+
+/// Whether a filesystem with this much `left` can take another [`CHECK_EVERY`]
+/// bytes and [`MAKE_EVERY`] inodes and still keep what must be kept.
+///
+/// **A filesystem that counts no inodes has none to run out of.** vfat and exfat
+/// report zero files in all — measured on this machine — and so does btrfs, and
+/// reading that as none free would refuse every unpack onto them.
+fn enough(left: Left) -> bool {
+    left.bytes >= KEEP_FREE + CHECK_EVERY
+        && (left.files == 0 || left.files_free >= reserve(left.files) + MAKE_EVERY)
 }
 
 /// An archive's path as this program will treat it: no `./` in front, no
@@ -440,6 +530,53 @@ mod tests {
         assert_eq!(output.place.since_check, 4096);
         assert_eq!(output.place.written.bytes, 8192);
         drop(output);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **Inodes run out as surely as bytes do**, and an archive of empty files
+    /// spends nothing else.
+    #[test]
+    fn a_filesystem_out_of_inodes_is_out_of_room_with_bytes_to_spare() {
+        let left = |bytes, files, files_free| Left { bytes, files, files_free };
+        let plenty = 1 << 40;
+        assert!(enough(left(plenty, 1_000_000, 500_000)));
+        assert!(!enough(left(plenty, 1_000_000, KEEP_FREE_FILES)), "the last inodes were spent");
+        // A filesystem that keeps no count is never out of what it does not count.
+        assert!(enough(left(plenty, 0, 0)));
+        // And bytes still bind on their own.
+        assert!(!enough(left(KEEP_FREE, 1_000_000, 500_000)));
+    }
+
+    /// **A small inode table keeps a proportionate reserve**, not all of itself:
+    /// 64 GiB under `mkfs.ext4 -T largefile4` is 16,384 inodes in all, which an
+    /// absolute reserve of 16,384 refused every unpack onto however empty it was.
+    #[test]
+    fn a_small_inode_table_is_not_all_reserve() {
+        let largefile4 = Left { bytes: 1 << 36, files: 16_384, files_free: 16_373 };
+        assert_eq!(reserve(largefile4.files), 256);
+        assert!(enough(largefile4), "an empty filesystem refused an unpack");
+        assert_eq!(reserve(92_061_696), KEEP_FREE_FILES, "a large table keeps the whole reserve");
+    }
+
+    /// **Making things asks the filesystem again without a byte written**, and a
+    /// deep path counts every directory it makes — the two shapes of archive the
+    /// byte cadence alone never rechecks.
+    #[test]
+    fn making_things_rechecks_room_without_writing_a_byte() {
+        let root = std::env::temp_dir().join(format!("skerry-place-made-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut place = Place::under(&root).unwrap();
+        place.directory("a").unwrap();
+        assert!(place.checked, "the first entry did not ask");
+        assert_eq!(place.made_since_check, 1);
+
+        place.made_since_check = MAKE_EVERY;
+        place.directory("b").unwrap();
+        assert_eq!(place.made_since_check, 1, "a thousand things made and nobody asked");
+
+        let file = place.create("c/d/e/f.txt", false).unwrap();
+        assert!(file.is_some());
+        assert_eq!(place.made_since_check, 5, "three directories and a file are four inodes");
         std::fs::remove_dir_all(root).unwrap();
     }
 }
