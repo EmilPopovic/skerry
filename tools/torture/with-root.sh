@@ -14,14 +14,14 @@
 # could not be preserved" paths never fire and the run would be a weaker test
 # than the unprivileged one.
 #
-# **Root writes only into a directory nobody else can touch, and deletes only
-# what it made.** Root follows symlinks, so a directory another user prepared —
-# the old default was the predictable `/var/tmp/skerry-spike-e-fs` — let them
-# aim its `truncate`, `mkfs` and `rm -rf` at any file on the machine; and the
-# cleanup was `rm -rf` of whatever directory was named, `/var/tmp` included. So
-# the default is `mktemp -d`, and a named directory must be new — or empty,
-# owned by root and writable by nobody else — under ancestors that only root or
-# the invoking user can rearrange.
+# **Root acts only on paths nobody else can change, and deletes only what it
+# made.** Root follows symlinks, so a directory another user prepared — the old
+# default was the predictable `/var/tmp/skerry-spike-e-fs` — let them aim its
+# `truncate`, `mkfs` and `rm -rf` at any file on the machine; and the cleanup
+# was `rm -rf` of whatever directory was named, `/var/tmp` included. So the
+# default is `mktemp -d`, and a named directory must be new — or empty, owned
+# by root and writable by nobody else — under ancestors owned by root or the
+# invoking user and writable by nobody else unless sticky.
 set -u
 RUN_UID=${SUDO_UID:-$(id -u)}
 RUN_GID=${SUDO_GID:-$(id -g)}
@@ -31,24 +31,20 @@ refuse() {
   exit 1
 }
 
-# Trusted: root, and the invoking user — whose `sudo` this already is — with
-# their own group, because a umask of 002 leaves every directory they make
-# group-writable. A sticky directory such as `/var/tmp` is safe to stand under
-# whoever can write to it: nobody can rename or remove an entry they do not own.
+# Trusted: root, and the invoking user, whose `sudo` this already is. Not a
+# group, not even theirs: nothing here can tell a private group from a shared
+# one. A sticky directory such as `/var/tmp` is safe to stand under whoever can
+# write to it, because nobody can rename or remove an entry they do not own.
 refuse_unsafe_ancestors() {
-  local dir=$1 info owner group mode
+  local dir=$1 info owner mode
   while :; do
-    info=$(stat -c '%u %g %a' -- "$dir") || refuse "cannot stat $dir"
-    read -r owner group mode <<<"$info"
+    info=$(stat -c '%u %a' -- "$dir") || refuse "cannot stat $dir"
+    read -r owner mode <<<"$info"
     if [ "$owner" != 0 ] && [ "$owner" != "$RUN_UID" ]; then
       refuse "$dir belongs to uid $owner, who could replace what is under it"
     fi
-    if (( 8#$mode & 8#1000 )); then
-      :
-    elif (( 8#$mode & 8#002 )); then
-      refuse "$dir is writable by every user and is not sticky"
-    elif (( 8#$mode & 8#020 )) && [ "$group" != 0 ] && [ "$group" != "$RUN_GID" ]; then
-      refuse "$dir is writable by group $group and is not sticky"
+    if (( 8#$mode & 8#022 && !(8#$mode & 8#1000) )); then
+      refuse "$dir is writable by its group or by every user, and is not sticky"
     fi
     [ "$dir" = / ] && return
     dir=$(dirname -- "$dir")
@@ -59,7 +55,10 @@ refuse_unsafe_ancestors() {
 refuse_unusable_work() {
   local info owner mode entries
   [ -L "$WORK" ] && refuse "$WORK is a symlink"
-  [ -e "$WORK" ] || return 0
+  if [ ! -e "$WORK" ]; then
+    WORK_IS_NEW=1
+    return 0
+  fi
   [ -d "$WORK" ] || refuse "$WORK exists and is not a directory"
   info=$(stat -c '%u %a' -- "$WORK") || refuse "cannot stat $WORK"
   read -r owner mode <<<"$info"
@@ -71,6 +70,7 @@ refuse_unusable_work() {
 
 # Resolved before the `cd` below, so a relative path means what the caller meant.
 WORK=
+WORK_IS_NEW=
 if [ $# -gt 0 ]; then
   name=$(basename -- "$1")
   case $name in .|..|/) refuse "name a new directory for the images, not $1" ;; esac
@@ -135,8 +135,10 @@ if [ -z "$WORK" ]; then
   # `mktemp` makes it 0700, and the matrix, running as the invoking user, has
   # to reach the mounts inside it.
   chmod 0755 "$WORK"
-elif [ ! -e "$WORK" ]; then
-  # No `-p`: this fails if anything has appeared there since it was checked.
+elif [ -n "$WORK_IS_NEW" ]; then
+  # On what the check saw, not on a second look: the path is in our command
+  # line for anyone to read, so something may have appeared there since, and
+  # then this fails instead of adopting it.
   mkdir -m 0755 -- "$WORK" || exit 1
   made_dirs+=("$WORK")
 fi
@@ -221,22 +223,25 @@ make_fs vfat  1G -F 32
 # the roadmap's list and the one whose failure modes are least like the others:
 # no hardlink guarantees worth trusting, no xattrs, and a server that can go away
 # mid-copy.
+#
+# Everything root does inside the export happens before `exportfs`. The export
+# is `insecure` and AUTH_SYS, so once it is live any local user can speak NFS
+# to it claiming to be uid $RUN_UID, and a `mkdir` or `chown` by root through
+# the mount would follow whatever they had planted there.
 if command -v exportfs >/dev/null && [ -d "$WORK/btrfs" ]; then
   export_dir="$WORK/nfs-export"
-  mkdir -- "$export_dir" && nfs_export=$export_dir
-  mkdir -- "$WORK/nfs" && made_dirs+=("$WORK/nfs")
-  chown "$RUN_UID:$RUN_GID" "$export_dir"
-  if exportfs -o rw,no_subtree_check,insecure "127.0.0.1:$export_dir" 2>/dev/null &&
+  if mkdir -- "$export_dir" && nfs_export=$export_dir &&
+     mkdir -- "$export_dir/skerry" && chown "$RUN_UID:$RUN_GID" "$export_dir/skerry" &&
+     mkdir -- "$WORK/nfs" && made_dirs+=("$WORK/nfs") &&
+     exportfs -o rw,no_subtree_check,insecure "127.0.0.1:$export_dir" 2>/dev/null &&
      exported=127.0.0.1:$export_dir &&
      mount -t nfs -o vers=4 "127.0.0.1:$export_dir" "$WORK/nfs" 2>/dev/null; then
     mounted+=("$WORK/nfs")
-    mkdir -p "$WORK/nfs/skerry"
-    chown "$RUN_UID:$RUN_GID" "$WORK/nfs/skerry"
     targets+=("$WORK/nfs/skerry")
     echo "  ready nfs at $WORK/nfs/skerry"
   else
     echo "  skip nfs: could not export or mount"
-    exportfs -u "127.0.0.1:$export_dir" 2>/dev/null
+    [ -n "$exported" ] && exportfs -u "$exported" 2>/dev/null
     exported=
   fi
 else
