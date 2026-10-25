@@ -297,7 +297,10 @@ fn indented(lines: &[&str], at: usize, quoted: u8, out: &mut Vec<Block>) -> usiz
         {
             break;
         }
-        body.push(lines[next].get(4..).unwrap_or("").to_owned());
+        let line = lines[next];
+        body.push(
+            line.strip_prefix('\t').or_else(|| line.strip_prefix("    ")).unwrap_or("").to_owned(),
+        );
         next += 1;
     }
     out.push(Block {
@@ -650,6 +653,11 @@ fn emphasis(found: &mut Found<'_>, at: usize, mark: char, depth: u8) -> Option<(
         return None;
     }
     let end = found.closing(at + run, mark, run)?;
+    // **Nothing between the marks is not emphasis**, or `******` — a masked
+    // password, a row of a hand-drawn box — would draw as nothing at all.
+    if end == at + run {
+        return None;
+    }
     let strong = mark != '~' && run >= 2;
     let slanted = mark != '~' && run % 2 == 1;
     let runs = spans(&letters[at + run..end], depth + 1)
@@ -1276,6 +1284,30 @@ mod tests {
         out
     }
 
+    /// **An emphasis with nothing in it is its own text**, so a masked password
+    /// reads as the asterisks it is rather than as nothing — which is
+    /// `CommonMark`'s answer as well as ADR 0029's.
+    #[test]
+    fn an_empty_emphasis_is_its_own_text() {
+        for text in ["Password: ******", "~~~~", "a ______ b", "**bold**~~~~"] {
+            let runs = inline(text);
+            let drawn: String = runs.iter().map(|it| it.text.as_str()).collect();
+            let expected = text.replace("**bold**", "bold");
+            assert_eq!(drawn, expected, "{text:?} gave {runs:?}");
+        }
+    }
+
+    /// **A tab indents code the way four spaces do**, and comes off as one
+    /// character rather than four bytes: three letters went with it from every
+    /// tab-indented line, and the whole line where the fourth byte fell inside
+    /// a character.
+    #[test]
+    fn a_tab_indented_code_line_keeps_every_character() {
+        let blocks = parse("Before.\n\n\tlet x = 1;\n\tééx\n    four spaces\n");
+        let Kind::Code { lines, .. } = &blocks[2].kind else { panic!("{blocks:?}") };
+        assert_eq!(lines, &["let x = 1;", "ééx", "four spaces"]);
+    }
+
     /// A run of plain text is one run, not one per character.
     #[test]
     fn plain_text_is_one_run() {
@@ -1347,11 +1379,9 @@ mod tests {
             let blocks = parsed_within(text.clone(), BOUND)
                 .unwrap_or_else(|| panic!("{case} took longer than {BOUND:?}"));
             assert_eq!(blocks.len(), 1, "{case} is one paragraph");
-            // An opener nothing closes is its own text, which for these three is
-            // every one of them.
-            if case != "stars" {
-                assert_eq!(words(&blocks[0]), text, "{case} lost a character");
-            }
+            // An opener nothing closes is its own text, and so is an emphasis
+            // with nothing in it, which between them is every character here.
+            assert_eq!(words(&blocks[0]), text, "{case} lost a character");
         }
     }
 
