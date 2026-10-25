@@ -480,17 +480,26 @@ fn count_one(directory: &Path, device: u64, seen: &mut usize, pending: &mut Vec<
 /// a walk.
 #[must_use]
 pub fn save(index: &Index) -> bool {
-    path_for(&index.root).is_some_and(|file| save_to(index, &file))
+    let Some(file) = path_for(&index.root) else { return false };
+    if let Some(folder) = file.parent() {
+        seal(folder);
+    }
+    save_to(index, &file)
 }
 
 /// As [`save`], to a named file.
 ///
 /// The seam a test uses. `$XDG_CACHE_HOME` is process-global, and a test that
 /// moved it would be a test that moves it for every other test running beside it.
+///
+/// **0600, in folders made 0700.** An index of a home folder names everything
+/// beneath it, `~/.ssh`'s contents included, so an index anybody could read
+/// publishes what those folders' own modes keep private.
 #[must_use]
 pub fn save_to(index: &Index, file: &Path) -> bool {
-    let Some(directory) = file.parent() else { return false };
-    if std::fs::create_dir_all(directory).is_err() {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let (Some(directory), Some(name)) = (file.parent(), file.file_name()) else { return false };
+    if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).is_err() {
         return false;
     }
     let arena_len = index.columns_at - index.arena_at;
@@ -505,17 +514,64 @@ pub fn save_to(index: &Index, file: &Path) -> bool {
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&hash(&index.bytes).to_le_bytes());
     out.extend_from_slice(&index.bytes);
+    publish(directory, name, &out).is_ok()
+}
 
-    let staging = file.with_extension("new");
-    if std::fs::write(&staging, &out).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
+/// Puts `bytes` at `name` in `directory`, through a file only this call created.
+///
+/// **Created `O_EXCL`, under a name no earlier version used**, so a link planted
+/// at the staging name is refused rather than written through; and the rename
+/// replaces a link at `name` rather than following it. A name per call, so two
+/// saves running on the pool at once never share a staging file. Both happen
+/// against one descriptor for the folder, opened without following a link at its
+/// name, so the file is staged and published in the same place.
+fn publish(directory: &Path, name: &std::ffi::OsStr, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let open = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let folder = rustix::fs::open(directory, open, Mode::empty())?;
+    let mut staging = std::ffi::OsString::from(".");
+    staging.push(name);
+    staging.push(format!(
+        ".{}-{}",
+        rustix::process::getpid().as_raw_nonzero(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = rustix::fs::openat(&folder, &staging, create, Mode::from_raw_mode(0o600))?;
+    let written = std::fs::File::from(handle).write_all(bytes).and_then(|()| {
+        rustix::fs::renameat(&folder, &staging, &folder, name).map_err(std::io::Error::from)
+    });
+    if written.is_err() {
+        let _ = rustix::fs::unlinkat(&folder, &staging, rustix::fs::AtFlags::empty());
     }
-    if std::fs::rename(&staging, file).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
+    written
+}
+
+/// Takes group and other access off the index folder an older version left open.
+///
+/// **From [`save`] and [`load`], not from [`save_to`]**, because only the folder
+/// [`path_for`] names is this program's to close — a test saves into the
+/// system's temporary directory. `load` is what makes it prompt: a rebuild is
+/// only ever asked for, so the first search after an upgrade is what puts the
+/// indexes an older version wrote 0644 behind a closed folder.
+///
+/// A link at the folder's name is not followed, and a folder somebody else owns
+/// is left alone: a change through either lands on something that is not ours.
+fn seal(folder: &Path) {
+    let open = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let Ok(fd) = rustix::fs::open(folder, open, Mode::empty()) else { return };
+    let asked = StatxFlags::MODE | StatxFlags::UID;
+    let Ok(stat) = rustix::fs::statx(&fd, "", rustix::fs::AtFlags::EMPTY_PATH, asked) else {
+        return;
+    };
+    let mode = u32::from(stat.stx_mode);
+    let shared = mode & 0o077;
+    if shared != 0 && stat.stx_uid == rustix::process::geteuid().as_raw() {
+        let _ = rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode & 0o700));
     }
-    true
 }
 
 /// Reads the index for `root`, or nothing if there is not a usable one.
@@ -525,7 +581,9 @@ pub fn save_to(index: &Index, file: &Path) -> bool {
 /// the one that reads all fifty megabytes.
 #[must_use]
 pub fn load(root: &Path) -> Option<Index> {
-    load_from(&path_for(root)?, root)
+    let file = path_for(root)?;
+    seal(file.parent()?);
+    load_from(&file, root)
 }
 
 /// As [`load`], from a named file.
@@ -813,7 +871,9 @@ fn now() -> i64 {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{HEADER, Index, MOST, build, count, load_from, save_to, scan_by, search, shard_of};
+    use super::{
+        HEADER, Index, MOST, build, count, load_from, save_to, scan_by, seal, search, shard_of,
+    };
     use sk_util::{Cancel, Pool};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
@@ -934,6 +994,96 @@ mod tests {
         assert_eq!(names(&hunt(&back, "report")), ["Report.pdf", "report-2024.pdf", "reports"]);
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn mode(path: &Path) -> String {
+        format!("{:o}", std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777)
+    }
+
+    /// What is in a folder, `.` and `..` aside.
+    fn listed(folder: &Path) -> Vec<String> {
+        use rustix::fs::{Dir, Mode, OFlags};
+        let open = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let fd = rustix::fs::open(folder, open, Mode::empty()).unwrap();
+        Dir::read_from(&fd)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "." && name != "..")
+            .collect()
+    }
+
+    /// **0600 in 0700.** An index of a home folder names everything beneath it,
+    /// `~/.ssh`'s contents included, so a file anybody can read publishes what
+    /// those folders' own modes keep private. Every folder the save has to make
+    /// is made 0700, which is what the basedir specification asks of
+    /// `$XDG_CACHE_HOME` itself.
+    #[test]
+    fn a_saved_index_is_readable_by_its_owner_alone() {
+        let root = fixture("private");
+        let index = built(&root);
+        let cache = root.join("..").join(format!("{}-private-cache", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let folder = cache.join("skerry").join("index");
+        let file = folder.join("0123.skix");
+        assert!(save_to(&index, &file), "the index would not save");
+        assert_eq!(mode(&file), "600", "the index");
+        for made in [&folder, &cache.join("skerry"), &cache] {
+            assert_eq!(mode(made), "700", "{}", made.display());
+        }
+        // The staging name is gone, rather than a second copy beside the first.
+        assert_eq!(listed(&folder), ["0123.skix"]);
+        std::fs::remove_dir_all(cache).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A link in the index folder is never written through**: not at the
+    /// staging name every earlier version used, and not at the index's own name,
+    /// which the rename replaces rather than follows.
+    #[test]
+    fn a_link_planted_in_the_index_folder_is_not_written_through() {
+        let root = fixture("links");
+        let index = built(&root);
+        let folder = root.join("..").join(format!("{}-links-cache", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("0123.skix");
+        let (staged, named) = (folder.join("staged-victim"), folder.join("named-victim"));
+        std::fs::write(&staged, "unrelated").unwrap();
+        std::fs::write(&named, "unrelated").unwrap();
+        std::os::unix::fs::symlink(&staged, file.with_extension("new")).unwrap();
+        std::os::unix::fs::symlink(&named, &file).unwrap();
+        let _ = save_to(&index, &file);
+        assert_eq!(std::fs::read(&staged).unwrap(), b"unrelated", "the staging link");
+        assert_eq!(std::fs::read(&named).unwrap(), b"unrelated", "the index's own name");
+        std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A folder an older version left open is closed**, which reaches every
+    /// index it already wrote 0644 without waiting for a rebuild — and nothing
+    /// above it, or behind a link at its name, is changed.
+    #[test]
+    fn an_index_folder_left_open_is_closed_and_nothing_else_is() {
+        use std::fs::Permissions;
+        let cache = std::env::temp_dir().join(format!("skerry-store-{}-seal", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let folder = cache.join("skerry").join("index");
+        let elsewhere = cache.join("elsewhere");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for open in [&cache, &cache.join("skerry"), &folder, &elsewhere] {
+            std::fs::set_permissions(open, Permissions::from_mode(0o755)).unwrap();
+        }
+        seal(&folder);
+        assert_eq!(mode(&folder), "700", "the index folder");
+        assert_eq!(mode(&cache.join("skerry")), "755", "the folder above it");
+
+        let linked = cache.join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        seal(&linked);
+        assert_eq!(mode(&elsewhere), "755", "the close went through a link");
+        std::fs::remove_dir_all(cache).unwrap();
     }
 
     /// Every corruption is a walk, which is ADR 0008's third constraint.
