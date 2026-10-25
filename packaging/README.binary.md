@@ -3,6 +3,17 @@
 This archive contains Skerry and all three helper executables. No Rust toolchain
 or source checkout is required.
 
+Check the tarball before extracting it. The `.sha256` beside it catches a
+damaged download; it cannot catch a replaced one, because whoever could replace
+the tarball could replace that file too. The attestation can: it is signed for
+the release workflow of `EmilPopovic/skerry` and names the commit it built, and
+the [GitHub CLI](https://cli.github.com) checks both:
+
+```sh
+sha256sum --check skerry-VERSION-ARCH-linux.tar.gz.sha256
+gh attestation verify skerry-VERSION-ARCH-linux.tar.gz --repo EmilPopovic/skerry
+```
+
 Run directly from the extracted directory:
 
 ```sh

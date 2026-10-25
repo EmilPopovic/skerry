@@ -14,6 +14,17 @@
 # sorted, ownership-stripped archive get most of the way, and the binary itself
 # is whatever the runner's linker produced. That is stated rather than claimed
 # the other way round.
+#
+# **Built without a write token, published without building.** `cargo build`
+# runs every build script and proc-macro in the graph — 25 on x86-64 by
+# `cargo metadata --filter-platform`, none of them written here — so `build`
+# holds `contents: read` and leaves no credential in `.git/config`. `publish`
+# holds the write token and has no checkout to run: it checks the tarballs
+# against their `.sha256`, signs their provenance and attaches them. A
+# compromised dependency can still change the tarball it is built into —
+# nothing here prevents that — but it can no longer replace an asset on a
+# release, and a tarball that did not come out of this workflow fails
+# `gh attestation verify`.
 name: release
 
 on:
@@ -38,10 +49,10 @@ jobs:
   validate-parsers:
     uses: ./.github/workflows/fuzz.yml
 
-  tarball:
+  build:
     needs: [validate, validate-filesystems, validate-parsers]
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +69,7 @@ jobs:
           # The whole history, because `build.rs` stamps the commit into
           # `--version` and a shallow checkout of a tag still has one.
           fetch-depth: 0
+          persist-credentials: false
       - name: Packages
         run: |
           sudo apt-get update
@@ -92,11 +104,37 @@ jobs:
           path: |
             ${{ steps.stage.outputs.archive }}
             ${{ steps.stage.outputs.archive }}.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The only job that can write, and the only one that can sign: a token for
+    # either is a token every build script would otherwise have been handed.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: skerry-*-linux
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        # A transfer that changed a byte is caught here rather than by the
+        # person who downloads it. What a checksum beside its tarball cannot
+        # catch is somebody replacing both, which is what the attestation is for.
+        working-directory: dist
+        run: sha256sum --check --strict -- *.tar.gz.sha256
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" \
-            "${{ steps.stage.outputs.archive }}" \
-            "${{ steps.stage.outputs.archive }}.sha256"
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            dist/*.tar.gz dist/*.tar.gz.sha256

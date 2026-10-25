@@ -63,7 +63,15 @@ in the settings panel (`Ctrl+,`).
 
 Prebuilt tarballs for x86-64 and aarch64 are attached to tagged releases and need
 no Rust. They require glibc 2.39 or newer, so Debian 12 and Ubuntu 22.04 must
-build from source instead. See [packaging/README.binary.md](packaging/README.binary.md).
+build from source instead. Each tarball is attested by the release workflow that
+built it; check one with the [GitHub CLI](https://cli.github.com) before
+extracting it:
+
+```sh
+gh attestation verify skerry-VERSION-ARCH-linux.tar.gz --repo EmilPopovic/skerry
+```
+
+See [packaging/README.binary.md](packaging/README.binary.md).
 
 To run Skerry you need a Wayland or X11 session and Vulkan or OpenGL. Software
 rendering works. PDF previews use a PDF renderer on your `PATH` if one is installed.
