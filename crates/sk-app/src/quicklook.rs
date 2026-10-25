@@ -2133,6 +2133,7 @@ mod tests {
             Refusal::TooLarge,
             Refusal::NoSuchPage,
             Refusal::Interrupted,
+            Refusal::Unconfined,
         ] {
             let wanted = match refusal {
                 Refusal::None | Refusal::NotItsKind | Refusal::NoSuchPage => false,
@@ -2140,7 +2141,8 @@ mod tests {
                 | Refusal::Undecodable
                 | Refusal::NoRenderer
                 | Refusal::TooLarge
-                | Refusal::Interrupted => true,
+                | Refusal::Interrupted
+                | Refusal::Unconfined => true,
             };
             let Some(key) = refusal.message() else {
                 assert!(!wanted, "{refusal:?} lost its sentence");
