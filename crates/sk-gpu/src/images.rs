@@ -241,7 +241,6 @@ impl Images {
 /// so it is not 128 pixels square and never will be. Putting it in a slot would
 /// mean either a second grid of a different size or the heterogeneous packing this
 /// module exists to avoid; a texture of its own is neither.
-#[derive(Default)]
 pub struct Preview {
     /// What is held, oldest-drawn first is not guaranteed — `frame` decides.
     held: Vec<Kept>,
@@ -252,6 +251,8 @@ pub struct Preview {
     /// What the budget may not drop. See [`Preview::keep`].
     pinned: Vec<ImageKey>,
     frame: u64,
+    /// The widest or tallest texture the device makes. See [`Preview::hold`].
+    most_side: u32,
 }
 
 /// One held picture: what it is of, how big, and when it was last drawn.
@@ -260,12 +261,15 @@ struct Kept {
     size: (u32, u32),
     /// The frame this was last drawn in, which is what eviction sorts on.
     frame: u64,
+    /// Whether it has a texture, which a picture past the device's limit never
+    /// gets.
+    on_device: bool,
 }
 
 impl Kept {
-    /// What it costs, in bytes of RGBA.
+    /// What it costs, in bytes of RGBA on the device.
     fn bytes(&self) -> usize {
-        self.size.0 as usize * self.size.1 as usize * 4
+        if self.on_device { self.size.0 as usize * self.size.1 as usize * 4 } else { 0 }
     }
 }
 
@@ -280,6 +284,25 @@ impl Kept {
 const MOST_HELD_BYTES: usize = 24 * 1024 * 1024;
 
 impl Preview {
+    /// A store for a device whose textures are at most `most_side` on a side.
+    #[must_use]
+    pub fn new(most_side: u32) -> Self {
+        Self {
+            held: Vec::new(),
+            pending: Vec::new(),
+            bound: None,
+            pinned: Vec::new(),
+            frame: 0,
+            most_side,
+        }
+    }
+
+    /// Whether the device makes a texture of `size`.
+    #[must_use]
+    pub fn fits(&self, size: (u32, u32)) -> bool {
+        size.0 <= self.most_side && size.1 <= self.most_side
+    }
+
     /// Takes a picture. The next `flush` allocates a texture and uploads it.
     ///
     /// **The size is recorded now and the pixels later**, which is not tidiness:
@@ -287,6 +310,13 @@ impl Preview {
     /// resolving asks `size_of`. Registering only on upload meant the frame a page
     /// arrived on drew nothing at all, then the next one drew it — a page that
     /// appeared one frame late, every time.
+    ///
+    /// **A picture past the device's limit is held as a size and never
+    /// uploaded.** `wgpu` answers a `create_texture` past it with a panic, and a
+    /// picture that draws nothing is what the atlas already does with one it
+    /// cannot place. Held rather than refused, because a page the store does not
+    /// hold is one the panel asks for again — and the child would answer with the
+    /// same picture, one round trip after another.
     pub fn hold(&mut self, key: ImageKey, size: (u32, u32), pixels: &[u8]) {
         if size.0 == 0 || size.1 == 0 || pixels.len() != (size.0 as usize * size.1 as usize * 4) {
             return;
@@ -294,8 +324,11 @@ impl Preview {
         if self.held.iter().any(|kept| kept.key == key) {
             return;
         }
-        self.held.push(Kept { key, size, frame: self.frame });
-        self.pending.push((key, size, pixels.to_vec()));
+        let on_device = self.fits(size);
+        self.held.push(Kept { key, size, frame: self.frame, on_device });
+        if on_device {
+            self.pending.push((key, size, pixels.to_vec()));
+        }
     }
 
     /// The size held under `key`, if it is held.
@@ -419,10 +452,27 @@ fn place(slot: u32, width: u32, height: u32) -> Slot {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{ACROSS, ImageKey, Images, SLOT, origin};
+    use super::{ACROSS, ImageKey, Images, Preview, SLOT, origin};
 
     fn pixels(width: u32, height: u32) -> Vec<u8> {
         vec![7u8; (width * height * 4) as usize]
+    }
+
+    /// **Nothing past the device's limit reaches `create_texture`**, which is
+    /// fed from `take` and nothing else — and the picture is still held as a
+    /// size, or the panel would ask for it again on every frame it is missing.
+    #[test]
+    fn a_picture_past_the_device_limit_is_held_and_never_uploaded() {
+        let mut store = Preview::new(2048);
+        let (wide, fine) = (ImageKey(1), ImageKey(2));
+        store.hold(wide, (2049, 1), &pixels(2049, 1));
+        assert_eq!(store.size_of(wide), Some((2049, 1)), "dropped, so it would be asked for again");
+        assert!(!store.owes_upload(), "a texture past the limit was queued");
+        assert_eq!(store.stats(), (1, 0), "it is counted at bytes it never took");
+
+        store.hold(fine, (2048, 1), &pixels(2048, 1));
+        assert_eq!(store.take().map(|(key, size, _)| (key, size)), Some((fine, (2048, 1))));
+        assert!(store.take().is_none());
     }
 
     #[test]

@@ -220,6 +220,7 @@ impl Renderer {
         let capacity = 1 << 14;
         let instances = instance_buffer(&device, capacity);
         let info = adapter.get_info();
+        let looking = crate::images::Preview::new(device.limits().max_texture_dimension_2d);
         Self {
             device,
             queue,
@@ -236,7 +237,7 @@ impl Renderer {
             icons,
             pages: std::collections::HashMap::new(),
             placeholder: preview,
-            looking: crate::images::Preview::default(),
+            looking,
             atlas: Atlas::new(),
             pictures: Images::default(),
             marks: crate::images::Icons::default(),
@@ -362,6 +363,14 @@ impl Renderer {
     /// panel. The texture is made the next time a frame is drawn, so a preview that
     /// arrives and is dismissed before the frame costs no allocation at all.
     pub fn hold_preview(&mut self, key: ImageKey, size: (u32, u32), pixels: &[u8]) {
+        if !self.looking.fits(size) {
+            eprintln!(
+                "skerry: a {}×{} preview is past this device's {}-texel limit and is not drawn",
+                size.0,
+                size.1,
+                self.device.limits().max_texture_dimension_2d
+            );
+        }
         self.looking.hold(key, size, pixels);
     }
 

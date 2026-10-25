@@ -58,6 +58,28 @@ const REPLY_HEADER: usize = 32;
 /// an out-of-memory kill.
 const MOST_PIXELS: usize = 64 * 1024 * 1024;
 
+/// The most a reply may be on either side, in pixels.
+///
+/// **4096, which is [`MOST_PIXELS`]'s square side and the smallest
+/// `maxImageDimension2D` a Vulkan device may report.** The byte ceiling alone let
+/// a picture be 65,536 pixels wide and 256 tall — exactly 64 MiB, and sixteen
+/// times the side Vulkan guarantees — and `wgpu`'s default answer to a texture
+/// past its device's limit is a panic in the process that asked. A side bounded
+/// here is a picture any Vulkan device takes as one texture.
+pub const MOST_SIDE: u32 = 4096;
+
+/// The box a child is asked to answer inside: `within`, each side at least one
+/// pixel and at most [`MOST_SIDE`].
+///
+/// **The host asks with this and checks against it**, so the two cannot drift. A
+/// panel wider than 4096 device pixels asks for a picture that wide and draws it
+/// at its own size, which is what the document helper already did on its own; a
+/// box of zero is one pixel, because that is what both helpers fit into it.
+#[must_use]
+pub fn bounded(within: (u32, u32)) -> (u32, u32) {
+    (within.0.clamp(1, MOST_SIDE), within.1.clamp(1, MOST_SIDE))
+}
+
 /// The most a page's text layer may carry, in bytes.
 ///
 /// Four megabytes. A word record is twenty-two bytes and its text, so this is
@@ -168,7 +190,8 @@ pub struct Request {
     /// Which of the two shapes of answer is wanted.
     pub ask: Ask,
     /// The largest the answer may be, in device pixels. The child fits the image
-    /// inside this box and keeps its aspect ratio.
+    /// inside this box and keeps its aspect ratio, and the host refuses a reply
+    /// past [`bounded`] of it.
     pub within: (u32, u32),
     /// Which page, one-based, or zero for "whatever the first one is".
     ///
@@ -290,7 +313,10 @@ impl Reply {
         out.flush()
     }
 
-    /// Reads a reply from a child, in the host.
+    /// Reads a child's reply to a request that asked for `within`, in the host.
+    ///
+    /// A picture larger than [`bounded`]`(within)` on either side comes back as
+    /// [`Refusal::TooLarge`] with no pixels, its bytes read past and never kept.
     ///
     /// # Errors
     ///
@@ -299,7 +325,7 @@ impl Reply {
     /// protocol violation — both are refused before anything is allocated, because
     /// a length read off a pipe and handed to `Vec::with_capacity` is how a bug in
     /// one process becomes an out-of-memory kill in another.
-    pub fn read_from(input: &mut impl Read) -> std::io::Result<Self> {
+    pub fn read_from(input: &mut impl Read, within: (u32, u32)) -> std::io::Result<Self> {
         let head = exactly::<REPLY_HEADER>(input)?;
         let (magic, version) = (word32(&head, 0), word16(&head, 4));
         if magic != MAGIC || version != VERSION {
@@ -325,6 +351,20 @@ impl Reply {
             (size.0 as usize).checked_mul(size.1 as usize).and_then(|pixels| pixels.checked_mul(4));
         if wanted != Some(len) {
             return Err(broken(&format!("{len} bytes for {}×{}", size.0, size.1)));
+        }
+        // **A picture larger than its box is that answer refused, not the child.**
+        // The header is whole and its lengths agree, so the pipe is still in step
+        // and reading past the bytes keeps it there. Killing the child instead
+        // would take every request batched behind this one with it — and one case
+        // reaches here with no bug anywhere: the thumbnail cache is shared, and
+        // another program's `normal` thumbnail larger than 128 is relayed as found.
+        let most = bounded(within);
+        if size.0 > most.0 || size.1 > most.1 {
+            let owed = (len + said) as u64;
+            if std::io::copy(&mut input.by_ref().take(owed), &mut std::io::sink())? != owed {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            return Ok(Self::refused(Refusal::TooLarge));
         }
         let mut pixels = vec![0u8; len];
         input.read_exact(&mut pixels)?;
@@ -442,7 +482,31 @@ fn broken(what: &str) -> std::io::Error {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Ask, Refusal, Reply, Request, Word, Words};
+    use super::{Ask, MOST_PIXELS, MOST_SIDE, Refusal, Reply, Request, Word, Words};
+
+    /// The box every reply in these tests answers, which none of them is about.
+    const BOX: (u32, u32) = (800, 600);
+
+    /// A reply header claiming `size` and `len` bytes of pixels, with no text
+    /// layer.
+    ///
+    /// **Assembled by hand rather than through `write_to`**, because what is being
+    /// tested is a header this build would never write: the point is what happens
+    /// when the bytes on the pipe are wrong.
+    fn head(size: (u32, u32), len: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0x534b_5052u32.to_le_bytes());
+        bytes.extend_from_slice(&super::VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&size.0.to_le_bytes());
+        bytes.extend_from_slice(&size.1.to_le_bytes());
+        // The page count and the frame delay, neither of which this is about.
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes
+    }
 
     #[test]
     fn a_request_round_trips_through_bytes() {
@@ -475,13 +539,13 @@ mod tests {
         };
         let mut pipe = Vec::new();
         answered.write_to(&mut pipe).unwrap();
-        assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), answered);
+        assert_eq!(Reply::read_from(&mut pipe.as_slice(), BOX).unwrap(), answered);
 
         // A refusal carries no pixels and still round trips.
         let refused = Reply::refused(Refusal::NoRenderer);
         let mut pipe = Vec::new();
         refused.write_to(&mut pipe).unwrap();
-        assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), refused);
+        assert_eq!(Reply::read_from(&mut pipe.as_slice(), BOX).unwrap(), refused);
 
         // **And a page count travels with a refusal too**, which is the whole of
         // how `↓` at the last page learns how long the document is: `NoSuchPage`
@@ -496,7 +560,7 @@ mod tests {
         };
         let mut pipe = Vec::new();
         ended.write_to(&mut pipe).unwrap();
-        assert_eq!(Reply::read_from(&mut pipe.as_slice()).unwrap(), ended);
+        assert_eq!(Reply::read_from(&mut pipe.as_slice(), BOX).unwrap(), ended);
     }
 
     /// The layer round trips, and a short or invalid one is no layer rather than
@@ -529,41 +593,69 @@ mod tests {
     /// allocated from it.
     #[test]
     fn a_reply_whose_length_disagrees_with_its_size_is_refused() {
-        // **Assembled by hand rather than through `write_to`**, because what is
-        // being tested is a header this build would never write: the point is what
-        // happens when the bytes on the pipe are wrong.
-        let head = |size: (u32, u32), len: u32| {
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(&0x534b_5052u32.to_le_bytes());
-            bytes.extend_from_slice(&super::VERSION.to_le_bytes());
-            bytes.extend_from_slice(&0u16.to_le_bytes());
-            bytes.extend_from_slice(&size.0.to_le_bytes());
-            bytes.extend_from_slice(&size.1.to_le_bytes());
-            // The page count and the frame delay, neither of which this is about.
-            bytes.extend_from_slice(&0u32.to_le_bytes());
-            bytes.extend_from_slice(&0u32.to_le_bytes());
-            bytes.extend_from_slice(&len.to_le_bytes());
-            // And no text layer, which is every reply this test is about.
-            bytes.extend_from_slice(&0u32.to_le_bytes());
-            bytes
-        };
         // Two pixels claimed, one pixel's worth of bytes.
-        assert!(Reply::read_from(&mut head((2, 1), 4).as_slice()).is_err());
+        assert!(Reply::read_from(&mut head((2, 1), 4).as_slice(), BOX).is_err());
         // A gigabyte claimed for a 1×1 image.
-        assert!(Reply::read_from(&mut head((1, 1), 1 << 30).as_slice()).is_err());
+        assert!(Reply::read_from(&mut head((1, 1), 1 << 30).as_slice(), BOX).is_err());
         // A size that overflows on multiplication rather than wrapping to a
         // plausible length.
-        assert!(Reply::read_from(&mut head((u32::MAX, u32::MAX), 4).as_slice()).is_err());
+        assert!(Reply::read_from(&mut head((u32::MAX, u32::MAX), 4).as_slice(), BOX).is_err());
         // And the honest one still reads.
         let mut ok = head((1, 1), 4);
         ok.extend_from_slice(&[9, 9, 9, 9]);
-        assert!(Reply::read_from(&mut ok.as_slice()).is_ok());
+        assert!(Reply::read_from(&mut ok.as_slice(), BOX).is_ok());
+    }
+
+    /// **A picture larger than the box it was asked into is that one answer
+    /// refused**, and the reply behind it on the same pipe still reads — so a
+    /// child relaying a thumbnail too big for its slot costs one thumbnail rather
+    /// than itself and the rest of its batch.
+    #[test]
+    fn a_picture_past_its_box_is_refused_and_the_pipe_stays_in_step() {
+        let mut pipe = head((3, 1), 12);
+        pipe.extend_from_slice(&[7; 12]);
+        let mut honest = head((2, 2), 16);
+        honest.extend_from_slice(&[9; 16]);
+        pipe.extend_from_slice(&honest);
+
+        let mut reading = pipe.as_slice();
+        let refused = Reply::read_from(&mut reading, (2, 2)).unwrap();
+        assert_eq!(refused, Reply::refused(Refusal::TooLarge));
+        let next = Reply::read_from(&mut reading, (2, 2)).unwrap();
+        assert_eq!((next.refusal, next.size, next.pixels), (Refusal::None, (2, 2), vec![9; 16]));
+        assert!(reading.is_empty(), "{} bytes were left on the pipe", reading.len());
+    }
+
+    /// **65,536 × 256 is exactly [`MOST_PIXELS`]** and no texture any device
+    /// holds: it passed the byte ceiling, and `wgpu` panicked the window that
+    /// tried to draw it. A side past [`MOST_SIDE`] is refused however large the
+    /// box was, because the box is bounded before it is compared.
+    #[test]
+    fn a_side_past_the_ceiling_is_refused_whatever_the_box() {
+        use std::io::Read as _;
+        assert_eq!(65_536 * 256 * 4, MOST_PIXELS);
+        let header = head((65_536, 256), MOST_PIXELS as u32);
+        let mut pipe = header.as_slice().chain(std::io::repeat(0).take(MOST_PIXELS as u64));
+        let reply = Reply::read_from(&mut pipe, (u32::MAX, u32::MAX)).unwrap();
+        assert_eq!(reply.refusal, Refusal::TooLarge);
+        assert!(reply.pixels.is_empty());
+
+        // One pixel past the ceiling is past it; the ceiling itself is not.
+        let wide = MOST_SIDE + 1;
+        let mut past = head((wide, 1), wide * 4);
+        past.extend(std::iter::repeat_n(0u8, wide as usize * 4));
+        let reply = Reply::read_from(&mut past.as_slice(), (u32::MAX, 1)).unwrap();
+        assert_eq!(reply.refusal, Refusal::TooLarge);
+        let mut at = head((MOST_SIDE, 1), MOST_SIDE * 4);
+        at.extend(std::iter::repeat_n(0u8, MOST_SIDE as usize * 4));
+        let reply = Reply::read_from(&mut at.as_slice(), (u32::MAX, 1)).unwrap();
+        assert_eq!((reply.refusal, reply.size), (Refusal::None, (MOST_SIDE, 1)));
     }
 
     #[test]
     fn a_stranger_on_the_pipe_is_refused_rather_than_parsed() {
         assert!(Request::read_from(&mut b"hello there, twenty-four+".as_slice()).is_err());
-        assert!(Reply::read_from(&mut b"hello there, twenty-four+".as_slice()).is_err());
+        assert!(Reply::read_from(&mut b"hello there, twenty-four+".as_slice(), BOX).is_err());
         // A truncated header is an error and not a hang.
         assert!(Request::read_from(&mut b"SKPR".as_slice()).is_err());
     }
