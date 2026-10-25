@@ -157,8 +157,9 @@ fn svg(bytes: &[u8], within: (u32, u32)) -> Result<Raster, Refusal> {
     // default is `std::fs::read` on the raw text (0.48.1, `parser/image.rs`): an
     // absolute path reads any picture the sandbox's read-only `/` reaches, a
     // FIFO holds the child until the host's deadline, and what was read lands in
-    // the shared cache under the SVG's name. A picture beside the document no
-    // longer draws, which is the price.
+    // the shared cache under the SVG's name. The price is an `<image>` linked by
+    // absolute path rather than embedded — what Inkscape writes for a linked
+    // image — which now draws as nothing.
     let options = resvg::usvg::Options {
         font_family: fonts.default.clone(),
         fontdb: std::sync::Arc::clone(&fonts.db),
