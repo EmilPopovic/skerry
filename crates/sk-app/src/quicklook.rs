@@ -509,6 +509,20 @@ pub(crate) struct Shot {
 /// texture beside it.
 const WORDS_KEPT: usize = 4;
 
+/// What a text read hands the frame loop: the file cut into lines and tones,
+/// and its blocks where it is markdown.
+///
+/// **Everything the bytes become is made on the job**, so taking delivery is a
+/// move — rule 1. The parse used to be the frame loop's: a 256 KiB paragraph of
+/// `[` held the window for 10.5 seconds before the parser was made linear, and
+/// a 187 KB document written to be read still costs 2.7 ms in a release build
+/// on a 24-thread laptop — a third of the frame before anything is drawn, and
+/// more on every slower machine.
+struct Read {
+    text: Text,
+    blocks: Vec<crate::markdown::Block>,
+}
+
 /// What is on screen, and what is still coming.
 pub(crate) struct QuickLook {
     /// The file being looked at.
@@ -668,7 +682,10 @@ pub(crate) struct QuickLook {
     /// the one copy of the file as it was has to be here, taken when edit mode
     /// starts and replaced by every save.
     as_on_disk: Option<String>,
-    reading: Option<mpsc::Receiver<Option<String>>>,
+    reading: Option<mpsc::Receiver<Option<Read>>>,
+    /// The edited text's blocks, while a job parses it — see
+    /// [`Self::stop_editing`].
+    parsing: Option<mpsc::Receiver<Vec<crate::markdown::Block>>>,
     /// What is inside the archive, once the child has said.
     pub(crate) inside: Option<crate::archive::Inside>,
     listed: Option<mpsc::Receiver<sk_preview::archive::Listing>>,
@@ -733,6 +750,7 @@ impl QuickLook {
             shown_at: None,
             as_on_disk: None,
             reading: None,
+            parsing: None,
             inside: None,
             listed: None,
             stop: None,
@@ -745,16 +763,46 @@ impl QuickLook {
         look
     }
 
-    /// Reads the file on a job, because reading a file is a syscall — rule 1.
+    /// Reads the file on a job, because reading a file is a syscall — rule 1 —
+    /// and cuts and parses it there, because that is not the frame's work either.
     fn start_reading(&mut self, jobs: &crate::pane::Jobs) {
         let (done, waiting) = mpsc::channel();
         self.reading = Some(waiting);
         let path = self.path.clone();
+        let language = crate::highlight::Language::of(&self.title());
+        let markdown = is_markdown(&self.title());
         let wake = jobs.wake.clone();
         jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let _ = done.send(sk_fs::text::read_text(&path, TEXT_LIMIT).ok());
+            let read = sk_fs::text::read_text(&path, TEXT_LIMIT).ok().map(|body| Read {
+                blocks: if markdown { crate::markdown::parse(&body) } else { Vec::new() },
+                text: Text::of(&body, language),
+            });
+            let _ = done.send(read);
             wake.wake();
         });
+    }
+
+    /// Parses the text again on a job, because the editor has changed it.
+    fn start_parsing(&mut self, jobs: &crate::pane::Jobs) {
+        let Some(text) = self.text.as_ref() else { return };
+        let body = text.body();
+        let (done, waiting) = mpsc::channel();
+        self.parsing = Some(waiting);
+        let wake = jobs.wake.clone();
+        jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let _ = done.send(crate::markdown::parse(&body));
+            wake.wake();
+        });
+    }
+
+    /// Whether the rendering is waiting for a parse of the edited text.
+    ///
+    /// **While it is, the source is drawn**, which is the text as it now stands,
+    /// rather than the blocks from before the edit — which would be the stale
+    /// listing this panel exists not to show, for the frame or two the parse
+    /// takes.
+    pub(crate) fn parsing(&self) -> bool {
+        self.parsing.is_some()
     }
 
     /// Asks a child what is inside, on a job — rule 1, and the read is a whole
@@ -782,26 +830,51 @@ impl QuickLook {
         true
     }
 
-    /// Takes delivery of a text read. Whether anything arrived.
+    /// Takes delivery of a text read, or of a parse after an edit. Whether
+    /// anything arrived.
     pub(crate) fn drain(&mut self) -> bool {
-        let Some(waiting) = &self.reading else { return false };
-        let Ok(body) = waiting.try_recv() else { return false };
+        let parsed = self.drain_parse();
+        let Some(waiting) = &self.reading else { return parsed };
+        let read = match waiting.try_recv() {
+            Ok(read) => read,
+            Err(mpsc::TryRecvError::Empty) => return parsed,
+            // **A job that panicked drops its sender**, and now that the parse
+            // is the job's that is a parser bug — which on the frame loop was a
+            // crash, and here would be a panel waiting for ever.
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
         self.reading = None;
-        match body {
-            Some(body) => {
-                let language = crate::highlight::Language::of(&self.title());
-                // **Parsed once, when the bytes land.** A document is parsed on
-                // the frame it arrives on and never again; what a resize costs is
+        match read {
+            Some(Read { text, blocks }) => {
+                // **Parsed once, when the bytes land.** What a resize costs is
                 // the layout, which is cached separately — see
                 // [`crate::mdlayout`].
                 if is_markdown(&self.title()) {
-                    self.blocks = crate::markdown::parse(&body);
+                    self.blocks = blocks;
                     self.rendered = true;
                 }
-                self.text = Some(Text::of(&body, language));
+                self.text = Some(text);
             }
             None => self.refusal = Some(Refusal::Unreadable),
         }
+        true
+    }
+
+    /// Takes delivery of [`Self::start_parsing`]'s blocks. Whether they arrived.
+    fn drain_parse(&mut self) -> bool {
+        let Some(waiting) = &self.parsing else { return false };
+        match waiting.try_recv() {
+            Ok(blocks) => {
+                self.blocks = blocks;
+                self.laid = None;
+                self.picked = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => return false,
+            // The text is what there is to show when its rendering cannot be
+            // made, and the blocks from before the edit are not it.
+            Err(mpsc::TryRecvError::Disconnected) => self.rendered = false,
+        }
+        self.parsing = None;
         true
     }
 
@@ -1410,6 +1483,21 @@ impl QuickLook {
         }
     }
 
+    /// Turns edit mode off, back to the rendering if that is where it began.
+    ///
+    /// **Re-parsed, because the document is not the one that was parsed** —
+    /// coming back to the rendering after an edit and seeing the text from before
+    /// it is the same defect as a listing that goes stale — and on a job, because
+    /// the parse is no more the frame's work after an edit than before one.
+    pub(crate) fn stop_editing(&mut self, jobs: &crate::pane::Jobs) {
+        self.editing = false;
+        self.rendered = std::mem::take(&mut self.was_rendered);
+        if self.rendered {
+            self.laid = None;
+            self.start_parsing(jobs);
+        }
+    }
+
     /// Remembers what was just written as the file's own text.
     pub(crate) fn saved_as(&mut self, body: String) {
         self.as_on_disk = Some(body);
@@ -1833,6 +1921,7 @@ mod tests {
             shown_at: None,
             as_on_disk: None,
             reading: None,
+            parsing: None,
             inside: None,
             listed: None,
             stop: None,
@@ -2384,5 +2473,91 @@ two
         assert!(look.type_in("Z"));
         assert!(look.discard());
         assert_eq!(look.text.as_ref().expect("text").body(), after);
+    }
+
+    /// A pool and a waker for a test that opens a real look, and a directory of
+    /// its own — named after the test, because `cargo test` runs a crate's tests
+    /// as threads of one process (docs/12-measurement.md).
+    fn harness(test: &str) -> (crate::pane::Jobs, sk_util::Waker, std::path::PathBuf) {
+        let waker = sk_util::Waker::new().expect("eventfd");
+        let (sender, _) = std::sync::mpsc::channel();
+        let jobs = crate::pane::Jobs {
+            pool: std::sync::Arc::new(sk_util::Pool::with_width(2)),
+            wake: waker.handle(),
+            sender,
+            mime: None,
+        };
+        let root =
+            std::env::temp_dir().join(format!("skerry-quicklook-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a fixture directory");
+        (jobs, waker, root)
+    }
+
+    /// Calls `drain` the way the frame loop does, until something arrives.
+    fn delivered(look: &mut QuickLook) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !look.drain() {
+            assert!(std::time::Instant::now() < deadline, "nothing arrived");
+            std::thread::yield_now();
+        }
+    }
+
+    /// How many documents this thread has parsed.
+    fn parsed_here() -> usize {
+        crate::markdown::PARSED.with(std::cell::Cell::get)
+    }
+
+    /// **A markdown file arrives already parsed**, so taking delivery costs the
+    /// frame nothing whatever the file says — rule 1. A paragraph of `[` is the
+    /// document that held the window for 10.5 seconds when `drain` parsed it.
+    #[test]
+    fn a_markdown_file_arrives_already_parsed() {
+        let (jobs, _waker, root) = harness("arrives-parsed");
+        let path = root.join("hostile.md");
+        std::fs::write(&path, "x".to_owned() + &"[".repeat(64 * 1024)).expect("a fixture");
+        let before = parsed_here();
+        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        delivered(&mut look);
+        assert_eq!(parsed_here(), before, "the thread taking delivery parsed the document");
+        assert!(look.has_markdown() && look.rendered, "it arrived rendered");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Leaving the editor comes back to a rendering of the edited text**,
+    /// parsed on a job, and until it lands the source is what is drawn rather
+    /// than the document from before the edit.
+    #[test]
+    fn leaving_the_editor_parses_the_edit_on_a_job() {
+        let (jobs, _waker, root) = harness("edit-parsed");
+        let path = root.join("notes.md");
+        std::fs::write(&path, "# Title\n\nA paragraph.\n").expect("a fixture");
+        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        delivered(&mut look);
+        assert!(look.rendered);
+
+        look.start_editing();
+        look.put_caret(Spot { line: 2, byte: 0 });
+        assert!(look.type_in("Edited. "));
+        let before = parsed_here();
+        look.stop_editing(&jobs);
+        assert!(look.rendered && !look.editing);
+        assert!(look.parsing() && look.laid.is_none(), "the old blocks are not laid out");
+
+        delivered(&mut look);
+        assert_eq!(parsed_here(), before, "the thread taking delivery parsed the edit");
+        assert!(!look.parsing());
+        let said: String = look
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.kind {
+                crate::markdown::Kind::Paragraph(runs) => {
+                    Some(runs.iter().map(|it| it.text.as_str()).collect::<String>())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, "Edited. A paragraph.");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

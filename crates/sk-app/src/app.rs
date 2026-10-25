@@ -7674,16 +7674,7 @@ impl App {
     pub(crate) fn stop_editing_the_look(&mut self) {
         self.save_the_look();
         if let Some(look) = self.quick_look.as_mut() {
-            look.editing = false;
-            look.rendered = std::mem::take(&mut look.was_rendered);
-            // **Re-parsed, because the document is not the one that was parsed.**
-            // Coming back to the rendering after an edit and seeing the text from
-            // before it is the same defect as a listing that goes stale.
-            if look.rendered {
-                let body = look.text.as_ref().map(crate::quicklook::Text::body);
-                look.blocks = body.map(|it| crate::markdown::parse(&it)).unwrap_or_default();
-                look.laid = None;
-            }
+            look.stop_editing(&self.jobs);
         }
         self.dirty = true;
     }
@@ -8948,7 +8939,7 @@ scope_aim={scope_aim:?}",
         let scale = self.window.scale();
         let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size * 4.0);
         let Some(look) = self.quick_look.as_ref() else { return };
-        if !look.rendered || look.blocks.is_empty() {
+        if !look.rendered || look.blocks.is_empty() || look.parsing() {
             return;
         }
         if look.laid.as_ref().is_some_and(|laid| laid.fits(room, size, scale)) {

@@ -144,9 +144,22 @@ fn spoken(block: &Block) -> String {
 /// stack, and eight thousand of them a job thread's two.
 const DEEPEST: u8 = 16;
 
+#[cfg(test)]
+thread_local! {
+    /// How many documents this thread has parsed.
+    ///
+    /// **So a test can say which thread parsed**, which is the property rule 1
+    /// asks of the quick look: a test that timed the frame loop's delivery
+    /// instead would pass because the parser is fast, not because it is not on
+    /// the frame loop.
+    pub(crate) static PARSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Parses a document into blocks, in the order they are drawn.
 #[must_use]
 pub(crate) fn parse(text: &str) -> Vec<Block> {
+    #[cfg(test)]
+    PARSED.with(|it| it.set(it.get() + 1));
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut at = 0;
