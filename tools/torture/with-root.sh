@@ -7,16 +7,81 @@
 # and this script exists so the privileged part is one command with one password.
 #
 #   sudo ./with-root.sh                 # btrfs, xfs, exfat, vfat, and NFS if present
-#   sudo ./with-root.sh /var/tmp/spike  # somewhere with room for the images
+#   sudo ./with-root.sh /var/tmp/spike  # a new directory, somewhere with room for the images
 #
 # The matrix itself runs as the *invoking* user, not as root. That is deliberate:
 # root can set any extended attribute and write any file, so the "report what
 # could not be preserved" paths never fire and the run would be a weaker test
 # than the unprivileged one.
+#
+# **Root writes only into a directory nobody else can touch, and deletes only
+# what it made.** Root follows symlinks, so a directory another user prepared —
+# the old default was the predictable `/var/tmp/skerry-spike-e-fs` — let them
+# aim its `truncate`, `mkfs` and `rm -rf` at any file on the machine; and the
+# cleanup was `rm -rf` of whatever directory was named, `/var/tmp` included. So
+# the default is `mktemp -d`, and a named directory must be new — or empty,
+# owned by root and writable by nobody else — under ancestors that only root or
+# the invoking user can rearrange.
 set -u
+RUN_UID=${SUDO_UID:-$(id -u)}
+RUN_GID=${SUDO_GID:-$(id -g)}
+
+refuse() {
+  echo "with-root.sh: $*" >&2
+  exit 1
+}
+
+# Trusted: root, and the invoking user — whose `sudo` this already is — with
+# their own group, because a umask of 002 leaves every directory they make
+# group-writable. A sticky directory such as `/var/tmp` is safe to stand under
+# whoever can write to it: nobody can rename or remove an entry they do not own.
+refuse_unsafe_ancestors() {
+  local dir=$1 info owner group mode
+  while :; do
+    info=$(stat -c '%u %g %a' -- "$dir") || refuse "cannot stat $dir"
+    read -r owner group mode <<<"$info"
+    if [ "$owner" != 0 ] && [ "$owner" != "$RUN_UID" ]; then
+      refuse "$dir belongs to uid $owner, who could replace what is under it"
+    fi
+    if (( 8#$mode & 8#1000 )); then
+      :
+    elif (( 8#$mode & 8#002 )); then
+      refuse "$dir is writable by every user and is not sticky"
+    elif (( 8#$mode & 8#020 )) && [ "$group" != 0 ] && [ "$group" != "$RUN_GID" ]; then
+      refuse "$dir is writable by group $group and is not sticky"
+    fi
+    [ "$dir" = / ] && return
+    dir=$(dirname -- "$dir")
+  done
+}
+
+# `stat` without `-L` describes a symlink, not where it points.
+refuse_unusable_work() {
+  local info owner mode entries
+  [ -L "$WORK" ] && refuse "$WORK is a symlink"
+  [ -e "$WORK" ] || return 0
+  [ -d "$WORK" ] || refuse "$WORK exists and is not a directory"
+  info=$(stat -c '%u %a' -- "$WORK") || refuse "cannot stat $WORK"
+  read -r owner mode <<<"$info"
+  [ "$owner" = 0 ] || refuse "$WORK exists and is not owned by root"
+  (( 8#$mode & 8#022 )) && refuse "$WORK is writable by users other than root"
+  entries=$(ls -A -- "$WORK") || refuse "cannot list $WORK"
+  [ -z "$entries" ] || refuse "$WORK exists and is not empty"
+}
+
+# Resolved before the `cd` below, so a relative path means what the caller meant.
+WORK=
+if [ $# -gt 0 ]; then
+  name=$(basename -- "$1")
+  case $name in .|..|/) refuse "name a new directory for the images, not $1" ;; esac
+  parent=$(realpath -e -- "$(dirname -- "$1")") || refuse "$(dirname -- "$1") does not exist"
+  WORK=${parent%/}/$name
+  refuse_unsafe_ancestors "$parent"
+  refuse_unusable_work
+fi
+
 cd "$(dirname "$0")"
 BIN=$PWD/target/release/skerry-torture
-WORK=${1:-/var/tmp/skerry-spike-e-fs}
 
 if [ "$(id -u)" != 0 ]; then
   echo "this script needs root for mount(2); re-run with sudo" >&2
@@ -26,8 +91,6 @@ if [ ! -x "$BIN" ]; then
   echo "build first: cargo build --release" >&2
   exit 1
 fi
-RUN_UID=${SUDO_UID:-$(id -u)}
-RUN_GID=${SUDO_GID:-$(id -g)}
 # `setpriv` changes the uid and not the environment, so `$HOME` still points at
 # root's home. The matrix looks for a directory under `$HOME` to find the root
 # filesystem, so without this the ext4 target disappears from a `sudo` run.
@@ -36,19 +99,47 @@ RUN_HOME=${RUN_HOME:-/tmp}
 
 mounted=()
 loops=()
+exported=
+# What this run made, removed in reverse. Directories go with `rmdir`, so one
+# that is still a mount point, or holds anything this script did not put there,
+# is named and left rather than recursed into.
+made_files=()
+made_dirs=()
+nfs_export=
 cleanup() {
-  for m in "${mounted[@]:-}"; do
-    [ -n "$m" ] || continue
-    umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null
+  local i
+  for (( i = ${#mounted[@]} - 1; i >= 0; i-- )); do
+    umount "${mounted[i]}" 2>/dev/null || umount -l "${mounted[i]}" 2>/dev/null
   done
+  # The NFS export outlives the mount, so it is removed explicitly.
+  [ -n "$exported" ] && exportfs -u "$exported" 2>/dev/null
   for l in "${loops[@]:-}"; do
     [ -n "$l" ] && losetup -d "$l" 2>/dev/null
   done
-  rm -rf "$WORK"
+  # The one directory whose contents are the matrix's rather than this
+  # script's: what it wrote through NFS. `--one-file-system`, so a mount that
+  # would not come off is not descended into.
+  [ -n "$nfs_export" ] && rm -rf --one-file-system -- "$nfs_export"
+  for (( i = ${#made_files[@]} - 1; i >= 0; i-- )); do
+    rm -f -- "${made_files[i]}"
+  done
+  for (( i = ${#made_dirs[@]} - 1; i >= 0; i-- )); do
+    rmdir -- "${made_dirs[i]}" 2>/dev/null || echo "left behind: ${made_dirs[i]}" >&2
+  done
 }
 trap cleanup EXIT
 
-mkdir -p "$WORK"
+if [ -z "$WORK" ]; then
+  WORK=$(mktemp -d /var/tmp/skerry-torture.XXXXXXXXXX) || exit 1
+  made_dirs+=("$WORK")
+  # `mktemp` makes it 0700, and the matrix, running as the invoking user, has
+  # to reach the mounts inside it.
+  chmod 0755 "$WORK"
+elif [ ! -e "$WORK" ]; then
+  # No `-p`: this fails if anything has appeared there since it was checked.
+  mkdir -m 0755 -- "$WORK" || exit 1
+  made_dirs+=("$WORK")
+fi
 targets=()
 
 # btrfs needs about 110 MiB, xfs about 300 MiB. The images are sparse, so the
@@ -88,11 +179,13 @@ make_fs() {
   fi
   local img="$WORK/$fs.img" mnt="$WORK/$fs"
   truncate -s "$size" "$img" || return
+  made_files+=("$img")
   if ! "mkfs.$fs" "$@" "$img" >/dev/null 2>&1; then
     echo "  skip $fs: mkfs refused the image"
     return
   fi
-  mkdir -p "$mnt"
+  mkdir -- "$mnt" || return
+  made_dirs+=("$mnt")
   if ! mount -o "$(mount_opts "$fs")" "$img" "$mnt" 2>/dev/null; then
     echo "  skip $fs: mount refused"
     return
@@ -130,9 +223,11 @@ make_fs vfat  1G -F 32
 # mid-copy.
 if command -v exportfs >/dev/null && [ -d "$WORK/btrfs" ]; then
   export_dir="$WORK/nfs-export"
-  mkdir -p "$export_dir" "$WORK/nfs"
+  mkdir -- "$export_dir" && nfs_export=$export_dir
+  mkdir -- "$WORK/nfs" && made_dirs+=("$WORK/nfs")
   chown "$RUN_UID:$RUN_GID" "$export_dir"
   if exportfs -o rw,no_subtree_check,insecure "127.0.0.1:$export_dir" 2>/dev/null &&
+     exported=127.0.0.1:$export_dir &&
      mount -t nfs -o vers=4 "127.0.0.1:$export_dir" "$WORK/nfs" 2>/dev/null; then
     mounted+=("$WORK/nfs")
     mkdir -p "$WORK/nfs/skerry"
@@ -142,6 +237,7 @@ if command -v exportfs >/dev/null && [ -d "$WORK/btrfs" ]; then
   else
     echo "  skip nfs: could not export or mount"
     exportfs -u "127.0.0.1:$export_dir" 2>/dev/null
+    exported=
   fi
 else
   echo "  skip nfs: exportfs is not installed"
@@ -159,11 +255,4 @@ echo "running the matrix as uid $RUN_UID (HOME=$RUN_HOME) over ${#targets[@]} ex
 echo
 setpriv --reuid "$RUN_UID" --regid "$RUN_GID" --clear-groups \
   env HOME="$RUN_HOME" "$BIN" run "${targets[@]}"
-rc=$?
-
-# The NFS export outlives the mount, so it is removed explicitly.
-if [ -d "$WORK/nfs-export" ]; then
-  umount "$WORK/nfs" 2>/dev/null
-  exportfs -u "127.0.0.1:$WORK/nfs-export" 2>/dev/null
-fi
-exit $rc
+exit $?
