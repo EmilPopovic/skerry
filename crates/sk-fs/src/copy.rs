@@ -19,6 +19,8 @@
 //! unavailable, hardlink publication is tried; filesystems supporting neither
 //! refuse the operation rather than risking an unrelated destination.
 
+use std::ffi::{OsStr, OsString};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
@@ -154,54 +156,126 @@ impl Default for Options {
 /// Copies one regular file.
 ///
 /// Symlinks, directories and hardlink sets are the caller's problem: the
-/// decisions they need are policy and this is mechanism.
+/// decisions they need are policy and this is mechanism. A symlink, a fifo or a
+/// device at `source` is refused rather than followed or opened.
 ///
 /// **Runs on a job.**
 pub fn copy_file(source: &Path, destination: &Path, options: Options) -> Result<Copied, Problem> {
-    copy_file_progress(source, destination, options, &mut |_| true)
+    let (from, from_name) = parent_of(source)?;
+    let (to, to_name) = parent_of(destination)?;
+    copy_regular(
+        At { dir: from.as_fd(), name: from_name, path: source },
+        At { dir: to.as_fd(), name: to_name, path: destination },
+        options,
+        None,
+        &mut |_| true,
+    )
+    .map(|(copied, _)| copied)
 }
 
-fn copy_file_progress(
-    source: &Path,
-    destination: &Path,
+/// One entry, named relative to a directory this operation already holds open.
+///
+/// The path is for messages and nothing else: no syscall below resolves it.
+#[derive(Clone, Copy)]
+struct At<'a> {
+    dir: BorrowedFd<'a>,
+    name: &'a OsStr,
+    path: &'a Path,
+}
+
+impl At<'_> {
+    fn sibling(&self, name: &OsStr) -> PathBuf {
+        self.path.parent().map_or_else(|| PathBuf::from(name), |parent| parent.join(name))
+    }
+}
+
+/// The directory `path` is in, held open, and the name `path` has there.
+///
+/// **The one place a tree operation resolves a path.** Everything below the
+/// entry it names is reached through a descriptor and `O_NOFOLLOW`, so a
+/// directory renamed away and replaced with a symlink half way through a walk
+/// redirects nothing: the walk is still holding the directory it opened. What
+/// is above the entry is the caller's choice of path, symlinks and all, as it
+/// is for `cp`. `O_PATH`, because the parent is only ever a `dirfd` — a folder
+/// somebody may search but not list is still one they can copy out of.
+fn parent_of(path: &Path) -> Result<(OwnedFd, &OsStr), Problem> {
+    let name = path.file_name().ok_or_else(|| at(Errno::INVAL, path, "no name"))?;
+    let parent =
+        path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let fd =
+        openat(fs::CWD, parent, OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|error| at(error, parent, "open parent"))?;
+    Ok((fd, name))
+}
+
+/// Opens the regular file `from` names for reading, refusing anything else.
+///
+/// `O_NOFOLLOW`, so a name swapped for a symlink fails with `ELOOP` instead of
+/// opening whatever it points at. `O_NONBLOCK`, so a name swapped for a fifo
+/// answers at once instead of waiting forever for a writer — the descriptor's
+/// own `fstat` then refuses it. Where the walk has already `lstat`ed the name,
+/// the descriptor has to be that inode, which is the check coreutils' `cp`
+/// makes before it reads a byte ("skipping file …, as it was replaced while
+/// being copied").
+fn open_regular(from: At<'_>, seen: Option<&Stat>) -> Result<(OwnedFd, Stat), Problem> {
+    let flags =
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
+    let fd = openat(from.dir, from.name, flags, Mode::empty())
+        .map_err(|error| at(error, from.path, "open"))?;
+    let stat = fstat(&fd).map_err(|error| at(error, from.path, "stat"))?;
+    if fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::RegularFile
+        || seen.is_some_and(|seen| !same_file(seen, &stat))
+    {
+        return Err(changed(from.path));
+    }
+    // A regular file ignores `O_NONBLOCK` on every local filesystem, but FUSE
+    // and NFS hand the open flags to a server, and the flag was only ever
+    // wanted for the open.
+    fs::fcntl_setfl(&fd, OFlags::empty()).map_err(|error| at(error, from.path, "open"))?;
+    Ok((fd, stat))
+}
+
+/// Copies the regular file `from` names to `to`, and returns the source's
+/// `fstat` alongside the result.
+fn copy_regular(
+    from: At<'_>,
+    to: At<'_>,
     options: Options,
+    seen: Option<&Stat>,
     checkpoint: &mut dyn FnMut(u64) -> bool,
-) -> Result<Copied, Problem> {
-    let cwd = fs::CWD;
-    let from = openat(cwd, source, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|error| at(error, source, "open"))?;
-    let stat = fstat(&from).map_err(|error| at(error, source, "stat"))?;
+) -> Result<(Copied, Stat), Problem> {
+    let (source, stat) = open_regular(from, seen)?;
 
     // The classic truncation bug: `cp a a` that opens the destination for writing
     // empties the file before it reads anything. Comparing device and inode
     // catches it through a symlink, a hardlink and a bind mount alike, where a
     // path comparison does not.
-    if let Ok(there) = statat(cwd, destination, AtFlags::empty()) {
+    if let Ok(there) = statat(to.dir, to.name, AtFlags::empty()) {
         if same_file(&stat, &there) {
-            return Err(at(Errno::INVAL, destination, "the same file"));
+            return Err(at(Errno::INVAL, to.path, "the same file"));
         }
         if !options.replace {
-            return Err(at(Errno::EXIST, destination, "place"));
+            return Err(at(Errno::EXIST, to.path, "place"));
         }
     }
 
-    let temp = temporary(destination);
+    let temp = temporary();
     // `O_EXCL`: a name that already exists means a collision with another
     // operation, and that file must not be touched.
     let into = openat(
-        cwd,
+        to.dir,
         &temp,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
-    .map_err(|error| at(error, destination, "create"))?;
+    .map_err(|error| at(error, to.path, "create"))?;
 
     let size = stat.st_size.cast_unsigned();
     let mut refused = Vec::new();
     let (strategy, bytes) =
-        match write_contents(&from, &into, size, options, &mut refused, checkpoint) {
+        match write_contents(&source, &into, size, options, &mut refused, checkpoint) {
             Ok(written) => written,
-            Err((error, stage)) => return Err(discard(&temp, error, destination, stage)),
+            Err((error, stage)) => return Err(discard(to, &temp, error, stage)),
         };
 
     let mut unpreserved = Vec::new();
@@ -209,7 +283,7 @@ fn copy_file_progress(
         unpreserved.push("mode".to_owned());
     }
     if options.xattrs {
-        copy_xattrs(&from, &into, &mut unpreserved);
+        copy_xattrs(&source, &into, &mut unpreserved);
     }
     // Timestamps last. Every write above moves the modification time, so setting
     // it earlier sets it to a value the next write overwrites — which is what
@@ -225,9 +299,10 @@ fn copy_file_progress(
     }
     drop(into);
 
-    let (placement, orphan) = place(&temp, destination, options.replace)
-        .map_err(|error| discard(&temp, error, destination, "place"))?;
-    Ok(Copied { strategy, placement, bytes, unpreserved, orphan, refused })
+    let (placement, orphan) =
+        place(to, &temp, options.replace).map_err(|error| discard(to, &temp, error, "place"))?;
+    let orphan = orphan.then(|| to.sibling(&temp));
+    Ok((Copied { strategy, placement, bytes, unpreserved, orphan, refused }, stat))
 }
 
 /// Moves one file, which is two entirely different operations behind one word.
@@ -245,7 +320,7 @@ pub fn move_file(
     options: Options,
 ) -> Result<Placement, Problem> {
     let cwd = fs::CWD;
-    match place_existing(source, destination, options.replace) {
+    match place_existing((cwd, source), (cwd, destination), options.replace) {
         Ok(placement) => {
             finish_move(source, placement)?;
             return Ok(placement);
@@ -337,7 +412,7 @@ pub fn copy_into(
             "a folder cannot be copied into itself",
         ));
     }
-    copy_any(source, &destination, options, cancel, progress, watch, 0)?;
+    Walk { options, cancel, progress, watch }.copy(source, &destination)?;
     Ok(destination)
 }
 
@@ -374,7 +449,7 @@ pub(crate) fn copy_to_options(
         ));
     }
     let mut progress = Progress::default();
-    copy_any(source, destination, options, cancel, &mut progress, watch, 0)
+    Walk { options, cancel, progress: &mut progress, watch }.copy(source, destination)
 }
 
 /// A name nothing in `into` is called, from `name`.
@@ -451,7 +526,7 @@ pub fn move_into(
             "a folder cannot be moved into itself",
         ));
     }
-    match place_existing(source, &destination, options.replace) {
+    match place_existing((fs::CWD, source), (fs::CWD, &destination), options.replace) {
         Ok(placement) => {
             finish_move(source, placement)?;
             progress.done += 1;
@@ -460,7 +535,7 @@ pub fn move_into(
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, &destination, "rename")),
     }
-    copy_any(source, &destination, options, cancel, progress, watch, 0)?;
+    Walk { options, cancel, progress, watch }.copy(source, &destination)?;
     // Only now, and only because the copy above returned `Ok`.
     remove_tree(source, cancel)?;
     Ok(destination)
@@ -473,7 +548,7 @@ pub fn move_to(
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(Progress),
 ) -> Result<(), Problem> {
-    match place_existing(source, destination, false) {
+    match place_existing((fs::CWD, source), (fs::CWD, destination), false) {
         Ok(placement) => return finish_move(source, placement),
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, destination, "rename")),
@@ -494,16 +569,8 @@ fn finish_move(source: &Path, placement: Placement) -> Result<(), Problem> {
 ///
 /// **Runs on a job.**
 pub fn remove_tree(path: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
-    let parent = path.parent().ok_or_else(|| at(Errno::INVAL, path, "no parent"))?;
-    let name = path.file_name().ok_or_else(|| at(Errno::INVAL, path, "no name"))?;
-    let fd = openat(
-        fs::CWD,
-        parent,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| at(e, parent, "open parent"))?;
-    remove_at(&fd, Path::new(name), path, cancel, 0)
+    let (parent, name) = parent_of(path)?;
+    remove_at(&parent, Path::new(name), path, cancel, 0)
 }
 
 fn remove_at(
@@ -572,195 +639,204 @@ fn remove_directory(
     unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|e| at(e, subject, "remove directory"))
 }
 
-/// One entry, whatever kind it is, at a destination path that must not exist.
-fn copy_any(
-    source: &Path,
-    destination: &Path,
+/// One tree operation's worth of state, carried down the recursion.
+struct Walk<'a> {
     options: Options,
-    cancel: &sk_util::Cancel,
-    progress: &mut Progress,
-    watch: &mut dyn FnMut(Progress),
-    depth: u32,
-) -> Result<(), Problem> {
-    if cancel.is_cancelled() {
-        return Err(cancelled(source));
-    }
-    if depth > MAX_DEPTH {
-        return Err(too_deep(source));
-    }
-    let stat =
-        statat(fs::CWD, source, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, source, "stat"))?;
-    match fs::FileType::from_raw_mode(stat.st_mode) {
-        fs::FileType::RegularFile => {
-            // Already there and the same size: what a stopped copy got to.
-            // Counted as done, because it is — the progress line is about the
-            // work the queue was given rather than about this attempt at it.
-            if options.resume && same_size(destination, stat.st_size) {
-                progress.done += 1;
-                progress.bytes += stat.st_size.cast_unsigned();
-                watch(*progress);
-                return Ok(());
-            }
-            let base = *progress;
-            let copied = copy_file_progress(source, destination, options, &mut |bytes| {
-                watch(Progress { bytes: base.bytes + bytes, ..base });
-                !cancel.is_cancelled()
-            })?;
-            progress.done += 1;
-            progress.bytes += stat.st_size.cast_unsigned();
-            watch(*progress);
-            if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
-                return Err(Problem::new(
-                    ProblemKind::Preservation,
-                    destination.display().to_string(),
-                    format!(
-                        "not preserved: {:?}; leftover: {:?}",
-                        copied.unpreserved, copied.orphan
-                    ),
-                ));
-            }
-            Ok(())
-        }
-        // Recreated rather than followed. A link is 40 bytes and what it points at
-        // may be a terabyte, or may be the directory this walk is inside.
-        fs::FileType::Symlink => {
-            if options.resume && statat(fs::CWD, destination, AtFlags::SYMLINK_NOFOLLOW).is_ok() {
-                progress.done += 1;
-                watch(*progress);
-                return Ok(());
-            }
-            let target = fs::readlinkat(fs::CWD, source, Vec::new())
-                .map_err(|error| at(error, source, "readlink"))?;
-            fs::symlinkat(target.as_c_str(), fs::CWD, destination)
-                .map_err(|error| at(error, destination, "symlink"))?;
-            progress.done += 1;
-            watch(*progress);
-            Ok(())
-        }
-        fs::FileType::Directory => {
-            copy_directory(source, destination, options, cancel, progress, watch, depth, &stat)
-        }
-        // A fifo, a socket or a device. Recreating one needs `mknod` and, for a
-        // device, privilege this process does not have — and skipping it silently
-        // is how a copy reports success while leaving something out.
-        _ => Err(Problem::new(
-            ProblemKind::NotCopyable,
-            source.display().to_string(),
-            "not a file, a folder or a link",
-        )),
-    }
+    cancel: &'a sk_util::Cancel,
+    progress: &'a mut Progress,
+    watch: &'a mut dyn FnMut(Progress),
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one walk's worth of state, and \
-    bundling it into a struct would put a lifetime on every recursive call"
-)]
-fn copy_directory(
-    source: &Path,
-    destination: &Path,
-    options: Options,
-    cancel: &sk_util::Cancel,
-    progress: &mut Progress,
-    watch: &mut dyn FnMut(Progress),
-    depth: u32,
-    stat: &Stat,
-) -> Result<(), Problem> {
-    // 0o700 while it is being filled, so a half-copied directory is not readable
-    // by anyone who was not already allowed to read the original. The real mode
-    // goes on at the end.
-    match fs::mkdir(destination, Mode::from_bits_truncate(0o700)) {
-        Ok(()) => {}
-        Err(Errno::EXIST) if options.replace || options.resume => {}
-        Err(error) => return Err(at(error, destination, "mkdir")),
+impl Walk<'_> {
+    /// Copies `source` to `destination`, which must not exist unless the options
+    /// say what to do about it.
+    fn copy(&mut self, source: &Path, destination: &Path) -> Result<(), Problem> {
+        let (from, from_name) = parent_of(source)?;
+        let (to, to_name) = parent_of(destination)?;
+        self.any(
+            At { dir: from.as_fd(), name: from_name, path: source },
+            At { dir: to.as_fd(), name: to_name, path: destination },
+            0,
+        )
     }
-    // Keep the first warning bounded in memory, but finish every child. A
-    // preservation warning describes published data; other errors stop the walk.
-    let mut warning = None;
-    for child in children(source)? {
-        let result = copy_any(
-            &source.join(&child),
-            &destination.join(&child),
-            options,
-            cancel,
-            progress,
-            watch,
-            depth + 1,
-        );
-        if let Err(problem) = result {
-            if problem.kind() != ProblemKind::Preservation {
-                return Err(problem);
-            }
-            warning.get_or_insert(problem);
+
+    /// One entry, whatever kind it is.
+    fn any(&mut self, from: At<'_>, to: At<'_>, depth: u32) -> Result<(), Problem> {
+        if self.cancel.is_cancelled() {
+            return Err(cancelled(from.path));
+        }
+        if depth > MAX_DEPTH {
+            return Err(too_deep(from.path));
+        }
+        let stat = statat(from.dir, from.name, AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|e| at(e, from.path, "stat"))?;
+        match fs::FileType::from_raw_mode(stat.st_mode) {
+            fs::FileType::RegularFile => self.file(from, to, &stat),
+            fs::FileType::Symlink => self.link(from, to),
+            fs::FileType::Directory => self.directory(from, to, depth, &stat),
+            // A fifo, a socket or a device. Recreating one needs `mknod` and, for
+            // a device, privilege this process does not have — and skipping it
+            // silently is how a copy reports success while leaving something out.
+            _ => Err(Problem::new(
+                ProblemKind::NotCopyable,
+                from.path.display().to_string(),
+                "not a file, a folder or a link",
+            )),
         }
     }
-    // Mode and times after the contents, for the reason a file's are: writing a
-    // child moves the directory's modification time.
-    let mode = Mode::from_bits_truncate(stat.st_mode & 0o7777);
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let from = openat(fs::CWD, source, flags, Mode::empty())
-        .map_err(|error| at(error, source, "metadata"))?;
-    let into = openat(fs::CWD, destination, flags, Mode::empty())
-        .map_err(|error| at(error, destination, "metadata"))?;
-    let mut missing = Vec::new();
-    if fchmod(&into, mode).is_err() {
-        missing.push("mode".to_owned());
-    }
-    if options.xattrs {
-        copy_xattrs(&from, &into, &mut missing);
-    }
-    if futimens(&into, &times_of(stat)).is_err() {
-        missing.push("times".to_owned());
-    }
-    if !missing.is_empty() {
-        warning.get_or_insert_with(|| {
-            Problem::new(
+
+    fn file(&mut self, from: At<'_>, to: At<'_>, stat: &Stat) -> Result<(), Problem> {
+        // Already there and the same size: what a stopped copy got to. Counted
+        // as done, because it is — the progress line is about the work the
+        // queue was given rather than about this attempt at it.
+        if self.options.resume && same_size(to, stat.st_size) {
+            self.finished(stat.st_size);
+            return Ok(());
+        }
+        let base = *self.progress;
+        let (watch, cancel) = (&mut *self.watch, self.cancel);
+        let (copied, _) = copy_regular(from, to, self.options, Some(stat), &mut |bytes| {
+            watch(Progress { bytes: base.bytes + bytes, ..base });
+            !cancel.is_cancelled()
+        })?;
+        self.finished(stat.st_size);
+        if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
+            return Err(Problem::new(
                 ProblemKind::Preservation,
-                destination.display().to_string(),
-                missing.join(", "),
-            )
-        });
+                to.path.display().to_string(),
+                format!("not preserved: {:?}; leftover: {:?}", copied.unpreserved, copied.orphan),
+            ));
+        }
+        Ok(())
     }
-    progress.done += 1;
-    watch(*progress);
-    warning.map_or(Ok(()), Err)
+
+    /// Recreated rather than followed. A link is 40 bytes and what it points at
+    /// may be a terabyte, or may be the directory this walk is inside.
+    fn link(&mut self, from: At<'_>, to: At<'_>) -> Result<(), Problem> {
+        if self.options.resume && statat(to.dir, to.name, AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+            self.finished(0);
+            return Ok(());
+        }
+        let target = fs::readlinkat(from.dir, from.name, Vec::new())
+            .map_err(|error| at(error, from.path, "readlink"))?;
+        fs::symlinkat(target.as_c_str(), to.dir, to.name)
+            .map_err(|error| at(error, to.path, "symlink"))?;
+        self.finished(0);
+        Ok(())
+    }
+
+    fn directory(
+        &mut self,
+        from: At<'_>,
+        to: At<'_>,
+        depth: u32,
+        stat: &Stat,
+    ) -> Result<(), Problem> {
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let source = openat(from.dir, from.name, flags, Mode::empty())
+            .map_err(|error| at(error, from.path, "open"))?;
+        if !same_file(stat, &fstat(&source).map_err(|error| at(error, from.path, "stat"))?) {
+            return Err(changed(from.path));
+        }
+        // 0o700 while it is being filled, so a half-copied directory is not
+        // readable by anyone who was not already allowed to read the original.
+        // The real mode goes on at the end.
+        match fs::mkdirat(to.dir, to.name, Mode::from_bits_truncate(0o700)) {
+            Ok(()) => {}
+            Err(Errno::EXIST) if self.options.replace || self.options.resume => {}
+            Err(error) => return Err(at(error, to.path, "mkdir")),
+        }
+        // `O_NOFOLLOW` and `O_DIRECTORY`: what was just made, or what a resumed
+        // copy merges into, has to be a directory and not a link to one.
+        let into = openat(to.dir, to.name, flags, Mode::empty())
+            .map_err(|error| at(error, to.path, "open"))?;
+        // Keep the first warning bounded in memory, but finish every child. A
+        // preservation warning describes published data; other errors stop the walk.
+        let mut warning = None;
+        for child in names(&source, from.path)? {
+            let result = self.any(
+                At { dir: source.as_fd(), name: &child, path: &from.path.join(&child) },
+                At { dir: into.as_fd(), name: &child, path: &to.path.join(&child) },
+                depth + 1,
+            );
+            if let Err(problem) = result {
+                if problem.kind() != ProblemKind::Preservation {
+                    return Err(problem);
+                }
+                warning.get_or_insert(problem);
+            }
+        }
+        // Mode and times after the contents, for the reason a file's are:
+        // writing a child moves the directory's modification time.
+        let mut missing = Vec::new();
+        if fchmod(&into, Mode::from_bits_truncate(stat.st_mode & 0o7777)).is_err() {
+            missing.push("mode".to_owned());
+        }
+        if self.options.xattrs {
+            copy_xattrs(&source, &into, &mut missing);
+        }
+        if futimens(&into, &times_of(stat)).is_err() {
+            missing.push("times".to_owned());
+        }
+        if !missing.is_empty() {
+            warning.get_or_insert_with(|| {
+                Problem::new(
+                    ProblemKind::Preservation,
+                    to.path.display().to_string(),
+                    missing.join(", "),
+                )
+            });
+        }
+        self.finished(0);
+        warning.map_or(Ok(()), Err)
+    }
+
+    fn finished(&mut self, bytes: i64) {
+        self.progress.done += 1;
+        self.progress.bytes += bytes.cast_unsigned();
+        (self.watch)(*self.progress);
+    }
 }
 
-/// Whether `path` is a regular file of exactly `bytes`.
+/// Whether `to` names a regular file of exactly `bytes`.
 ///
 /// `SYMLINK_NOFOLLOW`, so a symlink where a file should be is not the file: it
 /// is something else with the same name, and copying over it is the right
 /// answer rather than skipping it.
-fn same_size(path: &Path, bytes: i64) -> bool {
-    statat(fs::CWD, path, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
+fn same_size(to: At<'_>, bytes: i64) -> bool {
+    statat(to.dir, to.name, AtFlags::SYMLINK_NOFOLLOW).is_ok_and(|stat| {
         fs::FileType::from_raw_mode(stat.st_mode) == fs::FileType::RegularFile
             && stat.st_size == bytes
     })
 }
 
-/// Every name in a directory except `.` and `..`.
+/// Every name in a directory this walk holds open, except `.` and `..`.
 ///
 /// Collected rather than streamed: the walk below creates files in the tree it is
 /// reading from when a copy goes into a sibling directory, and a `getdents64`
 /// cursor over a directory being written to may or may not see them.
-fn children(directory: &Path) -> Result<Vec<PathBuf>, Problem> {
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
-    let fd = openat(fs::CWD, directory, flags, Mode::empty())
-        .map_err(|error| at(error, directory, "open"))?;
-    let dir = fs::Dir::read_from(&fd).map_err(|error| at(error, directory, "read"))?;
+fn names(directory: &OwnedFd, path: &Path) -> Result<Vec<OsString>, Problem> {
+    let dir = fs::Dir::read_from(directory).map_err(|error| at(error, path, "read"))?;
     let mut out = Vec::new();
     for entry in dir {
-        let entry = entry.map_err(|e| at(e, directory, "read"))?;
+        let entry = entry.map_err(|e| at(e, path, "read"))?;
         let name = entry.file_name().to_bytes();
         if name == b"." || name == b".." {
             continue;
         }
         // Bytes, not `str`: a filename is not required to be UTF-8, and a copy
         // that skips the ones that are not is a copy that loses files.
-        let name = <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(name.to_vec());
-        out.push(PathBuf::from(name));
+        out.push(OsStr::from_bytes(name).to_owned());
     }
     Ok(out)
+}
+
+/// A name that was one thing when the walk looked and another when it opened it.
+///
+/// Refused rather than copied: somebody renamed something into the tree while
+/// it was being read, and whatever is there now is not what was chosen.
+fn changed(path: &Path) -> Problem {
+    Problem::new(ProblemKind::Gone, path.display().to_string(), "replaced while being copied")
 }
 
 fn cancelled(path: &Path) -> Problem {
@@ -776,51 +852,47 @@ fn too_deep(path: &Path) -> Problem {
 }
 
 /// A name in the destination directory that nothing else will pick.
-fn temporary(destination: &Path) -> PathBuf {
-    let parent = destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
+fn temporary() -> OsString {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());
-    parent.join(format!(".skerry-copy-{}-{nanos}", rustix::process::getpid().as_raw_nonzero()))
+    format!(".skerry-copy-{}-{nanos}", rustix::process::getpid().as_raw_nonzero()).into()
 }
 
 /// Gives the finished temporary file its final name without ever overwriting
 /// something nobody asked to overwrite.
-fn place(
-    temp: &Path,
-    destination: &Path,
-    replace: bool,
-) -> Result<(Placement, Option<PathBuf>), Errno> {
-    let cwd = fs::CWD;
-    match place_existing(temp, destination, replace) {
+///
+/// `true` beside the placement where the temporary name survived it.
+fn place(to: At<'_>, temp: &OsStr, replace: bool) -> Result<(Placement, bool), Errno> {
+    match place_existing((to.dir, Path::new(temp)), (to.dir, Path::new(to.name)), replace) {
         Ok(Placement::LinkThenUnlink) => {
             // The unlink can fail, and ignoring it leaves a `.skerry-copy-*` name
             // in the destination directory *and* inflates the link count of what
             // is supposed to be a clean copy.
-            let orphan = unlinkat(cwd, temp, AtFlags::empty()).err().map(|_| temp.to_path_buf());
+            let orphan = unlinkat(to.dir, temp, AtFlags::empty()).is_err();
             Ok((Placement::LinkThenUnlink, orphan))
         }
-        Ok(placement) => Ok((placement, None)),
+        Ok(placement) => Ok((placement, false)),
         Err(error) => Err(error),
     }
 }
 
-/// The placement chain, over a path that already exists.
+/// The placement chain, over an entry that already exists.
 ///
 /// Shared by [`move_file`], which renames the source itself, and by [`place`],
 /// which renames a temporary file. `LinkThenUnlink` leaves the source linked in
 /// two places and it is the caller's job to unlink it — which is what lets
 /// `move_file` treat the link count honestly.
-fn place_existing(from: &Path, to: &Path, replace: bool) -> Result<Placement, Errno> {
-    let cwd = fs::CWD;
+fn place_existing(
+    (from_dir, from): (BorrowedFd<'_>, &Path),
+    (to_dir, to): (BorrowedFd<'_>, &Path),
+    replace: bool,
+) -> Result<Placement, Errno> {
     if replace {
-        renameat_with(cwd, from, cwd, to, RenameFlags::empty())?;
+        renameat_with(from_dir, from, to_dir, to, RenameFlags::empty())?;
         return Ok(Placement::Replace);
     }
-    match renameat_with(cwd, from, cwd, to, RenameFlags::NOREPLACE) {
+    match renameat_with(from_dir, from, to_dir, to, RenameFlags::NOREPLACE) {
         Ok(()) => return Ok(Placement::NoReplace),
         // The destination is really there; there is nothing else to try.
         Err(Errno::EXIST) => return Err(Errno::EXIST),
@@ -831,7 +903,7 @@ fn place_existing(from: &Path, to: &Path, replace: bool) -> Result<Placement, Er
         Err(Errno::INVAL | Errno::NOSYS | Errno::OPNOTSUPP) => {}
         Err(error) => return Err(error),
     }
-    match fs::linkat(cwd, from, cwd, to, AtFlags::empty()) {
+    match fs::linkat(from_dir, from, to_dir, to, AtFlags::empty()) {
         Ok(()) => return Ok(Placement::LinkThenUnlink),
         Err(Errno::EXIST) => return Err(Errno::EXIST),
         Err(Errno::XDEV) => return Err(Errno::XDEV),
@@ -1050,15 +1122,15 @@ fn same_file(left: &Stat, right: &Stat) -> bool {
 }
 
 /// Removes the temporary file, and says so if even that failed.
-fn discard(temp: &Path, error: Errno, subject: &Path, stage: &'static str) -> Problem {
-    if unlinkat(fs::CWD, temp, AtFlags::empty()).is_err() {
+fn discard(to: At<'_>, temp: &OsStr, error: Errno, stage: &'static str) -> Problem {
+    if unlinkat(to.dir, temp, AtFlags::empty()).is_err() {
         return Problem::new(
             ProblemKind::Unreadable,
-            subject.display().to_string(),
-            format!("{stage}: {error}, and {} could not be removed", temp.display()),
+            to.path.display().to_string(),
+            format!("{stage}: {error}, and {} could not be removed", to.sibling(temp).display()),
         );
     }
-    at(error, subject, stage)
+    at(error, to.path, stage)
 }
 
 /// One errno, as something a person can act on and a stage they can report.
@@ -1105,6 +1177,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Options, Placement, Strategy, copy_file, move_file, remove};
+    use std::os::fd::AsFd as _;
     use std::path::{Path, PathBuf};
 
     fn scratch(label: &str) -> PathBuf {
@@ -1612,14 +1685,21 @@ mod tests {
         let options =
             super::Options { reflink: false, kernel_copy: false, ..super::Options::default() };
         let mut largest = 0;
-        let result = super::copy_file_progress(&source, &destination, options, &mut |bytes| {
-            largest = largest.max(bytes);
-            bytes < 1 << 20
-        });
+        let parent = std::fs::File::open(&root).unwrap();
+        let result = super::copy_regular(
+            super::At { dir: parent.as_fd(), name: "source".as_ref(), path: &source },
+            super::At { dir: parent.as_fd(), name: "destination".as_ref(), path: &destination },
+            options,
+            None,
+            &mut |bytes| {
+                largest = largest.max(bytes);
+                bytes < 1 << 20
+            },
+        );
         assert!(result.is_err());
         assert_eq!(largest, 1 << 20);
         assert!(!destination.exists());
-        assert_eq!(super::children(&root).unwrap().len(), 1);
+        assert_eq!(super::names(&parent.into(), &root).unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1634,6 +1714,122 @@ mod tests {
         assert!(!source.exists());
         assert_eq!(std::fs::read_to_string(destination).unwrap(), "contents");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Three files in a folder, each holding `contents`.
+    fn three(folder: &Path, contents: &str) {
+        std::fs::create_dir_all(folder).unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::write(folder.join(name), contents).unwrap();
+        }
+    }
+
+    /// Copies `tree` under `root` into `root/into`, and once the first file has
+    /// landed renames `swapped` away and puts a symlink to `target` in its place —
+    /// which is what somebody who can write the folder above it can do.
+    fn copy_with_a_swap(
+        root: &Path,
+        swapped: &Path,
+        target: &Path,
+    ) -> Result<(), sk_model::Problem> {
+        let into = root.join("into");
+        std::fs::create_dir_all(&into).unwrap();
+        let mut armed = true;
+        super::copy_into(
+            &root.join("tree"),
+            &into,
+            Options::default(),
+            &sk_util::Cancel::new(),
+            &mut super::Progress::default(),
+            &mut |progress| {
+                if armed && progress.done == 1 {
+                    armed = false;
+                    std::fs::rename(swapped, root.join("renamed-away")).unwrap();
+                    std::os::unix::fs::symlink(target, swapped).unwrap();
+                }
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// The finding that made the walk descriptor-based: with paths, two of three
+    /// files landed in the symlink's target and the copy called it a warning.
+    #[test]
+    fn a_destination_folder_swapped_for_a_symlink_mid_copy_redirects_nothing() {
+        let root = scratch("swap-destination");
+        three(&root.join("tree"), "mine");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+
+        let copied = copy_with_a_swap(&root, &root.join("into/tree"), &elsewhere);
+        assert!(walk(&elsewhere).is_empty(), "written through the link: {:?}", walk(&elsewhere));
+        for name in ["a", "b", "c"] {
+            let landed = root.join("renamed-away").join(name);
+            assert_eq!(std::fs::read_to_string(landed).unwrap(), "mine");
+        }
+        copied.expect("copied");
+    }
+
+    /// The same swap on the side being read copies another folder's files out.
+    #[test]
+    fn a_source_folder_swapped_for_a_symlink_mid_copy_is_not_read_through() {
+        let root = scratch("swap-source");
+        three(&root.join("tree"), "mine");
+        let secret = root.join("secret");
+        three(&secret, "secret");
+
+        let copied = copy_with_a_swap(&root, &root.join("tree"), &secret);
+        for name in ["a", "b", "c"] {
+            let landed = root.join("into/tree").join(name);
+            assert_eq!(std::fs::read_to_string(landed).unwrap(), "mine", "{name}");
+        }
+        copied.expect("copied");
+    }
+
+    /// A name the walk saw as a file and then found to be a fifo is refused at
+    /// once. Opening it without `O_NONBLOCK` waits for a writer forever, and
+    /// without the `fstat` the copy would read whatever one wrote.
+    #[test]
+    fn a_file_replaced_after_it_was_looked_at_is_refused_and_never_waited_on() {
+        use std::os::unix::fs::FileTypeExt as _;
+        let root = scratch("swap-type");
+        let looked_at = root.join("file");
+        std::fs::write(&looked_at, b"bytes").unwrap();
+        let seen =
+            super::statat(super::fs::CWD, &looked_at, super::AtFlags::SYMLINK_NOFOLLOW).unwrap();
+        std::fs::remove_file(&looked_at).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &looked_at,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_bits_truncate(0o600),
+            0,
+        )
+        .unwrap();
+
+        let parent = std::fs::File::open(&root).unwrap();
+        let destination = root.join("copy");
+        let refused = super::copy_regular(
+            super::At { dir: parent.as_fd(), name: "file".as_ref(), path: &looked_at },
+            super::At { dir: parent.as_fd(), name: "copy".as_ref(), path: &destination },
+            Options::default(),
+            Some(&seen),
+            &mut |_| true,
+        )
+        .expect_err("a fifo is not the file that was looked at");
+        assert!(refused.detail().contains("replaced"), "{}", refused.detail());
+        assert!(!destination.exists());
+        assert!(std::fs::symlink_metadata(&looked_at).unwrap().file_type().is_fifo());
+    }
+
+    /// `copy_file` copies a regular file and nothing that merely leads to one.
+    #[test]
+    fn copy_file_refuses_a_symlink_rather_than_following_it() {
+        let root = scratch("copy-file-link");
+        std::fs::write(root.join("target"), b"not this").unwrap();
+        std::os::unix::fs::symlink(root.join("target"), root.join("link")).unwrap();
+        assert!(copy_file(&root.join("link"), &root.join("copy"), Options::default()).is_err());
+        assert!(!root.join("copy").exists());
     }
 
     #[test]
