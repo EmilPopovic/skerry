@@ -210,7 +210,8 @@ fn on_path(program: &str) -> bool {
 /// its output and a second spawn per render is a tenth of what the render costs.
 #[derive(Clone, Copy, Default)]
 struct Facts {
-    /// The `MediaBox`, in points, **unrotated** — which is what poppler prints.
+    /// The `CropBox`, in points, **unrotated** — which is what `pdfinfo` prints as
+    /// a page's size, and what every renderer here is told to draw.
     size: Option<(f32, f32)>,
     /// Degrees clockwise, 0, 90, 180 or 270.
     rotation: u32,
@@ -251,7 +252,7 @@ fn facts(path: &Path, page: u32) -> Facts {
 /// How far the page is turned, for the text layer.
 ///
 /// **A `/Rotate 90` page is where poppler's own two answers disagree**: its text
-/// layer reports the unrotated `MediaBox` as the page's size and the boxes in the
+/// layer reports the unrotated page box as the page's size and the boxes in the
 /// rotated space, and its renderer draws the rotated image. Zero where nothing
 /// can say, which is the same as no rotation and is what every page that is not
 /// turned reports anyway.
@@ -334,11 +335,17 @@ fn render(
             // one pixel wider than the box with the long edge exactly right.
             // `-W`/`-H` take that pixel, which is margin, off a page the host
             // would otherwise refuse.
+            //
+            // **And drawn from the `CropBox`**, which is the box `pdfinfo` sized
+            // the fit from and the one mupdf draws. poppler's default is the
+            // `MediaBox`: a 612×792 page cropped to 612×400, in a 1000×600 box,
+            // was drawn whole at the crop's scale and came back 710×600 — the
+            // top of a page that was not the one asked for.
             let long = fitted_long_edge(path, page, within);
             let (width, height) = (within.0.to_string(), within.1.to_string());
             command
-                .args(["-png", "-f", &page_number, "-l", &page_number, "-scale-to", &long])
-                .args(["-W", &width, "-H", &height])
+                .args(["-png", "-cropbox", "-f", &page_number, "-l", &page_number])
+                .args(["-scale-to", &long, "-W", &width, "-H", &height])
                 .arg(path);
         }
         Tool::MuTool => {
@@ -421,13 +428,21 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
 
-    /// A one-page A4 PDF with nothing on the page, written with a correct
-    /// cross-reference table so neither renderer has to repair it.
-    fn a4_pdf(path: &Path) {
+    /// A one-page PDF whose page dictionary carries `boxes` and which draws
+    /// `content` in Helvetica, written with a correct cross-reference table so
+    /// neither renderer has to repair it.
+    fn one_page_pdf(path: &Path, boxes: &str, content: &str) {
+        let page = format!(
+            "<< /Type /Page /Parent 2 0 R {boxes} /Resources << /Font << /F1 5 0 R >> >> \
+             /Contents 4 0 R >>"
+        );
+        let stream = format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len() + 1);
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] >>",
+            page.as_str(),
+            stream.as_str(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         ];
         let mut bytes = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
@@ -457,7 +472,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("skerry-doc-fit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("a4.pdf");
-        a4_pdf(&pdf);
+        one_page_pdf(&pdf, "/MediaBox [0 0 595 842]", "");
         for (tool, program) in [(Tool::PdfToPpm, "pdftoppm"), (Tool::MuTool, "mutool")] {
             if !on_path(program) {
                 eprintln!("skerry-preview-doc: no {program} on this machine — skipped");
@@ -474,6 +489,44 @@ mod tests {
                 let filled = (size.0 as f32 / within.0 as f32).max(size.1 as f32 / within.1 as f32);
                 assert!(filled > 0.97, "{program}: {size:?} leaves {within:?} unfilled");
             }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A cropped page is drawn as cropped, whole, with its words where it is
+    /// drawn.** `pdfinfo` sizes a page by its `CropBox` and poppler draws the
+    /// `MediaBox` unless told otherwise, so the fit was computed for one box and
+    /// drawn for another — and the crop to the panel then cut it.
+    #[test]
+    fn a_cropped_page_is_drawn_whole_from_its_crop_box() {
+        let dir = std::env::temp_dir().join(format!("skerry-doc-crop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("cropped.pdf");
+        // A black quarter in the crop's bottom left, a word inside the crop and
+        // one above it, on the part of the `MediaBox` the crop leaves out.
+        let content = "0 0 0 rg 0 0 306 200 re f\n\
+                       BT /F1 24 Tf 400 300 Td (Inside) Tj ET\n\
+                       BT /F1 24 Tf 400 700 Td (Outside) Tj ET";
+        one_page_pdf(&pdf, "/MediaBox [0 0 612 792] /CropBox [0 0 612 400]", content);
+        let dark = |pixels: &[u8], width: u32, at: (u32, u32)| {
+            pixels[((at.1 * width + at.0) * 4) as usize] < 64
+        };
+        for (tool, program) in [(Tool::PdfToPpm, "pdftoppm"), (Tool::MuTool, "mutool")] {
+            if !on_path(program) {
+                eprintln!("skerry-preview-doc: no {program} on this machine — skipped");
+                continue;
+            }
+            let (pixels, size) = render(tool, &pdf, (1000, 600), 1).unwrap();
+            assert_eq!(size, (918, 600), "{program} drew some other box");
+            assert!(dark(&pixels, size.0, (100, 500)), "{program}: the crop's corner is missing");
+            assert!(!dark(&pixels, size.0, (100, 100)), "{program}: the corner is not where it is");
+        }
+        if on_path("pdftotext") {
+            let layer = super::words::of(&pdf, 1, 0).unwrap();
+            assert_eq!(layer.page, (612.0, 400.0), "the words are measured on another page");
+            let said: Vec<&str> = layer.words.iter().map(|word| word.text.as_str()).collect();
+            assert_eq!(said, ["Inside"], "a word outside the crop was offered for selection");
+            assert!(layer.words[0].at.1 < 400.0);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
