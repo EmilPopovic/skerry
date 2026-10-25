@@ -22,9 +22,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
+use rustix::fs::{AtFlags, Mode, OFlags};
 use sk_model::{Problem, ProblemKind};
 
 /// What a [`Change::Created`] made.
@@ -827,37 +828,80 @@ pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
 /// **Runs on a job.**
 pub fn set_permissions(path: &Path, nine: u16) -> Result<Change, Problem> {
     crate::trash::writable(path)?;
-    let before = mode_now(path)?;
+    let (held, before) = hold(path)?;
     let after = (before & 0o7000) | (nine & 0o777);
-    chmod(path, after)?;
+    chmod(&held, path, after)?;
     Ok(Change::Permissions { path: path.to_path_buf(), before, after })
 }
 
-/// The whole mode a path has right now, refusing a symlink.
-fn mode_now(path: &Path) -> Result<u16, Problem> {
-    let stat = rustix::fs::statx(
+/// The file `path` names, held, and the whole mode it has — refusing a symlink.
+///
+/// **One descriptor for the look and the change.** A `statx` of the path and a
+/// `chmod` of the path are two lookups, and between them somebody who can write
+/// the folder could swap the file for a symlink: the check saw a file, and the
+/// change followed the link to whatever it named. `O_PATH | O_NOFOLLOW` opens a
+/// symlink as itself, so the `fstat` that refuses it and the [`chmod`] that
+/// follows are about one inode. `O_PATH` and not `O_RDONLY`, because changing a
+/// mode needs ownership and not permission to read — the person restoring
+/// access to their own `000` file is exactly who this is for.
+fn hold(path: &Path) -> Result<(OwnedFd, u16), Problem> {
+    let fd = rustix::fs::openat(
         rustix::fs::CWD,
         path,
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-        StatxFlags::TYPE | StatxFlags::MODE,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
     )
     .map_err(|error| problem(error, path))?;
-    if u32::from(stat.stx_mode) & libc::S_IFMT == libc::S_IFLNK {
+    let stat = rustix::fs::fstat(&fd).map_err(|error| problem(error, path))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Symlink {
         return Err(Problem::new(
             ProblemKind::Unreadable,
             path.display().to_string(),
             "a symlink has no permissions of its own",
         ));
     }
-    Ok(stat.stx_mode & 0o7777)
+    Ok((fd, (stat.st_mode & 0o7777) as u16))
 }
 
-fn chmod(path: &Path, mode: u16) -> Result<(), Problem> {
+/// `__NR_fchmodat2`: 452 in the table every architecture has shared since Linux
+/// 5.1 (`include/uapi/asm-generic/unistd.h`), and not in the `libc` crate for
+/// aarch64 as of 0.2.189. Where the number means nothing the kernel answers
+/// `ENOSYS`, which is the fallback's cue anyway.
+const FCHMODAT2: libc::c_long = 452;
+
+/// Sets the mode of the file `held` refers to, never by name.
+///
+/// `fchmodat2` with `AT_EMPTY_PATH` acts on the descriptor itself, and is Linux
+/// 6.6 — above the 5.10 floor, so it is tried rather than assumed. Without it,
+/// `/proc/self/fd/N` is the descriptor's own magic link and `chmod` through it
+/// reaches the same inode; plain `fchmod` refuses an `O_PATH` descriptor with
+/// `EBADF`.
+fn chmod(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
+    let flags = libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW;
+    // SAFETY: the descriptor is open for the whole call, the path is a valid
+    // NUL-terminated empty string, and the mode and flags are plain integers.
+    let answer = unsafe {
+        libc::syscall(FCHMODAT2, held.as_raw_fd(), c"".as_ptr(), libc::c_uint::from(mode), flags)
+    };
+    if answer == 0 {
+        return Ok(());
+    }
+    match rustix::io::Errno::from_io_error(&std::io::Error::last_os_error()) {
+        Some(rustix::io::Errno::NOSYS) => chmod_through_proc(held, path, mode),
+        Some(error) => Err(problem(error, path)),
+        None => Err(problem(rustix::io::Errno::IO, path)),
+    }
+}
+
+/// [`chmod`] for a kernel without `fchmodat2`, through the descriptor's own link
+/// in `/proc`. A system with no `/proc` mounted gets `ENOENT`, and says so.
+fn chmod_through_proc(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
+    let link = format!("/proc/self/fd/{}", held.as_raw_fd());
     rustix::fs::chmodat(
         rustix::fs::CWD,
-        path,
+        link.as_str(),
         Mode::from_bits_truncate(u32::from(mode)),
-        rustix::fs::AtFlags::empty(),
+        AtFlags::empty(),
     )
     .map_err(|error| problem(error, path))
 }
@@ -868,7 +912,7 @@ fn chmod(path: &Path, mode: u16) -> Result<(), Problem> {
 /// mode somebody else changed in between is not one this undo has an inverse
 /// for, and writing over it would lose their change without saying so.
 fn restore_mode(path: &Path, expected: u16, wanted: u16) -> Result<(), Problem> {
-    let now = mode_now(path)?;
+    let (held, now) = hold(path)?;
     if now != expected {
         return Err(Problem::new(
             ProblemKind::ChangedSince,
@@ -876,7 +920,7 @@ fn restore_mode(path: &Path, expected: u16, wanted: u16) -> Result<(), Problem> 
             "permissions changed since",
         ));
     }
-    chmod(path, wanted)
+    chmod(&held, path, wanted)
 }
 
 /// Whether something is already called that.
@@ -1886,6 +1930,51 @@ mod tests {
         let refused = set_permissions(&link, 0o600).expect_err("a symlink was accepted");
         assert_eq!(refused.kind(), ProblemKind::Unreadable);
         assert_eq!(mode_of(&target), 0o644, "the target was changed through the link");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The check and the change used to be two lookups of one path, and a file
+    /// swapped for a symlink between them had the link's target changed. Both
+    /// ways of changing a held mode — `fchmodat2` and, for a kernel before 6.6,
+    /// `/proc/self/fd` — act on the file that was held and nothing else.
+    #[test]
+    fn a_file_swapped_for_a_symlink_once_held_is_the_only_one_changed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        type Change = fn(&std::os::fd::OwnedFd, &Path, u16) -> Result<(), sk_model::Problem>;
+        let ways: [(&str, Change); 2] =
+            [("fchmodat2", super::chmod), ("proc", super::chmod_through_proc)];
+        for (way, change) in ways {
+            let root = scratch(&format!("chmod-swap-{way}"));
+            let file = root.join("file");
+            let victim = root.join("victim");
+            for path in [&file, &victim] {
+                std::fs::write(path, b"contents").unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let (held, before) = super::hold(&file).expect("held");
+            assert_eq!(before, 0o600);
+            std::fs::rename(&file, root.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&victim, &file).unwrap();
+
+            change(&held, &file, 0o640).expect("changed");
+            assert_eq!(mode_of(&victim), 0o600, "{way} changed the symlink's target");
+            assert_eq!(mode_of(&root.join("moved")), 0o640, "{way} missed the held file");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Why the descriptor is `O_PATH`: a mode is changed by its owner, who need
+    /// not be able to read the file — and a `000` file is the one most in need.
+    #[test]
+    fn a_file_nobody_may_read_can_still_have_its_bits_set() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("chmod-unreadable");
+        let path = root.join("locked");
+        std::fs::write(&path, b"contents").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let change = set_permissions(&path, 0o600).expect("set");
+        assert_eq!(change, Change::Permissions { path: path.clone(), before: 0, after: 0o600 });
+        assert_eq!(mode_of(&path), 0o600);
         let _ = std::fs::remove_dir_all(&root);
     }
 
