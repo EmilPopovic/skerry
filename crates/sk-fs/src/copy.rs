@@ -523,7 +523,8 @@ pub fn free_name(into: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsStri
 /// they do not — with the removal strictly after the copy, per [`move_file`].
 ///
 /// Returns where it landed and, beside it, what the removal left in the source
-/// on purpose: see [`remove_taken`]. The move has happened either way.
+/// on purpose — whatever changed or appeared there after the copy read it, and
+/// any mount inside it. The move has happened either way.
 ///
 /// **Runs on a job.**
 pub fn move_into(
