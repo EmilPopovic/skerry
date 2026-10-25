@@ -21,6 +21,8 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, StatxFlags};
+
 /// The specification's `normal` size. `large` is 256 and is not written here —
 /// [ADR 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md)
 /// has one slot size and this is it.
@@ -61,7 +63,7 @@ fn uri(path: &Path) -> String {
 /// Returns the RGBA and its size. A thumbnail whose recorded `Thumb::MTime`
 /// disagrees with `mtime` is stale and is treated as absent.
 pub fn read(path: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
-    let file = std::fs::File::open(place(path)?).ok()?;
+    let file = open_regular(&place(path)?).ok()?;
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reading = decoder.read_info().ok()?;
@@ -95,6 +97,32 @@ pub fn write(path: &Path, mtime: i64, pixels: &[u8], size: (u32, u32)) {
     }
 }
 
+/// How a cache folder is opened, to write into or to close.
+///
+/// **Not through a link at its name**, and never waiting: `O_DIRECTORY` refuses a
+/// FIFO swapped in for the folder before the open could block on it.
+const FOLDER: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::CLOEXEC);
+
+/// Opens a file to read, if what is at `file` is one.
+///
+/// **A regular file at that very name, or nothing.** Every file manager this
+/// person runs writes here, so what is in it may have been planted: a link is not
+/// followed, and a FIFO opens without waiting for a writer and is then refused,
+/// rather than holding the child until the host's deadline.
+fn open_regular(file: &Path) -> std::io::Result<std::fs::File> {
+    let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(file, open, Mode::empty())?;
+    let stat = rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, StatxFlags::TYPE)?;
+    if FileType::from_raw_mode(u32::from(stat.stx_mode)) != FileType::RegularFile {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    Ok(std::fs::File::from(fd))
+}
+
 /// Makes the cache's folder, or closes one that was left open.
 ///
 /// **0700 for `thumbnails/normal` and the `thumbnails` above it**, as the
@@ -104,48 +132,44 @@ pub fn write(path: &Path, mtime: i64, pixels: &[u8], size: (u32, u32)) {
 /// wrote into it are 0644 and the folder is the one thing that closes all of
 /// them at once. `$XDG_CACHE_HOME` itself is the person's and is not touched.
 ///
-/// **Before confinement**, which is where it is called, so the sandbox never has
-/// to allow changing a mode.
+/// **Before confinement**, which is where it is called, because the folder has
+/// to exist before Landlock can be given a descriptor for it.
 pub fn prepare(directory: &Path) {
     use std::os::unix::fs::DirBuilderExt as _;
     if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).is_err() {
         return;
     }
     for folder in [Some(directory), directory.parent()].into_iter().flatten() {
-        let _ = tighten(folder);
+        seal(folder);
     }
 }
 
-/// Takes group and other access off a folder, unless the name is a link.
+/// Takes group and other access off a cache folder an older version left open.
 ///
-/// **The descriptor is what is changed, and it is checked against the name.** A
-/// path checked and then changed by path can be swapped for a link in between,
-/// and the change then lands wherever the link points.
-fn tighten(folder: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let named = std::fs::symlink_metadata(folder)?;
-    let shared = named.mode() & 0o077;
-    if !named.is_dir() || shared == 0 {
-        return Ok(());
+/// A folder somebody else owns is left alone, so a child running as root with
+/// another person's `$HOME` changes nothing of theirs.
+fn seal(folder: &Path) {
+    let Ok(fd) = rustix::fs::open(folder, FOLDER, Mode::empty()) else { return };
+    let asked = StatxFlags::MODE | StatxFlags::UID;
+    let Ok(stat) = rustix::fs::statx(&fd, "", AtFlags::EMPTY_PATH, asked) else { return };
+    let mode = u32::from(stat.stx_mode);
+    let shared = mode & 0o077;
+    if shared != 0 && stat.stx_uid == rustix::process::geteuid().as_raw() {
+        let _ = rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode & 0o700));
     }
-    let handle = std::fs::File::open(folder)?;
-    let held = handle.metadata()?;
-    if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
-        return Ok(());
-    }
-    handle.set_permissions(std::fs::Permissions::from_mode(held.mode() & 0o700))
 }
 
 /// As [`write`], to a named file, and saying why it did not.
 ///
 /// The seam a test uses, because `$XDG_CACHE_HOME` is process-global.
 ///
-/// **The staging file is created, never opened.** `O_CREAT | O_EXCL` fails on a
-/// name that exists, "regardless of the contents of the symbolic link" (POSIX
-/// `open`), so a link planted at the staging name is refused rather than written
-/// through — and there is no `O_TRUNC` for the sandbox to have to allow. One
-/// name per process is enough because the child answers one request at a time
-/// ([ADR 0017](../../../docs/adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md)).
+/// Everything happens against one descriptor for the folder, so the thumbnail is
+/// staged and published in the same place, and the rename replaces a link at
+/// its name rather than following it. **One staging name per process**, because
+/// the child answers one request at a time
+/// ([ADR 0017](../../../docs/adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md));
+/// what is already there was left by a killed child with the same pid, and is
+/// removed.
 fn write_to(
     file: &Path,
     original: &Path,
@@ -153,19 +177,39 @@ fn write_to(
     pixels: &[u8],
     size: (u32, u32),
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
-    let directory = file.parent().ok_or_else(|| std::io::Error::other("no folder"))?;
+    use std::os::unix::fs::DirBuilderExt as _;
+    let (Some(directory), Some(name)) = (file.parent(), file.file_name()) else {
+        return Err(std::io::Error::other("no folder"));
+    };
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
-    let staging = file.with_extension(format!("{}.tmp", std::process::id()));
-    let handle =
-        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&staging)?;
-    let written = encode(handle, original, mtime, pixels, size)
+    let folder = rustix::fs::open(directory, FOLDER, Mode::empty())?;
+    let staging = Path::new(name).with_extension(format!("{}.tmp", std::process::id()));
+    match rustix::fs::unlinkat(&folder, &staging, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let written = encode(stage(&folder, &staging)?, original, mtime, pixels, size)
         .map_err(std::io::Error::from)
-        .and_then(|()| std::fs::rename(&staging, file));
+        .and_then(|()| {
+            rustix::fs::renameat(&folder, &staging, &folder, name).map_err(std::io::Error::from)
+        });
     if written.is_err() {
-        let _ = std::fs::remove_file(&staging);
+        let _ = rustix::fs::unlinkat(&folder, &staging, AtFlags::empty());
     }
     written
+}
+
+/// Creates the staging file, 0600, refusing anything already at its name.
+///
+/// **`O_EXCL` is what makes the `unlinkat` before it safe.** A link planted again
+/// in between is a name that exists, and the create fails "regardless of the
+/// contents of the symbolic link" (POSIX `open`) rather than writing through it —
+/// and there is no `O_TRUNC` for the sandbox to have to allow.
+fn stage(folder: &impl rustix::fd::AsFd, staging: &Path) -> std::io::Result<std::fs::File> {
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = rustix::fs::openat(folder, staging, create, Mode::from_raw_mode(0o600))?;
+    Ok(std::fs::File::from(handle))
 }
 
 fn encode(
@@ -209,7 +253,7 @@ fn to_rgba(raw: &[u8], colour: png::ColorType) -> Option<Vec<u8>> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{place, prepare, to_rgba, uri, write_to};
+    use super::{open_regular, place, prepare, seal, stage, to_rgba, uri, write_to};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
@@ -227,6 +271,17 @@ mod tests {
 
     fn open_up(path: &Path) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Runs `work`, failing the test rather than hanging it if it blocks.
+    fn promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(work()));
+        receiver.recv_timeout(std::time::Duration::from_secs(10)).expect("it blocked")
+    }
+
+    fn fifo(at: &Path) {
+        rustix::fs::mkfifoat(rustix::fs::CWD, at, rustix::fs::Mode::from_raw_mode(0o644)).unwrap();
     }
 
     /// **0600 in 0700, which is the specification's "Permissions" section.** A
@@ -265,9 +320,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// **A link in the cache is followed by neither the write nor the close.** The
-    /// staging name is the one this helper has always used, so it is the one
-    /// somebody could have planted something at.
+    /// **A link in the cache is followed by neither the write nor the close**, and
+    /// a FIFO in a folder's place is not waited on. The staging link is removed
+    /// rather than opened, and the thumbnail's own name is replaced rather than
+    /// followed.
     #[test]
     fn a_link_in_the_cache_is_not_written_or_closed_through() {
         let root = scratch("links");
@@ -278,17 +334,62 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, root.join("thumbnails").join("normal")).unwrap();
         prepare(&root.join("thumbnails").join("normal"));
         assert_eq!(mode(&elsewhere), "755", "the close went through a link");
+        let pipe = root.join("pipe");
+        fifo(&pipe);
+        let held = pipe.clone();
+        promptly(move || seal(&held));
+        assert_eq!(mode(&pipe), "644", "a FIFO was changed");
 
         let folder = root.join("real");
         std::fs::create_dir_all(&folder).unwrap();
-        let victim = root.join("victim");
-        std::fs::write(&victim, "unrelated").unwrap();
+        let (staged, named) = (root.join("staged-victim"), root.join("named-victim"));
+        std::fs::write(&staged, "unrelated").unwrap();
+        std::fs::write(&named, "unrelated").unwrap();
         let file = folder.join("0123.png");
         let staging = file.with_extension(format!("{}.tmp", std::process::id()));
-        std::os::unix::fs::symlink(&victim, &staging).unwrap();
-        assert!(write_to(&file, Path::new("/a.png"), 7, &[255; 4], (1, 1)).is_err());
-        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "unrelated");
-        assert!(!file.exists(), "a thumbnail was published through somebody else's file");
+        std::os::unix::fs::symlink(&staged, &staging).unwrap();
+        std::os::unix::fs::symlink(&named, &file).unwrap();
+        write_to(&file, Path::new("/a.png"), 7, &[255; 4], (1, 1)).unwrap();
+        assert_eq!(std::fs::read(&staged).unwrap(), b"unrelated", "the staging link");
+        assert_eq!(std::fs::read(&named).unwrap(), b"unrelated", "the thumbnail's own name");
+        assert_eq!(mode(&file), "600", "the thumbnail is not the file the write made");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **The staging file is created, never opened**: a link put back at its name
+    /// between the write's `unlinkat` and its create is refused, and the file it
+    /// points at is untouched. The write cannot be made to lose that race on
+    /// demand, so this asks the create directly.
+    #[test]
+    fn a_link_at_the_staging_name_is_refused_by_the_create() {
+        use rustix::fs::{Mode, OFlags};
+        let root = scratch("stage");
+        let victim = root.join("victim");
+        std::fs::write(&victim, "unrelated").unwrap();
+        std::os::unix::fs::symlink(&victim, root.join("0123.1.tmp")).unwrap();
+        let open = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let fd = rustix::fs::open(&root, open, Mode::empty()).unwrap();
+        let refused = stage(&fd, Path::new("0123.1.tmp")).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unrelated");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **Only a regular file at the thumbnail's own name is read.** A link is not
+    /// followed, and a FIFO is refused at once rather than holding the child
+    /// until the host's deadline.
+    #[test]
+    fn a_link_or_a_fifo_at_the_thumbnail_name_is_not_read() {
+        let root = scratch("planted");
+        let file = root.join("0123.png");
+        write_to(&file, Path::new("/a.png"), 7, &[255; 4], (1, 1)).unwrap();
+        assert!(open_regular(&file).is_ok(), "the thumbnail itself was refused");
+        let linked = root.join("linked.png");
+        std::os::unix::fs::symlink(&file, &linked).unwrap();
+        assert!(open_regular(&linked).is_err(), "a thumbnail was read through a link");
+        let pipe = root.join("pipe.png");
+        fifo(&pipe);
+        assert!(promptly(move || open_regular(&pipe).is_err()), "a FIFO was read");
         std::fs::remove_dir_all(root).unwrap();
     }
 

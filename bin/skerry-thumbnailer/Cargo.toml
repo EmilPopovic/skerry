@@ -18,6 +18,9 @@ sk-preview = { workspace = true }
 png = { workspace = true }
 zune-jpeg = { workspace = true }
 resvg = { workspace = true }
+# For `O_NOFOLLOW`, `O_DIRECTORY` and `geteuid` on the thumbnail cache, which
+# `std` does not name. Already in this crate's tree through `sk-preview`.
+rustix = { workspace = true }
 
 [lints]
 workspace = true

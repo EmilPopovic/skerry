@@ -1144,6 +1144,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "png",
  "resvg",
+ "rustix",
  "sk-preview",
  "zune-jpeg",
 ]
