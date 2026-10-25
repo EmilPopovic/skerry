@@ -26,13 +26,16 @@
 
 use std::collections::VecDeque;
 use std::os::fd::OwnedFd;
+use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::wrapper::ConnectionExt as _;
 
-use crate::clipboard::{Content, Selection, Transfer, selection_pipe, send_to};
+use crate::clipboard::{
+    Content, SELECTION_LIMIT, SELECTION_TIMEOUT, Selection, Transfer, selection_pipe, send_to,
+};
 
 use super::atoms::Atoms;
 
@@ -78,9 +81,47 @@ struct Incoming {
     incremental: bool,
     /// What has arrived so far, when it is arriving incrementally.
     collected: Vec<u8>,
+    /// The most `collected` may hold before the conversion is abandoned.
+    limit: usize,
+    /// When the conversion is abandoned if it has not finished.
+    ///
+    /// A peer can stop answering anywhere — before its first property, or
+    /// between two chunks of an `INCR` — and nothing on the wire says so.
+    deadline: Instant,
     /// Which selection this answers, so a `TARGETS` reply updates the right
     /// offer list.
     primary: bool,
+}
+
+impl Incoming {
+    fn new(target: xproto::Atom, pipe: Option<OwnedFd>, primary: bool, now: Instant) -> Self {
+        Self {
+            target,
+            pipe,
+            incremental: false,
+            collected: Vec::new(),
+            limit: SELECTION_LIMIT,
+            deadline: now + SELECTION_TIMEOUT,
+            primary,
+        }
+    }
+
+    /// Whether `more` bytes would still be under the limit.
+    fn fits(&self, more: usize) -> bool {
+        self.collected.len().saturating_add(more) <= self.limit
+    }
+
+    /// How much of a property to ask for, in the 32-bit units `GetProperty`
+    /// counts in.
+    ///
+    /// **What is left under the limit, and no more.** A property is the peer's
+    /// to size, so asking for all of it is a reply as large as the peer cares
+    /// to make; asking for the room left makes one that would pass the limit
+    /// come back with `bytes_after` set instead.
+    fn words(&self) -> u32 {
+        let room = self.limit.saturating_sub(self.collected.len());
+        u32::try_from(room.div_ceil(4)).unwrap_or(u32::MAX)
+    }
 }
 
 /// What a `TARGETS` reply said, and which selection said it.
@@ -380,13 +421,7 @@ impl Selections {
         let _ = connection.flush();
         self.incoming.push_back((
             atoms.SKERRY_SELECTION,
-            Incoming {
-                target,
-                pipe: Some(write),
-                incremental: false,
-                collected: Vec::new(),
-                primary: false,
-            },
+            Incoming::new(target, Some(write), false, Instant::now()),
         ));
         Some(read)
     }
@@ -405,16 +440,9 @@ impl Selections {
         let _ = connection.flush();
         // No pipe: the answer is a list of atoms for the offer table, not bytes
         // for a caller. `arrived` tells the two apart by this being `None`.
-        self.incoming.push_back((
-            property,
-            Incoming {
-                target: atoms.TARGETS,
-                pipe: None,
-                incremental: false,
-                collected: Vec::new(),
-                primary: matches!(selection, Selection::Primary),
-            },
-        ));
+        let primary = matches!(selection, Selection::Primary);
+        self.incoming
+            .push_back((property, Incoming::new(atoms.TARGETS, None, primary, Instant::now())));
     }
 
     /// A conversion we asked for has landed.
@@ -445,23 +473,37 @@ impl Selections {
             self.incoming.remove(index);
             return None;
         }
+        let words = self.incoming.get(index).map_or(0, |(_, incoming)| incoming.words());
         let reply = connection
-            .get_property(false, window, event.property, xproto::AtomEnum::ANY, 0, u32::MAX / 4)
+            .get_property(false, window, event.property, xproto::AtomEnum::ANY, 0, words)
             .ok()?
             .reply()
             .ok()?;
 
         if reply.type_ == atoms.INCR {
+            // ICCCM 2.7: the value is a lower bound on the size. One already
+            // past the limit is refused before the first chunk, by leaving
+            // undeleted the property whose deletion would ask for it.
+            let announced = reply.value32().and_then(|mut sizes| sizes.next()).unwrap_or(0);
+            let announced = usize::try_from(announced).unwrap_or(usize::MAX);
+            let (_, incoming) = self.incoming.get_mut(index)?;
+            if !incoming.fits(announced) {
+                self.incoming.remove(index);
+                return None;
+            }
+            incoming.incremental = true;
             let _ = connection.delete_property(window, event.property);
             let _ = connection.flush();
-            if let Some((_, incoming)) = self.incoming.get_mut(index) {
-                incoming.incremental = true;
-            }
             return None;
         }
 
         let (_, mut incoming) = self.incoming.remove(index)?;
         let _ = connection.delete_property(window, event.property);
+        if reply.bytes_after > 0 {
+            // Past the limit in one property. `incoming` goes out of scope
+            // here, and its pipe closes with nothing written.
+            return None;
+        }
         if reply.type_ == atoms.TARGETS || reply.type_ == xproto::Atom::from(xproto::AtomEnum::ATOM)
         {
             let mimes = reply
@@ -499,28 +541,67 @@ impl Selections {
         else {
             return;
         };
+        let words = self.incoming.get(index).map_or(0, |(_, incoming)| incoming.words());
         let Some(reply) = connection
-            .get_property(true, event.window, event.atom, xproto::AtomEnum::ANY, 0, u32::MAX / 4)
+            .get_property(true, event.window, event.atom, xproto::AtomEnum::ANY, 0, words)
             .ok()
             .and_then(|cookie| cookie.reply().ok())
         else {
             return;
         };
         let _ = connection.flush();
-        if reply.value.is_empty() {
-            // A zero-length property ends an `INCR` transfer, and everything
-            // collected goes to the caller in one piece.
-            if let Some((_, mut incoming)) = self.incoming.remove(index)
-                && let Some(pipe) = incoming.pipe.take()
-            {
-                let bytes = std::mem::take(&mut incoming.collected);
-                send_to(transfers, pipe, bytes.into());
-            }
+        self.collect(index, &reply.value, reply.bytes_after, transfers);
+    }
+
+    /// Adds one property of an `INCR` transfer, already read, to what has
+    /// arrived for the conversion at `index`.
+    ///
+    /// `beyond` is the reply's `bytes_after`: what the property held past what
+    /// [`Incoming::words`] asked for, which is anything over the limit.
+    fn collect(&mut self, index: usize, chunk: &[u8], beyond: u32, transfers: &mut Vec<Transfer>) {
+        let Some((_, incoming)) = self.incoming.get_mut(index) else { return };
+        if beyond > 0 || !incoming.fits(chunk.len()) {
+            // **Abandoned, not truncated.** Dropping the entry closes the pipe
+            // with nothing written, which a reader takes as nothing offered —
+            // where the first sixteen megabytes of a URI list would be a paste
+            // of some of the files.
+            self.incoming.remove(index);
             return;
         }
-        if let Some((_, incoming)) = self.incoming.get_mut(index) {
-            incoming.collected.extend_from_slice(&reply.value);
+        if !chunk.is_empty() {
+            incoming.collected.extend_from_slice(chunk);
+            return;
         }
+        // A zero-length property ends an `INCR` transfer, and everything
+        // collected goes to the caller in one piece.
+        if let Some((_, mut incoming)) = self.incoming.remove(index)
+            && let Some(pipe) = incoming.pipe.take()
+        {
+            let bytes = std::mem::take(&mut incoming.collected);
+            send_to(transfers, pipe, bytes.into());
+        }
+    }
+
+    /// Abandons every conversion whose peer has had [`SELECTION_TIMEOUT`] and
+    /// not finished.
+    ///
+    /// Dropping an entry drops its pipe's write end, which is what turns a peer
+    /// that went quiet into an end-of-file the reading job can act on. Without
+    /// it a drop whose source stopped between two chunks held a job blocked on
+    /// that pipe, and the entry itself, for the life of the process.
+    pub(super) fn expire(&mut self, now: Instant) {
+        self.incoming.retain(|(_, incoming)| incoming.deadline > now);
+    }
+
+    /// How long until the next conversion is abandoned.
+    ///
+    /// `None` with nothing in flight, so a window with no paste or drop
+    /// outstanding still sleeps with no timeout at all.
+    pub(super) fn next_deadline(&self, now: Instant) -> Option<Duration> {
+        self.incoming
+            .iter()
+            .map(|(_, incoming)| incoming.deadline.saturating_duration_since(now))
+            .min()
     }
 
     /// The peer deleted the property, so the next chunk goes in.
@@ -643,7 +724,92 @@ impl Types {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
+
+    /// One `INCR` conversion in flight, with the end its reader holds.
+    fn incremental(limit: usize, now: Instant) -> (Selections, OwnedFd) {
+        let (read, write) = selection_pipe().unwrap();
+        let mut incoming = Incoming::new(TYPES.uri_list, Some(write), false, now);
+        incoming.limit = limit;
+        incoming.incremental = true;
+        let mut selections = Selections::default();
+        selections.incoming.push_back((1, incoming));
+        (selections, read)
+    }
+
+    /// What the reader ends up with. A pipe whose writer has gone reads to
+    /// end-of-file at once; one still held times out, which is the failure.
+    fn read(fd: &OwnedFd) -> std::io::Result<Vec<u8>> {
+        crate::clipboard::receive(fd, usize::MAX, Duration::from_millis(200))
+    }
+
+    #[test]
+    fn an_incremental_answer_reaches_the_reader_whole_at_its_terminator() {
+        let (mut selections, reader) = incremental(8, Instant::now());
+        let mut transfers = Vec::new();
+        for chunk in [&b"file"[..], b"://a", b""] {
+            selections.collect(0, chunk, 0, &mut transfers);
+        }
+        assert_eq!(selections.awaiting(), 0, "a finished transfer stayed in flight");
+        assert_eq!(read(&reader).unwrap(), b"file://a", "exactly the limit is not past it");
+    }
+
+    /// A peer that owns the clipboard and answers with `INCR` decides how much
+    /// it sends. Watched failing with the `fits` check removed: the transfer was
+    /// still collecting at nine bytes against a limit of eight.
+    #[test]
+    fn an_incremental_answer_past_the_limit_is_abandoned_and_its_pipe_closed() {
+        let (mut selections, reader) = incremental(8, Instant::now());
+        let mut transfers = Vec::new();
+        selections.collect(0, b"file", 0, &mut transfers);
+        selections.collect(0, b"://ab", 0, &mut transfers);
+        assert_eq!(selections.awaiting(), 0, "an over-limit transfer was kept");
+        selections.collect(0, b"cdef", 0, &mut transfers);
+        selections.collect(0, b"", 0, &mut transfers);
+        assert_eq!(read(&reader).unwrap(), b"", "the reader got part of an over-limit answer");
+    }
+
+    /// The server says a property was longer than what was asked for, which is
+    /// the room left under the limit — so a chunk that fits in what came back
+    /// is still over.
+    #[test]
+    fn a_property_with_bytes_left_behind_is_past_the_limit() {
+        let (mut selections, reader) = incremental(8, Instant::now());
+        selections.collect(0, b"file://a", 1, &mut Vec::new());
+        assert_eq!(selections.awaiting(), 0);
+        assert_eq!(read(&reader).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_property_is_asked_for_no_further_than_the_limit_leaves_room() {
+        let (mut selections, _reader) = incremental(10, Instant::now());
+        assert_eq!(selections.incoming[0].1.words(), 3);
+        selections.collect(0, b"abc", 0, &mut Vec::new());
+        assert_eq!(selections.incoming[0].1.words(), 2);
+        selections.collect(0, b"defghij", 0, &mut Vec::new());
+        assert_eq!(selections.incoming[0].1.words(), 0);
+    }
+
+    /// A drop whose source stops between two chunks never sends the terminator
+    /// and never says so. Watched failing with `expire` emptied: the entry, and
+    /// the write end its reader waits on, outlived the deadline.
+    #[test]
+    fn a_conversion_whose_peer_goes_quiet_is_abandoned_at_its_deadline() {
+        let asked = Instant::now();
+        let (mut selections, reader) = incremental(SELECTION_LIMIT, asked);
+        selections.collect(0, b"file://a", 0, &mut Vec::new());
+        assert_eq!(selections.next_deadline(asked), Some(SELECTION_TIMEOUT));
+
+        selections.expire(asked + SELECTION_TIMEOUT.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(selections.awaiting(), 1, "abandoned before its deadline");
+
+        selections.expire(asked + SELECTION_TIMEOUT);
+        assert_eq!(selections.awaiting(), 0, "kept past its deadline");
+        assert_eq!(read(&reader).unwrap(), b"", "the reader is still waiting");
+        assert_eq!(selections.next_deadline(asked), None, "an idle window would still wake");
+    }
 
     const TYPES: Types = Types {
         uri_list: 100,

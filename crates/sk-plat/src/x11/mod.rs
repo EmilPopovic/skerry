@@ -31,7 +31,7 @@ mod xdnd;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::fd::{AsRawFd, BorrowedFd};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags};
 use sk_model::{Problem, ProblemKind};
@@ -758,7 +758,10 @@ impl Window {
             return;
         }
 
+        // A conversion in flight is a wake-up with an owner: it is abandoned
+        // at its deadline whether or not the peer ever says anything again.
         let timeout = shorter(timeout, self.repeat.next_in());
+        let timeout = shorter(timeout, self.selections.next_deadline(Instant::now()));
         let display = unsafe_borrowed_fd(self.connection.as_raw_fd());
         let wake_fd = wake.map(Waker::as_fd);
         let mut fds = Vec::with_capacity(2 + self.transfers.len());
@@ -815,6 +818,7 @@ impl Window {
 
     fn after_events(&mut self) {
         self.repeat.emit(&mut self.events);
+        self.selections.expire(Instant::now());
         self.publish_geometry();
     }
 

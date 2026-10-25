@@ -165,6 +165,23 @@ impl Content {
     }
 }
 
+/// The most a peer's answer to a paste or a drop may hold.
+///
+/// **Counted where the bytes first gather.** Wayland hands the peer a pipe, so
+/// [`receive`] counts what comes through it. X11 has the peer write properties
+/// that this process collects before anything reaches the pipe, so the X11
+/// backend counts too: a peer answering with `INCR` could otherwise keep
+/// writing until this process ran out of memory, and the worker's limit would
+/// only see what was left afterwards.
+pub const SELECTION_LIMIT: usize = 16 * 1024 * 1024;
+
+/// How long a peer has to finish answering a paste or a drop.
+///
+/// The X11 backend abandons a conversion still outstanding after this and
+/// closes its pipe, so the job reading it sees an end-of-file rather than
+/// waiting on a peer that stopped halfway or never started.
+pub const SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A pipe for one selection read, closed on exec at both ends.
 ///
 /// **At creation, not after.** A helper or an application launched while a paste
