@@ -142,6 +142,9 @@ pub struct Bus {
     unique: String,
     /// Bytes read but not yet parsed, because a read can land mid-message.
     held: Vec<u8>,
+    /// How much of a message larger than [`LARGEST`] is still to arrive, and
+    /// is dropped as it does rather than held.
+    discard: usize,
     /// The well-known names this connection owns, in the order they were taken.
     names: Vec<String>,
 }
@@ -176,8 +179,14 @@ impl Bus {
     #[must_use]
     pub fn connect(address: &str) -> Option<Self> {
         let socket = address.split(';').find_map(open)?;
-        let mut bus =
-            Self { socket, serial: 0, unique: String::new(), held: Vec::new(), names: Vec::new() };
+        let mut bus = Self {
+            socket,
+            serial: 0,
+            unique: String::new(),
+            held: Vec::new(),
+            discard: 0,
+            names: Vec::new(),
+        };
         bus.authenticate()?;
         let hello = bus.call(Message::call(BUS.0, BUS.1, BUS.2, "Hello", Vec::new()))?;
         hello.text()?.clone_into(&mut bus.unique);
@@ -337,7 +346,9 @@ impl Bus {
                 }
                 Front::Partial => return Ok(None),
                 Front::Unread(unread) => {
-                    self.held.drain(..unread.size.min(self.held.len()));
+                    let here = unread.size.min(self.held.len());
+                    self.held.drain(..here);
+                    self.discard = unread.size - here;
                     if let Some(message) = self.account_for(unread) {
                         return Ok(Some(message));
                     }
@@ -354,7 +365,9 @@ impl Bus {
         if read == 0 {
             return None;
         }
-        self.held.extend_from_slice(&chunk[..read]);
+        let dropped = read.min(self.discard);
+        self.discard -= dropped;
+        self.held.extend_from_slice(&chunk[dropped..read]);
         Some(())
     }
 
@@ -573,6 +586,28 @@ const NO_REPLY_EXPECTED: u8 = 1;
 /// The standard error for a call whose arguments are not what was expected.
 const INVALID_ARGS: &str = "org.freedesktop.DBus.Error.InvalidArgs";
 
+/// The standard error for a request past what a resource allows.
+const LIMITS_EXCEEDED: &str = "org.freedesktop.DBus.Error.LimitsExceeded";
+
+/// The largest message this reads, header and body together.
+///
+/// **256 KiB, against a largest honest message of about 12 KiB.** What arrives
+/// is `FileManager1` calls, whose argument is a list of URIs of which the window
+/// opens the first, or one tab each; a second `skerry` handing over one path;
+/// and replies to this program's own calls. The largest reply is
+/// `ListActivatableNames`, 3,585 bytes of body for 112 names — measured against a
+/// private `dbus-daemon` reading this machine's service directories. The
+/// largest URI is 12,292 bytes — `file://` and a `PATH_MAX` path with every
+/// byte percent-encoded — and the ceiling holds twenty of those.
+///
+/// **What a body costs decoded is why there is a ceiling at all.** The session
+/// bus here forwards messages of up to 1,000,000,000 bytes, and an `ay` decoded
+/// at 48 bytes of memory per byte on the wire, measured with a counting
+/// allocator. With `ay` read as bytes and the reader's budget of values, the
+/// costliest of eight shapes measured — `ag` of empty signatures — peaked at
+/// 3.0 MiB for a message of this size.
+const LARGEST: usize = 256 * 1024;
+
 /// What the front of a receive buffer holds.
 pub(crate) enum Front {
     /// Not all of the next message has arrived.
@@ -641,20 +676,32 @@ pub(crate) fn unmarshal(bytes: &[u8]) -> Front {
     let Some(fields_end) = 16usize.checked_add(number(12) as usize) else { return Front::Lost };
     let Some(body_at) = fields_end.checked_next_multiple_of(8) else { return Front::Lost };
     let Some(end) = body_at.checked_add(number(4) as usize) else { return Front::Lost };
-    if bytes.len() < end {
+    let oversized = end > LARGEST;
+    let (error, why) = if oversized {
+        (LIMITS_EXCEEDED, "the message is larger than this program reads")
+    } else {
+        (INVALID_ARGS, "the message's arguments could not be read")
+    };
+    let quiet = fixed[2] & NO_REPLY_EXPECTED != 0;
+    let pass_over = |header| Front::Unread(Unread { size: end, header, quiet, error, why });
+    // **Held only as far as its header**, for a message larger than this reads:
+    // the header names whom to refuse, and the body is dropped as it arrives.
+    let needed = if oversized { fields_end } else { end };
+    if needed > LARGEST {
+        return pass_over(None);
+    }
+    if bytes.len() < needed {
         return Front::Partial;
     }
-    let quiet = fixed[2] & NO_REPLY_EXPECTED != 0;
-    let pass_over = |header| {
-        let why = "the message's arguments could not be read";
-        Front::Unread(Unread { size: end, header, quiet, error: INVALID_ARGS, why })
-    };
     // "Unknown types must be ignored", in the same table.
     let Some(kind) = Kind::of(fixed[1]) else { return pass_over(None) };
     let Some((mut message, signature)) = header(kind, number(8), &bytes[..fields_end], little)
     else {
         return pass_over(None);
     };
+    if oversized {
+        return pass_over(Some(message));
+    }
     match body(&bytes[..end], body_at, &signature, little) {
         Some(body) => {
             message.body = body;
@@ -733,8 +780,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        Bus, DESTINATION, Front, INVALID_ARGS, Kind, Message, SENDER, SIGNATURE, Value, marshal,
-        unmarshal,
+        Bus, DESTINATION, Front, INVALID_ARGS, Kind, LARGEST, LIMITS_EXCEEDED, Message, SENDER,
+        SIGNATURE, Value, marshal, unmarshal,
     };
 
     /// A call goes out and comes back as itself.
@@ -846,6 +893,7 @@ mod tests {
             serial: 0,
             unique: ":1.1".to_owned(),
             held: Vec::new(),
+            discard: 0,
             names: Vec::new(),
         };
         (bus, theirs)
@@ -989,6 +1037,54 @@ mod tests {
         let at = std::time::Instant::now();
         assert_eq!(bus.receive_ready().map(|it| it.len()), Some(0));
         assert!(at.elapsed() < Duration::from_secs(1), "it read a second time");
+    }
+
+    /// A call whose body takes it past [`LARGEST`], as it would arrive.
+    fn too_large(serial: u32) -> Vec<u8> {
+        let body = vec![Value::Bytes(vec![7; LARGEST + 64 * 1024])];
+        delivered(show_folders(body), serial)
+    }
+
+    /// **Refused from its header**, before a byte of its body has arrived.
+    ///
+    /// The header's lengths are the message's size; a reader that waited for
+    /// the body before looking at them had already buffered all of it.
+    #[test]
+    fn a_message_past_the_ceiling_is_refused_from_its_header() {
+        let bytes = too_large(5);
+        let header = bytes.len() - (4 + LARGEST + 64 * 1024);
+        let Front::Unread(unread) = unmarshal(&bytes[..header]) else {
+            panic!("the header alone did not say it was too large");
+        };
+        assert_eq!(unread.size, bytes.len());
+        assert_eq!(unread.error, LIMITS_EXCEEDED);
+        assert_eq!(unread.header.map(|it| it.serial), Some(5), "nobody to refuse");
+    }
+
+    /// **Dropped as it arrives, never held**, and the call behind it is read.
+    #[test]
+    fn a_message_too_large_to_hold_is_dropped_as_it_arrives() {
+        let (mut bus, peer) = pair();
+        let mut writer = peer.try_clone().unwrap();
+        let sending = std::thread::spawn(move || {
+            let good = delivered(show_folders(Vec::new()), 6);
+            writer.write_all(&[too_large(5), good].concat()).unwrap();
+        });
+        let next = bus.receive().expect("the call behind the large one was never read");
+        sending.join().unwrap();
+        assert_eq!(next.serial, 6);
+        assert!(
+            bus.held.capacity() < LARGEST,
+            "{} bytes were buffered for a message that was refused",
+            bus.held.capacity()
+        );
+
+        let mut peer = peer;
+        let mut answer = [0u8; 4096];
+        let read = peer.read(&mut answer).unwrap();
+        let (refusal, _) = unmarshal(&answer[..read]).whole().expect("a whole refusal");
+        assert_eq!(refusal.answers, Some(5));
+        assert_eq!(refusal.error.as_deref(), Some(LIMITS_EXCEEDED));
     }
 
     /// A real connection to whatever bus this machine has.

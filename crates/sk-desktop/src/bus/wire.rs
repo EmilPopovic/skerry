@@ -41,6 +41,12 @@ pub enum Value {
     /// passing — ADR 0023 — so no descriptor arrives with one, and the number is
     /// all there is to read.
     Fd(u32),
+    /// `ay`, held as the bytes themselves.
+    ///
+    /// **Not an [`Value::Array`] of [`Value::Byte`]**, which cost forty-eight
+    /// bytes of memory for every byte on the wire, measured — a value is
+    /// thirty-two and the array doubles as it grows.
+    Bytes(Vec<u8>),
     /// `s`
     Str(String),
     /// `o`, a string with a different signature and the same encoding.
@@ -61,8 +67,11 @@ pub enum Value {
     Dict(Vec<(String, Value)>),
     /// `a{..}` of any other key and value, as they arrived.
     ///
-    /// Its signature is its first entry's, the way [`Value::Array`]'s is; an
-    /// empty one reads as [`Value::Empty`], which names the entry it is empty of.
+    /// Its signature is its first entry's, and an empty one's is a guess — both
+    /// the way [`Value::Array`]'s are. **Not read as [`Value::Empty`]**, whose
+    /// signature is a string no byte on the wire paid for: a body of empty
+    /// dictionaries measured at twenty times its size, and a longer signature
+    /// costs more.
     Map(Vec<(Value, Value)>),
     /// `v`
     Variant(Box<Value>),
@@ -102,6 +111,7 @@ impl Value {
             Self::I64(_) => "x".to_owned(),
             Self::F64(_) => "d".to_owned(),
             Self::Fd(_) => "h".to_owned(),
+            Self::Bytes(_) => "ay".to_owned(),
             Self::Str(_) => "s".to_owned(),
             Self::Path(_) => "o".to_owned(),
             Self::Signature(_) => "g".to_owned(),
@@ -257,6 +267,9 @@ impl Writer {
             Value::I32(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
             Value::I64(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
             Value::F64(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
+            Value::Bytes(bytes) => {
+                self.write_array(1, |writer| writer.bytes.extend_from_slice(bytes));
+            }
             Value::Str(text) | Value::Path(text) => self.write_string(text),
             Value::Signature(text) => {
                 let length = u8::try_from(text.len()).unwrap_or(0);
@@ -330,19 +343,32 @@ impl Writer {
     }
 }
 
+/// The most values one reader produces before it refuses the rest.
+///
+/// **One for every four bytes of the largest message read** — four being the
+/// narrowest value the messages this program receives carry, now that an `ay`
+/// is one value. The wire size alone does not bound what a body costs decoded:
+/// a struct pads to eight and a struct inside it adds nothing, so thirty-two of
+/// them nested around one byte measured at 516 bytes of memory per byte on the
+/// wire. The most values an honest message here holds is 113, in
+/// `ListActivatableNames`'s reply.
+const VALUES: usize = super::LARGEST / 4;
+
 /// Reads values out of a message.
 pub struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
     little: bool,
     depth: usize,
+    /// How many more values it may produce — see [`VALUES`].
+    left: usize,
 }
 
 impl<'a> Reader<'a> {
     /// A reader over a whole message, in the byte order the header declared.
     #[must_use]
     pub const fn new(bytes: &'a [u8], at: usize, little: bool) -> Self {
-        Self { bytes, at, little, depth: 0 }
+        Self { bytes, at, little, depth: 0, left: VALUES }
     }
 
     /// How far in it has got.
@@ -386,9 +412,10 @@ impl<'a> Reader<'a> {
     /// `None` for a type this build does not know, which is a message it did not
     /// understand — see the module header.
     pub fn read(&mut self, signature: &str) -> Option<Value> {
-        if self.depth > 64 || !valid_signature(signature, true) {
+        if self.depth > 64 || self.left == 0 || !valid_signature(signature, true) {
             return None;
         }
+        self.left -= 1;
         self.depth += 1;
         let result = self.read_value(signature);
         self.depth -= 1;
@@ -439,8 +466,12 @@ impl<'a> Reader<'a> {
             '(' => {
                 self.pad(8);
                 let inner = signature.get(1..signature.len().saturating_sub(1))?;
-                let mut fields = Vec::new();
-                for kind in split(inner) {
+                let kinds = split(inner);
+                // Exactly as many as named: a vector left to grow holds four
+                // values for a struct of one, which made a struct nested around
+                // a single byte cost four times what its fields do.
+                let mut fields = Vec::with_capacity(kinds.len());
+                for kind in kinds {
                     fields.push(self.read(&kind)?);
                 }
                 Some(Value::Struct(fields))
@@ -462,21 +493,27 @@ impl<'a> Reader<'a> {
             at: self.at,
             little: self.little,
             depth: self.depth,
+            left: self.left,
         };
-        if let Some(entry) = element.strip_prefix('{').and_then(|it| it.strip_suffix('}')) {
-            let value = bounded.read_entries(entry, end)?;
-            self.at = end;
-            return Some(value);
-        }
-        let mut items = Vec::new();
-        while bounded.at < end {
-            items.push(bounded.read(element)?);
-        }
-        if bounded.at != end {
-            return None;
-        }
+        let value = if element == "y" {
+            Value::Bytes(bounded.take(length)?.to_vec())
+        } else if let Some(entry) = element.strip_prefix('{').and_then(|it| it.strip_suffix('}')) {
+            bounded.read_entries(entry, end)?
+        } else {
+            bounded.read_items(element, end)?
+        };
         self.at = end;
-        Some(Value::Array(items))
+        self.left = bounded.left;
+        Some(value)
+    }
+
+    /// An array's elements up to `end`, all of `element`.
+    fn read_items(&mut self, element: &str, end: usize) -> Option<Value> {
+        let mut items = Vec::new();
+        while self.at < end {
+            items.push(self.read(element)?);
+        }
+        (self.at == end).then_some(Value::Array(items))
     }
 
     /// A dictionary's entries up to `end`, each a key of the one-letter basic
@@ -501,11 +538,7 @@ impl<'a> Reader<'a> {
             });
             return pairs.collect::<Option<_>>().map(Value::Dict);
         }
-        Some(if pairs.is_empty() {
-            Value::Empty(format!("{{{entry}}}"))
-        } else {
-            Value::Map(pairs)
-        })
+        Some(Value::Map(pairs))
     }
 }
 
@@ -606,8 +639,16 @@ pub fn split(signature: &str) -> Vec<String> {
 
 #[test]
 fn parser_campaign_dbus() {
+    // A whole call by hand, so mutations reach a header and a body: the fixed
+    // sixteen bytes, `MEMBER` "C" padded to eight, `SIGNATURE` "s", one byte to
+    // the body's eight, and the string "x".
+    let call: &[u8] = b"l\x01\x00\x01\x06\x00\x00\x00\x01\x00\x00\x00\x17\x00\x00\x00\
+        \x03\x01s\x00\x01\x00\x00\x00C\x00\x00\x00\x00\x00\x00\x00\
+        \x08\x01g\x00\x01s\x00\x00\
+        \x01\x00\x00\x00x\x00";
+    assert!(matches!(super::unmarshal(call), super::Front::Whole(..)), "the seed is a message");
     let seeds: &[&[u8]] =
-        &[b"\x01\x00\x00\x00a\x00", b"\x01s\x00\x00\x03\x00\x00\x00abc\x00", &[0; 64]];
+        &[b"\x01\x00\x00\x00a\x00", b"\x01s\x00\x00\x03\x00\x00\x00abc\x00", &[0; 64], call];
     crate::fuzz_support::campaign("dbus", seeds, |bytes| {
         for signature in ["s", "v", "as", "a{sv}", "(ua{sv})", "a(so)", "aay", "a{ov}", "(nqdh)"] {
             for little in [true, false] {
@@ -700,6 +741,54 @@ mod tests {
         assert_eq!(Reader::new(&bytes, 0, false).read("d"), Some(Value::F64(1.5)));
     }
 
+    /// `ay` is its bytes, and `aay` a list of them — by hand: the outer length,
+    /// one byte behind its own length, three bytes of padding to the next
+    /// length, and an empty one.
+    #[test]
+    fn a_byte_array_reads_as_its_bytes_and_not_a_value_each() {
+        let bytes = [3, 0, 0, 0, 1, 2, 3];
+        assert_eq!(Reader::new(&bytes, 0, true).read("ay"), Some(Value::Bytes(vec![1, 2, 3])));
+        let mut writer = Writer::at(0);
+        writer.write(&Value::Bytes(vec![1, 2, 3]));
+        assert_eq!(writer.into_bytes(), bytes);
+
+        let nested = [12, 0, 0, 0, 1, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0];
+        let read = Reader::new(&nested, 0, true).read("aay").expect("aay");
+        assert_eq!(read, Value::Array(vec![Value::Bytes(vec![9]), Value::Bytes(Vec::new())]));
+        assert_eq!(read.signature(), "aay");
+    }
+
+    /// **A body that decodes into more values than the budget is refused.**
+    ///
+    /// The wire size does not bound the decoded size on its own: a struct nested
+    /// in a struct costs no bytes, and thirty-two of them around one byte
+    /// measured at 516 bytes of memory per byte on the wire.
+    #[test]
+    fn a_body_of_more_values_than_the_budget_is_refused() {
+        let numbers = |count: usize| {
+            let mut bytes = u32::try_from(count * 4).unwrap().to_le_bytes().to_vec();
+            bytes.resize(4 + count * 4, 0);
+            bytes
+        };
+        // The array is a value too, so it and VALUES - 1 numbers are the budget.
+        let fits = numbers(super::VALUES - 1);
+        assert!(Reader::new(&fits, 0, true).read("au").is_some(), "exactly the budget");
+        let over = numbers(super::VALUES);
+        assert!(Reader::new(&over, 0, true).read("au").is_none(), "one value past it");
+
+        // Thirty-three values an element: thirty-two structs and the byte. Each
+        // element is padded to eight, but not after the last.
+        let deep = format!("a{}y{}", "(".repeat(32), ")".repeat(32));
+        let structs = |count: usize| {
+            let length = (count - 1) * 8 + 1;
+            let mut bytes = u32::try_from(length).unwrap().to_le_bytes().to_vec();
+            bytes.resize(8 + length, 0);
+            bytes
+        };
+        assert!(Reader::new(&structs(1_000), 0, true).read(&deep).is_some(), "33,001 values");
+        assert!(Reader::new(&structs(2_000), 0, true).read(&deep).is_none(), "66,001 values");
+    }
+
     /// A dictionary whose key is not a string, and one whose value is not a
     /// variant, both read — each was a message refused unread.
     ///
@@ -733,10 +822,9 @@ mod tests {
             assert!(reader.done());
         }
 
-        // Empty, it still pads to its entry's eight and says what it is empty of.
-        let read = Reader::new(&[0; 8], 0, true).read("a{ss}").expect("empty a{ss}");
-        assert_eq!(read, Value::Empty("{ss}".to_owned()));
-        assert_eq!(read.signature(), "a{ss}");
+        // Empty, it still pads to its entry's eight.
+        let read = Reader::new(&[0; 8], 0, true).read("a{uv}").expect("empty a{uv}");
+        assert_eq!(read, Value::Map(Vec::new()));
     }
 
     /// **An array after an odd number of words is aligned to four, not eight.**
