@@ -1358,6 +1358,7 @@ fn pointer_surfaces() -> Vec<(&'static str, &'static str)> {
         crate::menu::IN_TRASH,
         crate::menu::IN_RECENT,
         crate::menu::ON_BACKGROUND,
+        crate::menu::ON_TRASH_BACKGROUND,
         crate::menu::IN_A_LOOK,
         crate::menu::ON_A_PLACE,
     ] {

@@ -533,6 +533,12 @@ impl Sidebar {
         self.places().any(|entry| entry.pinned && entry.path == path)
     }
 
+    /// Whether `path` is one of the trashes on the list.
+    #[must_use]
+    pub fn is_trash(&self, path: &Path) -> bool {
+        self.places().any(|entry| entry.mark == Mark::Trash && entry.path == path)
+    }
+
     /// The sections' own entries, which are the places themselves.
     ///
     /// **Not the drawn rows.** A directory shown because somebody opened a

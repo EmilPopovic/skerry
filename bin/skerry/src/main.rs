@@ -402,8 +402,10 @@ fn main() -> std::process::ExitCode {
             } else {
                 sk_app::take_the_name(named_path.as_deref())
             };
-            if standing == sk_app::Standing::Second {
-                return std::process::ExitCode::SUCCESS;
+            match standing {
+                sk_app::Standing::Second => return std::process::ExitCode::SUCCESS,
+                sk_app::Standing::Another => new_window = true,
+                sk_app::Standing::First | sk_app::Standing::Alone => {}
             }
             sk_app::install_panic_log(concat!(
                 "skerry ",

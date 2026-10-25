@@ -69,6 +69,21 @@ pub const IN_TRASH: &[&[&str]] = &[
     &["trash.empty"],
 ];
 
+/// What a secondary click on nothing offers while the pane is showing a trash.
+///
+/// **The background menu less what a trash refuses**, and Empty the Trash
+/// added. Every row that makes or pastes something is dimmed in a trash, so the
+/// ordinary background menu there was nine dimmed rows and no way to the one
+/// thing a person opens the Trash's menu to do.
+pub const ON_TRASH_BACKGROUND: &[&[&str]] = &[
+    &["edit.undo", "edit.redo", "menu.operation"],
+    &["select.all", "view.filter", "go.search"],
+    &["menu.view", "menu.sort", "menu.group"],
+    &["menu.panes"],
+    &["go.reload", "view.palette", "help.keys"],
+    &["trash.empty"],
+];
+
 /// What a secondary click on a row of the Recent view offers.
 ///
 /// **Its own table, as the trash has one.** Forget is the row that belongs to
@@ -97,7 +112,7 @@ pub const IN_A_LOOK: &[&[&str]] = &[
 
 /// What a secondary click on a sidebar row offers.
 ///
-/// **Three rows, and all three are about that row.** The background menu's
+/// **Every row is about that row.** The background menu's
 /// entries are about the directory the list is showing, so offering them over a
 /// place would make New folder mean somewhere else — and the place's own two
 /// verbs have nowhere else to live. Which row it is comes from
@@ -116,6 +131,8 @@ pub const ON_A_PLACE: &[&[&str]] = &[
     // a volume, rather than absent: a menu that changes shape by row is a menu
     // whose rows move under a hand.
     &["volume.mount", "volume.unmount", "volume.eject"],
+    // Dimmed over every row but a trash, for the same reason.
+    &["trash.empty"],
 ];
 
 /// What a secondary click on anything else offers.
@@ -1145,8 +1162,8 @@ mod tests {
 
     use super::{
         COLOUR, Choice, DropAs, FROM_TEMPLATE, IN_A_LOOK, IN_RECENT, IN_TRASH, Item, Kind, Menu,
-        ON_A_PLACE, ON_BACKGROUND, ON_ROW, OPEN_WITH, SUBMENUS, Sub, drop_question, height, inside,
-        place, place_beside, row_tops, submenu,
+        ON_A_PLACE, ON_BACKGROUND, ON_ROW, ON_TRASH_BACKGROUND, OPEN_WITH, SUBMENUS, Sub,
+        drop_question, height, inside, place, place_beside, row_tops, submenu,
     };
     use crate::layout::Area;
     use crate::openers::Handlers;
@@ -1272,7 +1289,9 @@ mod tests {
     /// draws.
     #[test]
     fn every_submenu_row_names_a_submenu_and_no_submenu_nests() {
-        for table in [ON_ROW, IN_TRASH, IN_RECENT, IN_A_LOOK, ON_A_PLACE, ON_BACKGROUND] {
+        for table in
+            [ON_ROW, IN_TRASH, IN_RECENT, IN_A_LOOK, ON_A_PLACE, ON_BACKGROUND, ON_TRASH_BACKGROUND]
+        {
             for id in table.iter().flat_map(|group| group.iter()) {
                 if id.starts_with("menu.") {
                     let data = *id == OPEN_WITH || *id == FROM_TEMPLATE;

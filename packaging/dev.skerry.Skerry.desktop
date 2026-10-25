@@ -17,3 +17,10 @@ StartupNotify=true
 # equality, and a mismatch is a window with no icon in the switcher.
 StartupWMClass=dev.skerry.Skerry
 Implements=org.freedesktop.FileManager1
+# What a dock offers on a secondary click. A bare second launch opens a window
+# too — ADR 0044 — and this is the same thing by name.
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=skerry --new-window

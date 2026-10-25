@@ -71,7 +71,9 @@ under a drag still draw the built-in marks.
 - Register as the handler for `inode/directory` and `x-scheme-handler/file`, with a
   reversible `--set-default` command rather than a silent grab at install time.
 - Single-instance behaviour over the same bus name: opening a folder reuses the running
-  window as a new tab, with `--new-window` to opt out.
+  window as a new tab, with `--new-window` to opt out. A launch that names no folder
+  is a new window —
+  [ADR 0044](adr/0044-a-launch-that-names-nothing-is-a-new-window.md).
 
 ## Where the sidebar's contents come from
 

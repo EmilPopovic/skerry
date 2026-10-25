@@ -4,9 +4,10 @@
 //! Two halves of one name.
 //!
 //! * **`dev.skerry.Skerry`** is the `app_id` the window already sets, and owning
-//!   it is what makes a second `skerry` a *request* rather than a second window:
-//!   the one that finds the name taken hands its arguments to the one that has it
-//!   and exits.
+//!   it is what makes a second `skerry /some/folder` a *request* rather than a
+//!   second window: the one that finds the name taken hands its folder to the one
+//!   that has it and exits. A second `skerry` naming nothing is a second window —
+//!   [ADR 0044](../../../docs/adr/0044-a-launch-that-names-nothing-is-a-new-window.md).
 //! * **`org.freedesktop.FileManager1`** is how the rest of the desktop says *show
 //!   me this file* — a browser's Open containing folder, an editor's Reveal, a
 //!   notification's Show in folder. Asked for without replacing an owner: Nautilus
@@ -82,6 +83,9 @@ pub enum Standing {
     First,
     /// Another instance owns it, and has been given our arguments.
     Second,
+    /// Another instance owns it and nothing was named, so this is a window of
+    /// its own, as `--new-window` makes: no names, and a session slot apart.
+    Another,
     /// There is no bus, or it would not have us. Everything else still works.
     Alone,
 }
@@ -102,7 +106,14 @@ pub fn take_the_name(path: Option<&std::path::Path>) -> (Standing, Option<Bus>) 
     match bus.request_name(NAME) {
         Named::Ours => ours(bus),
         Named::Already => {
-            if hand_over(&mut bus, &paths) {
+            // **A launch that names nothing asks for a window.** Handing it over
+            // asked the running one to come forward with no token to do it on,
+            // which a Wayland compositor refuses — so clicking the launcher a
+            // second time did nothing anyone could see.
+            if paths.is_empty() && answers(&mut bus) {
+                return (Standing::Another, Some(bus));
+            }
+            if !paths.is_empty() && hand_over(&mut bus, &paths) {
                 return (Standing::Second, None);
             }
             // **Asked for a second time, because the first answer was about a
@@ -208,11 +219,18 @@ pub fn desktop_icon_theme(bus: &mut Bus) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Asks the running instance to show `paths`. Whether it answered.
+/// Whether the instance that owns the name is alive enough to answer.
 ///
-/// With nothing to show it still calls, with an empty list: the point of the call
-/// is to bring the other window forward, which is what `skerry` with no arguments
-/// means when one is already open.
+/// The question the hand-over used to answer as a side effect: a name whose
+/// owner is still closing its socket is a name about to be free, and taking it
+/// then is better than a second window beside a first that is already gone.
+fn answers(bus: &mut Bus) -> bool {
+    let call =
+        Message::call(NAME, OBJECT, "org.freedesktop.DBus.Introspectable", "Introspect", vec![]);
+    bus.call(call).is_some()
+}
+
+/// Asks the running instance to show `paths`. Whether it answered.
 fn hand_over(bus: &mut Bus, paths: &[PathBuf]) -> bool {
     let uris = paths.iter().map(|path| Value::Str(sk_desktop::file_uri(path))).collect();
     let call = Message::call(

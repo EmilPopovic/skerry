@@ -51,6 +51,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0041](0041-panic-diagnostics-use-a-preopened-local-log.md) | Panic diagnostics use a preopened local log | Accepted |
 | [0042](0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md) | Where a mark comes from is a setting, and an icon is a band in its own atlas | Accepted |
 | [0043](0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md) | Recents are two stores read as one list, and ours is the one rule 6 counts | Accepted — the shared write is staged behind the measurement the record names |
+| [0044](0044-a-launch-that-names-nothing-is-a-new-window.md) | A launch that names nothing is a new window | Accepted — supersedes one sentence of 0038 |
 
 ## Triggers that have been answered
 

@@ -3917,8 +3917,13 @@ impl App {
 
     /// Whether any trash holds anything, which is whether emptying is a
     /// question worth asking.
+    ///
+    /// **Dimmed on a place's menu over anything but a trash**, which is the
+    /// sidebar's rule for the volume rows: the row is there on every place so
+    /// the menu keeps its shape, and means something only on the one it is about.
     pub(crate) fn can_empty_trash(&self) -> bool {
-        self.sidebar.trashes().iter().any(|(_, held)| held.any())
+        let over_a_trash = self.place_target.as_ref().is_none_or(|it| self.sidebar.is_trash(it));
+        over_a_trash && self.sidebar.trashes().iter().any(|(_, held)| held.any())
     }
 
     /// Asks whether to empty every trash that holds anything, saying how much
@@ -5591,6 +5596,7 @@ impl App {
         // would move the keyboard and re-read a directory for a click.
         if drop == crate::panes::Drop::Strip(from, index)
             || drop == crate::panes::Drop::Strip(from, index + 1)
+            || drop == crate::panes::Drop::Pane(from)
         {
             self.dirty = true;
             return;
@@ -5610,6 +5616,7 @@ impl App {
                 let at = if id == from && at > index { at - 1 } else { at };
                 self.panes.put_tab(id, at, pane);
             }
+            crate::panes::Drop::Pane(id) => self.panes.put_tab(id, usize::MAX, pane),
             crate::panes::Drop::Split(id, axis, before) => {
                 self.panes.split_with(id, axis, before, pane);
             }
@@ -10836,6 +10843,7 @@ tool_hover={tool_hover}",
         let tab_drop = match self.placement.tab_drop {
             None => "none",
             Some(crate::panes::Drop::Strip(..)) => "strip",
+            Some(crate::panes::Drop::Pane(..)) => "pane",
             Some(crate::panes::Drop::Split(..)) => "split",
         };
         let divider_aim = self
@@ -12707,6 +12715,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             crate::menu::IN_RECENT
         } else if row.is_some() {
             crate::menu::ON_ROW
+        } else if self.trash_context() {
+            crate::menu::ON_TRASH_BACKGROUND
         } else {
             crate::menu::ON_BACKGROUND
         };
@@ -12763,6 +12773,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             } else {
                 crate::menu::ON_ROW
             }
+        } else if self.trash_context() {
+            crate::menu::ON_TRASH_BACKGROUND
         } else {
             crate::menu::ON_BACKGROUND
         };

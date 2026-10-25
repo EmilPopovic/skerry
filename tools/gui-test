@@ -4034,8 +4034,9 @@ def context_menu_pointer(run: Run, fixture: Path) -> None:
         hover_place(run, 0)
         run.drive("click right\nsleep 350\nkey f12\nsleep 150\n")
         over_place = run.state()
-        # Seven: Open, the three about a pin, and the three about a disk — ADR 0030.
-        expect(over_place, menu="7", cursor=wanted)
+        # Eight: Open, the three about a pin, the three about a disk — ADR 0030 —
+        # and Empty the Trash.
+        expect(over_place, menu="8", cursor=wanted)
         if "file.new_folder" in over_place["menu_aim"]:
             raise Failure("the sidebar answered with the list's own menu")
         if not over_place["place_menu"]:
@@ -7320,14 +7321,15 @@ def a_default_place_is_not_unpinnable(run: Run, fixture: Path) -> None:
         hover_place(own, 0)
         own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
         over_home = holds(own, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
-        # Seven since ADR 0030 put Mount, Unmount and Eject on this menu.
-        expect(over_home, menu="7")
+        # Seven since ADR 0030 put Mount, Unmount and Eject on this menu, and
+        # eight since Empty the Trash joined them.
+        expect(over_home, menu="8")
         # Open is the fourth row and is *not* dimmed: every row of the sidebar is
         # a directory and every one of them opens. What Home has no business
         # offering is the three that change the list.
         if "place.expand" in over_home["menu_dim"]:
             raise Failure(f"Open is dimmed over Home: {over_home['menu_dim']!r}")
-        for wanted in ("place.unpin", "place.raise", "place.lower"):
+        for wanted in ("place.unpin", "place.raise", "place.lower", "trash.empty"):
             if wanted not in over_home["menu_dim"]:
                 raise Failure(f"{wanted} is not dimmed over Home: {over_home['menu_dim']!r}")
         if "file.new_folder" in over_home["menu_aim"]:
@@ -9706,6 +9708,33 @@ def drag_a_tab(run: Run, fixture: Path) -> None:
     expect(joined, panes="1", tabs="2")
 
 
+@scenario("a-tab-dropped-on-another-pane-joins-it")
+def drop_a_tab_on_a_pane(run: Run, fixture: Path) -> None:
+    """A tab let go over the middle of the other half lands in that half's strip.
+
+    **The middle of a pane, not its strip.** The edges split and the strip
+    inserts, and both are aimed at; the middle is where a hand lets go when it
+    means "over there", and the overlay has to say so where the hand is.
+    """
+    run.drive("sleep 500\nkey f3\nsleep 800\nkey ctrl+t\nsleep 700\nkey f12\nsleep 300\n")
+    split = run.state()
+    expect(split, panes="2", pane_focus="1", tabs="2")
+
+    tab = tab_aim(run, split, 1)
+    x, y, width, height = (float(it) for it in split["pane_body"].split(",")[0].split(":"))
+    middle = aim(run, split, x + width / 2.0, y + height / 2.0)
+    run.drive(
+        f"move {tab[0]:.1f} {tab[1]:.1f}\nsleep 200\npress\nsleep 150\n"
+        f"move {middle[0]:.1f} {middle[1]:.1f}\nsleep 350\nkey f12\nsleep 200\n"
+    )
+    if run.state()["tab_drop"] != "pane":
+        raise Failure(f"the overlay over the middle says {run.state()['tab_drop']!r}")
+    run.drive("release\nsleep 800\nkey f12\nsleep 400\n")
+
+    joined = run.state()
+    expect(joined, panes="2", pane_focus="0", tabs="2")
+
+
 @scenario("a-split-is-two-panes-that-move-apart")
 def splits(run: Run, fixture: Path) -> None:
     """F3 splits, F6 moves the keyboard, and the divider moves the boundary.
@@ -10340,6 +10369,42 @@ def one_instance(run: Run, fixture: Path) -> None:
     until(run, path=str(inner))
 
 
+@scenario("a-second-skerry-naming-nothing-opens-a-window", fresh=True, bus=True)
+def another_window(run: Run, fixture: Path) -> None:
+    """A bare second `skerry` is a window of its own — ADR 0044.
+
+    The launcher clicked a second time. Handing over asked the first window to
+    come forward without a token, which Wayland refuses, so nothing was seen; it
+    has to draw instead, and the first window must not have moved.
+    """
+    listed(run)
+    before = run.state()["path"]
+    second = subprocess.Popen(
+        [str(SKERRY)],
+        env=run.environment,
+        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        drawn, said = False, ""
+        deadline = time.time() + PATIENCE
+        while time.time() < deadline and not drawn:
+            ready, _, _ = select.select([second.stderr], [], [], 0.2)
+            if ready:
+                line = second.stderr.readline()
+                said += line
+                drawn = "first frame" in line
+            if second.poll() is not None and not drawn:
+                raise Failure(f"the second instance exited {second.returncode}: {said[-300:]}")
+        if not drawn:
+            raise Failure(f"the second instance drew nothing: {said[-300:]}")
+    finally:
+        second.kill()
+        second.wait(timeout=PATIENCE)
+    expect(run.state(), path=before)
+
+
 def started_by_the_bus(marker: str) -> list[int]:
     """The `skerry` processes running with `marker` in their environment.
 
@@ -10790,6 +10855,60 @@ def emptying_the_trash(run: Run, fixture: Path) -> None:
             raise Failure(f"Ctrl+Z after an empty said {said!r}")
         if doomed.exists():
             raise Failure("an emptied file came back")
+    finally:
+        own.close()
+
+
+@scenario("the-trash-empties-from-its-own-menus", fresh=True)
+def emptying_the_trash_by_pointer(run: Run, fixture: Path) -> None:
+    """Empty the Trash is on the Trash row's menu and on the Trash's own.
+
+    **The pointer's two ways to it**, and rule 5's half of the scenario above:
+    the command was reachable only from the menu over a trashed *file*, so a
+    Trash whose files nobody wanted to look at had no way to be emptied without
+    `Ctrl+Shift+Delete`. Its own data home, for the reason the one above has.
+    """
+    run.close()
+    place = own_config(run, "empty-by-pointer")
+    files = Path(place["XDG_DATA_HOME"]) / "Trash" / "files"
+    (fixture / "receipt.txt").write_text("kept for tax")
+    own = Run(run.display, run.log.parent, fixture, [], run.instance, place)
+    try:
+        listed(own)
+        own.drive("text receipt\nsleep 400\nkey delete\n")
+        until(own, undo="true", trash_held="1")
+
+        # Every row of the sidebar is tried until the window says it is over the
+        # Trash, rather than counting sections the arrangement may change.
+        rows = int(own.state()["places"])
+        trash = next(
+            (at for at in range(rows) if hover_place(own, at).get("place_name") == "Trash"),
+            None,
+        )
+        if trash is None:
+            raise Failure("no sidebar row is called Trash")
+        own.drive("click right\nsleep 400\nkey f12\nsleep 200\n")
+        over = holds(own, lambda it: "trash.empty" in it.get("menu_aim", ""), "the place menu")
+        if "trash.empty" in over["menu_dim"]:
+            raise Failure(f"Empty the Trash is dimmed over the Trash: {over['menu_dim']!r}")
+        own.drive("key escape\nsleep 200\n")
+        until(own, menu="0")
+
+        # Into the Trash, and a secondary click on nothing in it.
+        hover_place(own, trash)
+        own.drive("click\nsleep 600\n")
+        inside = until(own, rows="1")
+        below = float(inside["body_top"]) + float(inside["row_h"]) * 3
+        where = aim(own, inside, float(inside["name_x"]) + 40.0, below)
+        own.drive(f"move {where[0]:.1f} {where[1]:.1f}\nsleep 150\nclick right\nsleep 400\n")
+        background = holds(own, lambda it: bool(it.get("menu_aim")), "the Trash's menu")
+        if "file.new_folder" in background["menu_aim"]:
+            raise Failure("the Trash offered the ordinary background menu")
+        aimed = menu_aim(own, background, "trash.empty")
+        own.drive(f"move {aimed[0]:.1f} {aimed[1]:.1f}\nsleep 200\nclick\nsleep 400\n")
+        until(own, menu="0", erasing="1")
+        if not any(files.iterdir()):
+            raise Failure("asking emptied the Trash")
     finally:
         own.close()
 

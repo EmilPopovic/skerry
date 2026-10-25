@@ -865,13 +865,16 @@ pub(crate) fn tab_areas(strip: Area, count: usize) -> impl Iterator<Item = Area>
 /// Where a tab being dragged would land.
 ///
 /// The five zones every editor with drag-to-split uses: the four edges make a
-/// split and the middle joins the strip. A drop is described rather than done,
+/// split and the middle joins the pane. A drop is described rather than done,
 /// so the same value draws the overlay and performs the move — two answers to
 /// "where would this go" is how the highlight and the result disagree.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Drop {
     /// Into this leaf's strip, at this index.
     Strip(PaneId, usize),
+    /// Into this leaf, after its last tab: the middle of the pane rather than a
+    /// place in its strip.
+    Pane(PaneId),
     /// Splitting this leaf, with the tab in the new half.
     Split(PaneId, Axis, bool),
 }
@@ -906,14 +909,14 @@ impl Drop {
         .min_by(|left, right| left.0.total_cmp(&right.0));
         match nearest {
             Some((distance, split)) if distance < EDGE => split,
-            _ => Self::Strip(leaf.id, tabs),
+            _ => Self::Pane(leaf.id),
         }
     }
 
     /// Which leaf the drop is on.
     pub(crate) fn leaf(self) -> PaneId {
         match self {
-            Self::Strip(id, _) | Self::Split(id, _, _) => id,
+            Self::Strip(id, _) | Self::Pane(id) | Self::Split(id, _, _) => id,
         }
     }
 
@@ -929,6 +932,11 @@ impl Drop {
                     .map_or_else(|| tab_plus(leaf.tabs, tabs).x, |tab| tab.x);
                 crate::layout::Area { x: x - width / 2.0, width, ..leaf.tabs }
             }
+            // **The whole pane, where the hand is.** This drew the strip's seam
+            // after the last tab, which is the right answer drawn a pane's
+            // height away from the pointer: the middle looked like a place a
+            // drop did nothing, when it moves the tab exactly as the strip does.
+            Self::Pane(_) => leaf.area,
             Self::Split(_, Axis::Beside, before) => {
                 let half = leaf.area.width / 2.0;
                 let x = if before { leaf.area.x } else { leaf.area.x + half };
@@ -1612,7 +1620,7 @@ mod tests {
         assert_eq!(Drop::at(&leaf, 1, at(0.95, 0.5)), Drop::Split(id, Axis::Beside, false));
         assert_eq!(Drop::at(&leaf, 1, at(0.5, 0.95)), Drop::Split(id, Axis::Below, false));
         // The middle is a join, not a split, however far down it is.
-        assert_eq!(Drop::at(&leaf, 1, at(0.5, 0.5)), Drop::Strip(id, 1));
+        assert_eq!(Drop::at(&leaf, 1, at(0.5, 0.5)), Drop::Pane(id));
         // A corner belongs to whichever edge is nearer, and never to both.
         assert_eq!(Drop::at(&leaf, 1, at(0.02, 0.10)), Drop::Split(id, Axis::Beside, true));
     }
@@ -1653,6 +1661,8 @@ mod tests {
         // A strip drop is a seam, not a block: it must not cover the tabs.
         let seam = Drop::Strip(leaf.id, 0).overlay(&leaf, 1);
         assert!(seam.width < 8.0, "the seam is {} wide", seam.width);
+        // A join over the middle shades the pane it joins, under the pointer.
+        assert_eq!(Drop::Pane(leaf.id).overlay(&leaf, 1), leaf.area);
     }
 
     /// Moving the only tab of a leaf takes the leaf with it, and the last tab of
