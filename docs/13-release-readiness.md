@@ -25,9 +25,11 @@ filter denies networking and selected process/kernel interfaces. Landlock
 executable grants now name only resolved external tools and their ELF
 interpreters, excluding writable output trees. The live-kernel tests prove both
 successful dynamic execution and denied output execution/input truncation.
-The exact policy and its limits are in [ADR 0034](adr/0034-helper-execution-and-network-rights-are-explicit.md)
-and [SECURITY.md](../SECURITY.md). Landlock absence still means reduced filesystem
-isolation; helpers can read ordinary user-readable files even with Landlock.
+The exact policy and its limits are in [ADR 0034](adr/0034-helper-execution-and-network-rights-are-explicit.md),
+[ADR 0046](adr/0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md)
+and [SECURITY.md](../SECURITY.md). Without Landlock a helper refuses to decode
+unless the `decode_without_landlock` setting allows it; helpers can read ordinary
+user-readable files even with Landlock.
 
 User-installed fonts now win equal matches over system fonts, as documented.
 The golden harness fingerprints the PDF Base-14 substitute as well as UI fonts.

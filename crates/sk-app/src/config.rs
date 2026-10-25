@@ -345,6 +345,7 @@ mod tests {
             aside: 260.0,
             layout: crate::views::Layout::Grid,
             confirm_trash: true,
+            decode_without_landlock: true,
         };
         let read = Config::of(&super::text(&registry, &wrote));
         assert_eq!(read.values, wrote);

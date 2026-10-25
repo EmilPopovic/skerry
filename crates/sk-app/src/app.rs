@@ -530,8 +530,26 @@ fn describe(window: &Window) -> String {
     .into_iter()
     .filter_map(|(name, present)| present.then_some(name.to_owned()))
     .chain(gpu_note(found))
+    .chain(Some(sandbox_note()))
     .collect::<Vec<_>>()
     .join(" ")
+}
+
+/// How the helpers that decode files are confined — [ADR
+/// 0046](../../../docs/adr/0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md).
+///
+/// **The kernel's answer and what has happened since**, not what a helper said:
+/// a helper's own line goes to `stderr`, which this process forwards rather than
+/// parses, and the one outcome that differs from the kernel's answer — a helper
+/// that refused — arrives as an exit status.
+fn sandbox_note() -> String {
+    let allowed = sk_preview::host::allows_without_landlock();
+    match sk_preview::sandbox::landlock_abi() {
+        _ if sk_preview::host::refused_without_landlock() => "sandbox=refused".to_owned(),
+        Some(abi) => format!("sandbox=landlock-{abi}"),
+        None if allowed => "sandbox=UNCONFINED".to_owned(),
+        None => "sandbox=refused".to_owned(),
+    }
 }
 
 /// Which GPU the compositor said it renders on, and what that resolved to.
@@ -1524,6 +1542,9 @@ pub struct App {
     /// person who wants it is not wrong, and asking is one line of state and the
     /// panel [`Erasing`] already draws.
     confirm_trash: bool,
+    /// Whether the status line has said that helpers are refusing for want of
+    /// Landlock — once, and again only after the setting has moved. ADR 0046.
+    said_unconfined: bool,
     /// Whether the display server has already reported this gesture's drop.
     ///
     /// **A drag ends twice.** The pointer's button comes up and the data device
@@ -1772,6 +1793,41 @@ impl App {
         if changed(Setting::Icons) {
             self.set_icons(session.icons.clone());
         }
+        if changed(Setting::DecodeWithoutLandlock) {
+            self.decode_without_landlock(session.decode_without_landlock);
+        }
+    }
+
+    /// Lets helpers read files where Landlock does not take, or stops letting
+    /// them — ADR 0046.
+    ///
+    /// **The value lives in `sk_preview::host`**, where every spawn reads it,
+    /// and the helpers started under the old value are replaced rather than left
+    /// decoding under a setting that has moved.
+    fn decode_without_landlock(&mut self, yes: bool) {
+        if yes == sk_preview::host::allows_without_landlock() {
+            return;
+        }
+        sk_preview::host::allow_without_landlock(yes);
+        self.previews.reconfine();
+        self.said_unconfined = false;
+        self.capabilities = describe(&self.window);
+    }
+
+    /// Says once that helpers are refusing for want of Landlock, and puts it on
+    /// the `F2` line — ADR 0046.
+    ///
+    /// **Polled beside the drains** rather than told: a preview's refusal and an
+    /// archive's both land on jobs that end in a wake-up, and the one flag both
+    /// set is cheaper to read than two paths are to plumb.
+    fn say_the_helpers_refused(&mut self) {
+        if self.said_unconfined || !sk_preview::host::refused_without_landlock() {
+            return;
+        }
+        self.said_unconfined = true;
+        self.notice = Some((sk_model::t!("notice.helpers_unconfined").to_owned(), Instant::now()));
+        self.capabilities = describe(&self.window);
+        self.dirty = true;
     }
 
     /// Puts the window back the way the file says it was.
@@ -1815,6 +1871,7 @@ impl App {
             layout: self.views.defaults.layout,
             confirm_trash: self.confirm_trash,
             icons: self.icons.clone(),
+            decode_without_landlock: sk_preview::host::allows_without_landlock(),
             touched: self.marks,
             zoom: self.zoom,
             window: (self.logical.width as u32, self.logical.height as u32),
@@ -1825,7 +1882,7 @@ impl App {
         }
     }
 
-    /// What all six settings are set to right now.
+    /// What every setting is set to right now.
     ///
     /// Assembled from where each one lives rather than held twice — see
     /// [`Self::marks`] for why.
@@ -1838,6 +1895,7 @@ impl App {
             layout: self.views.defaults.layout,
             confirm_trash: self.confirm_trash,
             icons: self.icons.clone(),
+            decode_without_landlock: sk_preview::host::allows_without_landlock(),
         }
     }
 
@@ -1855,6 +1913,7 @@ impl App {
         self.views.defaults.layout = values.layout;
         self.confirm_trash = values.confirm_trash;
         self.set_icons(values.icons.clone());
+        self.decode_without_landlock(values.decode_without_landlock);
         for pane in self.panes.every_mut() {
             pane.show_hidden = values.hidden;
         }
@@ -1879,6 +1938,7 @@ impl App {
                 self.relayout();
             }
             Setting::ConfirmTrash => self.confirm_trash = yes,
+            Setting::DecodeWithoutLandlock => self.decode_without_landlock(yes),
             // Neither a truth nor a number — see `Self::step_icons`, which is the
             // path the panel's two arrows take for it.
             Setting::Theme
@@ -2131,6 +2191,7 @@ impl App {
             desktop_icons: None,
             panel: None,
             confirm_trash: false,
+            said_unconfined: false,
             look_pan: None,
             page_drag: false,
             properties_owed: false,
@@ -2224,6 +2285,7 @@ impl App {
             self.drain_edits();
             self.drain_previews();
             self.drain_the_look_text();
+            self.say_the_helpers_refused();
             if let Some(gone) = self.sidebar.drain() {
                 self.dirty = true;
                 self.sidebar.count_the_trashes(&self.jobs);

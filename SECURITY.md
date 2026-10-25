@@ -21,14 +21,34 @@ Skerry runs with the logged-in user's filesystem permissions. File operations
 refuse unsafe replacements and preserve undo information where possible, but
 undo needs usable trash and is not a backup or an atomic filesystem transaction.
 
-Untrusted image, document and archive parsing runs in helper processes. They
-require resource limits, no-new-privileges and a seccomp filter that denies
-networking and selected process/kernel interfaces. This is a targeted deny
-filter, not a complete syscall allowlist. Landlock adds filesystem restrictions
-when available, including exact executable/loader grants and writable output
-roots. Without usable Landlock, filesystem isolation is reduced and reported by
-helper probes. Ordinary user-readable files remain readable by helpers; their
-confinement is not a guarantee that private home-directory data is inaccessible.
+Untrusted image, document and archive parsing runs in helper processes. Each
+helper leaves Skerry's session and terminal, gets a cleared environment with a
+short allowlist, writes diagnostics to a pipe Skerry forwards with control
+characters replaced, and requires resource limits (address space, CPU time and
+file size), no-new-privileges and a seccomp filter. The filter denies
+networking, signals and resource or scheduling changes aimed at other
+processes, changes to any file's mode, owner, extended attributes and times
+(an archive unpack may set the times of what it writes), the kernel keyrings,
+and selected kernel interfaces; the thumbnailer may not start processes at all.
+This is a targeted deny filter, not a complete syscall allowlist.
+
+Landlock restricts which files a helper may read, write and execute, with exact
+executable/loader grants and writable output roots, and from Landlock ABI 6 it
+also keeps a helper's signals inside its own processes. Below ABI 3 the seccomp
+filter denies truncation, which Landlock cannot restrict there.
+
+**Without usable Landlock, a helper refuses to decode.** Thumbnails, previews
+and archive listing and unpacking stop, and the window says so. The setting
+"Decode files without Landlock" (`decode_without_landlock` in the
+config file) lets helpers decode anyway, with every filesystem right the user
+has; turn it on only if you accept that a decoder exploit could then change your
+files. Below Landlock ABI 6 the archive helper can still signal another process
+of the same user, because it must be able to stop its own decompressor.
+
+Ordinary user-readable files remain readable by helpers; their confinement is
+not a guarantee that private home-directory data is inaccessible. The decisions
+and their limits are in ADRs [0034](docs/adr/0034-helper-execution-and-network-rights-are-explicit.md)
+and [0046](docs/adr/0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md).
 
 External renderers and decompressors come from the user's PATH. Keep them and
 the operating system updated. Unsupported archive variants are refused, and a
