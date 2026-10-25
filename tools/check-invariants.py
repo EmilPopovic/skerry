@@ -270,6 +270,58 @@ def spliced_comment_check(report: Report) -> None:
                 )
 
 
+# A pipe made without close-on-exec is inherited by every helper and application
+# this process launches. Two clipboard pipes were, and a paste whose reader waits
+# for end-of-file then waited until whatever had been launched meanwhile exited.
+# `pipe_with(PipeFlags::CLOEXEC)` sets the flag at creation; an `fcntl` afterwards
+# leaves a window that another thread's `fork` lands in.
+BARE_PIPE = re.compile(r"\bpipe::pipe\s*\(\s*\)|\blibc::pipe\s*\(")
+TEST_MODULE = re.compile(r"\s*(?:pub(?:\([\w:]+\))?\s+)?mod\s+\w+\s*\{")
+
+
+def test_lines(lines: list[str]) -> set[int]:
+    """The line numbers inside a `#[cfg(test)] mod … { … }`.
+
+    Found by counting braces in the code before any `//`, which a brace inside
+    a string literal can mislead; a rule that uses this fails open on such a
+    file rather than shut.
+    """
+    inside: set[int] = set()
+    armed = False
+    depth = 0
+    for number, line in enumerate(lines, 1):
+        code = line.split("//")[0]
+        if depth > 0:
+            inside.add(number)
+            depth += code.count("{") - code.count("}")
+            continue
+        stripped = code.strip()
+        if stripped == "#[cfg(test)]":
+            armed = True
+        elif armed and TEST_MODULE.match(code):
+            inside.add(number)
+            depth = code.count("{") - code.count("}")
+            armed = False
+        elif stripped and not stripped.startswith("#["):
+            armed = False
+    return inside
+
+
+def cloexec_check(report: Report) -> None:
+    for source in rust_sources("crates", "bin"):
+        lines = source.read_text().splitlines()
+        tests = test_lines(lines)
+        for number, line in enumerate(lines, 1):
+            if number in tests or suppressed(line, "cloexec"):
+                continue
+            if BARE_PIPE.search(line.split("//")[0]):
+                report.fail(
+                    f"{rel(source)}:{number}",
+                    "a pipe without close-on-exec leaks into everything this process "
+                    "launches — use pipe_with(PipeFlags::CLOEXEC)",
+                )
+
+
 def adr_immutability_check(report: Report) -> None:
     """ADRs record what was decided when. A changed decision is a new ADR."""
     changed = git("diff", "--name-only", "HEAD", "--", "docs/adr")
@@ -312,6 +364,7 @@ def run() -> int:
     feature_flag_check(report)
     lint_header_check(report)
     source_check(report)
+    cloexec_check(report)
     spliced_comment_check(report)
     catalogue_check(report)
     adr_immutability_check(report)
@@ -319,7 +372,7 @@ def run() -> int:
     if not report.failures:
         report.note(
             "banned crates, capability flags, crate lints, GPU and backend seams, log "
-            "prefixes, doc comments, "
+            "prefixes, close-on-exec pipes, doc comments, "
             "catalogue keys, ADR immutability, SPDX headers"
         )
     return report.finish()
