@@ -63,10 +63,22 @@ fn uri(path: &Path) -> String {
 /// Returns the RGBA and its size. A thumbnail whose recorded `Thumb::MTime`
 /// disagrees with `mtime` is stale and is treated as absent.
 pub fn read(path: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
-    let file = open_regular(&place(path)?).ok()?;
+    read_from(&place(path)?, mtime)
+}
+
+/// As [`read`], from a named file — the seam a test uses.
+///
+/// **Nothing wider or taller than [`SIDE`] is decoded.** The pixel buffer below
+/// is sized by what the header claims, the header was written by whoever wrote
+/// the file, and a `normal` thumbnail is at most 128×128 by the specification.
+fn read_from(file: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
+    let file = open_regular(file).ok()?;
     let mut decoder = png::Decoder::new(std::io::BufReader::new(file));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reading = decoder.read_info().ok()?;
+    if reading.info().width > SIDE || reading.info().height > SIDE {
+        return None;
+    }
     let fresh = reading
         .info()
         .uncompressed_latin1_text
@@ -253,7 +265,7 @@ fn to_rgba(raw: &[u8], colour: png::ColorType) -> Option<Vec<u8>> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{open_regular, place, prepare, seal, stage, to_rgba, uri, write_to};
+    use super::{SIDE, place, prepare, read_from, seal, stage, to_rgba, uri, write_to};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
@@ -383,13 +395,27 @@ mod tests {
         let root = scratch("planted");
         let file = root.join("0123.png");
         write_to(&file, Path::new("/a.png"), 7, &[255; 4], (1, 1)).unwrap();
-        assert!(open_regular(&file).is_ok(), "the thumbnail itself was refused");
+        assert!(read_from(&file, 7).is_some(), "the thumbnail itself was refused");
         let linked = root.join("linked.png");
         std::os::unix::fs::symlink(&file, &linked).unwrap();
-        assert!(open_regular(&linked).is_err(), "a thumbnail was read through a link");
+        assert!(read_from(&linked, 7).is_none(), "a thumbnail was read through a link");
         let pipe = root.join("pipe.png");
         fifo(&pipe);
-        assert!(promptly(move || open_regular(&pipe).is_err()), "a FIFO was read");
+        assert!(promptly(move || read_from(&pipe, 7).is_none()), "a FIFO was read");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A thumbnail larger than the specification's is not decoded**, because the
+    /// buffer it decodes into is whatever size its header claims.
+    #[test]
+    fn a_thumbnail_larger_than_the_specification_allows_is_not_decoded() {
+        let root = scratch("oversized");
+        for (side, kept) in [(SIDE, true), (SIDE + 1, false)] {
+            let file = root.join(format!("{side}.png"));
+            let pixels = vec![255; side as usize * 4];
+            write_to(&file, Path::new("/a.png"), 7, &pixels, (side, 1)).unwrap();
+            assert_eq!(read_from(&file, 7).is_some(), kept, "{side} pixels wide");
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
