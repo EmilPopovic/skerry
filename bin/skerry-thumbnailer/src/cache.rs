@@ -90,30 +90,92 @@ pub fn read(path: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
 /// thumbnail or none, never a torn one. Failure is silent on purpose — a cache
 /// that cannot be written is a slower program, not a broken one.
 pub fn write(path: &Path, mtime: i64, pixels: &[u8], size: (u32, u32)) {
-    let Some(file) = place(path) else { return };
-    let Some(directory) = file.parent() else { return };
-    if std::fs::create_dir_all(directory).is_err() {
-        return;
-    }
-    let staging = file.with_extension(format!("{}.tmp", std::process::id()));
-    if encode(&staging, path, mtime, pixels, size).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return;
-    }
-    if std::fs::rename(&staging, &file).is_err() {
-        let _ = std::fs::remove_file(&staging);
+    if let Some(file) = place(path) {
+        let _ = write_to(&file, path, mtime, pixels, size);
     }
 }
 
+/// Makes the cache's folder, or closes one that was left open.
+///
+/// **0700 for `thumbnails/normal` and the `thumbnails` above it**, as the
+/// specification's "Permissions" section says: a thumbnail is a small copy of a
+/// picture and its `Thumb::URI` is the picture's full path. An existing folder
+/// is tightened rather than trusted, because the thumbnails an older version
+/// wrote into it are 0644 and the folder is the one thing that closes all of
+/// them at once. `$XDG_CACHE_HOME` itself is the person's and is not touched.
+///
+/// **Before confinement**, which is where it is called, so the sandbox never has
+/// to allow changing a mode.
+pub fn prepare(directory: &Path) {
+    use std::os::unix::fs::DirBuilderExt as _;
+    if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).is_err() {
+        return;
+    }
+    for folder in [Some(directory), directory.parent()].into_iter().flatten() {
+        let _ = tighten(folder);
+    }
+}
+
+/// Takes group and other access off a folder, unless the name is a link.
+///
+/// **The descriptor is what is changed, and it is checked against the name.** A
+/// path checked and then changed by path can be swapped for a link in between,
+/// and the change then lands wherever the link points.
+fn tighten(folder: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let named = std::fs::symlink_metadata(folder)?;
+    let shared = named.mode() & 0o077;
+    if !named.is_dir() || shared == 0 {
+        return Ok(());
+    }
+    let handle = std::fs::File::open(folder)?;
+    let held = handle.metadata()?;
+    if (held.dev(), held.ino()) != (named.dev(), named.ino()) {
+        return Ok(());
+    }
+    handle.set_permissions(std::fs::Permissions::from_mode(held.mode() & 0o700))
+}
+
+/// As [`write`], to a named file, and saying why it did not.
+///
+/// The seam a test uses, because `$XDG_CACHE_HOME` is process-global.
+///
+/// **The staging file is created, never opened.** `O_CREAT | O_EXCL` fails on a
+/// name that exists, "regardless of the contents of the symbolic link" (POSIX
+/// `open`), so a link planted at the staging name is refused rather than written
+/// through — and there is no `O_TRUNC` for the sandbox to have to allow. One
+/// name per process is enough because the child answers one request at a time
+/// ([ADR 0017](../../../docs/adr/0017-one-preview-child-per-kind-answering-one-request-at-a-time.md)).
+fn write_to(
+    file: &Path,
+    original: &Path,
+    mtime: i64,
+    pixels: &[u8],
+    size: (u32, u32),
+) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+    let directory = file.parent().ok_or_else(|| std::io::Error::other("no folder"))?;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory)?;
+    let staging = file.with_extension(format!("{}.tmp", std::process::id()));
+    let handle =
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&staging)?;
+    let written = encode(handle, original, mtime, pixels, size)
+        .map_err(std::io::Error::from)
+        .and_then(|()| std::fs::rename(&staging, file));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    written
+}
+
 fn encode(
-    to: &Path,
+    to: std::fs::File,
     original: &Path,
     mtime: i64,
     pixels: &[u8],
     size: (u32, u32),
 ) -> Result<(), png::EncodingError> {
-    let file = std::fs::File::create(to)?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size.0, size.1);
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(to), size.0, size.1);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder.add_text_chunk("Thumb::URI".to_owned(), uri(original))?;
@@ -147,8 +209,88 @@ fn to_rgba(raw: &[u8], colour: png::ColorType) -> Option<Vec<u8>> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{place, to_rgba, uri};
-    use std::path::Path;
+    use super::{place, prepare, to_rgba, uri, write_to};
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(label: &str) -> PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("skerry-thumbnail-cache-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn mode(path: &Path) -> String {
+        format!("{:o}", std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777)
+    }
+
+    fn open_up(path: &Path) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// **0600 in 0700, which is the specification's "Permissions" section.** A
+    /// thumbnail is a small copy of the picture and its `Thumb::URI` chunk is the
+    /// picture's full path, so one anybody could read publishes both.
+    #[test]
+    fn a_thumbnail_is_readable_by_its_owner_alone() {
+        let root = scratch("private");
+        let folder = root.join("thumbnails").join("normal");
+        let file = folder.join("0123.png");
+        write_to(&file, Path::new("/home/a/private.png"), 7, &[255; 4], (1, 1)).unwrap();
+        assert_eq!(mode(&file), "600", "the thumbnail");
+        assert_eq!(mode(&folder), "700", "thumbnails/normal");
+        assert_eq!(mode(&root.join("thumbnails")), "700", "thumbnails");
+        let staging = file.with_extension(format!("{}.tmp", std::process::id()));
+        assert!(!staging.exists(), "the staging file was left beside the thumbnail");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A folder an older version left open is closed**, which is the only thing
+    /// that reaches the thumbnails it already wrote 0644 — and the folder above
+    /// `thumbnails` is the person's, so it is left as it was.
+    #[test]
+    fn an_open_cache_folder_is_closed_and_the_one_above_it_is_not() {
+        let root = scratch("tighten");
+        let thumbnails = root.join("thumbnails");
+        let normal = thumbnails.join("normal");
+        std::fs::create_dir_all(&normal).unwrap();
+        for folder in [&root, &thumbnails, &normal] {
+            open_up(folder);
+        }
+        prepare(&normal);
+        assert_eq!(mode(&normal), "700", "thumbnails/normal");
+        assert_eq!(mode(&thumbnails), "700", "thumbnails");
+        assert_eq!(mode(&root), "755", "the cache home was changed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A link in the cache is followed by neither the write nor the close.** The
+    /// staging name is the one this helper has always used, so it is the one
+    /// somebody could have planted something at.
+    #[test]
+    fn a_link_in_the_cache_is_not_written_or_closed_through() {
+        let root = scratch("links");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        open_up(&elsewhere);
+        std::fs::create_dir_all(root.join("thumbnails")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("thumbnails").join("normal")).unwrap();
+        prepare(&root.join("thumbnails").join("normal"));
+        assert_eq!(mode(&elsewhere), "755", "the close went through a link");
+
+        let folder = root.join("real");
+        std::fs::create_dir_all(&folder).unwrap();
+        let victim = root.join("victim");
+        std::fs::write(&victim, "unrelated").unwrap();
+        let file = folder.join("0123.png");
+        let staging = file.with_extension(format!("{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &staging).unwrap();
+        assert!(write_to(&file, Path::new("/a.png"), 7, &[255; 4], (1, 1)).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "unrelated");
+        assert!(!file.exists(), "a thumbnail was published through somebody else's file");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// **The digest has to match other implementations**, so the URI it is taken
     /// of has to be encoded the way they encode it.
