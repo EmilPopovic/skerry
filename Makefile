@@ -40,12 +40,19 @@ build:
 
 # `install -D` makes the parent, so there is no `mkdir -p` to keep in step with
 # the paths below.
+#
+# **The desktop entry names the binary by its absolute path**, because the
+# graphical session's `PATH` is not the shell's: a display manager starting a
+# compositor reads no `~/.profile`, so `PREFIX=$HOME/.local` once installed an
+# entry its own launcher could not start. Quoted, because the specification's
+# `Exec` splits on spaces and a prefix may hold one.
 install: build
 	for binary in $(BINARIES); do \
 		install -Dm755 "target/release/$$binary" "$(bindir)/$$binary" || exit 1; \
 	done
-	install -Dm644 packaging/dev.skerry.Skerry.desktop \
-		"$(datadir)/applications/dev.skerry.Skerry.desktop"
+	install -d "$(datadir)/applications"
+	sed 's|^Exec=skerry |Exec="$(PREFIX)/bin/skerry" |' packaging/dev.skerry.Skerry.desktop \
+		> "$(datadir)/applications/dev.skerry.Skerry.desktop"
 	install -Dm644 packaging/icons/dev.skerry.Skerry.svg "$(datadir)/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg"
 	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
 	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"

@@ -3,6 +3,7 @@
 """Exercise archive contents and installation independently of a source build."""
 from pathlib import Path
 import hashlib
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -63,6 +64,11 @@ class Distribution(unittest.TestCase):
         for name in ("RELEASE-NOTES.md", "SECURITY.md"):
             self.assertEqual((installed / "share/doc/skerry" / name).read_bytes(), (source / name).read_bytes())
         self.assertTrue((installed / "share/icons/hicolor/scalable/apps/dev.skerry.Skerry.svg").is_file())
+        # A launcher runs with the session's `PATH`, which need not hold the prefix.
+        entry = installed / "share/applications/dev.skerry.Skerry.desktop"
+        self.assertIn('\nExec="/custom prefix/bin/skerry" %U\n', entry.read_text())
+        if shutil.which("desktop-file-validate"):
+            subprocess.run(["desktop-file-validate", str(entry)], check=True, capture_output=True)
         sentinel = installed / "share/licenses/skerry/retained"
         sentinel.write_text("unrelated")
         subprocess.run(["make", "uninstall", *args], cwd=source, check=True, capture_output=True)
