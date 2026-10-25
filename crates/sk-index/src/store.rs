@@ -55,6 +55,18 @@ const HEADER: usize = 56;
 /// modified.
 const PER_ENTRY: usize = 4 + 4 + 2 + 2 + 8 + 8;
 
+/// The largest index file this reads: 64 bytes an entry for 32 Mi entries, 2 GiB.
+///
+/// **Read whole into memory, so a file's size is an allocation**, and a sparse
+/// file planted at an index's name can claim terabytes for free. Indexes measure
+/// 44.9 to 49.6 bytes an entry
+/// ([09](../../../docs/09-performance-budgets.md#what-the-index-measured)), so 64 leaves
+/// room for longer names; the largest tree measured, every local filesystem of
+/// the machine that measured it, is 6.9 million entries and 342 MB, and this is
+/// nearly five times that. An index of a larger tree is refused and the search
+/// walks, which is what every other refusal here costs too.
+const LARGEST: u64 = 64 * 32 * 1024 * 1024;
+
 /// The parent of an entry that sits directly in the root.
 const NO_PARENT: u32 = u32::MAX;
 
@@ -606,7 +618,8 @@ fn seal(folder: &Path) {
 /// **A regular file at that very name, or nothing.** The cache is writable by
 /// whoever runs this, so what is there may have been planted: a link is not
 /// followed, and a FIFO opens without waiting for a writer and is then refused,
-/// rather than holding a pool thread until somebody writes to it.
+/// rather than holding a pool thread until somebody writes to it. Nothing larger
+/// than [`LARGEST`] is read.
 fn read_regular(file: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
     let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
@@ -616,8 +629,15 @@ fn read_regular(file: &Path) -> std::io::Result<Vec<u8>> {
     if FileType::from_raw_mode(u32::from(stat.stx_mode)) != FileType::RegularFile {
         return Err(std::io::Error::other("not a regular file"));
     }
-    let mut raw = Vec::with_capacity(usize::try_from(stat.stx_size).unwrap_or(0));
-    std::fs::File::from(fd).read_to_end(&mut raw)?;
+    if stat.stx_size > LARGEST {
+        return Err(std::io::Error::other("larger than any index"));
+    }
+    // **Fallible, and bounded by the ceiling rather than the size.** An
+    // infallible reservation aborts the process when it cannot be met, and the
+    // file can grow between the `statx` and the read.
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(usize::try_from(stat.stx_size).map_err(std::io::Error::other)?)?;
+    std::fs::File::from(fd).take(LARGEST).read_to_end(&mut raw)?;
     Ok(raw)
 }
 
@@ -919,8 +939,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{
-        HEADER, Index, MOST, build, count, load_from, save_to, scan_by, seal, search, shard_of,
-        stage,
+        HEADER, Index, LARGEST, MOST, build, count, load_from, save_to, scan_by, seal, search,
+        shard_of, stage,
     };
     use sk_util::{Cancel, Pool};
     use std::os::unix::fs::PermissionsExt as _;
@@ -1164,6 +1184,25 @@ mod tests {
             .unwrap();
         let held = root.clone();
         assert!(promptly(move || load_from(&fifo, &held).is_none()), "a FIFO was read");
+        std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A file past the ceiling is refused before anything is read or
+    /// reserved.** Sparse, so it claims its size without occupying it: one byte
+    /// past [`LARGEST`], and the eight terabytes that aborted the window on every
+    /// search of the root when the read reserved whatever the file claimed.
+    #[test]
+    fn a_file_larger_than_any_index_is_refused_unread() {
+        let root = fixture("sparse");
+        let folder = folder("sparse-cache");
+        for claimed in [LARGEST + 1, 1 << 43] {
+            let file = folder.join(format!("{claimed}.skix"));
+            std::fs::File::create(&file).unwrap().set_len(claimed).unwrap();
+            let (held, root) = (file.clone(), root.clone());
+            assert!(promptly(move || load_from(&held, &root).is_none()), "{claimed} bytes");
+            std::fs::remove_file(file).unwrap();
+        }
         std::fs::remove_dir_all(folder).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
