@@ -4,9 +4,8 @@
 # against a version already in a lockfile, on a day nobody pushed. So this asks
 # again on a schedule, of code nobody touched.
 #
-# Both lockfiles, because `tools/torture` is standalone and has its own: it is
-# built in torture.yml just before a `sudo` step, and until this job no gate had
-# ever read it.
+# Both lockfiles, as `supply` does: `tools/torture` is standalone and has its
+# own, and torture.yml builds it just before a `sudo` step.
 name: advisories
 
 on:

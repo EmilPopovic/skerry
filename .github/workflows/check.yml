@@ -267,6 +267,9 @@ jobs:
     # `tools/check` runs the offline half of this where a person has the tool
     # installed. Here the whole of it runs, `advisories` included, because that
     # check fetches the RustSec database and this is where a network is a given.
+    #
+    # Over `tools/torture`'s lockfile too, against the same deny.toml: it is a
+    # graph of its own, and torture.yml builds it just before a `sudo` step.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -284,14 +287,20 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cargo/bin/cargo-deny
-          key: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          key: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-${{ hashFiles('Cargo.lock', 'tools/torture/Cargo.lock', 'deny.toml') }}
           restore-keys: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-
       - name: cargo-deny
+        id: install
         run: |
           if [[ "$(cargo-deny --version 2>/dev/null)" != "cargo-deny $CARGO_DENY" ]]; then
             cargo install cargo-deny --version "$CARGO_DENY" --locked --force
           fi
-          cargo deny --workspace --locked check
+      - name: The workspace
+        run: cargo deny --workspace --locked check
+      - name: The torture matrix
+        # Asked even when the workspace failed, so one run names both.
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: cargo deny --manifest-path tools/torture/Cargo.toml --config deny.toml --locked check
 
   no-c-toolchain:
     # **The evidence behind "C toolchain required for `skerry`: no".** That row
