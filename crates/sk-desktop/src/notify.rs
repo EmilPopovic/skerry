@@ -204,7 +204,7 @@ mod tests {
         // dictionary are the two arguments a signature is easiest to be wrong
         // about — an empty array reads back as an array of nothing, which is the
         // same eight characters and a different `Value`.
-        let (read, _) = unmarshal(&marshal(&call)).expect("a whole message");
+        let (read, _) = unmarshal(&marshal(&call)).whole().expect("a whole message");
         let back: String = read.body.iter().map(Value::signature).collect();
         assert_eq!(back, signature, "the body did not survive its own encoding");
         assert_eq!(

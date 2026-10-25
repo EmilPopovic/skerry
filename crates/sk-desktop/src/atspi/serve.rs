@@ -64,11 +64,13 @@ impl Server {
                 self.emit_pending();
             }
             if readable {
-                // One message per readable socket: `receive` blocks, and this
-                // thread must come back to the eventfd rather than sit on a
+                // One read per readable socket, and every message it completed:
+                // this thread must come back to the eventfd rather than sit on a
                 // second read that may never arrive.
-                let Some(message) = self.bus.receive() else { return };
-                self.answer(&message);
+                let Some(messages) = self.bus.receive_ready() else { return };
+                for message in &messages {
+                    self.answer(message);
+                }
             }
         }
     }
