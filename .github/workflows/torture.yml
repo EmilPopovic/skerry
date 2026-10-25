@@ -48,6 +48,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: The filesystems the matrix cannot create for itself
         # `exfatprogs` and `dosfstools` for the two that have no concept of
         # ownership, `btrfs-progs` and `xfsprogs` for the two that can reflink —

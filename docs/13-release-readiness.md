@@ -129,7 +129,10 @@ host timings do not establish the interactive performance budgets.
 - Run the reusable release workflows on the exact committed revision. Native ARM
   tests and both packaged architectures still need their CI results; local x86
   evidence is not ARM validation.
-- Verify downloaded package checksums and installation on each advertised distro.
+- Verify downloaded package checksums, build provenance (`gh attestation verify
+  <tarball> --repo EmilPopovic/skerry --signer-workflow
+  EmilPopovic/skerry/.github/workflows/release.yml`) and installation on each
+  advertised distro.
   Local binaries require GLIBC **2.39**. No claim of a 2.28 binary floor is made;
   achieving that floor requires an older build baseline and runtime testing.
 - Confirm a private security-reporting channel before publication. The policy

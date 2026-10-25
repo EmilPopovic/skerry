@@ -35,8 +35,12 @@ BINARIES = skerry skerry-thumbnailer skerry-preview-doc skerry-archive
 
 all: build
 
+# The standard library's notices are staged beside the binaries here, so that
+# `install` needs no `rustc`: under `sudo` it is usually not on `PATH`, and when
+# it is, it is a rustup proxy running as root.
 build:
 	$(CARGO) build --release --workspace
+	cp "$$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html" target/release/RUST-COPYRIGHT.html
 
 # `install -D` makes the parent, so there is no `mkdir -p` to keep in step with
 # the paths below.
@@ -46,7 +50,18 @@ build:
 # compositor reads no `~/.profile`, so `PREFIX=$HOME/.local` once installed an
 # entry its own launcher could not start. Quoted, because the specification's
 # `Exec` splits on spaces and a prefix may hold one.
-install: build
+#
+# **`install` builds nothing.** It used to depend on `build`, so `sudo make
+# install` ran every build script and proc-macro in the dependency graph as
+# root. Building is `make`, as the person; this only copies what that left, and
+# stops when it left nothing.
+install:
+	@for file in $(BINARIES) RUST-COPYRIGHT.html; do \
+		if [ ! -f "target/release/$$file" ]; then \
+			echo "target/release/$$file is missing: run \`make\` first, without sudo, then \`make install\`" >&2; \
+			exit 1; \
+		fi; \
+	done
 	for binary in $(BINARIES); do \
 		install -Dm755 "target/release/$$binary" "$(bindir)/$$binary" || exit 1; \
 	done
@@ -57,7 +72,7 @@ install: build
 	install -Dm644 LICENSE "$(datadir)/licenses/skerry/LICENSE"
 	install -Dm644 NOTICE "$(datadir)/licenses/skerry/NOTICE"
 	install -Dm644 packaging/THIRD-PARTY-NOTICES.txt "$(datadir)/licenses/skerry/THIRD-PARTY-NOTICES.txt"
-	install -Dm644 "$$(rustc --print sysroot)/share/doc/rust/COPYRIGHT-library.html" "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
+	install -Dm644 target/release/RUST-COPYRIGHT.html "$(datadir)/licenses/skerry/RUST-COPYRIGHT.html"
 
 uninstall:
 	for binary in $(BINARIES); do rm -f "$(bindir)/$$binary"; done

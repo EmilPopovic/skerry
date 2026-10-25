@@ -1,0 +1,49 @@
+# `cargo deny`, weekly, over both lockfiles CI builds from.
+#
+# The `supply` job in check.yml runs on a push, but an advisory is published
+# against a version already in a lockfile, on a day nobody pushed. So this asks
+# again on a schedule, of code nobody touched.
+#
+# Both lockfiles, as `supply` does: `tools/torture` is standalone and has its
+# own, and torture.yml builds it just before a `sudo` step.
+name: advisories
+
+on:
+  schedule:
+    # Mondays. RustSec publishes on no schedule of its own, so a week is the
+    # longest a known-vulnerable version can sit in either lockfile unnoticed.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Both track check.yml's pins, so a scheduled answer and a push's answer come
+  # from the same tool.
+  RUST: "1.96.1"
+  CARGO_DENY: "0.20.2"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          rustup toolchain install "$RUST" --profile minimal --no-self-update
+          rustup default "$RUST"
+      - name: cargo-deny
+        id: install
+        run: cargo install cargo-deny --version "$CARGO_DENY" --locked
+      - name: The workspace
+        run: cargo deny --workspace --locked check
+      - name: The torture matrix
+        # Asked even when the workspace failed, so one run names both. The
+        # config is the repository's, so the two graphs answer to one policy.
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: cargo deny --manifest-path tools/torture/Cargo.toml --config deny.toml --locked check

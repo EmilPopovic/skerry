@@ -16,6 +16,9 @@ name = "skerry-torture"
 version = "0.0.0"
 edition = "2021"
 publish = false
+# The repository's, spelled out because a standalone crate cannot inherit it, and
+# `cargo deny` refuses an unlicensed crate in the graph it checks.
+license = "Apache-2.0"
 
 [dependencies]
 sk-fs = { path = "../../crates/sk-fs" }

@@ -12,6 +12,10 @@
 #
 # Two architectures, because 06-portability.md claims two. The `aarch64` job runs
 # the same `tools/check` and not a subset of it.
+#
+# Every checkout is `persist-credentials: false`, here and in every other
+# workflow: nothing in CI pushes, and every job that builds runs third-party
+# build scripts, which would otherwise find the job's token in `.git/config`.
 name: check
 
 on:
@@ -50,6 +54,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Packages
         # `desktop-file-utils libxkbcommon-dev` because `#[link(name = "xkbcommon")]` needs the
         # linker symlink. The fonts because twelve places in the tests open with
@@ -99,6 +105,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Packages
         run: |
           sudo apt-get update
@@ -165,6 +173,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Packages
         # `xvfb` is the server, `x11-utils` is `xwininfo` and `xdpyinfo`,
         # `imagemagick` is `import` for the one scenario that asserts on pixels,
@@ -223,6 +233,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Packages
         run: |
           sudo apt-get update
@@ -255,10 +267,15 @@ jobs:
     # `tools/check` runs the offline half of this where a person has the tool
     # installed. Here the whole of it runs, `advisories` included, because that
     # check fetches the RustSec database and this is where a network is a given.
+    #
+    # Over `tools/torture`'s lockfile too, against the same deny.toml: it is a
+    # graph of its own, and torture.yml builds it just before a `sudo` step.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Toolchain
         run: |
           rustup toolchain install "$RUST" --profile minimal --no-self-update
@@ -270,14 +287,20 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             ~/.cargo/bin/cargo-deny
-          key: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}
+          key: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-${{ hashFiles('Cargo.lock', 'tools/torture/Cargo.lock', 'deny.toml') }}
           restore-keys: supply-${{ env.RUST }}-${{ env.CARGO_DENY }}-
       - name: cargo-deny
+        id: install
         run: |
           if [[ "$(cargo-deny --version 2>/dev/null)" != "cargo-deny $CARGO_DENY" ]]; then
             cargo install cargo-deny --version "$CARGO_DENY" --locked --force
           fi
-          cargo deny --workspace check
+      - name: The workspace
+        run: cargo deny --workspace --locked check
+      - name: The torture matrix
+        # Asked even when the workspace failed, so one run names both.
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: cargo deny --manifest-path tools/torture/Cargo.toml --config deny.toml --locked check
 
   no-c-toolchain:
     # **The evidence behind "C toolchain required for `skerry`: no".** That row
@@ -293,6 +316,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Packages
         run: |
           sudo apt-get update
@@ -312,6 +337,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Packages
         run: |
           sudo apt-get update
@@ -337,6 +364,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Disposable kernel and VM tools
         run: |
           sudo apt-get update

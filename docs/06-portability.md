@@ -82,9 +82,11 @@ nothing else must produce a working `skerry`.
   The helpers must stay beside `skerry`. `make install` honours `DESTDIR`
   and `PREFIX` and nothing else — no post-install scripts, no assumptions about who owns
   `/usr`.
-- **Generic**: a glibc tarball for each architecture, built in CI. Its bundled
-  Makefile installs without Rust or source code. AppImage and musl binary artifacts
-  are not implemented. See [release readiness](13-release-readiness.md).
+- **Generic**: a glibc tarball for each architecture, built in CI by a job with
+  no write token and attested by the one that publishes it — `gh attestation
+  verify` checks it. Its bundled Makefile installs without Rust or source code.
+  AppImage and musl binary artifacts are not implemented. See
+  [release readiness](13-release-readiness.md).
 - **Distro packages** are welcome downstream and the build is designed to make them
   straightforward: no vendored system libraries, offline builds after fetching the
   lockfile, and a version string with the commit. Packaging identical binaries is
