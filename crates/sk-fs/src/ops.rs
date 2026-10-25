@@ -1562,6 +1562,37 @@ mod tests {
         });
     }
 
+    /// Somebody who can write the folder above a `.Trash-$uid` renames it away
+    /// once Empty Trash has opened it, and plants a symlink to a folder shaped
+    /// like a trash. Removing by name again deleted that folder's file of the
+    /// same name; through the descriptors, the real entry goes and nothing else.
+    #[test]
+    fn a_trash_swapped_for_a_symlink_once_opened_has_only_its_own_entries_removed() {
+        with_trash("empty-swap", |root| {
+            let file = root.join("report.txt");
+            std::fs::write(&file, b"trashed").unwrap();
+            let Change::Trashed { stored, .. } = trash(&file).expect("trashed") else {
+                panic!("trash")
+            };
+            let files = stored.parent().expect("files").to_path_buf();
+            let trash_root = files.parent().expect("root").to_path_buf();
+            let decoy = trash_root.with_file_name("decoy").join("files");
+            std::fs::create_dir_all(&decoy).unwrap();
+            let name = stored.file_name().expect("name");
+            std::fs::write(decoy.join(name), b"precious").unwrap();
+
+            crate::trash::AFTER_OPEN.set(Some(|trash_root| {
+                std::fs::rename(trash_root, trash_root.with_file_name("held")).unwrap();
+                std::os::unix::fs::symlink(trash_root.with_file_name("decoy"), trash_root).unwrap();
+            }));
+            let emptied = empty_trash(&files, &sk_util::Cancel::new());
+            assert_eq!(std::fs::read(decoy.join(name)).unwrap(), b"precious");
+            let held = trash_root.with_file_name("held");
+            assert!(!held.join("files").join(name).exists(), "the trashed entry survived");
+            emptied.expect("emptied");
+        });
+    }
+
     /// An entry the empty cannot take keeps itself and its record, and nothing
     /// else: stopping at it once left a trash that looked untouched.
     #[test]

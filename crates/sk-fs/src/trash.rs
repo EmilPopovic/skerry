@@ -551,13 +551,24 @@ pub fn empty(files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
     let root = files.parent().ok_or_else(|| failure(files, "no trash root"))?;
     recognised(root)?;
     let storage = Storage::open(root, false)?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_OPEN.take() {
+        hook(root);
+    }
+    // **Through the two descriptors just checked, never by name again.** The
+    // path is resolved once, by `Storage::open`; somebody who can write the
+    // folder above a `.Trash-$uid` could otherwise rename it away and plant a
+    // symlink, and every entry would be deleted under the link's target.
     let mut first = None;
     let mut kept = std::collections::HashSet::new();
     for name in children(&storage.files)? {
         if cancel.is_cancelled() {
             return Err(failure(files, "cancelled"));
         }
-        if let Err(problem) = crate::copy::remove_tree(&files.join(&name), cancel) {
+        let subject = files.join(&name);
+        if let Err(problem) =
+            crate::copy::remove_at(&storage.files, Path::new(&name), &subject, cancel)
+        {
             first.get_or_insert(problem);
             let mut record = name;
             record.push(".trashinfo");
@@ -572,11 +583,21 @@ pub fn empty(files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
         if kept.contains(&name) {
             continue;
         }
-        if let Err(problem) = crate::copy::remove_tree(&info.join(&name), cancel) {
+        let subject = info.join(&name);
+        if let Err(problem) =
+            crate::copy::remove_at(&storage.info, Path::new(&name), &subject, cancel)
+        {
             first.get_or_insert(problem);
         }
     }
     first.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Runs once [`empty`] has opened the trash and before it removes anything.
+    pub(crate) static AFTER_OPEN: std::cell::Cell<Option<fn(&Path)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Every name in an already-open directory, read before anything is removed.
