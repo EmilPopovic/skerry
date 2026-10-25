@@ -52,6 +52,7 @@ Press `F1` in the window to see every keyboard shortcut.
 ## Installing
 
 ```sh
+make                                 # first, as yourself: installing builds nothing
 sudo make install                    # into /usr/local
 make install PREFIX=$HOME/.local     # or just for your account
 make uninstall                       # with the same PREFIX to remove it
@@ -59,7 +60,8 @@ make uninstall                       # with the same PREFIX to remove it
 
 This installs four binaries, a desktop entry and an icon. It does not change your
 default file manager. To make Skerry the default, use *Open folders with Skerry*
-in the settings panel (`Ctrl+,`).
+in the settings panel (`Ctrl+,`). `make install` builds nothing and stops if
+`make` has not run, so `sudo` never reaches a dependency's build script.
 
 Prebuilt tarballs for x86-64 and aarch64 are attached to tagged releases and need
 no Rust. They require glibc 2.39 or newer, so Debian 12 and Ubuntu 22.04 must
