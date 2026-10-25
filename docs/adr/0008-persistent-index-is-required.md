@@ -13,7 +13,7 @@
 fuzzy-filter it fzf-style". [09-performance-budgets.md](../09-performance-budgets.md) turns
 that into a row: first search result under 50 ms on a warm 1M-file tree.
 
-[Spike B](../../spikes/b-enumeration/README.md) measured what a walk costs on four machines.
+[Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured what a walk costs on four machines.
 A million files, producing names, sizes and mtimes:
 
 | | warm | cold |
@@ -64,7 +64,7 @@ expensive to reverse:
 The on-disk format, the update mechanism and the freshness policy are **not** decided here.
 They depend on measurements that do not exist yet, and a format is the most expensive thing
 in this area to get wrong. A later ADR settles them, informed by
-[Spike F](../../spikes/f-index-and-search/README.md).
+[Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md).
 
 ## Consequences
 

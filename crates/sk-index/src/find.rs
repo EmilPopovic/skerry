@@ -6,7 +6,7 @@
 //! **A walk, not the index.** [ADR
 //! 0008](../../../docs/adr/0008-persistent-index-is-required.md) makes a
 //! persistent filename index mandatory, and [Spike
-//! F](../../../spikes/f-index-and-search/README.md) measured one: 195 ms to load
+//! F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) measured one: 195 ms to load
 //! it cold on a Pi against 2.3–3.7 s to walk the same tree. That index is what
 //! makes a *complete* answer over the whole filesystem fast — 27.45 ms against
 //! 8,559 ms over 6.9 million entries, which is

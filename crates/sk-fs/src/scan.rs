@@ -3,7 +3,7 @@
 //! the whole pool.
 //!
 //! The split is the measurement, not a style. [Spike
-//! B](../../../spikes/b-enumeration/README.md) took a warm million-file walk from
+//! B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) took a warm million-file walk from
 //! 1.195 s to 0.530 s, and **0.614 s of that 0.665 s is deferring `statx`** —
 //! `getdents64` itself is worth 0.051 s. So the batching is the decision and the
 //! syscall is the trim.

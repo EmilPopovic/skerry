@@ -179,7 +179,7 @@ was never really there declines everything, identically, every time.
 
 ## A byte-for-byte comparison is not a correctness test
 
-[Spike E](../spikes/e-operations/README.md) found four defects. **Two of them pass
+[Spike E](../tools/torture/README.md) found four defects. **Two of them pass
 a byte-for-byte comparison of source and destination.**
 
 - `copy_file_range` over a whole file turned a 1 GiB sparse file with 12 KiB of
@@ -363,7 +363,7 @@ refuses 4 MiB of emoji.
 
 ## An accelerator has to agree with the thing it accelerates
 
-[Spike F](../spikes/f-index-and-search/README.md) proposed an eight-byte prefix
+[Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) proposed an eight-byte prefix
 key to make a name sort read sequentially, with the full comparison repairing
 ties. Implemented against natural-order collation, it reordered the listing: the
 key compares `img10.png` against `img2.png` as `1` against `2` and returns, and

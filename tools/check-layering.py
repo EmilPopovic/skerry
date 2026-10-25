@@ -30,7 +30,7 @@ LEVEL_NAMES = {
 
 def crates() -> dict[str, dict]:
     found = {}
-    for manifest in manifests(spikes=False):
+    for manifest in manifests(torture=False):
         parsed = load(manifest)
         package = parsed.get("package", {})
         name = package.get("name")

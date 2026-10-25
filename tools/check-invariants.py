@@ -227,8 +227,8 @@ def spliced_comment_check(report: Report) -> None:
     is an item's `derive` left stranded above the comment of the item that was
     inserted under it. Rust accepts the ordering, which is why nothing else
     complains; this project never writes it, and a sweep of `crates` and `bin` when
-    this was added found zero. The two hits in `spikes/` are a `#[cfg]` above a
-    doc comment, and spikes are not scanned.
+    this was added found zero. The two hits in `tools/torture` are a `#[cfg]`
+    above a doc comment, and it is not scanned.
 
     **What neither catches** is a comment spliced onto the *end* of a paragraph
     rather than after a summary — the block then reads as one comment with an odd
@@ -297,7 +297,7 @@ def spdx_check(report: Report) -> None:
     has two licence texts at its root and nothing in its sources has told nobody
     anything about the file they are actually reading.
     """
-    for source in rust_sources("crates", "bin", "tools", "spikes"):
+    for source in rust_sources("crates", "bin", "tools"):
         if SPDX not in source.read_text():
             report.fail(rel(source), "no SPDX-License-Identifier line")
     for pattern in ("tools/*.py", "tools/check", "tools/gui-test", "tools/*/*.py"):

@@ -10,7 +10,7 @@ deliberately left three things open — the on-disk format, the update mechanism
 and the freshness policy — on the grounds that "a format is the most expensive
 thing in this area to get wrong" and that none of the numbers existed. It named
 the document that would spend them: a later ADR, informed by
-[Spike F](../../spikes/f-index-and-search/README.md).
+[Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md).
 
 Spike F has run, on a 24-thread laptop and on a Raspberry Pi 5, and the Pi is the
 machine that decides. Its answer to the format question is unambiguous:

@@ -2153,10 +2153,10 @@ mod tests {
     /// survive and everything else has to be encoded.
     #[test]
     fn a_trashinfo_path_keeps_its_separators_and_encodes_the_rest() {
-        assert_eq!(encode_path("/home/emil/notes.txt"), "/home/emil/notes.txt");
-        assert_eq!(encode_path("/home/emil/My File.txt"), "/home/emil/My%20File.txt");
-        assert_eq!(encode_path("/home/emil/a#b?c"), "/home/emil/a%23b%3Fc");
-        assert_eq!(encode_path("/home/emil/café"), "/home/emil/caf%C3%A9");
+        assert_eq!(encode_path("/home/tester/notes.txt"), "/home/tester/notes.txt");
+        assert_eq!(encode_path("/home/tester/My File.txt"), "/home/tester/My%20File.txt");
+        assert_eq!(encode_path("/home/tester/a#b?c"), "/home/tester/a%23b%3Fc");
+        assert_eq!(encode_path("/home/tester/café"), "/home/tester/caf%C3%A9");
         assert_eq!(encode_path("/a-b_c.d~e"), "/a-b_c.d~e");
     }
 

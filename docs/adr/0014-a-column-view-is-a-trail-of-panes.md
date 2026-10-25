@@ -49,7 +49,7 @@ Four consequences, one for each of the things that assumed a single listing:
   budget in [09](../09-performance-budgets.md#the-watch-budget-is-per-user-shared-and-not-a-constant)
   is the constraint, and a trail is bounded by path depth, which is small.
 - **The session stores nothing new.** A trail is derivable from a path: the
-  ancestors of `/home/emil/repos/skerry` are its parents. `Mode::Columns` in the
+  ancestors of `/home/tester/repos/skerry` are its parents. `Mode::Columns` in the
   tab line is the whole of it, which is what [ADR
   0011](0011-one-plain-text-state-file-written-atomically.md)'s no-bump rule
   wants.

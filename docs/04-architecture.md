@@ -256,7 +256,7 @@ See [ADR 0005](adr/0005-no-async-runtime.md).
 **Width is at least `ncpu`, and the exact value matters less than not going below it.**
 The `ncpu - 2` in the diagram above is wrong on small machines, where subtracting two is
 most of the machine:
-[Spike B](../spikes/b-enumeration/README.md#ncpu---2-is-wrong-again-for-a-second-and-unrelated-reason)
+[Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md#ncpu---2-is-wrong-again-for-a-second-and-unrelated-reason)
 measured a million-file walk at **1.626 s** with `ncpu - 2` on a four-core Raspberry Pi 5
 against **0.91–1.01 s** anywhere from four workers upward. Every machine measured has its
 optimum at or above `ncpu`, and past that point the curve is flat enough that the choice is
@@ -302,7 +302,7 @@ the job possible at all — the pane cannot lend out a listing that `statx` resu
 are still landing on — and the permutation stays valid because an `EntryId` is an
 index into arrays that only grow at the end.
 
-**Sort keys are derived once at listing time — and [Spike F](../spikes/f-index-and-search/README.md#sorting-misses-its-target-and-the-architectures-stated-reason-is-wrong)
+**Sort keys are derived once at listing time — and [Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md#sorting-misses-its-target-and-the-architectures-stated-reason-is-wrong)
 measured that this is worth 3%, not the order of magnitude an earlier revision of this
 paragraph implied.** Sorting a million entries by name takes 152 ms whether the comparison
 reads the arena or a precomputed `u64`, against a 120 ms budget; sorting by a metadata
@@ -320,7 +320,7 @@ whose byte order is `natural_cmp` exactly**, in `sk_model::radix`: 1,460 → 166
 Enumeration goes through raw `getdents64` (via `rustix`) rather than `std::fs::read_dir`,
 because `d_type` yields file-versus-directory for free and lets `statx` be deferred to a
 background pass that fills columns in as they arrive.
-[Spike B](../spikes/b-enumeration/README.md) measured the tax at a million entries: a warm
+[Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured the tax at a million entries: a warm
 walk producing size and mtime takes **0.530 s** this way and **1.195 s** through `read_dir`
 plus `metadata()`, which misses the 1 s bar.
 

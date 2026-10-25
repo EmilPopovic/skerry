@@ -59,7 +59,7 @@ the same renderer and the same glyph atlas the window uses.
 | Sort a large listing | < 120 ms at 1M | **166.0 ms** median of 5 at 973,759, on a job — down from 1,460 ms | **missed** by 1.4×, see below |
 | First search result | < 50 ms | **0.7 ms** median of 7 over 817,288 entries, **2.9 ms** over 563,605 | met by 17×, and see below for what it does not say |
 | Repeat search over an index | < 50 ms | **6.99 ms** median of 3 over 563,605 entries, against **639.9 ms** to walk the same tree for the same complete answer | met by 7×, and it is the *complete* answer rather than the first result |
-| Load an index | < 250 ms at 1M | **31.7 ms** warm, median of 3 at 563,605 — 45 bytes an entry | met warm; **cold is unmeasured here**, and [Spike F](../spikes/f-index-and-search/README.md) measured 195 ms cold at 1M on a Pi 5 |
+| Load an index | < 250 ms at 1M | **31.7 ms** warm, median of 3 at 563,605 — 45 bytes an entry | met warm; **cold is unmeasured here**, and [Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) measured 195 ms cold at 1M on a Pi 5 |
 | Frame during a hung mount | < 8 ms | **not one frame over budget** from the moment the pane reached the mount to the moment it left it — the navigation in, three keystrokes each answered fresh, and the way out to a directory that lands | met, and see below |
 | Idle CPU | 0.0% | **0 scheduler ticks over 8 s** on a mapped, focused window, on **both** display servers. On X11 the frame loop was traced across a three-second idle window and made **zero syscalls** | met |
 | RSS, ordinary session | < 90 MB | **117.6 MB** at 10,000 entries, of which 116.3 MB is the floor | **missed**, and the floor is the driver's |
@@ -240,7 +240,7 @@ fixture Spike F built. Median of five each: before 1,424–1,522, after
 165.0–169.7. The row stays at 120 ms and stays marked missed.
 
 What changed is *what is sorted*, which is what
-[Spike F](../spikes/f-index-and-search/README.md) said it would have to be. The
+[Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) said it would have to be. The
 spike proposed an eight-byte lexical prefix key with a radix pass; **that key
 cannot work for this comparison**, and the counterexample is still a test in
 `sk_model::collate` — natural order is not lexical order, so a lexical key decides
@@ -340,7 +340,7 @@ match now goes out at once and the interval takes over after it.
 numbers below can be reproduced rather than believed. `/usr` on this machine is
 **563,605 entries**. Three runs, warm page cache, on a 24-thread Ryzen AI 9
 HX 370 with 60 GB — the *favourable* machine, and [Spike
-F](../spikes/f-index-and-search/README.md) measured the laptop-to-Pi factor at
+F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) measured the laptop-to-Pi factor at
 **2.6× to 12×**, so every figure here should be read with that range in mind
 rather than a single multiplier.
 
@@ -372,8 +372,8 @@ a second walk beside it — the same bargain the copy engine already makes, and 
 same rule: nothing is estimated from a partial count, so there is no bar at all
 until that walk has finished. It is affordable because it reads names and does
 **not** `statx` each entry, which [Spike
-B](../spikes/b-enumeration/README.md) and [Spike
-F](../spikes/f-index-and-search/README.md) both measure as the expensive half.
+B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) and [Spike
+F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) both measure as the expensive half.
 Measured at **42% of the build**, so the bar appears about four tenths of the way
 in and is real for the rest. Sequentially measured; run concurrently the two
 contend for I/O, and on a cold tree the counting pass also warms the cache for
@@ -450,7 +450,7 @@ finding is not implemented because it was written down.
 
 ## What Spike A measured
 
-[Spike A](../spikes/a-million-rows/README.md) is resolved, so four rows above are
+[Spike A](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/a-million-rows/README.md) is resolved, so four rows above are
 no longer aspirations. **The frame rows require an idle machine to measure:** the
 same llvmpipe configuration reported 2.4 ms idle and 16.0 ms alongside a
 `cargo build`, so the regression CI in M8 has to control for load or it will
@@ -490,7 +490,7 @@ measured whether it is needed.
 
 That row is `sk-plat`'s to satisfy, and Spike D must cover scale negotiation
 explicitly — see [ADR 0002](adr/0002-own-platform-layer.md) and Spike A's
-[crispness finding](../spikes/a-million-rows/README.md#crisp-glyphs-at-fractional-scale).
+[crispness finding](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/a-million-rows/README.md#crisp-glyphs-at-fractional-scale).
 
 The RSS row is the one that did not come out clean, and the reason is not ours:
 the marginal cost of a million rows is 43–50 MB on every driver, while the
@@ -514,7 +514,7 @@ fonts into memory rather than mapping them, 19.5 MB of it `NotoSansCJK`.
 
 ## What Spike B measured
 
-[Spike B](../spikes/b-enumeration/README.md) is resolved except for its
+[Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) is resolved except for its
 cold-cache arm. Warm cache, 1,000,000 files on ext4, measured on four machines
 including a **Raspberry Pi 5** — four Cortex-A76 cores, aarch64, NVMe — which is
 the closest thing available to the machine this document describes, and the
@@ -598,7 +598,7 @@ the numbers.
 
 ## What Spike F measured
 
-[Spike F](../spikes/f-index-and-search/README.md) measured flattened search, the
+[Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) measured flattened search, the
 persistent index and sorting, on a 24-thread laptop and on a **Raspberry Pi 5**.
 The Pi is the row that counts.
 
@@ -674,7 +674,7 @@ to take one.
 
 This section previously projected reference hardware from the laptop using a
 single "3× slower per core" factor. Measured, the factor runs from **2.6× to 12×
-on the same pair of machines**, and [Spike F](../spikes/f-index-and-search/README.md#measuring-what-the-machines-offer-and-retracting-bandwidth-bound)
+on the same pair of machines**, and [Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md#measuring-what-the-machines-offer-and-retracting-bandwidth-bound)
 then measured *why*, over the same 28.5 MB arena:
 
 | | laptop | Pi 5 | ratio |
@@ -742,7 +742,7 @@ taken on a machine with 60 GB of RAM.
 
 ## What Spike C measured
 
-[Spike C](../spikes/c-watching/README.md) measured inotify across the 21,338
+[Spike C](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/c-watching/README.md) measured inotify across the 21,338
 directories of a million-file tree, on three machines.
 
 | Measure | laptop | homelab | **Pi 5** |
@@ -823,7 +823,7 @@ and the dropped events are gone.
 
 ## What Spike D measured
 
-[Spike D](../spikes/d-platform-and-dnd/README.md) is a capability spike, so most
+[Spike D](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md) is a capability spike, so most
 of what it produced is a matrix rather than a table of milliseconds. Four numbers
 belong here because they became gates.
 
@@ -875,7 +875,7 @@ compositor each of them is.
 
 ## What Spike E measured
 
-[Spike E](../spikes/e-operations/README.md) is a correctness spike, so almost all
+[Spike E](../tools/torture/README.md) is a correctness spike, so almost all
 of its output is a pass or a limitation rather than a number. Three numbers belong
 here, and one row in [the correctness gates](#correctness-gates-that-are-not-negotiable)
 now has a test behind it.
@@ -892,7 +892,7 @@ now has a test behind it.
 "Zero data loss across the filesystem matrix" was a gate with nothing behind it.
 It now has 46 checks, and the number that matters is not 37 passes — it is that
 **four defects were found by a check failing**, listed in
-[the spike](../spikes/e-operations/README.md#four-things-this-changed-three-of-them-in-our-own-code).
+[the spike](../tools/torture/README.md#four-things-this-changed-three-of-them-in-our-own-code).
 Two of them pass a byte-for-byte comparison. One of them copies nothing at all to
 an external drive.
 

@@ -3,7 +3,7 @@
 //! hole-preserving read/write floor — each probed at runtime rather than chosen
 //! by a `#[cfg]` ([ADR 0007](../../../docs/adr/0007-runtime-capability-detection.md)).
 //!
-//! **Ported from [Spike E](../../../spikes/e-operations/README.md), which is the
+//! **Ported from [Spike E](../../../tools/torture/README.md), which is the
 //! permanent torture matrix and is a CI job.** Two of its four defects live in
 //! this file as structure rather than as comments, and both would have shipped:
 //!
@@ -104,7 +104,7 @@ pub struct Options {
     /// Whether `FICLONE` may be tried.
     ///
     /// **Off is for measuring, not for policy.** The torture matrix in
-    /// `spikes/e-operations` forces the floor so it can compare a reflink
+    /// `tools/torture` forces the floor so it can compare a reflink
     /// against a true byte copy on the same filesystem, and so it can exercise
     /// `read/write` on a filesystem where the kernel would never have chosen it.
     /// Nothing in the product turns these off.
@@ -1242,7 +1242,7 @@ mod tests {
     ///
     /// **A matrix row saying `read/write` means nothing on its own.** It is the
     /// same answer whether `FICLONE` was refused with `EOPNOTSUPP` or never
-    /// attempted, and `spikes/e-operations` exists to tell those apart on seven
+    /// attempted, and `tools/torture` exists to tell those apart on seven
     /// filesystems. Turning a strategy off has to *both* skip it and leave no
     /// refusal behind, or the report says a filesystem cannot do something
     /// nobody asked it to do.

@@ -522,8 +522,8 @@ mod tests {
 
     #[test]
     fn a_path_with_a_space_or_a_hash_survives_the_uri_list() {
-        let encoded = encode_uri("/home/emil/my file #1.txt");
-        assert_eq!(encoded, "/home/emil/my%20file%20%231.txt");
+        let encoded = encode_uri("/home/tester/my file #1.txt");
+        assert_eq!(encoded, "/home/tester/my%20file%20%231.txt");
         assert!(!encoded.contains(' '), "a space splits a uri-list entry in two");
         assert!(!encoded.contains('#'), "a hash makes the rest a fragment");
     }
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn a_uri_round_trips_through_both_halves() {
-        for original in ["/home/emil/my file #1.txt", "/tmp/naïve", "/a/100%25.txt", "/plain"] {
+        for original in ["/home/tester/my file #1.txt", "/tmp/naïve", "/a/100%25.txt", "/plain"] {
             let uri = format!("file://{}", encode_uri(original));
             let back = decode_uri(&uri).expect(&uri);
             assert_eq!(back, PathBuf::from(original), "{uri}");

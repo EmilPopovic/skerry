@@ -128,7 +128,7 @@ pub fn mounts() -> Vec<Mount> {
             .map(|(_, label)| label.clone());
         // **Not for a remote one.** `statvfs` over NFS is a round trip to a
         // server that may not answer, and [Spike
-        // B](../../../spikes/b-enumeration/README.md) measured what one
+        // B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured what one
         // unresponsive mount costs: 28,000 ms.
         if !mount.remote {
             mount.free = room_on(&mount.at);
@@ -325,7 +325,7 @@ mod tests {
         let mut seen = Vec::new();
         let first = "46 1 252:1 / / rw - ext4 /dev/sda1 rw";
         let again = "70 46 252:1 / /mnt/copy rw - ext4 /dev/sda1 rw";
-        let bind = "71 46 252:2 /home/emil /mnt/bound rw - ext4 /dev/sda2 rw";
+        let bind = "71 46 252:2 /home/tester /mnt/bound rw - ext4 /dev/sda2 rw";
         assert!(parse(first, &mut seen).is_some());
         assert!(parse(again, &mut seen).is_none(), "the same device twice");
         assert!(parse(bind, &mut seen).is_none(), "a bind mount of a subdirectory");
@@ -334,17 +334,17 @@ mod tests {
     #[test]
     fn a_network_mount_says_it_can_block() {
         let sshfs = parse(
-            "90 46 0:60 / /mnt/remote rw - fuse.sshfs emil@host:/ rw,user_id=1000",
+            "90 46 0:60 / /mnt/remote rw - fuse.sshfs tester@host:/ rw,user_id=1000",
             &mut Vec::new(),
         )
         .expect("sshfs is a place");
         assert!(sshfs.remote);
-        assert_eq!(sshfs.source, "emil@host:/");
+        assert_eq!(sshfs.source, "tester@host:/");
     }
 
     #[test]
     fn an_escaped_mount_point_is_unescaped() {
-        assert_eq!(unescape("/media/emil/My\\040Drive"), "/media/emil/My Drive");
+        assert_eq!(unescape("/media/tester/My\\040Drive"), "/media/tester/My Drive");
         assert_eq!(unescape("/plain/path"), "/plain/path");
         assert_eq!(unescape("a\\011b"), "a\tb");
         // A backslash that is not an escape survives, and so does a multi-byte
@@ -358,7 +358,7 @@ mod tests {
     fn a_mount_point_is_matched_by_component_and_not_by_prefix() {
         assert!(super::is_system("/boot") && super::is_system("/boot/efi"));
         assert!(!super::is_system("/bootcamp"), "a disk called bootcamp is a disk");
-        assert!(!super::is_system("/media/emil/stick"));
+        assert!(!super::is_system("/media/tester/stick"));
         assert!(!super::is_system("/"), "the root filesystem is the first place");
     }
 

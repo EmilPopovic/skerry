@@ -20,6 +20,7 @@ dependency policy the product has, applied to the thing that enforces it.
 | `fuzz-parsers.py` | Not a gate on every commit. Runs bounded, reproducible mutation campaigns against the tar, ZIP and D-Bus parsers ([ADR 0040](../docs/adr/0040-bounded-parser-mutation-campaigns.md)); `--seed` reproduces a run and a crash keeps its input. Address space, CPU and core size are capped so a runaway case fails rather than takes the machine | Python 3, `cargo`, the archive and desktop test binaries |
 | `qt-clipboard-peer` | A real Qt application on the same display, for the KDE cut scenarios. A **separate process** for the same reason `gtk-drag-peer` is one: Qt is banned by rule 9, and what is being measured is interoperation with it. Publishes and reads `application/x-kde-cutselection`, which is the marker a copy and a cut differ by | PyQt6, a display server |
 | `hung-mount-vm.py` | Runs the FUSE rig and the GUI liveness scenario inside a disposable guest, for a host that cannot give an unprivileged user `/dev/fuse`. Changes no host device | QEMU, a kernel, the disposable-kernel setup below |
+| `torture` | Not a gate on every commit. The filesystem torture matrix, which began as Spike E and gates M3: it discovers which filesystems the machine has, copies through `sk-fs` onto each, and checks what survived. `with-root.sh` adds btrfs, xfs, exFAT and vfat on loop devices; [torture.yml](../.github/workflows/torture.yml) runs it nightly. Standalone, and exempt from the layering and dependency gates | `cargo`; root and `mkfs` for the loop-device filesystems; libfuse for the fault injector |
 | `skerry-drive` | The input half of `gui-test`: replays a script of keys, clicks, drags and scrolls into a display server — virtual-input protocols on Wayland, `XTEST` on X11, one playback function over both so a scenario presses the same sequence either way. Also `--paste MIME` and `--close`, which are the X11 answers to `wl-paste` and `hyprctl closewindow` | — |
 
 ## Testing the window itself
@@ -231,7 +232,7 @@ libraries. The tested kernel is 6.8.0-139-generic. Then run:
 
 ```sh
 cargo build --release --locked --target x86_64-unknown-linux-musl \
-  --manifest-path spikes/e-operations/Cargo.toml
+  --manifest-path tools/torture/Cargo.toml
 python3 tools/filesystem-vm.py --packages /path/to/extracted-packages \
   --kernel /path/to/extracted-packages/boot/vmlinuz-6.8.0-139-generic
 ```

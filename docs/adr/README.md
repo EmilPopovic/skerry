@@ -9,7 +9,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | # | Decision | Status |
 | --- | --- | --- |
 | [0001](0001-custom-gpu-ui.md) | A custom GPU UI layer instead of GTK or Qt | Accepted |
-| [0002](0002-own-platform-layer.md) | Own the Wayland/X11 platform layer instead of using `winit` | Accepted — [Spike D](../../spikes/d-platform-and-dnd/README.md) resolved its revisit trigger |
+| [0002](0002-own-platform-layer.md) | Own the Wayland/X11 platform layer instead of using `winit` | Accepted — [Spike D](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md) resolved its revisit trigger |
 | [0003](0003-wgpu-first-backend.md) | `wgpu` as the first GPU backend, behind a `Renderer` seam | Accepted |
 | [0004](0004-swash-for-text.md) | `swash` for shaping and rasterization; our own line layout | Accepted |
 | [0005](0005-no-async-runtime.md) | One owned job pool; no async runtime in the core | Accepted |

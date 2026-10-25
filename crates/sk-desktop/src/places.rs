@@ -426,16 +426,16 @@ mod tests {
 
     #[test]
     fn the_one_variable_the_format_has_is_expanded() {
-        let home = Path::new("/home/emil");
-        assert_eq!(expand("$HOME/Descargas", home), Path::new("/home/emil/Descargas"));
-        assert_eq!(expand("${HOME}/Descargas", home), Path::new("/home/emil/Descargas"));
+        let home = Path::new("/home/tester");
+        assert_eq!(expand("$HOME/Descargas", home), Path::new("/home/tester/Descargas"));
+        assert_eq!(expand("${HOME}/Descargas", home), Path::new("/home/tester/Descargas"));
         assert_eq!(expand("$HOME", home), home);
         assert_eq!(expand("/mnt/media", home), Path::new("/mnt/media"));
     }
 
     #[test]
     fn a_bookmark_is_a_uri_and_arrives_percent_encoded() {
-        assert_eq!(percent_decode("/home/emil/My%20Files"), "/home/emil/My Files");
+        assert_eq!(percent_decode("/home/tester/My%20Files"), "/home/tester/My Files");
         assert_eq!(percent_decode("/plain"), "/plain");
         assert_eq!(percent_decode("/trailing%"), "/trailing%");
         assert_eq!(percent_decode("/caf%C3%A9"), "/café");
@@ -467,10 +467,10 @@ mod tests {
     /// promises all three come back out unchanged and in the same position, and
     /// this is what makes that a promise rather than an intention.
     const WILD: &[&str] = &[
-        "file:///home/emil/repos",
+        "file:///home/tester/repos",
         "sftp://box.example/srv",
         "",
-        "file:///home/emil/My%20Files Work",
+        "file:///home/tester/My%20Files Work",
         "trash:///",
     ];
 
@@ -489,17 +489,17 @@ mod tests {
     /// A directory already on the list is a request already granted.
     #[test]
     fn pinning_what_is_already_pinned_writes_nothing() {
-        assert!(added(&wild(), Path::new("/home/emil/repos")).is_none());
+        assert!(added(&wild(), Path::new("/home/tester/repos")).is_none());
         // Including the one whose line carries a label, which is the same line
         // and must not be duplicated because the text differs.
-        assert!(added(&wild(), Path::new("/home/emil/My Files")).is_none());
+        assert!(added(&wild(), Path::new("/home/tester/My Files")).is_none());
     }
 
     /// An unpin removes its line and nothing near it.
     #[test]
     fn unpinning_removes_one_line_and_keeps_the_ones_it_cannot_read() {
-        let held = removed(&wild(), Path::new("/home/emil/My Files")).expect("nothing removed");
-        assert_eq!(held, ["file:///home/emil/repos", "sftp://box.example/srv", "", "trash:///"]);
+        let held = removed(&wild(), Path::new("/home/tester/My Files")).expect("nothing removed");
+        assert_eq!(held, ["file:///home/tester/repos", "sftp://box.example/srv", "", "trash:///"]);
         assert!(removed(&held, Path::new("/nowhere")).is_none(), "a path not on the list");
     }
 
@@ -508,15 +508,16 @@ mod tests {
     /// and the label travels with the row that carries it.
     #[test]
     fn a_reorder_moves_the_rows_it_knows_and_nothing_else() {
-        let order = vec![PathBuf::from("/home/emil/My Files"), PathBuf::from("/home/emil/repos")];
+        let order =
+            vec![PathBuf::from("/home/tester/My Files"), PathBuf::from("/home/tester/repos")];
         let held = permuted(&wild(), &order).expect("the request did not describe the file");
         assert_eq!(
             held,
             [
-                "file:///home/emil/My%20Files Work",
+                "file:///home/tester/My%20Files Work",
                 "sftp://box.example/srv",
                 "",
-                "file:///home/emil/repos",
+                "file:///home/tester/repos",
                 "trash:///",
             ]
         );
@@ -533,14 +534,14 @@ mod tests {
     /// nobody dragged.
     #[test]
     fn a_reorder_that_cannot_be_a_permutation_is_refused() {
-        let twice = vec![PathBuf::from("/home/emil/repos"), PathBuf::from("/home/emil/repos")];
+        let twice = vec![PathBuf::from("/home/tester/repos"), PathBuf::from("/home/tester/repos")];
         assert!(permuted(&wild(), &twice).is_none(), "the same row twice was accepted");
-        let absent = vec![PathBuf::from("/home/emil/repos"), PathBuf::from("/nowhere")];
+        let absent = vec![PathBuf::from("/home/tester/repos"), PathBuf::from("/nowhere")];
         assert!(permuted(&wild(), &absent).is_none(), "a path not in the file was accepted");
         // A request naming fewer rows than the file holds is not stale, it is a
         // permutation of those rows — which is a permutation of one row, and
         // changes nothing.
-        let one = vec![PathBuf::from("/home/emil/repos")];
+        let one = vec![PathBuf::from("/home/tester/repos")];
         assert_eq!(permuted(&wild(), &one).expect("a subset was refused"), wild());
     }
 

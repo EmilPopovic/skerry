@@ -59,7 +59,7 @@ answered from it first.**
   same allow-list the sidebar's Volumes section draws, so what the sidebar calls
   a place is what the search calls a root and neither can grow a filesystem the
   other has not heard of. A remote mount is excluded because reaching one costs
-  its timeout — [Spike B](../../spikes/b-enumeration/README.md) measured 28,000
+  its timeout — [Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured 28,000
   ms for one unresponsive mount — and a search that hangs is a worse answer than
   a search that says what it covered. Where `/proc/self/mountinfo` cannot be read
   at all the scope is `/` alone, because a search with no roots finds nothing and
@@ -82,7 +82,7 @@ answered from it first.**
 - **Index-first per root, then one walk over the rest, in one job.** The indexed
   roots answer in tens of milliseconds and their results are on screen before the
   walk of the others starts. Serially, and not in parallel across roots: [Spike
-  B](../../spikes/b-enumeration/README.md) measured a parallel walk at 4× and it
+  B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured a parallel walk at 4× and it
   needs a store shared between threads, which is a different design — and the
   thing a person waits for here is the *first* result, which arrives in about a
   millisecond either way.

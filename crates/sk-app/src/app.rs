@@ -8142,7 +8142,7 @@ scope_aim={scope_aim:?}",
     /// mount table is a file and rule 1 has no exemption for a small one — and
     /// the sidebar has already read it, on a job, with the same allow-list of
     /// filesystem types. A remote mount is excluded: reaching one costs its
-    /// timeout, which [Spike B](../../spikes/b-enumeration/README.md) measured at
+    /// timeout, which [Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured at
     /// 28,000 ms for one unresponsive mount. `/` alone where the sidebar has
     /// nothing yet, because a search with no roots finds nothing and says nothing
     /// about why.

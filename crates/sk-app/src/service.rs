@@ -371,7 +371,7 @@ mod tests {
         let asked = call(
             "ShowItems",
             &[
-                "file:///home/emil/a%20file.txt",
+                "file:///home/tester/a%20file.txt",
                 "sftp://box.example/srv/thing",
                 "file:///tmp",
                 "not a uri at all",
@@ -380,7 +380,7 @@ mod tests {
         let paths = paths_of(&asked);
         assert_eq!(
             paths,
-            [std::path::PathBuf::from("/home/emil/a file.txt"), std::path::PathBuf::from("/tmp"),]
+            [std::path::PathBuf::from("/home/tester/a file.txt"), std::path::PathBuf::from("/tmp"),]
         );
         assert_eq!(Ask::Items(paths.clone()).paths(), paths);
     }

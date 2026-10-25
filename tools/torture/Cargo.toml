@@ -1,0 +1,37 @@
+# The torture matrix, which began as Spike E. Standalone by design: not a
+# workspace member, exempt from the layering, lint and dependency rules
+# (tools/_common.py), because it carries a FUSE fault injector we would never ship.
+#
+# 08-roadmap.md made it permanent and gates M3 on it. So it is written to be
+# re-run against a filesystem it has never seen: the filesystem list is probed,
+# never compiled in.
+# Standalone, and the empty table below is what makes it so. Without it
+# `cargo` walks up to the workspace at the repository root, finds this crate
+# is not a member, and refuses to build at all — which is how Spike E's
+# torture matrix stopped being runnable the day `crates/` arrived.
+[workspace]
+
+[package]
+name = "skerry-torture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+sk-fs = { path = "../../crates/sk-fs" }
+sk-util = { path = "../../crates/sk-util" }
+sk-model = { path = "../../crates/sk-model" }
+rustix = { version = "1", features = ["fs", "process", "time"] }
+# The filesystem that fails at an exact offset. Optional so the engine still
+# builds where libfuse is absent — a real full disk is not a repeatable
+# instrument, and this is the whole reason the ENOSPC result is a number.
+fuser = { version = "0.18", optional = true }
+libc = { version = "0.2", optional = true }
+
+[features]
+default = ["inject"]
+inject = ["fuser", "libc"]
+
+[profile.release]
+opt-level = 3
+debug = 1

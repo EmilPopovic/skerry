@@ -72,7 +72,7 @@ impl Flags {
     /// `statx` has not landed yet, so size and mtime are not yet real.
     ///
     /// The view draws these rows immediately with the name it has, because
-    /// [Spike B](../../../spikes/b-enumeration/README.md) measured 200 rows on
+    /// [Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured 200 rows on
     /// screen in **0.143 ms** by deferring exactly this. A row that waits for
     /// its metadata is a row that waits for a disk.
     pub const META_PENDING: Self = Self(1 << 6);

@@ -588,7 +588,7 @@ mod tests {
             "org.freedesktop.FileManager1",
             "ShowItems",
             vec![
-                Value::Array(vec![Value::Str("file:///home/emil/a file.txt".to_owned())]),
+                Value::Array(vec![Value::Str("file:///home/tester/a file.txt".to_owned())]),
                 Value::Str(String::new()),
             ],
         );

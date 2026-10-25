@@ -357,7 +357,7 @@ mod tests {
     fn an_exec_line_that_is_only_field_codes_names_no_program() {
         for exec in ["%f", "%F", "%u", "%U", "%f %F"] {
             assert_eq!(
-                expand(exec, &[PathBuf::from("/home/emil/report.pdf")]),
+                expand(exec, &[PathBuf::from("/home/tester/report.pdf")]),
                 None,
                 "{exec:?} turned a document into a program"
             );

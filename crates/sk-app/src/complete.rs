@@ -289,7 +289,7 @@ mod tests {
 
     fn list(names: &[&str], typed: &str) -> Completion {
         let rows = names.iter().map(|name| (*name).to_owned()).collect();
-        Completion::new(PathBuf::from("/home/emil"), rows, typed)
+        Completion::new(PathBuf::from("/home/tester"), rows, typed)
     }
 
     /// The rule the whole module exists for: the list showing and the list
@@ -431,8 +431,11 @@ mod tests {
     #[test]
     fn a_line_splits_into_a_directory_and_the_name_in_it() {
         let here = Path::new("/srv/fixture");
-        assert_eq!(split("/home/emil/Doc", here), (PathBuf::from("/home/emil"), "Doc".to_owned()));
-        assert_eq!(split("/home/emil/", here), (PathBuf::from("/home/emil"), String::new()));
+        assert_eq!(
+            split("/home/tester/Doc", here),
+            (PathBuf::from("/home/tester"), "Doc".to_owned())
+        );
+        assert_eq!(split("/home/tester/", here), (PathBuf::from("/home/tester"), String::new()));
         assert_eq!(split("/", here), (PathBuf::from("/"), String::new()));
         // No separator at all: a name in the directory the pane is showing,
         // which is the same rule that commits a relative path.

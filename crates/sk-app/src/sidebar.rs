@@ -590,8 +590,8 @@ pub fn moved(order: &[PathBuf], from: usize, at: usize) -> Option<Vec<PathBuf>> 
 
 /// Which row of `sections` is the directory shown, by longest match.
 ///
-/// The longest match rather than the first: with `/` and `/home/emil` both on
-/// the list, standing in `/home/emil/Downloads` should light Home and not the
+/// The longest match rather than the first: with `/` and `/home/tester` both on
+/// the list, standing in `/home/tester/Downloads` should light Home and not the
 /// filesystem. An exact match wins over both.
 pub(crate) fn current(rows: &[Row], path: &Path) -> Option<usize> {
     let mut best: Option<(usize, usize)> = None;
@@ -896,22 +896,22 @@ mod tests {
         super::current(laid_out(sections.to_vec()).rows(), Path::new(path))
     }
 
-    /// The longest match, not the first: `/` and `/home/emil` are both on the
-    /// list, and standing in `/home/emil/Downloads` should light Home.
+    /// The longest match, not the first: `/` and `/home/tester` are both on the
+    /// list, and standing in `/home/tester/Downloads` should light Home.
     #[test]
     fn the_deepest_matching_place_is_the_current_one() {
-        let sections = fake(&["/", "/home/emil", "/home/emil/Downloads"]);
-        assert_eq!(at(&sections, "/home/emil/Downloads/thing"), Some(2));
-        assert_eq!(at(&sections, "/home/emil/Documents"), Some(1));
+        let sections = fake(&["/", "/home/tester", "/home/tester/Downloads"]);
+        assert_eq!(at(&sections, "/home/tester/Downloads/thing"), Some(2));
+        assert_eq!(at(&sections, "/home/tester/Documents"), Some(1));
         assert_eq!(at(&sections, "/etc"), Some(0));
-        assert_eq!(at(&fake(&["/home/emil"]), "/etc"), None);
+        assert_eq!(at(&fake(&["/home/tester"]), "/etc"), None);
     }
 
     /// `starts_with` is by component, so a sibling whose name merely begins the
     /// same way is not a match.
     #[test]
     fn a_sibling_with_a_longer_name_is_not_inside_a_place() {
-        assert_eq!(at(&fake(&["/home/emil"]), "/home/emilia"), None);
+        assert_eq!(at(&fake(&["/home/tester"]), "/home/testers"), None);
     }
 
     /// This machine's own three sources: whatever they hold, every row a press
@@ -987,22 +987,22 @@ mod tests {
 
         let before = sections(vec![
             volume("/", true),
-            volume("/run/media/emil/STICK", true),
-            volume("/run/media/emil/CARD", true),
-            place("/home/emil/repos"),
+            volume("/run/media/tester/STICK", true),
+            volume("/run/media/tester/CARD", true),
+            place("/home/tester/repos"),
         ]);
         // The stick was unplugged, the card was unmounted and is still listed, a
         // new disk appeared, and the bookmark is gone.
         let after = sections(vec![
             volume("/", true),
-            volume("/run/media/emil/CARD", false),
-            volume("/run/media/emil/NEW", true),
+            volume("/run/media/tester/CARD", false),
+            volume("/run/media/tester/NEW", true),
         ]);
         let mut gone = super::vanished(&before, &after);
         gone.sort();
         assert_eq!(
             gone,
-            vec![PathBuf::from("/run/media/emil/CARD"), PathBuf::from("/run/media/emil/STICK"),]
+            vec![PathBuf::from("/run/media/tester/CARD"), PathBuf::from("/run/media/tester/STICK"),]
         );
 
         // And nothing changing is nothing gone, which is every read but the
@@ -1080,7 +1080,7 @@ mod tests {
             Section {
                 title: "sidebar.places",
                 entries: vec![Entry {
-                    path: PathBuf::from("/home/emil"),
+                    path: PathBuf::from("/home/tester"),
                     label: "Home".to_owned(),
                     mark: Mark::Place(Kind::Home),
                     remote: false,
@@ -1112,8 +1112,11 @@ mod tests {
         let sidebar = laid_out(sections);
         assert_eq!(sidebar.pinned(), [PathBuf::from("/mnt/photos"), PathBuf::from("/srv/work")]);
         assert!(sidebar.is_pinned(Path::new("/srv/work")));
-        assert!(!sidebar.is_pinned(Path::new("/home/emil")), "a well-known directory is not a pin");
-        assert!(sidebar.holds(Path::new("/home/emil")), "and it is still a place");
+        assert!(
+            !sidebar.is_pinned(Path::new("/home/tester")),
+            "a well-known directory is not a pin"
+        );
+        assert!(sidebar.holds(Path::new("/home/tester")), "and it is still a place");
         assert!(!sidebar.holds(Path::new("/etc")));
     }
 
@@ -1130,37 +1133,37 @@ mod tests {
     /// whole subtree with it.
     #[test]
     fn a_place_opens_and_what_is_under_it_is_indented() {
-        let mut sidebar = laid_out(fake(&["/home/emil", "/srv"]));
+        let mut sidebar = laid_out(fake(&["/home/tester", "/srv"]));
         assert_eq!(sidebar.len(), 2);
-        assert!(sidebar.toggle(Path::new("/home/emil")), "opening asked for no read");
+        assert!(sidebar.toggle(Path::new("/home/tester")), "opening asked for no read");
         // Open, and nothing under it until the read lands: a twisty that waits
         // is the honest state, not a row that guesses.
         assert_eq!(sidebar.len(), 2);
-        assert!(sidebar.is_open(Path::new("/home/emil")));
+        assert!(sidebar.is_open(Path::new("/home/tester")));
 
         // Handed over in readdir order and drawn in the listing's order, which
         // is the one a person can see beside it.
-        sidebar.took(PathBuf::from("/home/emil"), vec!["repos".to_owned(), "notes".to_owned()]);
+        sidebar.took(PathBuf::from("/home/tester"), vec!["repos".to_owned(), "notes".to_owned()]);
         let shape: Vec<(usize, &str)> =
             sidebar.rows().iter().map(|row| (row.depth, row.label.as_str())).collect();
-        assert_eq!(shape, [(0, "/home/emil"), (1, "notes"), (1, "repos"), (0, "/srv")]);
+        assert_eq!(shape, [(0, "/home/tester"), (1, "notes"), (1, "repos"), (0, "/srv")]);
 
         // A child opens too, and its own children go under it.
-        assert!(sidebar.toggle(Path::new("/home/emil/repos")));
-        sidebar.took(PathBuf::from("/home/emil/repos"), vec!["skerry".to_owned()]);
+        assert!(sidebar.toggle(Path::new("/home/tester/repos")));
+        sidebar.took(PathBuf::from("/home/tester/repos"), vec!["skerry".to_owned()]);
         let shape: Vec<(usize, &str)> =
             sidebar.rows().iter().map(|row| (row.depth, row.label.as_str())).collect();
         assert_eq!(
             shape,
-            [(0, "/home/emil"), (1, "notes"), (1, "repos"), (2, "skerry"), (0, "/srv")]
+            [(0, "/home/tester"), (1, "notes"), (1, "repos"), (2, "skerry"), (0, "/srv")]
         );
 
         // **Closing the place closes what was open inside it.** Leaving the
         // descendants on the list would make reopening one row restore a tree
         // somebody collapsed on purpose.
-        assert!(!sidebar.toggle(Path::new("/home/emil")), "closing asked for a read");
+        assert!(!sidebar.toggle(Path::new("/home/tester")), "closing asked for a read");
         assert_eq!(sidebar.len(), 2);
-        assert!(!sidebar.is_open(Path::new("/home/emil/repos")));
+        assert!(!sidebar.is_open(Path::new("/home/tester/repos")));
         assert!(sidebar.open_places().is_empty());
     }
 
@@ -1169,16 +1172,16 @@ mod tests {
     /// them.
     #[test]
     fn a_row_under_a_place_is_not_itself_a_place() {
-        let mut sidebar = laid_out(fake(&["/home/emil"]));
-        sidebar.toggle(Path::new("/home/emil"));
-        sidebar.took(PathBuf::from("/home/emil"), vec!["repos".to_owned()]);
-        assert!(sidebar.holds(Path::new("/home/emil")));
-        assert!(!sidebar.holds(Path::new("/home/emil/repos")), "a tree row refused a pin");
+        let mut sidebar = laid_out(fake(&["/home/tester"]));
+        sidebar.toggle(Path::new("/home/tester"));
+        sidebar.took(PathBuf::from("/home/tester"), vec!["repos".to_owned()]);
+        assert!(sidebar.holds(Path::new("/home/tester")));
+        assert!(!sidebar.holds(Path::new("/home/tester/repos")), "a tree row refused a pin");
         assert_eq!(sidebar.rows()[0].heading, Some("sidebar.places"));
         assert_eq!(sidebar.rows()[1].heading, None, "a child started a section");
 
         // And the highlight follows the deepest row, which is what the tree is
         // for: standing in `repos` lights `repos` rather than the place above it.
-        assert_eq!(super::current(sidebar.rows(), Path::new("/home/emil/repos/skerry")), Some(1));
+        assert_eq!(super::current(sidebar.rows(), Path::new("/home/tester/repos/skerry")), Some(1));
     }
 }

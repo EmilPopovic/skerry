@@ -1221,16 +1221,16 @@ mod tests {
         let (mut panes, _waker, jobs, _updates) = tree();
         // The first leaf: one tab at home and two on the stick, showing the one
         // at home.
-        panes.open_tab(PathBuf::from("/run/media/emil/STICK"), &jobs);
-        panes.open_tab(PathBuf::from("/run/media/emil/STICK/photos"), &jobs);
+        panes.open_tab(PathBuf::from("/run/media/tester/STICK"), &jobs);
+        panes.open_tab(PathBuf::from("/run/media/tester/STICK/photos"), &jobs);
         panes.reveal_tab(panes.focused_leaf().id, 0);
         // A second leaf, every tab of which is on the stick.
         panes.split(Axis::Beside, &jobs);
-        panes.focused_mut().open(PathBuf::from("/run/media/emil/STICK/notes"), &jobs);
+        panes.focused_mut().open(PathBuf::from("/run/media/tester/STICK/notes"), &jobs);
 
         let went = panes.close_under(
-            &[PathBuf::from("/run/media/emil/STICK")],
-            Path::new("/home/emil"),
+            &[PathBuf::from("/run/media/tester/STICK")],
+            Path::new("/home/tester"),
             &jobs,
         );
         assert_eq!(went, 3, "three tabs were on it");
@@ -1243,7 +1243,7 @@ mod tests {
         assert_eq!(leaves[0], vec![PathBuf::from("/tmp")], "the tab elsewhere went");
         assert_eq!(
             leaves[1],
-            vec![PathBuf::from("/home/emil")],
+            vec![PathBuf::from("/home/tester")],
             "a leaf with nothing left is not empty, it is at the fallback"
         );
         for leaf in panes.leaves() {
@@ -1256,26 +1256,32 @@ mod tests {
     #[test]
     fn the_tab_that_was_showing_still_is() {
         let (mut panes, _waker, jobs, _updates) = tree();
-        panes.open_tab(PathBuf::from("/home/emil"), &jobs);
-        panes.open_tab(PathBuf::from("/run/media/emil/STICK"), &jobs);
+        panes.open_tab(PathBuf::from("/home/tester"), &jobs);
+        panes.open_tab(PathBuf::from("/run/media/tester/STICK"), &jobs);
         panes.reveal_tab(panes.focused_leaf().id, 1);
-        assert_eq!(panes.focused().path, Path::new("/home/emil"));
+        assert_eq!(panes.focused().path, Path::new("/home/tester"));
 
-        let went =
-            panes.close_under(&[PathBuf::from("/run/media/emil/STICK")], Path::new("/tmp"), &jobs);
+        let went = panes.close_under(
+            &[PathBuf::from("/run/media/tester/STICK")],
+            Path::new("/tmp"),
+            &jobs,
+        );
         assert_eq!(went, 1);
-        assert_eq!(panes.focused().path, Path::new("/home/emil"), "the eye moved");
+        assert_eq!(panes.focused().path, Path::new("/home/tester"), "the eye moved");
     }
 
     /// **A mount point is matched by component, not by prefix.** A stick at
-    /// `/run/media/emil/STICK` must not take a tab in `/run/media/emil/STICK2`,
+    /// `/run/media/tester/STICK` must not take a tab in `/run/media/tester/STICK2`,
     /// which is a different disk that is still there.
     #[test]
     fn a_sibling_with_a_longer_name_is_not_on_the_disk_that_went() {
         let (mut panes, _waker, jobs, _updates) = tree();
-        panes.open_tab(PathBuf::from("/run/media/emil/STICK2"), &jobs);
-        let went =
-            panes.close_under(&[PathBuf::from("/run/media/emil/STICK")], Path::new("/tmp"), &jobs);
+        panes.open_tab(PathBuf::from("/run/media/tester/STICK2"), &jobs);
+        let went = panes.close_under(
+            &[PathBuf::from("/run/media/tester/STICK")],
+            Path::new("/tmp"),
+            &jobs,
+        );
         assert_eq!(went, 0, "a different disk lost a tab");
     }
 
@@ -1283,7 +1289,7 @@ mod tests {
     #[test]
     fn nothing_removed_closes_nothing() {
         let (mut panes, _waker, jobs, _updates) = tree();
-        panes.open_tab(PathBuf::from("/home/emil"), &jobs);
+        panes.open_tab(PathBuf::from("/home/tester"), &jobs);
         assert_eq!(panes.close_under(&[], Path::new("/tmp"), &jobs), 0);
         assert_eq!(panes.leaves().next().map(|leaf| leaf.panes.len()), Some(2));
     }

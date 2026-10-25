@@ -118,8 +118,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--packages', type=Path, required=True, help='extracted Ubuntu amd64 packages')
     parser.add_argument('--kernel', type=Path, required=True)
-    parser.add_argument('--executable', type=Path, default=ROOT / 'spikes/e-operations/target/'
-                        'x86_64-unknown-linux-musl/release/spike-e-operations')
+    parser.add_argument('--executable', type=Path, default=ROOT / 'tools/torture/target/'
+                        'x86_64-unknown-linux-musl/release/skerry-torture')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='skerry-filesystem-vm-') as directory:
         run(args, Path(directory))

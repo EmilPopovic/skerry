@@ -6,7 +6,7 @@
 //!
 //! Everything here runs on a job and takes a cancellation token. Nothing here is
 //! callable from the UI thread, and that is not a convention — it is rule 1, and
-//! [Spike B](../../../spikes/b-enumeration/README.md) measured what breaking it
+//! [Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) measured what breaking it
 //! costs: the same call that takes 4 ms on the pool took **28,000 ms** on the
 //! frame loop with one unresponsive mount.
 

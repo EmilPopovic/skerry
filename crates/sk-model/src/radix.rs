@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! An MSD radix sort over collation keys, which never compares two names.
 //!
-//! [Spike F](../../../spikes/f-index-and-search/README.md#sorting-chased-down-from-948-ms-to-191-ms)
+//! [Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md#sorting-chased-down-from-948-ms-to-191-ms)
 //! measured eight approaches to sorting a million filenames and this is the shape
 //! that won: split on the most significant byte, recurse onto the next one rather
 //! than repairing ties by comparison, and pack the leading key bytes beside the

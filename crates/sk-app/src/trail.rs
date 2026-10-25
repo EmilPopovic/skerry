@@ -21,7 +21,7 @@
 //!
 //! `trail[i]` is the *i*-th ancestor of the pane's path, and the pane is the last
 //! column. Nothing else is stored, which is why the session file needs no new
-//! field: the ancestors of `/home/emil/repos` are `/`, `/home` and `/home/emil`,
+//! field: the ancestors of `/home/tester/repos` are `/`, `/home` and `/home/tester`,
 //! and [`sync`] is the one thing that keeps the vector equal to that list. A
 //! navigation of any kind — a click in a column, a breadcrumb, `Alt ←`, a
 //! restored session — goes through it, so there is no second place for the
@@ -487,14 +487,14 @@ mod tests {
     fn the_trail_is_every_ancestor_of_the_path_shallowest_first() {
         let (_waker, jobs, _updates) = idle();
         let mut levels = Vec::new();
-        sync(&mut levels, Path::new("/home/emil/repos/skerry"), &jobs);
+        sync(&mut levels, Path::new("/home/tester/repos/skerry"), &jobs);
         assert_eq!(
             paths(&levels),
             vec![
                 PathBuf::from("/"),
                 PathBuf::from("/home"),
-                PathBuf::from("/home/emil"),
-                PathBuf::from("/home/emil/repos"),
+                PathBuf::from("/home/tester"),
+                PathBuf::from("/home/tester/repos"),
             ]
         );
 
@@ -512,17 +512,17 @@ mod tests {
     fn a_navigation_keeps_the_levels_that_are_still_ancestors() {
         let (_waker, jobs, _updates) = idle();
         let mut levels = Vec::new();
-        sync(&mut levels, Path::new("/home/emil/repos/skerry"), &jobs);
+        sync(&mut levels, Path::new("/home/tester/repos/skerry"), &jobs);
         let before: Vec<u64> = levels.iter().map(|level| level.dir.generation).collect();
 
         // A sibling of the deepest: every column stays, including the one whose
         // chosen entry changed.
-        sync(&mut levels, Path::new("/home/emil/repos/tasked"), &jobs);
+        sync(&mut levels, Path::new("/home/tester/repos/tasked"), &jobs);
         let after: Vec<u64> = levels.iter().map(|level| level.dir.generation).collect();
         assert_eq!(after, before, "a sibling navigation re-read something");
 
         // Deeper: the four are kept and one is added.
-        sync(&mut levels, Path::new("/home/emil/repos/tasked/src"), &jobs);
+        sync(&mut levels, Path::new("/home/tester/repos/tasked/src"), &jobs);
         let deeper: Vec<u64> = levels.iter().map(|level| level.dir.generation).collect();
         assert_eq!(deeper.len(), 5);
         assert_eq!(&deeper[..4], &before[..], "descending re-read an ancestor");

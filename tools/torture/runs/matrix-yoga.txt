@@ -1,0 +1,68 @@
+Spike E — the torture matrix
+  kernel       7.0.0-30-generic
+  load         1.14
+
+═══ ext4 at /home/<user>/skerry-spike-e ═══
+  PASS  fixture/ext4           11 files and 0 refusals: the filesystem accepted every fixture
+  PASS  tree/ext4→ext4         11 files, 4 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 11x copy_file_range; placement 11x renameat2(NOREPLACE); 0 failures
+  PASS  no-temp-files/ext4→ext4 0 reported by the engine, 0 found by walking the destination
+  PASS  bytes/ext4→ext4        11 files compared byte for byte
+  PASS  sparse/ext4→ext4       1073741824 apparent bytes in 3 extents; source occupies 12 KiB, destination 12 KiB
+  PASS  metadata/ext4→ext4     mode 4755 to 4755 (the filesystem keeps POSIX mode bits); mtime off by 0 ns, against exact to the nanosecond measured on a probe file
+  PASS  xattrs/ext4→ext4       2 user attributes on the source, 2 on the copy; 0 reported as unpreservable
+  PASS  hardlinks/ext4→ext4    3 names share 1 inode(s); 3 of them resolve to the first one; the filesystem reports a link count of 3
+  PASS  symlinks/ext4→ext4     4 of 4 symlinks copied as symlinks with identical targets
+  PASS  names/ext4→ext4        4 of 4 adversarial names round-tripped: 255 bytes, an embedded newline, invalid UTF-8, and a leading dash
+  PASS  self-copy/ext4→ext4    refused at same-file with Os { code: 22, kind: InvalidInput, message: "Invalid argument" }; size still 3145735 of 3145735
+  PASS  clobber/ext4→ext4      refused at destination-exists with Os { code: 17, kind: AlreadyExists, message: "File exists" }; the destination is unchanged: true
+  OWED  reflink/ext4→ext4      FICLONE refused with Os { code: 95, kind: Unsupported, message: "Operation not supported" } on ext4, so the bar's reflink condition cannot be measured here — it needs btrfs or xfs, and creating either needs root
+  PASS  move/ext4→ext4         within a filesystem: renamed in 0.014 ms; across: copied 65536 bytes, verified before unlinking: true; the source survives exactly when the destination does not: true
+
+═══ tmpfs at /tmp/skerry-spike-e ═══
+  PASS  fixture/tmpfs          11 files and 0 refusals: the filesystem accepted every fixture
+  PASS  tree/tmpfs→tmpfs       11 files, 4 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 11x copy_file_range; placement 11x renameat2(NOREPLACE); 0 failures
+  PASS  no-temp-files/tmpfs→tmpfs 0 reported by the engine, 0 found by walking the destination
+  PASS  bytes/tmpfs→tmpfs      11 files compared byte for byte
+  PASS  sparse/tmpfs→tmpfs     1073741824 apparent bytes in 3 extents; source occupies 12 KiB, destination 12 KiB
+  PASS  metadata/tmpfs→tmpfs   mode 4755 to 4755 (the filesystem keeps POSIX mode bits); mtime off by 0 ns, against exact to the nanosecond measured on a probe file
+  PASS  xattrs/tmpfs→tmpfs     2 user attributes on the source, 2 on the copy; 0 reported as unpreservable
+  PASS  hardlinks/tmpfs→tmpfs  3 names share 1 inode(s); 3 of them resolve to the first one; the filesystem reports a link count of 3
+  PASS  symlinks/tmpfs→tmpfs   4 of 4 symlinks copied as symlinks with identical targets
+  PASS  names/tmpfs→tmpfs      4 of 4 adversarial names round-tripped: 255 bytes, an embedded newline, invalid UTF-8, and a leading dash
+  PASS  self-copy/tmpfs→tmpfs  refused at same-file with Os { code: 22, kind: InvalidInput, message: "Invalid argument" }; size still 3145735 of 3145735
+  PASS  clobber/tmpfs→tmpfs    refused at destination-exists with Os { code: 17, kind: AlreadyExists, message: "File exists" }; the destination is unchanged: true
+  OWED  reflink/tmpfs→tmpfs    FICLONE refused with Os { code: 95, kind: Unsupported, message: "Operation not supported" } on tmpfs, so the bar's reflink condition cannot be measured here — it needs btrfs or xfs, and creating either needs root
+  PASS  move/tmpfs→tmpfs       within a filesystem: renamed in 0.010 ms; across: renamed — the paths were on one filesystem; the source survives exactly when the destination does not: true
+
+═══ ntfs (ntfs-3g) at /tmp/skerry-spike-e-ntfs-1271485/matrix-root ═══
+  LIMIT tree/ext4→ntfs         10 files, 3 symlinks, 3 directories, 3 names re-linked instead of copied; strategies 10x read/write; placement 10x link+unlink; 2 failures — invalid-��-utf8: Os { code: 84, kind: Uncategorized, message: "Invalid or incomplete multibyte or wide character" } at rename; link-invalid-target: Os { code: 84, kind: Uncategorized, message: "Invalid or incomplete multibyte or wide character" } at symlink
+  PASS  no-temp-files/ext4→ntfs 0 reported by the engine, 0 found by walking the destination
+  PASS  bytes/ext4→ntfs        13 files compared byte for byte; 1 skipped because the destination cannot encode the name
+  LIMIT sparse/ext4→ntfs       the destination reports no holes, so a sparse file necessarily becomes a dense one
+  LIMIT metadata/ext4→ntfs     mode 4755 to 777 (the filesystem does not keep POSIX mode bits); mtime off by -89 ns, against 89 ns of rounding measured on a probe file
+  LIMIT xattrs/ext4→ntfs       2 user attributes on the source, 0 on the copy; 2 reported as unpreservable: with-xattrs.bin user.skerry.one (Os { code: 95, kind: Unsupported, message: "Operation not supported" }), with-xattrs.bin user.skerry.two (Os { code: 95, kind: Unsupported, message: "Operation not supported" }); the destination refuses user attributes
+  PASS  hardlinks/ext4→ntfs    3 names share 1 inode(s); 3 of them resolve to the first one; the filesystem reports a link count of 4
+  LIMIT symlinks/ext4→ntfs     3 of 4 symlinks copied as symlinks with identical targets; link-invalid-target: not a symlink in the copy (Os { code: 2, kind: NotFound, message: "No such file or directory" })
+  LIMIT names/ext4→ntfs        3 of 4 adversarial names round-tripped: 255 bytes, an embedded newline, invalid UTF-8, and a leading dash; missing invalid-��-utf8
+  PASS  self-copy/ext4→ntfs    refused at same-file with Os { code: 22, kind: InvalidInput, message: "Invalid argument" }; size still 3145735 of 3145735
+  PASS  clobber/ext4→ntfs      refused at destination-exists with Os { code: 17, kind: AlreadyExists, message: "File exists" }; the destination is unchanged: true
+  OWED  reflink/ext4→ntfs      FICLONE refused with Os { code: 95, kind: Unsupported, message: "Operation not supported" } on fuse, so the bar's reflink condition cannot be measured here — it needs btrfs or xfs, and creating either needs root
+  PASS  move/ext4→ntfs         within a filesystem: renamed in 0.023 ms; across: copied 65536 bytes, verified before unlinking: true; the source survives exactly when the destination does not: true
+
+═══ injected: enospc=307200 source=1048576 ═══
+  PASS  enospc                 failed at copy_file_range with Os { code: 28, kind: StorageFull, message: "No space left on device" } after 307200 of 1048576 bytes, 741376 short of the file; the destination filesystem accepted 307200 bytes; the destination name exists afterwards: false; files left behind: []
+
+═══ injected: eio-read=65536 source=1048576 ═══
+  PASS  eio                    failed at read with Os { code: 5, kind: Uncategorized, message: "Input/output error" } after 65536 bytes, with the fault set at 65536; the destination name exists afterwards: false
+
+═══ injected: no-xattr ═══
+  PASS  no-xattr               the copy completed with 4096 bytes and reported 2 attributes as unpreservable: user.skerry.two (Os { code: 95, kind: Unsupported, message: "Operation not supported" }), user.skerry.one (Os { code: 95, kind: Unsupported, message: "Operation not supported" })
+
+═══ injected: short-write=512 ═══
+  PASS  short-write            262144 bytes written 512 bytes at a time via read/write; first difference from the source: Ok(None)
+
+═══ injected: enospc=2097152 ═══
+  PASS  enospc-tree            the destination accepted 2097152 bytes; 8 files copied and 12 failed; 8 of the files that exist are byte-exact; 0 incomplete; 0 temporary files left
+
+  37 pass, 0 fail, 6 limitation, 3 owed, of 46 checks
+EXIT=0

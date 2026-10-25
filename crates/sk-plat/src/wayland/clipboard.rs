@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The clipboard and the primary selection, as a source and as a target.
 //!
-//! Four things [Spike D](../../../../spikes/d-platform-and-dnd/README.md) learned
+//! Four things [Spike D](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md) learned
 //! the expensive way are structural here, because each was a silent failure that
 //! looked like a compositor bug:
 //!

@@ -171,7 +171,7 @@ The one integration nobody can fake, because it is judged against other applicat
   cannot be detected and the feature cannot even be greyed out.
 
 Spike D was the highest-uncertainty item in the whole plan and is now
-[resolved](../spikes/d-platform-and-dnd/README.md): a drag we start lands files on disk in
+[resolved](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md): a drag we start lands files on disk in
 GTK 4 and Qt 6 targets on both display servers. What it changed here is above; the four
 ordering invariants it produced are M0's, not this document's.
 

@@ -702,11 +702,11 @@ mod tests {
     /// component and `Ctrl+Backspace` walks back up a directory at a time.
     #[test]
     fn a_word_in_a_path_is_a_component() {
-        let mut field = Field::new("/home/emil/repos/skerry".to_owned());
+        let mut field = Field::new("/home/tester/repos/skerry".to_owned());
         field.delete_word(false);
-        assert_eq!(field.text, "/home/emil/repos/");
+        assert_eq!(field.text, "/home/tester/repos/");
         field.delete_word(false);
-        assert_eq!(field.text, "/home/emil/");
+        assert_eq!(field.text, "/home/tester/");
         field.delete_word(false);
         assert_eq!(field.text, "/home/");
         // The leading `/` is a component boundary of its own, so the last press

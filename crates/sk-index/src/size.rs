@@ -10,7 +10,7 @@
 //!   big is this folder": it is what copying the tree elsewhere would produce.
 //!   `du` reports allocated blocks instead, so the two disagree on a sparse file
 //!   by as much as the file is sparse. [Spike
-//!   E](../../../spikes/e-operations/README.md) built a 1 GiB file with 12 KiB in
+//!   E](../../../tools/torture/README.md) built a 1 GiB file with 12 KiB in
 //!   it; this reports 1 GiB for it and `du` reports 12 KiB. Both are true
 //!   answers to different questions.
 //! * **One filesystem**, like `du -x`. Without it, measuring `/` walks `/proc`
@@ -341,7 +341,7 @@ mod tests {
 ///   grandchildren, so a subtree that changed underneath keeps its old number
 ///   until something asks again. `F5` is that something — it forgets and
 ///   re-measures — and the alternative is a recursive watch on every visible
-///   folder, which [Spike C](../../../spikes/c-watching/README.md) priced at 34%
+///   folder, which [Spike C](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/c-watching/README.md) priced at 34%
 ///   of the per-user watch budget for one `node_modules`.
 pub struct Sizes {
     known: HashMap<PathBuf, Progress>,

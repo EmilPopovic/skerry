@@ -8,8 +8,9 @@ the work, not a schedule.
 ## Phase 0 — spikes, ~3–4 weeks
 
 Throwaway binaries, each answering one question that could invalidate the plan, each with a
-number attached. They live in `spikes/` afterwards because their measurements are the
-evidence behind the ADRs. **If a spike misses its bar, the architecture changes before
+number attached. Each is deleted once resolved; its record stays at the
+[`spikes-final`](https://github.com/EmilPopovic/skerry/tree/spikes-final/spikes) tag,
+because its measurements are the evidence behind the ADRs. **If a spike misses its bar, the architecture changes before
 there is a codebase to rewrite.**
 
 ### Status
@@ -19,12 +20,12 @@ there is a codebase to rewrite.**
 
 | | Verdict |
 | --- | --- |
-| [A](../spikes/a-million-rows/README.md) | **Go.** 2.6 ms worst p99 of 18 runs against an 8 ms bar. RSS misses on the NVIDIA proprietary driver alone, whose floor is 332 MB before our data exists |
-| [B](../spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
-| [C](../spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
-| [D](../spikes/d-platform-and-dnd/README.md) | **Go, three things to design.** Files land on disk from a drag we start; every Wayland pair passes and two of the peers pass on X11 too; four compositor limitations are documented and three of them report no error at all. `winit` reaches 5 of 9 capabilities, so [ADR 0002](adr/0002-own-platform-layer.md) is Accepted rather than pending |
-| [E](../spikes/e-operations/README.md) | **Go.** All three conditions met on seven filesystems: 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks. `ENOSPC` clean at an exact byte; reflink consumes 0 KiB against 192 MiB. **Four** defects found by a check failing |
-| [F](../spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
+| [A](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/a-million-rows/README.md) | **Go.** 2.6 ms worst p99 of 18 runs against an 8 ms bar. RSS misses on the NVIDIA proprietary driver alone, whose floor is 332 MB before our data exists |
+| [B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) | **Go.** 0.13 s warm on a laptop, 0.91–1.07 s on a Pi 5 — sits on the 1 s bar rather than inside it. A parallel walk with an unlocked store is 4× the obvious design |
+| [C](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/c-watching/README.md) | **Go, three things to design.** Notification 0.063 ms; overflow recovery 411 ms by pruning on directory mtime; the watch budget is per-user, shared, and not a constant |
+| [D](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md) | **Go, three things to design.** Files land on disk from a drag we start; every Wayland pair passes and two of the peers pass on X11 too; four compositor limitations are documented and three of them report no error at all. `winit` reaches 5 of 9 capabilities, so [ADR 0002](adr/0002-own-platform-layer.md) is Accepted rather than pending |
+| [E](../tools/torture/README.md) | **Go.** All three conditions met on seven filesystems: 81 pass, 0 fail, 16 limitations, 5 owed, of 102 checks. `ENOSPC` clean at an exact byte; reflink consumes 0 KiB against 192 MiB. **Four** defects found by a check failing |
+| [F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) | **Go on the index.** 195 ms cold load on a Pi against a 2.3–3.7 s cold walk; search 13.3 ms with a parallel scan. **Sorting misses at 191 ms** |
 
 **Spike F is not one of the original five.** It exists because
 [ADR 0008](adr/0008-persistent-index-is-required.md) made the persistent index required
@@ -100,7 +101,7 @@ Chrome and Thunderbird, covering copy, move and link.
 
 **Resolved: Go.** Built twice, on `wayland-client` + `x11rb` and on `winit`, so the
 revisit trigger is answered rather than argued. Full result in
-[d-platform-and-dnd](../spikes/d-platform-and-dnd/README.md). What it changed is above;
+[d-platform-and-dnd](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md). What it changed is above;
 what it left owed is Dolphin, a second compositor, and the peer-to-us direction on X11.
 
 ### Spike E — operation engine correctness
@@ -113,7 +114,7 @@ integrity after each. This spike becomes the permanent torture matrix.
 
 **Resolved: Go.** All three conditions are met, on seven filesystems — ext4, tmpfs, btrfs,
 xfs, exFAT, vfat and NTFS, plus five injected faults.
-Full result in [e-operations](../spikes/e-operations/README.md). Unlike every other spike
+Full result in [tools/torture](../tools/torture/README.md). Unlike every other spike
 its code stays: the matrix is a CI job today, it discovers what to test rather than being
 told, and it ships a filesystem that fails at an exact offset on demand.
 
@@ -662,7 +663,7 @@ three, and an API designed against one dialect is wrong in a way that costs week
 to correct. It sits behind the operations engine because a drop that lands on a
 directory has to *copy or move something*, and until item 4 exists a drag is a
 gesture with nothing at the end of it. Its own design constraint is already
-recorded: three capabilities are [absent with no error attached](../spikes/d-platform-and-dnd/README.md#what-this-changed),
+recorded: three capabilities are [absent with no error attached](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md#what-this-changed),
 so no policy above `sk-plat` may depend on `dnd_finished` arriving.
 
 ### Then — the layout model, because it is the one that cannot be retrofitted
@@ -727,7 +728,7 @@ job in [check.yml](../.github/workflows/check.yml) rather than a milestone:
 
 ### After those, and in this order
 
-**Search over the index** (M4) [Spike F](../spikes/f-index-and-search/README.md) said
+**Search over the index** (M4) [Spike F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) said
 go on, and **both scopes are searchable now**. `Ctrl+Shift+F` walks the tree under
 the folder — results arriving live with the folder each is in, first result at
 **0.7 ms over 817,288 entries** against a 50 ms bar
@@ -819,11 +820,11 @@ and M3 have to hold rather than rediscover.
 
 Two of those are worth repeating here because they are the ones a milestone can quietly
 skip. M0 owes four ordering invariants from
-[Spike D](../spikes/d-platform-and-dnd/README.md#what-this-changed) — devices before the
+[Spike D](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md#what-this-changed) — devices before the
 first commit, the offer surviving `leave`, a fresh serial per selection, a source that
 keeps dispatching after the drop — each of which was a silent failure that looked like a
 compositor bug. M3 owes the copy engine's two, from
-[Spike E](../spikes/e-operations/README.md#four-things-this-changed-three-of-them-in-our-own-code):
+[Spike E](../tools/torture/README.md#four-things-this-changed-three-of-them-in-our-own-code):
 `copy_file_range` per extent, and a placement fallback chain. Both sets are already
 written as tests; what M0 and M3 have to do is not delete them.
 

@@ -787,7 +787,7 @@ const SEPARATOR_TARGET: f32 = 18.0;
 
 /// The path's components, root first, with `/` as its own first component.
 ///
-/// `/` and `/home/emil` split differently and both have to read correctly: the
+/// `/` and `/home/tester` split differently and both have to read correctly: the
 /// root has no name of its own, so it is drawn as the separator it is.
 fn crumb_names(pane: &Pane) -> Vec<String> {
     let mut names = vec![i18n::lookup("chrome.crumb_root").to_owned()];
@@ -6690,7 +6690,7 @@ mod tests {
     /// the parent's names and the parent's sizes. Every unit test passed. This is
     /// the assertion that does not.
     /// The root is a component and is drawn as the separator it is; `/` and
-    /// `/home/emil` split differently and both have to read correctly.
+    /// `/home/tester` split differently and both have to read correctly.
     #[test]
     fn the_root_is_its_own_crumb_and_is_never_empty() {
         let crumbs = |path: &str| {
@@ -6702,14 +6702,14 @@ mod tests {
         // indexes `names.len() - 1` for the leaf.
         assert_eq!(crumbs(""), vec!["/"]);
         assert_eq!(crumbs("/home"), vec!["/", "home"]);
-        assert_eq!(crumbs("/home/emil"), vec!["/", "home", "emil"]);
+        assert_eq!(crumbs("/home/tester"), vec!["/", "home", "tester"]);
         // Trailing and doubled separators are components the path type folds
         // away, and a crumb per empty string would be a crumb per slash.
-        assert_eq!(crumbs("/home//emil/"), vec!["/", "home", "emil"]);
+        assert_eq!(crumbs("/home//tester/"), vec!["/", "home", "tester"]);
         // A name with a space in it is one component, not two.
         assert_eq!(
-            crumbs("/home/emil/VirtualBox VMs"),
-            vec!["/", "home", "emil", "VirtualBox VMs"]
+            crumbs("/home/tester/VirtualBox VMs"),
+            vec!["/", "home", "tester", "VirtualBox VMs"]
         );
     }
 

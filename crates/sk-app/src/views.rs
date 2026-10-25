@@ -556,12 +556,12 @@ mod tests {
 
         // A subtree with one real decision in it: the album is a grid.
         let mut views = Views::default();
-        views.remember(Path::new("/home/emil/Pictures"), grid());
+        views.remember(Path::new("/home/tester/Pictures"), grid());
         // Nothing recorded for the folders a trail walked through, so a folder
         // deep inside still inherits the one decision anybody made.
-        assert_eq!(views.for_path(Path::new("/home/emil/Pictures/2026/June")), grid());
+        assert_eq!(views.for_path(Path::new("/home/tester/Pictures/2026/June")), grid());
         // And a folder outside it takes the default, not whatever a pane was in.
-        assert_eq!(views.for_path(Path::new("/home/emil/Downloads")), View::default());
+        assert_eq!(views.for_path(Path::new("/home/tester/Downloads")), View::default());
     }
 
     /// A file written by a build that recorded `columns` reads as no record for
@@ -572,8 +572,8 @@ mod tests {
     fn a_columns_record_from_an_older_build_reads_as_no_record() {
         let text = concat!(
             "skerry 1\n",
-            "view columns flat /home/emil\n",
-            "view grid flat /home/emil/Pictures\n",
+            "view columns flat /home/tester\n",
+            "view grid flat /home/tester/Pictures\n",
         );
         let views = Views::parse(text).expect("a line it cannot use is not a broken file");
         // **Asserted on what was kept, not on what a folder answers.** A build that
@@ -583,14 +583,14 @@ mod tests {
         // it is the grid.
         let file = views.render();
         let kept: Vec<&str> = file.lines().filter(|line| line.starts_with("view ")).collect();
-        assert_eq!(kept, vec!["view grid flat /home/emil/Pictures"], "a columns line was kept");
+        assert_eq!(kept, vec!["view grid flat /home/tester/Pictures"], "a columns line was kept");
         assert_eq!(
-            views.for_path(Path::new("/home/emil/a/b/c")),
+            views.for_path(Path::new("/home/tester/a/b/c")),
             View::default(),
             "and a whole subtree inherited it"
         );
         assert_eq!(
-            views.for_path(Path::new("/home/emil/Pictures")),
+            views.for_path(Path::new("/home/tester/Pictures")),
             grid(),
             "the rest still reads"
         );
@@ -631,11 +631,11 @@ mod tests {
     fn a_colour_belongs_to_one_folder_and_is_not_inherited() {
         use crate::colours::Colour;
         let mut views = Views::default();
-        let projects = Path::new("/home/emil/projects");
+        let projects = Path::new("/home/tester/projects");
         assert!(views.colour(projects, Some(Colour::Red)));
         assert_eq!(views.colour_of(projects), Some(Colour::Red));
-        assert_eq!(views.colour_of(Path::new("/home/emil/projects/skerry")), None);
-        assert_eq!(views.colour_of(Path::new("/home/emil")), None);
+        assert_eq!(views.colour_of(Path::new("/home/tester/projects/skerry")), None);
+        assert_eq!(views.colour_of(Path::new("/home/tester")), None);
 
         // And it does not disturb the view records, which have their own list and
         // their own inheritance.
@@ -659,27 +659,27 @@ mod tests {
         use crate::colours::Colour;
         let mut views = Views::default();
         views.remember(
-            Path::new("/home/emil/pictures"),
+            Path::new("/home/tester/pictures"),
             View { layout: Layout::Grid, grouping: Grouping::None },
         );
-        assert!(views.colour(Path::new("/home/emil/projects"), Some(Colour::Red)));
-        assert!(views.colour(Path::new("/home/emil/wor k"), Some(Colour::Purple)));
+        assert!(views.colour(Path::new("/home/tester/projects"), Some(Colour::Red)));
+        assert!(views.colour(Path::new("/home/tester/wor k"), Some(Colour::Purple)));
 
         let text = views.render();
-        assert!(text.contains("colour red /home/emil/projects"), "{text}");
+        assert!(text.contains("colour red /home/tester/projects"), "{text}");
         let read = Views::parse(&text).expect("refused its own file");
-        assert_eq!(read.colour_of(Path::new("/home/emil/projects")), Some(Colour::Red));
+        assert_eq!(read.colour_of(Path::new("/home/tester/projects")), Some(Colour::Red));
         // A path with a space in it, which is why the path is last on the line.
-        assert_eq!(read.colour_of(Path::new("/home/emil/wor k")), Some(Colour::Purple));
-        assert_eq!(read.for_path(Path::new("/home/emil/pictures")).layout, Layout::Grid);
+        assert_eq!(read.colour_of(Path::new("/home/tester/wor k")), Some(Colour::Purple));
+        assert_eq!(read.for_path(Path::new("/home/tester/pictures")).layout, Layout::Grid);
 
         // A newer build's seventh colour, and a line that is neither.
         let odd = text.replace("colour red", "colour magenta")
             + "nonsense
 ";
         let read = Views::parse(&odd).expect("one unknown line refused the whole file");
-        assert_eq!(read.colour_of(Path::new("/home/emil/projects")), None);
-        assert_eq!(read.colour_of(Path::new("/home/emil/wor k")), Some(Colour::Purple));
+        assert_eq!(read.colour_of(Path::new("/home/tester/projects")), None);
+        assert_eq!(read.colour_of(Path::new("/home/tester/wor k")), Some(Colour::Purple));
     }
 
     /// The children of one directory, which is what a frame asks for.
@@ -687,11 +687,11 @@ mod tests {
     fn the_coloured_children_of_a_directory_are_found_by_name() {
         use crate::colours::Colour;
         let mut views = Views::default();
-        views.colour(Path::new("/home/emil/one"), Some(Colour::Red));
-        views.colour(Path::new("/home/emil/two"), Some(Colour::Green));
-        views.colour(Path::new("/home/emil/deeper/three"), Some(Colour::Blue));
+        views.colour(Path::new("/home/tester/one"), Some(Colour::Red));
+        views.colour(Path::new("/home/tester/two"), Some(Colour::Green));
+        views.colour(Path::new("/home/tester/deeper/three"), Some(Colour::Blue));
         let mut found: Vec<(String, Colour)> = views
-            .coloured_in(Path::new("/home/emil"))
+            .coloured_in(Path::new("/home/tester"))
             .map(|(name, colour)| (name.to_string_lossy().into_owned(), colour))
             .collect();
         found.sort_by(|left, right| left.0.cmp(&right.0));

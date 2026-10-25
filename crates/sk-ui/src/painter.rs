@@ -696,7 +696,7 @@ mod tests {
         for text in [
             "report.pdf",
             "café-étude.txt",
-            "/home/emil/repos/skerry/crates/sk-app/src/view.rs",
+            "/home/tester/repos/skerry/crates/sk-app/src/view.rs",
             "a",
             "",
         ] {

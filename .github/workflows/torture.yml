@@ -16,14 +16,14 @@ on:
   push:
     branches: [main]
     paths:
-      - "spikes/e-operations/**"
+      - "tools/torture/**"
       - "crates/sk-fs/**"
       - ".github/workflows/torture.yml"
   pull_request:
     # Spelled twice rather than shared through a YAML anchor, which this
     # workflow parser does not resolve.
     paths:
-      - "spikes/e-operations/**"
+      - "tools/torture/**"
       - "crates/sk-fs/**"
       - ".github/workflows/torture.yml"
   workflow_dispatch:
@@ -64,12 +64,12 @@ jobs:
           rustup toolchain install "$RUST" --profile minimal --no-self-update
           rustup default "$RUST"
       - name: Build
-        # Standalone by design: `spikes/e-operations` carries its own empty
+        # Standalone by design: `tools/torture` carries its own empty
         # `[workspace]` so it is not a member of ours.
-        working-directory: spikes/e-operations
+        working-directory: tools/torture
         run: cargo build --release --locked
       - name: Run it
-        working-directory: spikes/e-operations
+        working-directory: tools/torture
         run: |
           # `tee` alone would report the exit status of `tee`.
           set -o pipefail
@@ -94,7 +94,7 @@ jobs:
         if: always()
         run: |
           {
-            echo '## Spike E'
+            echo '## Torture matrix'
             echo '```'
             grep -E '^[[:space:]]*counts ' /tmp/matrix.log 2>/dev/null \
               || echo 'no counts line — the matrix did not reach its checks'

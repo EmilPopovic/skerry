@@ -1,6 +1,6 @@
 # 0003 — `wgpu` as the first GPU backend, behind a `Renderer` seam
 
-**Status:** Accepted — Spike A resolved, see [its result](../../spikes/a-million-rows/README.md#result)
+**Status:** Accepted — Spike A resolved, see [its result](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/a-million-rows/README.md#result)
 
 ## Context
 

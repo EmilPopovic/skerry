@@ -39,17 +39,20 @@ class Report:
         return 1 if self.failures else 0
 
 
-def manifests(*, spikes: bool = True) -> list[Path]:
+TORTURE = ROOT / "tools" / "torture"
+
+
+def manifests(*, torture: bool = True) -> list[Path]:
     """Every crate manifest, whether or not a workspace root exists yet.
 
-    Spikes are throwaway measurement binaries and are exempt from the layering
-    and dependency rules (spikes/README.md, docs/08-roadmap.md) — they exist to
-    measure alternatives we would never ship, including their dependency trees.
-    Pass spikes=False from a check that honours that exemption. The
-    banned-toolkit rule is never exempt, so check-invariants keeps them.
+    The torture matrix began as Spike E and keeps a spike's exemption from the
+    layering and dependency rules (tools/torture/README.md) — it is a standalone
+    harness that carries a FUSE fault injector we would never ship. Pass
+    torture=False from a check that honours that exemption. The banned-toolkit
+    rule is never exempt, so check-invariants keeps it.
     """
-    bases = ("crates", "bin", "tools", "spikes") if spikes else ("crates", "bin", "tools")
-    return sorted(p for base in bases for p in (ROOT / base).glob("*/Cargo.toml"))
+    found = sorted(p for base in ("crates", "bin", "tools") for p in (ROOT / base).glob("*/Cargo.toml"))
+    return found if torture else [p for p in found if p.parent != TORTURE]
 
 
 def load(manifest: Path) -> dict:

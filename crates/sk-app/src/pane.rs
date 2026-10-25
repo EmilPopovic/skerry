@@ -1769,7 +1769,7 @@ mod tests {
         use crate::groups::Grouping;
         use crate::views::{Layout, View, Views};
 
-        let downloads = Path::new("/home/emil/Downloads");
+        let downloads = Path::new("/home/tester/Downloads");
         let chosen = View { layout: Layout::Grid, grouping: Grouping::Time };
         let mut views = Views::default();
         views.remember(downloads, chosen);

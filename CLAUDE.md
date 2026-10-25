@@ -218,16 +218,18 @@ Phase 0's six spikes are all resolved and none of them said no:
 
 | | | |
 | --- | --- | --- |
-| [A](spikes/a-million-rows/README.md) | a million rows at 8 ms p99 | **Go**, 2.6 ms worst p99 |
-| [B](spikes/b-enumeration/README.md) | `getdents64` + batched `statx` | **Go**, but sits *on* the 1 s bar on a Pi 5 |
-| [C](spikes/c-watching/README.md) | inotify at scale | **Go**, three things to design |
-| [D](spikes/d-platform-and-dnd/README.md) | platform layer and drag-and-drop | **Go**, and three limitations report no error at all |
-| [E](spikes/e-operations/README.md) | operation engine correctness | **Go**, all three conditions on seven filesystems; four defects found that would have shipped |
-| [F](spikes/f-index-and-search/README.md) | index and flattened search | **Go on the index**; sorting misses its budget |
+| [A](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/a-million-rows/README.md) | a million rows at 8 ms p99 | **Go**, 2.6 ms worst p99 |
+| [B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) | `getdents64` + batched `statx` | **Go**, but sits *on* the 1 s bar on a Pi 5 |
+| [C](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/c-watching/README.md) | inotify at scale | **Go**, three things to design |
+| [D](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/d-platform-and-dnd/README.md) | platform layer and drag-and-drop | **Go**, and three limitations report no error at all |
+| [E](tools/torture/README.md) | operation engine correctness | **Go**, all three conditions on seven filesystems; four defects found that would have shipped |
+| [F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) | index and flattened search | **Go on the index**; sorting misses its budget |
 
-Spikes live in [spikes/](spikes/), are exempt from the layering, lint and
-dependency rules — never the banned-toolkit rule — and are kept for their
-measurements after the code is thrown away. Use `/spike`.
+A spike is deleted once it is resolved. The six above are at the
+[`spikes-final`](https://github.com/EmilPopovic/skerry/tree/spikes-final/spikes)
+tag, which is where every link to one points; the numbers that became gates are
+in [09](docs/09-performance-budgets.md). A spike is exempt from the layering,
+lint and dependency rules — never the banned-toolkit rule. Use `/spike`.
 
 **Read [docs/12-measurement.md](docs/12-measurement.md) before taking a number.**
 Every rule in it was learned by getting one wrong here, and three of them cost a
@@ -249,8 +251,9 @@ widened, and three drag-and-drop capabilities are **absent with no error
 attached**, which is a design constraint rather than a bug to fix.
 
 **Spike E's code is the one exception to "spike code is thrown away."** It is the
-permanent torture matrix, M3 is gated on it, and it is a CI job today — one binary
-with no arguments that discovers which filesystems to test, run nightly by
+permanent torture matrix in [tools/torture](tools/torture/README.md), M3 is gated
+on it, and it is a CI job today — one binary with no arguments that discovers
+which filesystems to test, run nightly by
 [torture.yml](.github/workflows/torture.yml) over four filesystems the job builds
 on loop devices for it.
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! inotify, on its own thread, coalesced.
 //!
-//! [Spike C](../../../spikes/c-watching/README.md) resolved this with three
+//! [Spike C](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/c-watching/README.md) resolved this with three
 //! numbers and three things to design:
 //!
 //! * **Notification costs 0.063 ms** on a Raspberry Pi, so latency is not the

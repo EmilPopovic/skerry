@@ -13,6 +13,8 @@ entire point, and the reason Phase 0 comes before any crate.
 
 Spike code is throwaway. Spike *measurements* are permanent: they are the
 evidence behind the ADRs, so they are recorded even when the spike is deleted.
+Phase 0's six were deleted once resolved and live at the `spikes-final` tag;
+links to them are permalinks there.
 
 ## Creating one
 
@@ -50,6 +52,8 @@ nothing we are allowed to act on.
    superseding ADR. Use `/adr`.
 5. Add the number to [09-performance-budgets.md](../../../docs/09-performance-budgets.md)
    where it becomes a permanent gate.
+6. Delete the spike's directory, and link to its README at the last commit that
+   had it — a permalink, never a path into the tree.
 
 ## Where the project actually is
 

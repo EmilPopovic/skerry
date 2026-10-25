@@ -58,8 +58,8 @@ zoom 2
 window 1100x720
 split beside 0.5
   leaf 1
-    tab /home/emil/notes name+ 0
-    tab /home/emil/Downloads size- 340
+    tab /home/tester/notes name+ 0
+    tab /home/tester/Downloads size- 340
   leaf 0
     tab / modified+ 0
 ```

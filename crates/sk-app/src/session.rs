@@ -23,7 +23,7 @@
 //! zoom 2                an index into App::ZOOM
 //! window 1100x720       logical pixels
 //! columns 520 96 128    name, size and modified widths, in logical pixels
-//! expanded /home/emil   a place opened in the sidebar's tree, one line each
+//! expanded /home/tester   a place opened in the sidebar's tree, one line each
 //! page 7 /home/a.pdf   which page a document was last left on, one line each
 //! split beside 0.5      beside | below, then a ratio
 //!   leaf 1              the index of the showing tab
@@ -501,7 +501,7 @@ pub fn parse(text: &str) -> Option<Session> {
             "zoom" => session.zoom = value.parse().unwrap_or(crate::app::ZOOM_DEFAULT),
             "columns" => session.columns = read_columns(value),
             "expanded" if !value.is_empty() => session.expanded.push(PathBuf::from(value)),
-            // `page 7 /home/emil/manual.pdf` — the number first, so the path
+            // `page 7 /home/tester/manual.pdf` — the number first, so the path
             // keeps the rest of the line and needs no quoting.
             "page" => {
                 if let Some((number, path)) = value.split_once(' ')
@@ -587,8 +587,8 @@ fn read_node(lines: &[&str], at: usize, depth: u32) -> Option<(Node, usize)> {
     }
 }
 
-/// One `tab` line, in either arity: `name+ grid 340 /home/emil/notes`, or the
-/// three-token `name+ 340 /home/emil/notes` an older build wrote. The path is the
+/// One `tab` line, in either arity: `name+ grid 340 /home/tester/notes`, or the
+/// three-token `name+ 340 /home/tester/notes` an older build wrote. The path is the
 /// rest of the line, so it may hold spaces.
 ///
 /// **Both forms parse, so adding the mode cost nobody their layout.** [ADR
@@ -743,8 +743,8 @@ mod tests {
                 first: Box::new(Node::Leaf {
                     active: 1,
                     tabs: vec![
-                        tab("/home/emil/notes", SortColumn::Name, 0.0),
-                        tab("/home/emil/Downloads", SortColumn::Size, 340.0),
+                        tab("/home/tester/notes", SortColumn::Name, 0.0),
+                        tab("/home/tester/Downloads", SortColumn::Size, 340.0),
                     ],
                 }),
                 second: Box::new(Node::Split {
@@ -776,7 +776,7 @@ mod tests {
     /// which is why the path is last and unescaped.
     #[test]
     fn a_path_with_spaces_and_punctuation_in_it_comes_back_whole() {
-        let odd = "/home/emil/My Documents/report (final) #2/  trailing  ";
+        let odd = "/home/tester/My Documents/report (final) #2/  trailing  ";
         let session = Session {
             tree: Node::Leaf { active: 0, tabs: vec![tab(odd, SortColumn::Name, 0.0)] },
             ..nested()
@@ -801,7 +801,7 @@ mod tests {
              zoom 2\n\
              window 1100x720\n\
              leaf 0\n\
-             tab name+ 0 /home/emil\n";
+             tab name+ 0 /home/tester\n";
         let session = parse(older).expect("an older file is not a broken one");
         assert_eq!(session.columns, crate::layout::Columns::default());
         assert_eq!(session.window, (1100, 720), "and the rest of it still read");

@@ -326,8 +326,8 @@ mod tests {
     /// row reading `nvme1n1p3` is a row nobody can identify.
     #[test]
     fn a_volume_is_named_by_the_best_thing_it_has() {
-        assert_eq!(made("8:1", Some("/run/media/emil/STICK"), Some("Photos")).name(), "Photos");
-        assert_eq!(made("8:1", Some("/run/media/emil/STICK"), None).name(), "STICK");
+        assert_eq!(made("8:1", Some("/run/media/tester/STICK"), Some("Photos")).name(), "Photos");
+        assert_eq!(made("8:1", Some("/run/media/tester/STICK"), None).name(), "STICK");
         assert_eq!(made("8:1", None, None).name(), "sda1");
         let nameless =
             Volume { device: None, kind: "fuse.sshfs".to_owned(), ..made("0:60", None, None) };

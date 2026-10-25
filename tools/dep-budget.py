@@ -53,7 +53,7 @@ def documented() -> set[str]:
 def internal_names() -> set[str]:
     """Every workspace member. These are not dependencies and are not budgeted."""
     found = set()
-    for manifest in manifests(spikes=False):
+    for manifest in manifests(torture=False):
         name = load(manifest).get("package", {}).get("name")
         if name:
             found.add(name)
@@ -64,7 +64,7 @@ def declared() -> dict[str, list[str]]:
     """External dependency name → the manifests that declare it."""
     internal = internal_names()
     raw: dict[str, list[str]] = {}
-    for manifest in manifests(spikes=False):
+    for manifest in manifests(torture=False):
         parsed = load(manifest)
         for table in ("dependencies", "build-dependencies"):
             for dep in parsed.get(table, {}):

@@ -15,7 +15,7 @@
 //!
 //! A fixed header, then the root's path, then every name concatenated into one
 //! arena, then six fixed-width columns. [Spike
-//! F](../../../spikes/f-index-and-search/README.md) measured this exact shape at
+//! F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) measured this exact shape at
 //! **195 ms to load a million entries cold on a Raspberry Pi 5**, against a cold
 //! walk of 3.7 s on the same machine — 19×, from the dullest thing that can
 //! work. No mmap, no compression, no ordering: each is complexity spent against
@@ -399,8 +399,8 @@ const COUNT_EVERY: std::time::Duration = std::time::Duration::from_millis(64);
 /// # Why it is cheap enough to be worth doing twice
 ///
 /// It reads names and does **not** `statx` each entry, which
-/// [Spike B](../../../spikes/b-enumeration/README.md) and [Spike
-/// F](../../../spikes/f-index-and-search/README.md) both measure as the
+/// [Spike B](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/b-enumeration/README.md) and [Spike
+/// F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) both measure as the
 /// expensive half — deferring it is 2× on the median and 10× on the p99. The
 /// kind comes from `getdents64`'s own `d_type`, and `statx` is asked only where
 /// the filesystem answered `Unknown`. One `statx` per *directory* settles the
@@ -599,7 +599,7 @@ pub fn forget(root: &Path) -> bool {
 /// Everything in the index whose name contains `needle`.
 ///
 /// The scan is **parallel by specification**, not as an optimisation: [Spike
-/// F](../../../spikes/f-index-and-search/README.md) measured a serial scan of a
+/// F](https://github.com/EmilPopovic/skerry/blob/spikes-final/spikes/f-index-and-search/README.md) measured a serial scan of a
 /// million entries at 47.4 ms worst case on a Raspberry Pi 5 against a 50 ms bar
 /// — "inside the bar by 5%, which is not inside it" — and 72.3 ms per keystroke
 /// as-you-type, outside it. Four cores buy 3.4–3.7×, well under the core count,
