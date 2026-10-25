@@ -709,6 +709,11 @@ pub fn stranded_by_empty(change: &Change, files: &Path, next: Next) -> Option<Ch
 /// Recorded as a rename, because that is what it is when the filesystems match
 /// and what its undo has to do either way.
 ///
+/// **What a move across filesystems leaves in the source is a note, not a
+/// failure.** It moved everything it copied, so the change goes on the stack
+/// and its undo brings that back — which then refuses while the leftovers
+/// still hold the original name, rather than merging into them.
+///
 /// **Runs on a job.**
 pub fn move_into(
     source: &Path,
@@ -728,11 +733,13 @@ pub fn move_into(
         && taken(&into.join(name))
     {
         let destination = into.join(name);
+        let mut left = None;
         let displaced = replace_into(name, into, Some(source), &mut |staging| {
-            crate::copy::move_to(source, staging, cancel, watch)
+            left = crate::copy::move_to(source, staging, cancel, watch)?;
+            Ok(())
         })?;
         let moved = Change::Renamed { from: source.to_path_buf(), to: destination };
-        return Ok(Change::Batch(vec![displaced, moved]));
+        return Ok(with_left(Change::Batch(vec![displaced, moved]), left));
     }
     let mut progress = crate::copy::Progress::default();
     // A move across filesystems is a copy and then a removal, so a resumed one
@@ -742,8 +749,22 @@ pub fn move_into(
         resume: conflict == Conflict::Resume,
         ..crate::copy::Options::default()
     };
-    let destination = crate::copy::move_into(source, into, options, cancel, &mut progress, watch)?;
-    Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
+    let (destination, left) =
+        crate::copy::move_into(source, into, options, cancel, &mut progress, watch)?;
+    Ok(with_left(Change::Renamed { from: source.to_path_buf(), to: destination }, left))
+}
+
+/// `change`, carrying what a move across filesystems left behind, if it did.
+fn with_left(change: Change, left: Option<Problem>) -> Change {
+    match left {
+        Some(left) => Change::Noted {
+            change: Box::new(change),
+            note: left.message(),
+            retry: false,
+            stranded: false,
+        },
+        None => change,
+    }
 }
 
 /// Replaces a text file's contents, and records what it held.
@@ -898,8 +919,11 @@ fn replace_into(
     let staging = holding.join(name);
     let discard = || {
         if let Some(source) = original {
-            if taken(&staging) {
-                crate::copy::move_to(&staging, source, &sk_util::Cancel::new(), &mut |_| {})?;
+            if taken(&staging)
+                && let Some(left) =
+                    crate::copy::move_to(&staging, source, &sk_util::Cancel::new(), &mut |_| {})?
+            {
+                return Err(left);
             }
             return rustix::fs::rmdir(&holding).map_err(|error| problem(error, &holding));
         }
@@ -962,8 +986,13 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         // Through the copy engine rather than `move_no_replace`: a rename inside
         // one directory can never cross a filesystem, but a *move* between two
         // can, and its undo has to be able to come back the same way it went.
+        // What that leaves behind is an error here, where nothing can carry a
+        // note; [`revert_recorded`], which the undo stack uses, carries it.
         Change::Renamed { from, to } => {
-            crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})
+            match crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})? {
+                Some(left) => Err(left),
+                None => Ok(()),
+            }
         }
         // Trash preserves files added after the original operation.
         Change::Copied { destination, .. } => trash(destination).map(|_| ()),
@@ -1047,8 +1076,8 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             }
         }
         Change::Renamed { from, to } => {
-            crate::copy::move_to(from, to, &sk_util::Cancel::new(), &mut |_| {})?;
-            Ok(change.clone())
+            let left = crate::copy::move_to(from, to, &sk_util::Cancel::new(), &mut |_| {})?;
+            Ok(with_left(change.clone(), left))
         }
         // **To the recorded destination, not to one derived from the source.**
         // A copy into the folder its original is in lands under a free name, and
@@ -1132,6 +1161,10 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
             }),
             _ => Ok(change.clone()),
         };
+    }
+    if let Change::Renamed { from, to } = change {
+        let left = crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})?;
+        return Ok(with_left(change.clone(), left));
     }
     revert(change)?;
     Ok(change.clone())
@@ -1560,6 +1593,53 @@ mod tests {
             assert!(!info.exists(), "a record with no file behind it: {info:?}");
             assert_eq!(crate::trash::held(&files, &sk_util::Cancel::new()).items, 0);
         });
+    }
+
+    /// A move between two real filesystems — `/dev/shm` and the temporary
+    /// directory, which are two mounts on any Linux this runs on, and where they
+    /// are not it returns. What arrived during the copy stays, the move goes on
+    /// the stack with a note saying so, and its undo refuses rather than merge
+    /// what it brings back into what stayed.
+    #[test]
+    fn a_move_between_filesystems_notes_what_it_left_and_undo_does_not_merge_into_it() {
+        let device =
+            |path: &Path| rustix::fs::stat(path).map(|stat| stat.st_dev).unwrap_or_default();
+        let here = scratch("across-filesystems");
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() || device(shm) == device(&here) {
+            return;
+        }
+        let source = shm.join(format!("skerry-ops-{}-across", std::process::id()));
+        let _ = std::fs::remove_dir_all(&source);
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("copied.txt"), b"moved").unwrap();
+
+        let mut armed = true;
+        let change =
+            move_into(&source, &here, Conflict::Refuse, &sk_util::Cancel::new(), &mut |p| {
+                if armed && p.done == 1 {
+                    armed = false;
+                    std::fs::write(source.join("arrived.txt"), b"new").unwrap();
+                }
+            })
+            .expect("moved");
+        let landed = here.join(source.file_name().unwrap());
+        assert_eq!(std::fs::read(landed.join("copied.txt")).unwrap(), b"moved");
+        assert!(!source.join("copied.txt").exists());
+        assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        let Change::Noted { change: inner, note, retry: false, stranded: false } = &change else {
+            panic!("{change:?}")
+        };
+        assert!(matches!(**inner, Change::Renamed { .. }), "{inner:?}");
+        assert!(note.contains("arrived.txt"), "{note}");
+
+        let undo = super::replay(&change, true, &mut |leaf| super::revert_recorded(leaf));
+        assert_eq!(undo.problem.map(|problem| problem.kind()), Some(ProblemKind::NameTaken));
+        assert!(undo.completed.is_none(), "an undo that refused was recorded as done");
+        assert_eq!(std::fs::read(landed.join("copied.txt")).unwrap(), b"moved");
+        assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        std::fs::remove_dir_all(&source).unwrap();
+        std::fs::remove_dir_all(&here).unwrap();
     }
 
     /// Somebody who can write the folder above a `.Trash-$uid` renames it away

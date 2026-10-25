@@ -64,6 +64,13 @@ pub enum ProblemKind {
     /// bind mount, a FUSE mount or a disk that happened to be mounted below a
     /// folder somebody deleted for good.
     MountedInside,
+    /// A move across filesystems left part of its source where it was, because
+    /// it changed or appeared after the copy had read what was there.
+    ///
+    /// Its own kind because the move happened and this is about what it did not
+    /// take: the copy holds the source as it was, so removing what came later
+    /// would delete the only copy of it.
+    LeftBehind,
     /// What an undo or a redo would put back is not what it would be replacing:
     /// somebody changed the file's bytes, or its mode, after this program did.
     ///
@@ -167,6 +174,7 @@ impl ProblemKind {
             Self::AcrossFilesystems => "error.across_filesystems",
             Self::NotEmpty => "error.not_empty",
             Self::MountedInside => "error.mounted_inside",
+            Self::LeftBehind => "error.left_behind",
             Self::ChangedSince => "error.changed_since",
             Self::TooLarge => "error.too_large",
             Self::Full => "error.full",

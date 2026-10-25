@@ -309,9 +309,11 @@ fn copy_regular(
 ///
 /// Within a filesystem it is a rename: atomic, instant, and it cannot lose
 /// anything. Across filesystems it is a copy followed by an unlink, and **the
-/// source is removed only after the copy has been placed**. A move that unlinks
-/// first, or that trusts a return value it did not check, is the classic way a
-/// file manager destroys a file.
+/// source is removed only after the copy has been placed**, and only while it
+/// is still what was copied — a file written to after it was read keeps its
+/// name, and the move says so. A move that unlinks first, or that trusts a
+/// return value it did not check, is the classic way a file manager destroys a
+/// file.
 ///
 /// **Runs on a job.**
 pub fn move_file(
@@ -329,7 +331,15 @@ pub fn move_file(
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, destination, "rename")),
     }
-    let copied = copy_file(source, destination, options)?;
+    let (from, from_name) = parent_of(source)?;
+    let (to, to_name) = parent_of(destination)?;
+    let (copied, read) = copy_regular(
+        At { dir: from.as_fd(), name: from_name, path: source },
+        At { dir: to.as_fd(), name: to_name, path: destination },
+        options,
+        None,
+        &mut |_| true,
+    )?;
     if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
         return Err(Problem::new(
             ProblemKind::Preservation,
@@ -337,7 +347,16 @@ pub fn move_file(
             format!("{:?}", copied.unpreserved),
         ));
     }
-    unlinkat(cwd, source, AtFlags::empty()).map_err(|error| at(error, source, "unlink"))?;
+    let now = statat(&from, from_name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| at(error, source, "stat"))?;
+    if !unchanged(&read, &now) {
+        return Err(Problem::new(
+            ProblemKind::LeftBehind,
+            source.display().to_string(),
+            "changed after it was copied",
+        ));
+    }
+    unlinkat(&from, from_name, AtFlags::empty()).map_err(|error| at(error, source, "unlink"))?;
     Ok(copied.placement)
 }
 
@@ -412,7 +431,7 @@ pub fn copy_into(
             "a folder cannot be copied into itself",
         ));
     }
-    Walk { options, cancel, progress, watch }.copy(source, &destination)?;
+    Walk { options, cancel, progress, watch, taken: None }.copy(source, &destination)?;
     Ok(destination)
 }
 
@@ -449,7 +468,7 @@ pub(crate) fn copy_to_options(
         ));
     }
     let mut progress = Progress::default();
-    Walk { options, cancel, progress: &mut progress, watch }.copy(source, destination)
+    Walk { options, cancel, progress: &mut progress, watch, taken: None }.copy(source, destination)
 }
 
 /// A name nothing in `into` is called, from `name`.
@@ -502,6 +521,9 @@ pub fn free_name(into: &Path, name: &std::ffi::OsStr) -> Option<std::ffi::OsStri
 /// A rename where the filesystems match, and a copy followed by a removal where
 /// they do not — with the removal strictly after the copy, per [`move_file`].
 ///
+/// Returns where it landed and, beside it, what the removal left in the source
+/// on purpose: see [`remove_taken`]. The move has happened either way.
+///
 /// **Runs on a job.**
 pub fn move_into(
     source: &Path,
@@ -510,7 +532,7 @@ pub fn move_into(
     cancel: &sk_util::Cancel,
     progress: &mut Progress,
     watch: &mut dyn FnMut(Progress),
-) -> Result<PathBuf, Problem> {
+) -> Result<(PathBuf, Option<Problem>), Problem> {
     let Some(name) = source.file_name() else {
         return Err(Problem::new(
             ProblemKind::BadName,
@@ -530,31 +552,57 @@ pub fn move_into(
         Ok(placement) => {
             finish_move(source, placement)?;
             progress.done += 1;
-            return Ok(destination);
+            return Ok((destination, None));
         }
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, &destination, "rename")),
     }
-    Walk { options, cancel, progress, watch }.copy(source, &destination)?;
-    // Only now, and only because the copy above returned `Ok`.
-    remove_tree(source, cancel)?;
-    Ok(destination)
+    let left = across(source, &destination, options, cancel, progress, watch)?;
+    Ok((destination, left))
 }
 
 /// Moves a file or directory to the exact recorded destination.
+///
+/// `Some` beside success for what the removal left in the source on purpose,
+/// as [`move_into`] returns it.
 pub fn move_to(
     source: &Path,
     destination: &Path,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(Progress),
-) -> Result<(), Problem> {
+) -> Result<Option<Problem>, Problem> {
     match place_existing((fs::CWD, source), (fs::CWD, destination), false) {
-        Ok(placement) => return finish_move(source, placement),
+        Ok(placement) => return finish_move(source, placement).map(|()| None),
         Err(Errno::XDEV) => {}
         Err(error) => return Err(at(error, destination, "rename")),
     }
-    copy_to(source, destination, cancel, watch)?;
-    remove_tree(source, cancel)
+    if let Some(into) = destination.parent()
+        && (into == source || into.starts_with(source))
+    {
+        return Err(Problem::new(
+            ProblemKind::BadName,
+            source.display().to_string(),
+            "a folder cannot be moved into itself",
+        ));
+    }
+    let mut progress = Progress::default();
+    across(source, destination, Options::default(), cancel, &mut progress, watch)
+}
+
+/// A move between two filesystems: a copy, and then the removal of exactly what
+/// it took — see [`remove_taken`].
+fn across(
+    source: &Path,
+    destination: &Path,
+    options: Options,
+    cancel: &sk_util::Cancel,
+    progress: &mut Progress,
+    watch: &mut dyn FnMut(Progress),
+) -> Result<Option<Problem>, Problem> {
+    let mut taken = Taken::default();
+    Walk { options, cancel, progress, watch, taken: Some(&mut taken) }.copy(source, destination)?;
+    // Only now, and only because the copy above returned `Ok`.
+    remove_taken(source, &taken, cancel)
 }
 
 fn finish_move(source: &Path, placement: Placement) -> Result<(), Problem> {
@@ -585,14 +633,37 @@ pub(crate) fn remove_at(
     cancel: &sk_util::Cancel,
 ) -> Result<(), Problem> {
     let device = fstat(parent).map_err(|e| at(e, subject, "stat parent"))?.st_dev;
-    let mut removal = Removal { cancel, left: Left::default() };
+    let mut removal = Removal { cancel, only: None, left: Left::default() };
     removal.entry(parent.as_fd(), name, subject, device, 0)?;
-    removal.left.problem().map_or(Ok(()), Err)
+    removal.left.problem(subject).map_or(Ok(()), Err)
+}
+
+/// Removes from `source` what a move copied out of it, and nothing else.
+///
+/// **A move across filesystems is a copy and then a removal, and the source is
+/// not still between the two.** Removing the whole tree deleted whatever had
+/// arrived in it while the copy ran, and whatever had been written to since it
+/// was read — neither of which the copy holds. So an entry goes only where its
+/// inode is one the copy took, a file only while its size and modification time
+/// are what the copy read, and a directory only once it is empty. What stays is
+/// returned as the problem to report beside a move that otherwise happened.
+fn remove_taken(
+    source: &Path,
+    taken: &Taken,
+    cancel: &sk_util::Cancel,
+) -> Result<Option<Problem>, Problem> {
+    let (parent, name) = parent_of(source)?;
+    let device = fstat(&parent).map_err(|e| at(e, source, "stat parent"))?.st_dev;
+    let mut removal = Removal { cancel, only: Some(taken), left: Left::default() };
+    removal.entry(parent.as_fd(), Path::new(name), source, device, 0)?;
+    Ok(removal.left.problem(source))
 }
 
 /// One removal's worth of state, carried down the recursion.
 struct Removal<'a> {
     cancel: &'a sk_util::Cancel,
+    /// For a move, what the copy took; `None` for a delete, which takes all.
+    only: Option<&'a Taken>,
     left: Left,
 }
 
@@ -614,6 +685,10 @@ impl Removal<'_> {
         }
         let stat =
             statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
+        if self.only.is_some_and(|taken| !taken.holds(&stat)) {
+            self.left.kept(subject);
+            return Ok(());
+        }
         if fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::Directory {
             return unlinkat(parent, name, AtFlags::empty()).map_err(|e| at(e, subject, "remove"));
         }
@@ -661,6 +736,11 @@ impl Removal<'_> {
         // given them back — through the descriptor just checked, never by name.
         // Where we do not own it this fails, and the `EACCES` below says why.
         let locked = opened.st_mode & 0o300 != 0o300;
+        let relock = || {
+            if locked {
+                let _ = fchmod(&fd, Mode::from_raw_mode(opened.st_mode & 0o7777));
+            }
+        };
         if locked {
             let _ = fchmod(&fd, Mode::from_raw_mode((opened.st_mode & 0o7777) | 0o700));
         }
@@ -678,9 +758,7 @@ impl Removal<'_> {
         // Something below stays, so this cannot go either — and it stays as it
         // was found rather than with the permissions it was given to be emptied.
         if self.left.count > before {
-            if locked {
-                let _ = fchmod(&fd, Mode::from_raw_mode(opened.st_mode & 0o7777));
-            }
+            relock();
             return Ok(());
         }
         let current =
@@ -688,20 +766,83 @@ impl Removal<'_> {
         if !same_file(&opened, &current) {
             return Err(at(Errno::BUSY, subject, "directory changed"));
         }
-        unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|e| at(e, subject, "remove directory"))
+        match unlinkat(parent, name, AtFlags::REMOVEDIR) {
+            Ok(()) => Ok(()),
+            // Something arrived after the listing above. A move leaves it where
+            // it is, for the reason it leaves everything else it did not copy.
+            Err(Errno::NOTEMPTY) if self.only.is_some() => {
+                relock();
+                self.left.kept(subject);
+                Ok(())
+            }
+            Err(error) => Err(at(error, subject, "remove directory")),
+        }
     }
 }
 
 /// Whether `directory` is the root of a mount.
 ///
-/// `STATX_ATTR_MOUNT_ROOT` is Linux
-/// 5.8, under the 5.10 floor; a kernel or a filter that refuses `statx` answers
-/// no, which is the `st_dev` test alone.
+/// `STATX_ATTR_MOUNT_ROOT` is Linux 5.8, under the 5.10 floor; a kernel or a
+/// filter that refuses `statx` answers no, which is the `st_dev` test alone.
 fn mount_root(directory: &impl AsFd) -> bool {
     fs::statx(directory, "", AtFlags::EMPTY_PATH, fs::StatxFlags::empty()).is_ok_and(|stat| {
         stat.stx_attributes_mask.contains(fs::StatxAttributes::MOUNT_ROOT)
             && stat.stx_attributes.contains(fs::StatxAttributes::MOUNT_ROOT)
     })
+}
+
+/// Every source entry a move copied, by inode, with what it was when read.
+///
+/// **64 bytes an entry at 100,000 entries and 103 at a million** — 6.4 MB and
+/// 103 MB held, 9.6 MB and 154 MB at the peak of the map's last growth —
+/// measured with a counting allocator around this key and value type. Held only
+/// while a move between filesystems runs, and the price of not deleting what
+/// the copy never saw. Packing the time into one `i64` saved 17% of it, which
+/// did not pay for the arithmetic.
+#[derive(Default)]
+struct Taken(std::collections::HashMap<(u64, u64), Option<Version>>);
+
+/// A non-directory as the copy read it.
+///
+/// **Modification time and size, not change time.** Unlinking one name of a
+/// hardlink set moves the inode's `ctime`, so a `ctime` check would leave every
+/// second name of every set behind; a write moves `mtime`, which is the change
+/// this exists to see.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Version {
+    mtime: (i64, u64),
+    size: i64,
+}
+
+impl Version {
+    fn of(stat: &Stat) -> Self {
+        Self { mtime: (stat.st_mtime as _, stat.st_mtime_nsec as _), size: stat.st_size }
+    }
+}
+
+impl Taken {
+    fn record(&mut self, stat: &Stat) {
+        let version = (!is_directory(stat)).then(|| Version::of(stat));
+        self.0.insert((stat.st_dev as _, stat.st_ino as _), version);
+    }
+
+    /// Whether what `stat` describes is still what the copy took.
+    fn holds(&self, stat: &Stat) -> bool {
+        match self.0.get(&(stat.st_dev as _, stat.st_ino as _)) {
+            Some(Some(version)) => !is_directory(stat) && *version == Version::of(stat),
+            Some(None) => is_directory(stat),
+            None => false,
+        }
+    }
+}
+
+/// Whether `now` is the file `read` described, unwritten since.
+fn unchanged(read: &Stat, now: &Stat) -> bool {
+    same_file(read, now) && Version::of(read) == Version::of(now)
+}
+
+fn is_directory(stat: &Stat) -> bool {
+    fs::FileType::from_raw_mode(stat.st_mode) == fs::FileType::Directory
 }
 
 /// What a removal left standing on purpose.
@@ -710,7 +851,7 @@ struct Left {
     count: usize,
     /// The first few, for the log. Bounded, because a tree can leave a million.
     first: Vec<PathBuf>,
-    /// The first mount point, which is what the message names.
+    /// The first mount point, which is what the message names when there is one.
     mount: Option<PathBuf>,
 }
 
@@ -719,19 +860,29 @@ impl Left {
 
     fn mount(&mut self, path: &Path) {
         self.mount.get_or_insert_with(|| path.to_path_buf());
+        self.kept(path);
+    }
+
+    fn kept(&mut self, path: &Path) {
         self.count += 1;
         if self.first.len() < Self::NAMED {
             self.first.push(path.to_path_buf());
         }
     }
 
-    fn problem(self) -> Option<Problem> {
-        let mount = self.mount?;
+    /// The problem to report about what stayed, if anything did. A mount wins
+    /// the message because its advice — unmount it — is the one that helps.
+    fn problem(self, root: &Path) -> Option<Problem> {
+        let first = self.first.first()?;
+        let (kind, subject) = match &self.mount {
+            Some(mount) => (ProblemKind::MountedInside, mount),
+            None => (ProblemKind::LeftBehind, first),
+        };
         let named: Vec<String> = self.first.iter().map(|path| path.display().to_string()).collect();
         Some(Problem::new(
-            ProblemKind::MountedInside,
-            mount.display().to_string(),
-            format!("{} left standing: {}", self.count, named.join(", ")),
+            kind,
+            subject.display().to_string(),
+            format!("{} left standing in {}: {}", self.count, root.display(), named.join(", ")),
         ))
     }
 }
@@ -742,6 +893,9 @@ struct Walk<'a> {
     cancel: &'a sk_util::Cancel,
     progress: &'a mut Progress,
     watch: &'a mut dyn FnMut(Progress),
+    /// For a move, every source entry as it was when copied — what
+    /// [`remove_taken`] may remove afterwards. `None` for a copy.
+    taken: Option<&'a mut Taken>,
 }
 
 impl Walk<'_> {
@@ -769,7 +923,7 @@ impl Walk<'_> {
             .map_err(|e| at(e, from.path, "stat"))?;
         match fs::FileType::from_raw_mode(stat.st_mode) {
             fs::FileType::RegularFile => self.file(from, to, &stat),
-            fs::FileType::Symlink => self.link(from, to),
+            fs::FileType::Symlink => self.link(from, to, &stat),
             fs::FileType::Directory => self.directory(from, to, depth, &stat),
             // A fifo, a socket or a device. Recreating one needs `mknod` and, for
             // a device, privilege this process does not have — and skipping it
@@ -787,15 +941,17 @@ impl Walk<'_> {
         // as done, because it is — the progress line is about the work the
         // queue was given rather than about this attempt at it.
         if self.options.resume && same_size(to, stat.st_size) {
+            self.took(stat);
             self.finished(stat.st_size);
             return Ok(());
         }
         let base = *self.progress;
         let (watch, cancel) = (&mut *self.watch, self.cancel);
-        let (copied, _) = copy_regular(from, to, self.options, Some(stat), &mut |bytes| {
+        let (copied, read) = copy_regular(from, to, self.options, Some(stat), &mut |bytes| {
             watch(Progress { bytes: base.bytes + bytes, ..base });
             !cancel.is_cancelled()
         })?;
+        self.took(&read);
         self.finished(stat.st_size);
         if !copied.unpreserved.is_empty() || copied.orphan.is_some() {
             return Err(Problem::new(
@@ -809,8 +965,9 @@ impl Walk<'_> {
 
     /// Recreated rather than followed. A link is 40 bytes and what it points at
     /// may be a terabyte, or may be the directory this walk is inside.
-    fn link(&mut self, from: At<'_>, to: At<'_>) -> Result<(), Problem> {
+    fn link(&mut self, from: At<'_>, to: At<'_>, stat: &Stat) -> Result<(), Problem> {
         if self.options.resume && statat(to.dir, to.name, AtFlags::SYMLINK_NOFOLLOW).is_ok() {
+            self.took(stat);
             self.finished(0);
             return Ok(());
         }
@@ -818,6 +975,7 @@ impl Walk<'_> {
             .map_err(|error| at(error, from.path, "readlink"))?;
         fs::symlinkat(target.as_c_str(), to.dir, to.name)
             .map_err(|error| at(error, to.path, "symlink"))?;
+        self.took(stat);
         self.finished(0);
         Ok(())
     }
@@ -884,8 +1042,15 @@ impl Walk<'_> {
                 )
             });
         }
+        self.took(stat);
         self.finished(0);
         warning.map_or(Ok(()), Err)
+    }
+
+    fn took(&mut self, stat: &Stat) {
+        if let Some(taken) = self.taken.as_deref_mut() {
+            taken.record(stat);
+        }
     }
 
     fn finished(&mut self, bytes: i64) {
@@ -1703,7 +1868,7 @@ mod tests {
         let shape = walk(&source);
         let into = root.join("elsewhere");
         std::fs::create_dir(&into).unwrap();
-        let landed = super::move_into(
+        let (landed, left) = super::move_into(
             &source,
             &into,
             Options::default(),
@@ -1713,7 +1878,91 @@ mod tests {
         )
         .expect("moved");
         assert!(!source.exists(), "the source survived");
+        assert!(left.is_none(), "{left:?}");
         assert_eq!(walk(&landed), shape);
+    }
+
+    /// The half of a move that runs between filesystems, run here on one, with
+    /// `meanwhile` called once `when` entries have been copied.
+    fn across(
+        source: &Path,
+        destination: &Path,
+        when: u64,
+        meanwhile: impl FnOnce(),
+    ) -> Option<sk_model::Problem> {
+        let mut meanwhile = Some(meanwhile);
+        super::across(
+            source,
+            destination,
+            Options::default(),
+            &sk_util::Cancel::new(),
+            &mut super::Progress::default(),
+            &mut |progress| {
+                if progress.done == when
+                    && let Some(meanwhile) = meanwhile.take()
+                {
+                    meanwhile();
+                }
+            },
+        )
+        .expect("moved")
+    }
+
+    /// Removing the whole source after the copy deleted whatever had arrived in
+    /// it while the copy ran — files the copy never saw and nothing else held.
+    #[test]
+    fn a_move_across_filesystems_leaves_what_arrived_while_it_copied() {
+        let root = scratch("across-arrived");
+        let source = root.join("tree");
+        three(&source, "moved");
+        let destination = root.join("landed");
+
+        let left = across(&source, &destination, 1, || {
+            std::fs::write(source.join("arrived.txt"), b"new").unwrap();
+            std::fs::create_dir(source.join("arrived")).unwrap();
+        });
+        assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        assert!(source.join("arrived").is_dir());
+        let left = left.expect("what arrived is reported");
+        assert_eq!(left.kind(), sk_model::ProblemKind::LeftBehind, "{left}");
+        assert!(left.detail().starts_with("2 left standing"), "{left}");
+        for name in ["a", "b", "c"] {
+            assert!(!source.join(name).exists(), "{name} was copied and should have gone");
+            assert_eq!(std::fs::read_to_string(destination.join(name)).unwrap(), "moved");
+        }
+    }
+
+    /// A file written to after the copy read it: the copy holds the old bytes,
+    /// so the source keeps the new ones.
+    #[test]
+    fn a_file_written_to_after_it_was_copied_stays_where_it_was() {
+        let root = scratch("across-written");
+        let source = root.join("tree");
+        three(&source, "moved");
+        let destination = root.join("landed");
+
+        let left = across(&source, &destination, 3, || {
+            std::fs::write(source.join("a"), b"written after the copy").unwrap();
+        });
+        assert_eq!(std::fs::read(source.join("a")).unwrap(), b"written after the copy");
+        assert_eq!(std::fs::read_to_string(destination.join("a")).unwrap(), "moved");
+        assert!(!source.join("b").exists() && !source.join("c").exists());
+        let left = left.expect("the written file is reported");
+        assert!(left.message().contains(&source.join("a").display().to_string()), "{left}");
+    }
+
+    /// Unlinking one name of a hardlink set changes the inode's `ctime`, which
+    /// is why the check is on `mtime`: on `ctime`, the second name stayed.
+    #[test]
+    fn every_name_of_a_hardlink_set_goes_with_the_move() {
+        let root = scratch("across-links");
+        let source = root.join("tree");
+        three(&source, "moved");
+        std::fs::hard_link(source.join("a"), source.join("a-again")).unwrap();
+
+        let left = across(&source, &root.join("landed"), u64::MAX, || {});
+        assert!(left.is_none(), "{left:?}");
+        assert!(!source.exists());
     }
 
     #[test]
@@ -2133,31 +2382,39 @@ mod tests {
         std::fs::rename(&selected, root.join("old")).unwrap();
         std::os::unix::fs::symlink(&outside, &selected).unwrap();
         assert!(
-            super::Removal { cancel: &sk_util::Cancel::new(), left: super::Left::default() }
-                .directory(
-                    parent.as_fd(),
-                    Path::new("selected"),
-                    &selected,
-                    0,
-                    &observed,
-                    observed.st_dev
-                )
-                .is_err()
+            super::Removal {
+                cancel: &sk_util::Cancel::new(),
+                only: None,
+                left: super::Left::default(),
+            }
+            .directory(
+                parent.as_fd(),
+                Path::new("selected"),
+                &selected,
+                0,
+                &observed,
+                observed.st_dev
+            )
+            .is_err()
         );
         assert_eq!(std::fs::read_to_string(outside.join("sentinel")).unwrap(), "valuable");
         std::fs::remove_file(&selected).unwrap();
         std::fs::rename(&outside, &selected).unwrap();
         assert!(
-            super::Removal { cancel: &sk_util::Cancel::new(), left: super::Left::default() }
-                .directory(
-                    parent.as_fd(),
-                    Path::new("selected"),
-                    &selected,
-                    0,
-                    &observed,
-                    observed.st_dev
-                )
-                .is_err()
+            super::Removal {
+                cancel: &sk_util::Cancel::new(),
+                only: None,
+                left: super::Left::default(),
+            }
+            .directory(
+                parent.as_fd(),
+                Path::new("selected"),
+                &selected,
+                0,
+                &observed,
+                observed.st_dev
+            )
+            .is_err()
         );
         assert_eq!(std::fs::read_to_string(selected.join("sentinel")).unwrap(), "valuable");
         std::fs::remove_dir_all(root).unwrap();
