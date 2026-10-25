@@ -901,12 +901,33 @@ enum Pasted {
     ///
     /// Always a copy: a peer that asked for a move removes its own originals,
     /// and doing it here would delete somebody else's files on a confirmation
-    /// this program cannot get — see `sk_plat::drag`.
-    Dropped(Vec<PathBuf>, PathBuf),
+    /// this program cannot get — see `sk_plat::drag`. The last field is what to
+    /// say when the read was refused; see [`refusal`].
+    Dropped(Vec<PathBuf>, PathBuf, Option<String>),
     /// The clipboard held nothing that names a file.
     NotFiles,
     /// Text to insert into whichever field still has the keyboard.
     Text(String),
+    /// A paste refused for its size or its pace, and what to say. See [`refusal`].
+    Refused(String),
+}
+
+/// What to tell a person when another application's answer to a paste or a
+/// drop was refused, or `None` for a failure with no more to say than the empty
+/// answer the caller already handles.
+///
+/// **Both limits are this program's, so neither may be silent.** A paste that
+/// stopped at one and showed nothing reads as a paste of an empty clipboard,
+/// and a drop as a drop that never happened.
+fn refusal(error: &std::io::Error) -> Option<String> {
+    match error.kind() {
+        std::io::ErrorKind::FileTooLarge => {
+            let limit = u64::try_from(sk_plat::SELECTION_LIMIT).unwrap_or(u64::MAX);
+            Some(sk_model::t!("error.selection_too_large", sk_ui::format::size(limit)))
+        }
+        std::io::ErrorKind::TimedOut => Some(sk_model::t!("error.selection_stalled").to_owned()),
+        _ => None,
+    }
 }
 
 /// The three channels a job answers the frame loop on.
@@ -2436,12 +2457,15 @@ impl App {
                 };
                 self.said_it_is_busy(took);
             }
-            Pasted::Dropped(paths, into) => {
+            Pasted::Dropped(paths, into, refused) => {
                 self.drops_drained = self.drops_drained.saturating_add(1);
                 // The bytes are in hand, so the drag is over: `wl_data_offer`
                 // wants `finish` *after* the read, and a source told earlier
                 // stops serving before it has served.
                 self.window.finish_drop();
+                if let Some(notice) = refused {
+                    self.notice = Some((notice, Instant::now()));
+                }
                 if !paths.is_empty() {
                     let took = self.edits.paste_all(paths, into, false, &self.jobs);
                     self.said_it_is_busy(took);
@@ -2458,6 +2482,7 @@ impl App {
                     Instant::now(),
                 ));
             }
+            Pasted::Refused(notice) => self.notice = Some((notice, Instant::now())),
         }
         self.dirty = true;
     }
@@ -3037,14 +3062,24 @@ impl App {
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let mut bytes = Vec::new();
-            let mut file = std::fs::File::from(fd);
-            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
-            // The first line only: this is one line of text, and a filename
-            // cannot hold a newline at all.
-            let text = String::from_utf8_lossy(&bytes);
-            let line = text.lines().next().unwrap_or("").to_owned();
-            if !line.is_empty() && sender.send(Pasted::Text(line)).is_ok() {
+            let limit = sk_plat::SELECTION_LIMIT;
+            let reply = match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+                Ok(bytes) => {
+                    // The first line only: this is one line of text, and a
+                    // filename cannot hold a newline at all.
+                    let text = String::from_utf8_lossy(&bytes);
+                    let line = text.lines().next().unwrap_or("").to_owned();
+                    if line.is_empty() {
+                        return;
+                    }
+                    Pasted::Text(line)
+                }
+                Err(error) => match refusal(&error) {
+                    Some(notice) => Pasted::Refused(notice),
+                    None => return,
+                },
+            };
+            if sender.send(reply).is_ok() {
                 wake.wake();
             }
         });
@@ -6263,7 +6298,8 @@ impl App {
             let sender = self.replies.paste_tx.clone();
             let wake = self.waker.handle();
             self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-                let reply = match sk_plat::receive_selection(&fd, 2, Duration::from_secs(5)) {
+                // Two bytes, not the selection limit: the marker is one.
+                let reply = match sk_plat::receive_selection(&fd, 2, sk_plat::SELECTION_TIMEOUT) {
                     Ok(bytes) => Pasted::KdeIntent(bytes == b"1", generation, into),
                     Err(_) => Pasted::NotFiles,
                 };
@@ -6319,12 +6355,14 @@ impl App {
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let Ok(bytes) =
-                sk_plat::receive_selection(&fd, 16 * 1024 * 1024, Duration::from_secs(5))
-            else {
-                let _ = sender.send(Pasted::NotFiles);
-                wake.wake();
-                return;
+            let limit = sk_plat::SELECTION_LIMIT;
+            let bytes = match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = sender.send(refusal(&error).map_or(Pasted::NotFiles, Pasted::Refused));
+                    wake.wake();
+                    return;
+                }
             };
 
             // **The peer's verb wins where there is one.** A cut in Nautilus
@@ -6477,9 +6515,17 @@ impl App {
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let mut bytes = Vec::new();
-            let mut file = std::fs::File::from(fd);
-            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            let limit = sk_plat::SELECTION_LIMIT;
+            let bytes = match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let reply = refusal(&error).map_or(Pasted::NotAFolder, Pasted::Refused);
+                    if sender.send(reply).is_ok() {
+                        wake.wake();
+                    }
+                    return;
+                }
+            };
             let text = String::from_utf8_lossy(&bytes);
             let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
             // The `is_dir` happens here, not on the loop: this is a path another
@@ -11729,9 +11775,12 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         let took = std::sync::Arc::clone(&self.drops_took);
         let delivered = std::sync::Arc::clone(&self.drops_delivered);
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let mut bytes = Vec::new();
-            let mut file = std::fs::File::from(fd);
-            let _ = std::io::Read::read_to_end(&mut file, &mut bytes);
+            let limit = sk_plat::SELECTION_LIMIT;
+            let (bytes, refused) =
+                match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+                    Ok(bytes) => (bytes, None),
+                    Err(error) => (Vec::new(), refusal(&error)),
+                };
             let text = String::from_utf8_lossy(&bytes);
             let paths: Vec<PathBuf> = text
                 .lines()
@@ -11745,11 +11794,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             // files on a confirmation this crate cannot get — see `sk_plat::drag`.
             // Sent even when it names nothing, so the drag is always closed:
             // an offer left open holds a source that is waiting on us.
-            let reply = if paths.is_empty() {
-                Pasted::Dropped(Vec::new(), into)
-            } else {
-                Pasted::Dropped(paths, into)
-            };
+            let reply = Pasted::Dropped(paths, into, refused);
             let spent = u32::try_from(asked.elapsed().as_millis()).unwrap_or(u32::MAX);
             took.store(spent, std::sync::atomic::Ordering::Relaxed);
             delivered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -14039,6 +14084,22 @@ mod tests {
             "a stale name kept"
         );
         assert_eq!(super::who_to_ask(None, None, None), None, "a panel about several files");
+    }
+
+    /// Each of this program's two limits is said, and says which it was;
+    /// anything else is left to the empty answer every reader already handles.
+    #[test]
+    fn a_refused_paste_or_drop_says_which_limit_it_reached() {
+        use std::io::{Error, ErrorKind};
+        let large = super::refusal(&Error::from(ErrorKind::FileTooLarge)).expect("said");
+        let limit = u64::try_from(sk_plat::SELECTION_LIMIT).unwrap();
+        assert!(large.contains(&sk_ui::format::size(limit)), "{large}");
+        let stalled = super::refusal(&Error::from(ErrorKind::TimedOut)).expect("said");
+        for said in [&large, &stalled] {
+            assert!(!said.starts_with("error."), "a key with no catalogue line: {said}");
+        }
+        assert_ne!(large, stalled);
+        assert_eq!(super::refusal(&Error::from(ErrorKind::BrokenPipe)), None);
     }
 
     use super::{LONG_ENOUGH_TO_TELL_THE_DESKTOP, worth_telling_the_desktop};
