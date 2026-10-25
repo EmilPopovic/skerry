@@ -1136,29 +1136,35 @@ mod tests {
             if !started.as_ref().is_err_and(|it| it.raw_os_error() == Some(libc::ETXTBSY)) {
                 break;
             }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            std::thread::sleep(std::time::Duration::from_millis(10)); // skerry-allow: no-blocking-ui — a test thread outwaiting another test's fork
             started = super::start("stand-in", Some(&beside), false);
         }
         let mut child = started.unwrap();
         let mut line = String::new();
         std::io::BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
-        let grandchild: u32 = line.trim().parse().unwrap();
-        let stat = |pid: u32| std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-        let field = |text: &str, at: usize| -> Option<String> {
-            text.rsplit_once(')')?.1.split_whitespace().nth(at).map(str::to_owned)
-        };
-        let own = stat(child.id()).unwrap();
-        assert_eq!(field(&own, 3), Some(child.id().to_string()), "the helper leads no session");
+        let grandchild: libc::c_long = line.trim().parse().unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        let session = stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(3));
+        assert_eq!(session, Some(child.id().to_string().as_str()), "the helper leads no session");
         assert!(child.stderr.is_some(), "the helper's stderr is not the host's pipe");
         super::forward(&mut child);
+        // SAFETY: `pidfd_open` takes a pid and no flags.
+        let watched = unsafe { libc::syscall(libc::SYS_pidfd_open, grandchild, 0) };
+        let watched = i32::try_from(watched).unwrap();
+        assert!(watched >= 0, "the grandchild was gone before the kill");
 
         super::terminate(&mut child);
         let _ = child.wait();
         std::fs::remove_dir_all(&beside).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while stat(grandchild).and_then(|it| field(&it, 0)).is_some_and(|state| state != "Z") {
-            assert!(std::time::Instant::now() < deadline, "what the helper started outlived it");
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // A pidfd is readable once its process has exited, so two seconds of
+        // silence is a grandchild that outlived the kill.
+        let mut ended = libc::pollfd { fd: watched, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one live `pollfd`, then the descriptor this test opened.
+        let exited = unsafe {
+            let ready = libc::poll(&raw mut ended, 1, 2000);
+            libc::close(watched);
+            ready
+        };
+        assert_eq!(exited, 1, "what the helper started outlived it");
     }
 }
