@@ -75,15 +75,25 @@ impl Backend {
     /// emulation over the real thing.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        match std::env::var("SKERRY_BACKEND").as_deref() {
-            Ok("wayland") => return Some(Self::Wayland),
-            Ok("x11") => return Some(Self::X11),
+        Self::from_vars(|name| std::env::var_os(name))
+    }
+
+    /// The same choice, over any source of variables.
+    ///
+    /// **So a test can ask without writing the environment.** `setenv` races
+    /// every C library call that reads it, and libtest runs this crate's tests
+    /// on several threads — `xkb_context_new` among them, which reads
+    /// `XKB_CONFIG_ROOT` and friends with no lock std can hold.
+    fn from_vars(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<Self> {
+        match var("SKERRY_BACKEND").as_deref().and_then(std::ffi::OsStr::to_str) {
+            Some("wayland") => return Some(Self::Wayland),
+            Some("x11") => return Some(Self::X11),
             _ => {}
         }
         // Empty means unset. A session that exports `WAYLAND_DISPLAY=` — which
         // is how a script says "not that one" — was otherwise read as a Wayland
         // session with a socket named nothing.
-        let named = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        let named = |name: &str| var(name).is_some_and(|value| !value.is_empty());
         if named("WAYLAND_DISPLAY") {
             return Some(Self::Wayland);
         }
@@ -395,48 +405,35 @@ pub use clipboard::{SELECTION_LIMIT, SELECTION_TIMEOUT};
 mod tests {
     use super::*;
 
-    /// The environment is process-global, so these run under one lock rather
-    /// than as four tests that pass alone and fail together.
+    /// The backend a session with exactly these variables set would choose.
+    fn chosen(vars: &[(&str, &str)]) -> Option<Backend> {
+        Backend::from_vars(|name| {
+            vars.iter().find(|(set, _)| *set == name).map(|(_, value)| (*value).into())
+        })
+    }
+
     #[test]
     fn the_backend_comes_from_the_session_and_can_be_forced() {
-        let restore: Vec<(&str, Option<std::ffi::OsString>)> =
-            ["SKERRY_BACKEND", "WAYLAND_DISPLAY", "DISPLAY"]
-                .iter()
-                .map(|name| (*name, std::env::var_os(name)))
-                .collect();
-        // SAFETY: single-threaded test, and every variable is restored below.
-        let set = |name: &str, value: Option<&str>| unsafe {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        };
-
-        set("SKERRY_BACKEND", None);
-        set("WAYLAND_DISPLAY", None);
-        set("DISPLAY", None);
-        assert_eq!(Backend::from_env(), None);
-
-        set("DISPLAY", Some(":0"));
-        assert_eq!(Backend::from_env(), Some(Backend::X11));
+        assert_eq!(chosen(&[]), None);
+        assert_eq!(chosen(&[("DISPLAY", ":0")]), Some(Backend::X11));
 
         // A Wayland session almost always has an Xwayland too, and preferring
         // X11 there would pick the emulation over the real thing.
-        set("WAYLAND_DISPLAY", Some("wayland-1"));
-        assert_eq!(Backend::from_env(), Some(Backend::Wayland));
+        let both = [("DISPLAY", ":0"), ("WAYLAND_DISPLAY", "wayland-1")];
+        assert_eq!(chosen(&both), Some(Backend::Wayland));
 
-        set("SKERRY_BACKEND", Some("x11"));
-        assert_eq!(Backend::from_env(), Some(Backend::X11));
-        set("SKERRY_BACKEND", Some("wayland"));
-        assert_eq!(Backend::from_env(), Some(Backend::Wayland));
+        let forced = |backend| [both[0], both[1], ("SKERRY_BACKEND", backend)];
+        assert_eq!(chosen(&forced("x11")), Some(Backend::X11));
+        assert_eq!(chosen(&forced("wayland")), Some(Backend::Wayland));
 
         // An unrecognised value falls through rather than failing: a typo in a
         // shell profile should not make the program refuse to start.
-        set("SKERRY_BACKEND", Some("mir"));
-        assert_eq!(Backend::from_env(), Some(Backend::Wayland));
+        assert_eq!(chosen(&forced("mir")), Some(Backend::Wayland));
+    }
 
-        for (name, value) in restore {
-            set(name, value.as_deref().and_then(|value| value.to_str()));
-        }
+    #[test]
+    fn an_empty_display_variable_is_an_unset_one() {
+        assert_eq!(chosen(&[("WAYLAND_DISPLAY", ""), ("DISPLAY", ":0")]), Some(Backend::X11));
+        assert_eq!(chosen(&[("WAYLAND_DISPLAY", ""), ("DISPLAY", "")]), None);
     }
 }
