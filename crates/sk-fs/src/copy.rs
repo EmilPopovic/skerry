@@ -279,11 +279,11 @@ fn copy_regular(
         };
 
     let mut unpreserved = Vec::new();
-    if fchmod(&into, Mode::from_bits_truncate(stat.st_mode & 0o7777)).is_err() {
+    if fchmod(&into, carried_mode(&stat, &into)).is_err() {
         unpreserved.push("mode".to_owned());
     }
     if options.xattrs {
-        copy_xattrs(&source, &into, &mut unpreserved);
+        copy_xattrs(&source, &into, &mut unpreserved, !foreign(&stat));
     }
     // Timestamps last. Every write above moves the modification time, so setting
     // it earlier sets it to a value the next write overwrites — which is what
@@ -769,11 +769,11 @@ impl Walk<'_> {
         // Mode and times after the contents, for the reason a file's are:
         // writing a child moves the directory's modification time.
         let mut missing = Vec::new();
-        if fchmod(&into, Mode::from_bits_truncate(stat.st_mode & 0o7777)).is_err() {
+        if fchmod(&into, carried_mode(stat, &into)).is_err() {
             missing.push("mode".to_owned());
         }
         if self.options.xattrs {
-            copy_xattrs(&source, &into, &mut missing);
+            copy_xattrs(&source, &into, &mut missing, !foreign(stat));
         }
         if futimens(&into, &times_of(stat)).is_err() {
             missing.push("times".to_owned());
@@ -1067,10 +1067,14 @@ std::thread_local! {
 /// FAT-family filesystem refuses everything. Both are reported and neither aborts
 /// the copy, because a copy that fails on a `security.selinux` label is a copy
 /// that fails on every file on a Fedora desktop.
+///
+/// `acls` false leaves the two POSIX ACLs behind, deliberately and unreported:
+/// see [`foreign`].
 pub(crate) fn copy_xattrs(
     from: &impl std::os::fd::AsFd,
     into: &impl std::os::fd::AsFd,
     out: &mut Vec<String>,
+    acls: bool,
 ) {
     #[cfg(test)]
     if REFUSE_NEXT_XATTR.with(|refuse| refuse.replace(false)) {
@@ -1089,6 +1093,9 @@ pub(crate) fn copy_xattrs(
     };
     let mut value = vec![0u8; 64 * 1024];
     for name in names[..length].split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
+        if !acls && POSIX_ACLS.contains(&name) {
+            continue;
+        }
         let name = String::from_utf8_lossy(name).into_owned();
         let Ok(size) = fs::fgetxattr(from.as_fd(), &name[..], &mut value[..]) else {
             out.push(name);
@@ -1099,6 +1106,43 @@ pub(crate) fn copy_xattrs(
             out.push(name);
         }
     }
+}
+
+/// The access ACL and, on a directory, the one its new entries inherit.
+const POSIX_ACLS: [&[u8]; 2] = [b"system.posix_acl_access", b"system.posix_acl_default"];
+
+/// Whether `source` belongs to somebody other than the person copying it.
+///
+/// **A copy belongs to whoever made it**, because nothing here calls `chown`.
+/// So whatever on the source was a grant *by its owner* would arrive as a grant
+/// by the copier, who never made it: a setuid bit runs the program with the
+/// copier's rights, and an ACL naming `user:someone:rw-` — a default ACL on a
+/// directory most of all, which every file later put inside inherits — lets
+/// that person into the copy. Neither is carried from a file somebody else
+/// owns, which is what `cp -p` does when it cannot keep the owner.
+fn foreign(source: &Stat) -> bool {
+    source.st_uid != rustix::process::geteuid().as_raw()
+}
+
+/// The mode a copy of `source` is given, once it exists as `copy`.
+///
+/// Set-user-ID and set-group-ID are dropped from a [`foreign`] source, and
+/// set-group-ID from one's own file where the copy came out in a different group
+/// — `cp -p` keeps each bit only where it kept the owner or the group it is
+/// about. The sticky bit is kept: it grants nothing. On a directory it stops
+/// people removing each other's entries, so dropping it would turn a copied
+/// `1777` drop box into a `0777` one anybody can empty; on a file Linux ignores
+/// it.
+fn carried_mode(source: &Stat, copy: &impl AsFd) -> Mode {
+    let mut mode = Mode::from_bits_truncate(source.st_mode & 0o7777);
+    if foreign(source) {
+        mode.remove(Mode::SUID | Mode::SGID);
+    } else if mode.contains(Mode::SGID)
+        && fstat(copy).map_or(true, |copy| copy.st_gid != source.st_gid)
+    {
+        mode.remove(Mode::SGID);
+    }
+    mode
 }
 
 fn times_of(stat: &Stat) -> Timestamps {
@@ -1820,6 +1864,99 @@ mod tests {
         assert!(refused.detail().contains("replaced"), "{}", refused.detail());
         assert!(!destination.exists());
         assert!(std::fs::symlink_metadata(&looked_at).unwrap().file_type().is_fifo());
+    }
+
+    /// A setuid binary out of somebody else's folder, copied, would be a setuid
+    /// binary owned by whoever copied it — their rights, for anyone who runs it.
+    /// Any setuid program on the machine that this user does not own is the
+    /// fixture; there is none to find when the suite runs as root.
+    #[test]
+    fn somebody_elses_setuid_program_arrives_without_its_set_id_bits() {
+        use std::os::unix::fs::MetadataExt as _;
+        let me = rustix::process::geteuid().as_raw();
+        let Some(program) = ["/usr/bin/passwd", "/usr/bin/su", "/usr/bin/mount", "/bin/su"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| {
+                std::fs::metadata(path).is_ok_and(|meta| {
+                    meta.is_file() && meta.mode() & 0o4000 != 0 && meta.uid() != me
+                }) && std::fs::File::open(path).is_ok()
+            })
+        else {
+            return;
+        };
+        let root = scratch("foreign-setuid");
+        let copy = root.join("copy");
+        copy_file(program, &copy, Options::default()).expect("copied");
+        let mode = std::fs::metadata(&copy).unwrap().mode();
+        assert_eq!(mode & 0o6000, 0, "{} arrived as {mode:o}", program.display());
+        assert_eq!(mode & 0o777, std::fs::metadata(program).unwrap().mode() & 0o777);
+    }
+
+    /// The torture matrix's `mode-4755` fixture: one's own setuid file is one's
+    /// own grant, and it survives.
+    #[test]
+    fn ones_own_set_id_bits_survive_a_copy() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let root = scratch("own-setuid");
+        let source = root.join("tool");
+        std::fs::write(&source, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o6755)).unwrap();
+        let copy = root.join("copy");
+        copy_file(&source, &copy, Options::default()).expect("copied");
+        assert_eq!(std::fs::metadata(&copy).unwrap().mode() & 0o7777, 0o6755);
+    }
+
+    /// An ACL with a named user in it, in the kernel's xattr encoding:
+    /// `user::rw-`, `user:65534:rw-`, `group::r--`, `mask::rw-`, `other::---`.
+    fn granting_acl() -> Vec<u8> {
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (0x01u16, 6u16, u32::MAX),
+            (0x02, 6, 65534),
+            (0x04, 4, u32::MAX),
+            (0x10, 6, u32::MAX),
+            (0x20, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(perm.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        acl
+    }
+
+    /// What a [`super::foreign`] source's ACL would do on the copy: let the
+    /// person it names in. Left behind; every other attribute still goes.
+    #[test]
+    fn a_foreign_files_acl_is_left_behind_and_its_other_attributes_are_not() {
+        let root = scratch("foreign-acl");
+        let source = std::fs::File::create(root.join("source")).unwrap();
+        let acl = rustix::fs::fsetxattr(
+            &source,
+            "system.posix_acl_access",
+            &granting_acl(),
+            rustix::fs::XattrFlags::empty(),
+        );
+        let user =
+            rustix::fs::fsetxattr(&source, "user.origin", b"here", rustix::fs::XattrFlags::empty());
+        if acl.is_err() || user.is_err() {
+            return;
+        }
+        let names = |file: &std::fs::File| {
+            let mut buffer = vec![0u8; 4096];
+            let length = rustix::fs::flistxattr(file, &mut buffer[..]).unwrap();
+            String::from_utf8_lossy(&buffer[..length]).into_owned()
+        };
+        let own = std::fs::File::create(root.join("own")).unwrap();
+        let mut missing = Vec::new();
+        super::copy_xattrs(&source, &own, &mut missing, true);
+        assert!(names(&own).contains("system.posix_acl_access"), "{missing:?}");
+
+        let theirs = std::fs::File::create(root.join("theirs")).unwrap();
+        super::copy_xattrs(&source, &theirs, &mut missing, false);
+        assert!(!names(&theirs).contains("posix_acl"), "{}", names(&theirs));
+        assert!(names(&theirs).contains("user.origin"), "{}", names(&theirs));
+        assert!(missing.is_empty(), "{missing:?}");
     }
 
     /// `copy_file` copies a regular file and nothing that merely leads to one.
