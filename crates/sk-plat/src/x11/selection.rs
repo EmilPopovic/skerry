@@ -32,7 +32,7 @@ use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::wrapper::ConnectionExt as _;
 
-use crate::clipboard::{Content, Selection, Transfer, send_to};
+use crate::clipboard::{Content, Selection, Transfer, selection_pipe, send_to};
 
 use super::atoms::Atoms;
 
@@ -370,7 +370,7 @@ impl Selections {
     ) -> Option<OwnedFd> {
         let Ask { connection, atoms, types, window, time } = *ask;
         let target = types.atom(mime)?;
-        let (read, write) = rustix::pipe::pipe().ok()?;
+        let (read, write) = selection_pipe()?;
         // The property is deleted first so the arrival of *this* conversion is
         // distinguishable from whatever was left in it by the last one.
         let _ = connection.delete_property(window, atoms.SKERRY_SELECTION);

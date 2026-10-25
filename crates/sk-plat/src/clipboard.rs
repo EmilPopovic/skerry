@@ -165,6 +165,17 @@ impl Content {
     }
 }
 
+/// A pipe for one selection read, closed on exec at both ends.
+///
+/// **At creation, not after.** A helper or an application launched while a paste
+/// or a drop is in flight otherwise inherits the write end: the job reading the
+/// other end waits for an end-of-file that comes only when that process exits,
+/// and the process can read the bytes or write its own. An `fcntl` after `pipe`
+/// leaves a window in which another thread's `fork` takes both ends with it.
+pub(crate) fn selection_pipe() -> Option<(OwnedFd, OwnedFd)> {
+    rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).ok()
+}
+
 /// Read a selection on a worker, refusing oversized or stalled transfers.
 pub fn receive(
     fd: &OwnedFd,
@@ -424,21 +435,33 @@ mod tests {
     /// this test does not finish.
     #[test]
     fn selection_reads_stop_at_the_byte_limit_and_deadline() {
-        let (read, write) = rustix::pipe::pipe().unwrap();
+        let (read, write) = selection_pipe().unwrap();
         rustix::io::write(&write, b"abc").unwrap();
         drop(write);
         assert_eq!(super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap(), b"abc");
-        let (read, write) = rustix::pipe::pipe().unwrap();
+        let (read, write) = selection_pipe().unwrap();
         rustix::io::write(&write, b"abcd").unwrap();
         assert_eq!(
             super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap_err().kind(),
             std::io::ErrorKind::FileTooLarge
         );
-        let (read, _held) = rustix::pipe::pipe().unwrap();
+        let (read, _held) = selection_pipe().unwrap();
         assert_eq!(
             super::receive(&read, 3, std::time::Duration::from_millis(1)).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
+    }
+
+    /// Both ends, because both leak something different: the write end held by
+    /// a launched application keeps the reader from ever seeing end-of-file, and
+    /// the read end hands it the bytes. Watched failing with `pipe()` restored.
+    #[test]
+    fn a_selection_pipe_is_not_inherited_by_anything_this_process_launches() {
+        let (read, write) = selection_pipe().unwrap();
+        for (end, fd) in [("read", &read), ("write", &write)] {
+            let flags = rustix::io::fcntl_getfd(fd).unwrap();
+            assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "the {end} end survives exec");
+        }
     }
 
     #[test]

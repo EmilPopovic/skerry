@@ -36,7 +36,7 @@ use wayland_protocols::wp::primary_selection::zv1::client::{
 };
 
 use super::State;
-use crate::clipboard::{Content, Selection, send_to};
+use crate::clipboard::{Content, Selection, selection_pipe, send_to};
 use crate::event::Event;
 
 /// The Wayland transport for the two selections.
@@ -115,7 +115,7 @@ impl super::Window {
     /// different cause.
     #[must_use]
     pub fn request_selection(&mut self, selection: Selection, mime: &str) -> Option<OwnedFd> {
-        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).ok()?;
+        let (read, write) = selection_pipe()?;
         match selection {
             Selection::Clipboard => {
                 let offer = self.state.clipboard.offer.as_ref()?;
@@ -287,7 +287,7 @@ impl super::Window {
     /// grab on the pointer.
     pub fn take_drop(&mut self, mime: &str) -> Option<std::os::fd::OwnedFd> {
         let offer = self.state.drags.offer.as_ref()?;
-        let (read, write) = rustix::pipe::pipe().ok()?;
+        let (read, write) = selection_pipe()?;
         offer.receive(mime.to_owned(), write.as_fd());
         drop(write);
         let _ = self.connection.flush();
