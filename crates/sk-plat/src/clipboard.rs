@@ -177,9 +177,10 @@ pub const SELECTION_LIMIT: usize = 16 * 1024 * 1024;
 
 /// How long a peer has to finish answering a paste or a drop.
 ///
-/// The X11 backend abandons a conversion still outstanding after this and
-/// closes its pipe, so the job reading it sees an end-of-file rather than
-/// waiting on a peer that stopped halfway or never started.
+/// A reader gives up after this and can say why. The X11 backend, which
+/// collects an answer before the reader sees any of it, abandons the
+/// conversion a moment later and closes its pipe, so nothing is left holding
+/// a peer that stopped halfway or never started.
 pub const SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A pipe for one selection read, closed on exec at both ends.

@@ -46,6 +46,15 @@ use super::atoms::Atoms;
 /// headroom costs one extra round trip on a multi-megabyte transfer.
 const CHUNK_HEADROOM: usize = 4096;
 
+/// How long past [`SELECTION_TIMEOUT`] a conversion is kept.
+///
+/// **The reader gives up first, so it can say why.** It waits the same
+/// timeout, started a moment after the request; abandoning at exactly that
+/// instant closed the pipe before the reader's own deadline, and a peer that
+/// stalled read as one that answered with nothing — a drop that did nothing and
+/// said nothing.
+const OUTLIVES_THE_READER: Duration = Duration::from_secs(1);
+
 /// What this window is publishing on one selection.
 struct Published {
     content: Content,
@@ -101,7 +110,7 @@ impl Incoming {
             incremental: false,
             collected: Vec::new(),
             limit: SELECTION_LIMIT,
-            deadline: now + SELECTION_TIMEOUT,
+            deadline: now + SELECTION_TIMEOUT + OUTLIVES_THE_READER,
             primary,
         }
     }
@@ -582,8 +591,8 @@ impl Selections {
         }
     }
 
-    /// Abandons every conversion whose peer has had [`SELECTION_TIMEOUT`] and
-    /// not finished.
+    /// Abandons every conversion whose peer has had [`SELECTION_TIMEOUT`], and
+    /// [`OUTLIVES_THE_READER`] more, and not finished.
     ///
     /// Dropping an entry drops its pipe's write end, which is what turns a peer
     /// that went quiet into an end-of-file the reading job can act on. Without
@@ -798,14 +807,19 @@ mod tests {
     #[test]
     fn a_conversion_whose_peer_goes_quiet_is_abandoned_at_its_deadline() {
         let asked = Instant::now();
+        let deadline = SELECTION_TIMEOUT + OUTLIVES_THE_READER;
         let (mut selections, reader) = incremental(SELECTION_LIMIT, asked);
         selections.collect(0, b"file://a", 0, &mut Vec::new());
-        assert_eq!(selections.next_deadline(asked), Some(SELECTION_TIMEOUT));
+        assert_eq!(selections.next_deadline(asked), Some(deadline));
 
-        selections.expire(asked + SELECTION_TIMEOUT.saturating_sub(Duration::from_millis(1)));
+        // Still held when the reader's own timeout runs out, so the reader's
+        // error is the one a person is told.
+        selections.expire(asked + SELECTION_TIMEOUT);
+        assert_eq!(selections.awaiting(), 1, "abandoned before the reader gave up");
+        selections.expire(asked + deadline.saturating_sub(Duration::from_millis(1)));
         assert_eq!(selections.awaiting(), 1, "abandoned before its deadline");
 
-        selections.expire(asked + SELECTION_TIMEOUT);
+        selections.expire(asked + deadline);
         assert_eq!(selections.awaiting(), 0, "kept past its deadline");
         assert_eq!(read(&reader).unwrap(), b"", "the reader is still waiting");
         assert_eq!(selections.next_deadline(asked), None, "an idle window would still wake");
