@@ -279,11 +279,12 @@ fn copy_regular(
         };
 
     let mut unpreserved = Vec::new();
-    if fchmod(&into, carried_mode(&stat, &into)).is_err() {
+    let theirs = foreign(&stat);
+    if fchmod(&into, carried_mode(&stat, theirs, &into)).is_err() {
         unpreserved.push("mode".to_owned());
     }
     if options.xattrs {
-        copy_xattrs(&source, &into, &mut unpreserved, !foreign(&stat));
+        copy_xattrs(&source, &into, &mut unpreserved, !theirs);
     }
     // Timestamps last. Every write above moves the modification time, so setting
     // it earlier sets it to a value the next write overwrites — which is what
@@ -1024,11 +1025,12 @@ impl Walk<'_> {
         // Mode and times after the contents, for the reason a file's are:
         // writing a child moves the directory's modification time.
         let mut missing = Vec::new();
-        if fchmod(&into, carried_mode(stat, &into)).is_err() {
+        let theirs = foreign(stat);
+        if fchmod(&into, carried_mode(stat, theirs, &into)).is_err() {
             missing.push("mode".to_owned());
         }
         if self.options.xattrs {
-            copy_xattrs(&source, &into, &mut missing, !foreign(stat));
+            copy_xattrs(&source, &into, &mut missing, !theirs);
         }
         if futimens(&into, &times_of(stat)).is_err() {
             missing.push("times".to_owned());
@@ -1388,16 +1390,16 @@ fn foreign(source: &Stat) -> bool {
 
 /// The mode a copy of `source` is given, once it exists as `copy`.
 ///
-/// Set-user-ID and set-group-ID are dropped from a [`foreign`] source, and
-/// set-group-ID from one's own file where the copy came out in a different group
-/// — `cp -p` keeps each bit only where it kept the owner or the group it is
-/// about. The sticky bit is kept: it grants nothing. On a directory it stops
+/// Set-user-ID and set-group-ID are dropped where `theirs`, the source being
+/// [`foreign`], and set-group-ID from one's own file where the copy came out in
+/// a different group — `cp -p` keeps each bit only where it kept the owner or
+/// the group it is about. The sticky bit is kept: it grants nothing. On a directory it stops
 /// people removing each other's entries, so dropping it would turn a copied
 /// `1777` drop box into a `0777` one anybody can empty; on a file Linux ignores
 /// it.
-fn carried_mode(source: &Stat, copy: &impl AsFd) -> Mode {
+fn carried_mode(source: &Stat, theirs: bool, copy: &impl AsFd) -> Mode {
     let mut mode = Mode::from_bits_truncate(source.st_mode & 0o7777);
-    if foreign(source) {
+    if theirs {
         mode.remove(Mode::SUID | Mode::SGID);
     } else if mode.contains(Mode::SGID)
         && fstat(copy).map_or(true, |copy| copy.st_gid != source.st_gid)
