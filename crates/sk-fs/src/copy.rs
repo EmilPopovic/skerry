@@ -570,73 +570,170 @@ fn finish_move(source: &Path, placement: Placement) -> Result<(), Problem> {
 /// **Runs on a job.**
 pub fn remove_tree(path: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
     let (parent, name) = parent_of(path)?;
-    remove_at(&parent, Path::new(name), path, cancel, 0)
+    remove_at(&parent, Path::new(name), path, cancel)
 }
 
-fn remove_at(
-    parent: &impl std::os::fd::AsFd,
+/// Removes `name` under the open directory `parent`, and everything below it.
+///
+/// For a caller that already holds the directory and has checked it, which is
+/// what Empty Trash does: resolving `parent`'s path again would be a second
+/// answer to a question already answered.
+pub(crate) fn remove_at(
+    parent: &impl AsFd,
     name: &Path,
     subject: &Path,
     cancel: &sk_util::Cancel,
-    depth: u32,
 ) -> Result<(), Problem> {
-    if cancel.is_cancelled() {
-        return Err(cancelled(subject));
-    }
-    if depth > MAX_DEPTH {
-        return Err(too_deep(subject));
-    }
-    let stat =
-        statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
-    if fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::Directory {
-        return unlinkat(parent, name, AtFlags::empty()).map_err(|e| at(e, subject, "remove"));
-    }
-    remove_directory(parent, name, subject, cancel, depth, &stat)
+    let device = fstat(parent).map_err(|e| at(e, subject, "stat parent"))?.st_dev;
+    let mut removal = Removal { cancel, left: Left::default() };
+    removal.entry(parent.as_fd(), name, subject, device, 0)?;
+    removal.left.problem().map_or(Ok(()), Err)
 }
 
-fn remove_directory(
-    parent: &impl std::os::fd::AsFd,
-    name: &Path,
-    subject: &Path,
-    cancel: &sk_util::Cancel,
-    depth: u32,
-    observed: &Stat,
-) -> Result<(), Problem> {
-    let fd = openat(
-        parent,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|e| at(e, subject, "open directory"))?;
-    let opened = fstat(&fd).map_err(|e| at(e, subject, "stat directory"))?;
-    if !same_file(observed, &opened) {
-        return Err(at(Errno::BUSY, subject, "directory changed"));
-    }
-    // **`unlinkat` needs write and search on the directory, not on the file**
-    // (unlink(2), `EACCES`), so one `dr-x------` folder from a tarball made
-    // every Empty Trash stop at its first file. Being removed for good, it is
-    // given them back — through the descriptor just checked, never by name.
-    // Where we do not own it this fails, and the `EACCES` below says why.
-    if opened.st_mode & 0o300 != 0o300 {
-        let _ = fchmod(&fd, Mode::from_raw_mode((opened.st_mode & 0o7777) | 0o700));
-    }
-    let dir = fs::Dir::read_from(&fd).map_err(|e| at(e, subject, "read directory"))?;
-    for entry in dir {
-        let entry = entry.map_err(|e| at(e, subject, "read directory"))?;
-        let bytes = entry.file_name().to_bytes();
-        if bytes == b"." || bytes == b".." {
-            continue;
+/// One removal's worth of state, carried down the recursion.
+struct Removal<'a> {
+    cancel: &'a sk_util::Cancel,
+    left: Left,
+}
+
+impl Removal<'_> {
+    /// One entry, whatever kind it is, in a directory on `device`.
+    fn entry(
+        &mut self,
+        parent: BorrowedFd<'_>,
+        name: &Path,
+        subject: &Path,
+        device: u64,
+        depth: u32,
+    ) -> Result<(), Problem> {
+        if self.cancel.is_cancelled() {
+            return Err(cancelled(subject));
         }
-        let child = Path::new(std::ffi::OsStr::from_bytes(bytes));
-        remove_at(&fd, child, &subject.join(child), cancel, depth + 1)?;
+        if depth > MAX_DEPTH {
+            return Err(too_deep(subject));
+        }
+        let stat =
+            statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
+        if fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::Directory {
+            return unlinkat(parent, name, AtFlags::empty()).map_err(|e| at(e, subject, "remove"));
+        }
+        self.directory(parent, name, subject, depth, &stat, device)
     }
-    let current =
-        statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
-    if !same_file(&opened, &current) {
-        return Err(at(Errno::BUSY, subject, "directory changed"));
+
+    /// A directory and what is in it, unless it is another filesystem's.
+    ///
+    /// **A mount inside the tree is left standing, with everything on it.**
+    /// Nothing can remove the mount point while it is mounted, so descending
+    /// into it deletes the contents of a bind mount, a FUSE mount or a disk and
+    /// then fails anyway. `st_dev` sees a different filesystem; only
+    /// `STATX_ATTR_MOUNT_ROOT` sees a bind mount of a folder on the same one.
+    fn directory(
+        &mut self,
+        parent: BorrowedFd<'_>,
+        name: &Path,
+        subject: &Path,
+        depth: u32,
+        observed: &Stat,
+        device: u64,
+    ) -> Result<(), Problem> {
+        if observed.st_dev != device {
+            self.left.mount(subject);
+            return Ok(());
+        }
+        let fd = openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| at(e, subject, "open directory"))?;
+        let opened = fstat(&fd).map_err(|e| at(e, subject, "stat directory"))?;
+        if !same_file(observed, &opened) {
+            return Err(at(Errno::BUSY, subject, "directory changed"));
+        }
+        if mount_root(&fd) {
+            self.left.mount(subject);
+            return Ok(());
+        }
+        // **`unlinkat` needs write and search on the directory, not on the file**
+        // (unlink(2), `EACCES`), so one `dr-x------` folder from a tarball made
+        // every Empty Trash stop at its first file. Being removed for good, it is
+        // given them back — through the descriptor just checked, never by name.
+        // Where we do not own it this fails, and the `EACCES` below says why.
+        let locked = opened.st_mode & 0o300 != 0o300;
+        if locked {
+            let _ = fchmod(&fd, Mode::from_raw_mode((opened.st_mode & 0o7777) | 0o700));
+        }
+        let before = self.left.count;
+        let dir = fs::Dir::read_from(&fd).map_err(|e| at(e, subject, "read directory"))?;
+        for entry in dir {
+            let entry = entry.map_err(|e| at(e, subject, "read directory"))?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let child = Path::new(OsStr::from_bytes(bytes));
+            self.entry(fd.as_fd(), child, &subject.join(child), opened.st_dev, depth + 1)?;
+        }
+        // Something below stays, so this cannot go either — and it stays as it
+        // was found rather than with the permissions it was given to be emptied.
+        if self.left.count > before {
+            if locked {
+                let _ = fchmod(&fd, Mode::from_raw_mode(opened.st_mode & 0o7777));
+            }
+            return Ok(());
+        }
+        let current =
+            statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|e| at(e, subject, "stat"))?;
+        if !same_file(&opened, &current) {
+            return Err(at(Errno::BUSY, subject, "directory changed"));
+        }
+        unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|e| at(e, subject, "remove directory"))
     }
-    unlinkat(parent, name, AtFlags::REMOVEDIR).map_err(|e| at(e, subject, "remove directory"))
+}
+
+/// Whether `directory` is the root of a mount.
+///
+/// `STATX_ATTR_MOUNT_ROOT` is Linux
+/// 5.8, under the 5.10 floor; a kernel or a filter that refuses `statx` answers
+/// no, which is the `st_dev` test alone.
+fn mount_root(directory: &impl AsFd) -> bool {
+    fs::statx(directory, "", AtFlags::EMPTY_PATH, fs::StatxFlags::empty()).is_ok_and(|stat| {
+        stat.stx_attributes_mask.contains(fs::StatxAttributes::MOUNT_ROOT)
+            && stat.stx_attributes.contains(fs::StatxAttributes::MOUNT_ROOT)
+    })
+}
+
+/// What a removal left standing on purpose.
+#[derive(Default)]
+struct Left {
+    count: usize,
+    /// The first few, for the log. Bounded, because a tree can leave a million.
+    first: Vec<PathBuf>,
+    /// The first mount point, which is what the message names.
+    mount: Option<PathBuf>,
+}
+
+impl Left {
+    const NAMED: usize = 8;
+
+    fn mount(&mut self, path: &Path) {
+        self.mount.get_or_insert_with(|| path.to_path_buf());
+        self.count += 1;
+        if self.first.len() < Self::NAMED {
+            self.first.push(path.to_path_buf());
+        }
+    }
+
+    fn problem(self) -> Option<Problem> {
+        let mount = self.mount?;
+        let named: Vec<String> = self.first.iter().map(|path| path.display().to_string()).collect();
+        Some(Problem::new(
+            ProblemKind::MountedInside,
+            mount.display().to_string(),
+            format!("{} left standing: {}", self.count, named.join(", ")),
+        ))
+    }
 }
 
 /// One tree operation's worth of state, carried down the recursion.
@@ -1969,6 +2066,59 @@ mod tests {
         assert!(!root.join("copy").exists());
     }
 
+    /// Deleting a folder for good used to delete what was mounted inside it.
+    ///
+    /// Mounting needs privilege, so this re-runs the test binary inside
+    /// `unshare -Urm`, where an ordinary user may mount into a namespace of
+    /// their own: a bind mount of a folder on the same filesystem, which only
+    /// `STATX_ATTR_MOUNT_ROOT` can see, and a tmpfs, which `st_dev` can. It
+    /// returns where namespaces are unavailable, as it has nothing to mount.
+    #[test]
+    fn a_mount_inside_a_deleted_folder_is_left_standing_with_everything_on_it() {
+        let can_unshare = std::process::Command::new("unshare")
+            .args(["-Urm", "true"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !can_unshare {
+            return;
+        }
+        let root = scratch("mounted-inside");
+        std::fs::create_dir_all(root.join("doomed/bound")).unwrap();
+        std::fs::create_dir_all(root.join("doomed/tmp")).unwrap();
+        std::fs::write(root.join("doomed/plain.txt"), b"goes").unwrap();
+        std::fs::create_dir(root.join("precious")).unwrap();
+        std::fs::write(root.join("precious/keep"), b"stays").unwrap();
+        let script = r#"mount --bind "$1/precious" "$1/doomed/bound" \
+            && mount -t tmpfs none "$1/doomed/tmp" && echo on-tmpfs > "$1/doomed/tmp/inside" \
+            && exec "$2" --exact copy::tests::inside_a_namespace_a_mount_is_left_standing --ignored"#;
+        let out = std::process::Command::new("unshare")
+            .args(["-Urm", "sh", "-c", script, "sh"])
+            .arg(&root)
+            .arg(std::env::current_exe().unwrap())
+            .env("SKERRY_MOUNT_TEST_ROOT", &root)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+        assert_eq!(std::fs::read(root.join("precious/keep")).unwrap(), b"stays");
+    }
+
+    #[test]
+    #[ignore = "run inside a mount namespace by the test above"]
+    fn inside_a_namespace_a_mount_is_left_standing() {
+        let Some(root) = std::env::var_os("SKERRY_MOUNT_TEST_ROOT").map(PathBuf::from) else {
+            return;
+        };
+        let doomed = root.join("doomed");
+        let left = super::remove_tree(&doomed, &sk_util::Cancel::new()).expect_err("left standing");
+        assert_eq!(left.kind(), sk_model::ProblemKind::MountedInside, "{left}");
+        assert!(left.detail().starts_with("2 left standing"), "{left}");
+        assert!(!doomed.join("plain.txt").exists(), "what was not mounted still goes");
+        assert_eq!(std::fs::read(doomed.join("bound/keep")).unwrap(), b"stays");
+        assert_eq!(std::fs::read(doomed.join("tmp/inside")).unwrap(), b"on-tmpfs\n");
+    }
+
     #[test]
     fn a_directory_swapped_after_stat_cannot_redirect_recursive_deletion() {
         let root = scratch("remove-swap");
@@ -1983,29 +2133,31 @@ mod tests {
         std::fs::rename(&selected, root.join("old")).unwrap();
         std::os::unix::fs::symlink(&outside, &selected).unwrap();
         assert!(
-            super::remove_directory(
-                &parent,
-                Path::new("selected"),
-                &selected,
-                &sk_util::Cancel::new(),
-                0,
-                &observed
-            )
-            .is_err()
+            super::Removal { cancel: &sk_util::Cancel::new(), left: super::Left::default() }
+                .directory(
+                    parent.as_fd(),
+                    Path::new("selected"),
+                    &selected,
+                    0,
+                    &observed,
+                    observed.st_dev
+                )
+                .is_err()
         );
         assert_eq!(std::fs::read_to_string(outside.join("sentinel")).unwrap(), "valuable");
         std::fs::remove_file(&selected).unwrap();
         std::fs::rename(&outside, &selected).unwrap();
         assert!(
-            super::remove_directory(
-                &parent,
-                Path::new("selected"),
-                &selected,
-                &sk_util::Cancel::new(),
-                0,
-                &observed
-            )
-            .is_err()
+            super::Removal { cancel: &sk_util::Cancel::new(), left: super::Left::default() }
+                .directory(
+                    parent.as_fd(),
+                    Path::new("selected"),
+                    &selected,
+                    0,
+                    &observed,
+                    observed.st_dev
+                )
+                .is_err()
         );
         assert_eq!(std::fs::read_to_string(selected.join("sentinel")).unwrap(), "valuable");
         std::fs::remove_dir_all(root).unwrap();

@@ -95,6 +95,7 @@ error.bad_name = “{0}” cannot be a name. Names cannot be empty or contain �
 error.name_taken = Something is already called “{0}”. Choose another name.
 error.across_filesystems = {0} is on another filesystem. Moving it there is not possible yet — copy it instead.
 error.not_empty = {0} is not empty any more, so undoing that would delete what is in it.
+error.mounted_inside = Another filesystem is mounted at {0}, so nothing on it was deleted. Unmount it, then try again.
 error.changed_since = {0} has changed since, so putting it back would lose that change. It was left as it is.
 error.too_large = {0} is too large to copy as text. Open it instead.
 error.full = There is no room for {0}. Free some space, or copy it somewhere else.

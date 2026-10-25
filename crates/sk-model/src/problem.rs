@@ -56,6 +56,14 @@ pub enum ProblemKind {
     AcrossFilesystems,
     /// A directory that has to be empty is not.
     NotEmpty,
+    /// Another filesystem is mounted inside what was being removed, so that
+    /// part was left standing with everything on it.
+    ///
+    /// Its own kind because the advice — unmount it first — is one no other
+    /// kind gives, and because the alternative was deleting the contents of a
+    /// bind mount, a FUSE mount or a disk that happened to be mounted below a
+    /// folder somebody deleted for good.
+    MountedInside,
     /// What an undo or a redo would put back is not what it would be replacing:
     /// somebody changed the file's bytes, or its mode, after this program did.
     ///
@@ -158,6 +166,7 @@ impl ProblemKind {
             Self::NameTaken => "error.name_taken",
             Self::AcrossFilesystems => "error.across_filesystems",
             Self::NotEmpty => "error.not_empty",
+            Self::MountedInside => "error.mounted_inside",
             Self::ChangedSince => "error.changed_since",
             Self::TooLarge => "error.too_large",
             Self::Full => "error.full",
