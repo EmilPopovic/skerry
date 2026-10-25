@@ -291,7 +291,7 @@ jobs:
           if [[ "$(cargo-deny --version 2>/dev/null)" != "cargo-deny $CARGO_DENY" ]]; then
             cargo install cargo-deny --version "$CARGO_DENY" --locked --force
           fi
-          cargo deny --workspace check
+          cargo deny --workspace --locked check
 
   no-c-toolchain:
     # **The evidence behind "C toolchain required for `skerry`: no".** That row

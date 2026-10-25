@@ -4,8 +4,10 @@
 # licences must be permissive, and no dependency may be a known-vulnerable
 # version. Until this existed both rows were claims with nothing behind them.
 #
-# Run by `tools/check` where `cargo-deny` is installed, and by the `supply` job
-# in .github/workflows/check.yml where it always is. The local run deliberately
+# Run by `tools/check` where `cargo-deny` is installed, by the `supply` job
+# in .github/workflows/check.yml where it always is, and weekly by
+# .github/workflows/advisories.yml over this workspace and `tools/torture`,
+# whose standalone graph answers to this same file. The local run deliberately
 # leaves out `advisories`: that check fetches the RustSec database over the
 # network, and a gate that needs the internet is a gate that fails on a train.
 
