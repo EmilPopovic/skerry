@@ -13,7 +13,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0003](0003-wgpu-first-backend.md) | `wgpu` as the first GPU backend, behind a `Renderer` seam | Accepted |
 | [0004](0004-swash-for-text.md) | `swash` for shaping and rasterization; our own line layout | Accepted |
 | [0005](0005-no-async-runtime.md) | One owned job pool; no async runtime in the core | Accepted |
-| [0006](0006-out-of-process-decoders.md) | Decoders in sandboxed helper processes | Accepted |
+| [0006](0006-out-of-process-decoders.md) | Decoders in sandboxed helper processes | Accepted — its Landlock fallback superseded by [0046](0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md) |
 | [0007](0007-runtime-capability-detection.md) | Runtime capability probing, never build-time features | Accepted |
 | [0008](0008-persistent-index-is-required.md) | A persistent filename index in `sk-index`, not an optional extra | Accepted |
 | [0009](0009-x11-backend-behind-a-runtime-selected-enum.md) | An X11 backend behind a runtime-selected enum, with scale from `Xft.dpi` | Accepted |
@@ -41,7 +41,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0031](0031-a-partition-the-table-says-not-to-automount-is-not-a-volume.md) | A partition udev has flagged to be ignored is not a volume | Accepted |
 | [0032](0032-an-archive-is-unpacked-by-a-child-that-can-only-write-where-the-files-go.md) | An archive is unpacked by a child that can only write where the files go | Accepted |
 | [0033](0033-operation-failures-retain-the-work-that-already-happened.md) | Operation failures retain the work that already happened | Accepted |
-| [0034](0034-helper-execution-and-network-rights-are-explicit.md) | Helper execution and network rights are explicit | Accepted |
+| [0034](0034-helper-execution-and-network-rights-are-explicit.md) | Helper execution and network rights are explicit | Accepted — one sentence superseded and the deny-list extended by [0046](0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md) |
 | [0035](0035-trash-recovery-uses-filesystem-local-records.md) | Trash recovery uses filesystem-local records | Accepted |
 | [0036](0036-operation-failures-retain-pending-work.md) | Operation failures retain pending work | Accepted |
 | [0037](0037-runtime-degradation-is-visible-and-injectable.md) | Runtime degradation is visible and injectable | Accepted |
@@ -53,6 +53,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0043](0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md) | Recents are two stores read as one list, and ours is the one rule 6 counts | Accepted — the shared write is staged behind the measurement the record names |
 | [0044](0044-a-launch-that-names-nothing-is-a-new-window.md) | A launch that names nothing is a new window | Accepted — supersedes one sentence of 0038 |
 | [0045](0045-bundled-symbols-use-the-glyph-mask-cache.md) | Bundled symbols use the glyph mask cache | Accepted — supersedes built-in drawing and the fresh-install default in 0042 |
+| [0046](0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md) | A helper that cannot be confined refuses, and a confined one reaches nothing but its files | Accepted — supersedes 0006's Landlock fallback and one sentence of 0034 |
 
 ## Triggers that have been answered
 
