@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Trash named a file nobody could see. Inside a text, animation or PDF preview
   the panel's own menu still opens; the file's menu is on the panel's title
   strip.
+- Empty the Trash empties a trash that holds a read-only folder. Before, it
+  stopped at the first file inside one, deleting only some of the trash or
+  none of it. An item that still cannot be deleted no longer keeps the rest.
 
 ## [1.0.0-alpha.2] - 2026-10-25
 

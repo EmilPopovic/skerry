@@ -538,6 +538,11 @@ fn bytes_under(
 /// rather than the second — and emptying again takes what is left, because both
 /// directories are walked whole.
 ///
+/// **One entry that will not go does not keep the rest.** Stopping at it left
+/// every name `getdents64` happened to return after it, and every record — a
+/// trash that looked untouched, with the failure in a status line. The first
+/// problem is still the answer; the entries that failed keep their records.
+///
 /// **Runs on a job.**
 pub fn empty(files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
     if files.file_name() != Some(OsStr::new("files")) {
@@ -546,17 +551,32 @@ pub fn empty(files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
     let root = files.parent().ok_or_else(|| failure(files, "no trash root"))?;
     recognised(root)?;
     let storage = Storage::open(root, false)?;
-    for (directory, at) in
-        [(&storage.files, files.to_path_buf()), (&storage.info, root.join("info"))]
-    {
-        for name in children(directory)? {
-            if cancel.is_cancelled() {
-                return Err(failure(files, "cancelled"));
-            }
-            crate::copy::remove_tree(&at.join(&name), cancel)?;
+    let mut first = None;
+    let mut kept = std::collections::HashSet::new();
+    for name in children(&storage.files)? {
+        if cancel.is_cancelled() {
+            return Err(failure(files, "cancelled"));
+        }
+        if let Err(problem) = crate::copy::remove_tree(&files.join(&name), cancel) {
+            first.get_or_insert(problem);
+            let mut record = name;
+            record.push(".trashinfo");
+            kept.insert(record);
         }
     }
-    Ok(())
+    let info = root.join("info");
+    for name in children(&storage.info)? {
+        if cancel.is_cancelled() {
+            return Err(failure(files, "cancelled"));
+        }
+        if kept.contains(&name) {
+            continue;
+        }
+        if let Err(problem) = crate::copy::remove_tree(&info.join(&name), cancel) {
+            first.get_or_insert(problem);
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 /// Every name in an already-open directory, read before anything is removed.

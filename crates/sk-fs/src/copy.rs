@@ -546,6 +546,14 @@ fn remove_directory(
     if !same_file(observed, &opened) {
         return Err(at(Errno::BUSY, subject, "directory changed"));
     }
+    // **`unlinkat` needs write and search on the directory, not on the file**
+    // (unlink(2), `EACCES`), so one `dr-x------` folder from a tarball made
+    // every Empty Trash stop at its first file. Being removed for good, it is
+    // given them back — through the descriptor just checked, never by name.
+    // Where we do not own it this fails, and the `EACCES` below says why.
+    if opened.st_mode & 0o300 != 0o300 {
+        let _ = fchmod(&fd, Mode::from_raw_mode((opened.st_mode & 0o7777) | 0o700));
+    }
     let dir = fs::Dir::read_from(&fd).map_err(|e| at(e, subject, "read directory"))?;
     for entry in dir {
         let entry = entry.map_err(|e| at(e, subject, "read directory"))?;
@@ -1500,6 +1508,24 @@ mod tests {
         let source = tree(&root);
         super::remove_tree(&source, &sk_util::Cancel::new()).expect("removed");
         assert!(!source.exists());
+    }
+
+    /// The failure behind a trash that would not empty: a folder unpacked from
+    /// a tarball whose directories are `dr-x------`.
+    #[test]
+    fn removing_a_tree_takes_read_only_directories_we_own() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("remove-read-only");
+        let source = root.join("ez130");
+        let locked = source.join("doc");
+        std::fs::create_dir_all(locked.join("deeper")).unwrap();
+        std::fs::write(locked.join("notes.pdf"), b"%PDF").unwrap();
+        std::fs::write(locked.join("deeper/inner.txt"), b"x").unwrap();
+        for dir in [locked.join("deeper"), locked.clone()] {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        super::remove_tree(&source, &sk_util::Cancel::new()).expect("removed");
+        assert!(!source.exists(), "a read-only directory stopped the removal");
     }
 
     /// A cancelled copy stops and leaves what it wrote, because unwinding it

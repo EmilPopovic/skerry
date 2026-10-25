@@ -1562,6 +1562,43 @@ mod tests {
         });
     }
 
+    /// An entry the empty cannot take keeps itself and its record, and nothing
+    /// else: stopping at it once left a trash that looked untouched.
+    #[test]
+    fn an_entry_that_will_not_go_does_not_keep_the_rest() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        with_trash("empty-partial", |root| {
+            let locked = root.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            std::fs::write(locked.join("inside.txt"), b"x").unwrap();
+            let before = root.join("before.txt");
+            let after = root.join("after.txt");
+            std::fs::write(&before, b"b").unwrap();
+            std::fs::write(&after, b"a").unwrap();
+            let trashed = [&before, &locked, &after].map(|path| match trash(path) {
+                Ok(Change::Trashed { stored, info, .. }) => (stored, info),
+                other => panic!("{other:?}"),
+            });
+            let (locked_stored, locked_info) = &trashed[1];
+            std::fs::set_permissions(locked_stored, std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            let files = locked_stored.parent().expect("files").to_path_buf();
+
+            let refused = empty_trash(&files, &sk_util::Cancel::new());
+            std::fs::set_permissions(locked_stored, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            refused.expect_err("an entry that could not be erased was not reported");
+            for (stored, info) in [&trashed[0], &trashed[2]] {
+                assert!(!stored.exists(), "{stored:?} was kept by an entry beside it");
+                assert!(!info.exists(), "{info:?} was kept by an entry beside it");
+            }
+            assert!(locked_stored.exists() && locked_info.exists(), "the survivor lost its record");
+        });
+    }
+
     /// A directory that is not a trash is not emptied, whatever it is called.
     #[test]
     fn a_directory_that_merely_looks_like_a_trash_is_refused() {

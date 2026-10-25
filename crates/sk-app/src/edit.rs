@@ -735,7 +735,7 @@ impl Edits {
         self.queue_all(Queued::Empty, files, jobs)
     }
 
-    /// Marks every entry whose way back the emptied trash at `files` erased.
+    /// Marks every entry whose way back the trash being emptied erased.
     ///
     /// **[Rule 3](../../../docs/03-principles.md#3-everything-is-reversible)'s
     /// own failure test, met on purpose.** Emptying the Trash is the one thing
@@ -745,10 +745,14 @@ impl Edits {
     /// at the moment it happens, in [ADR
     /// 0036](../../../docs/adr/0036-operation-failures-retain-pending-work.md)'s
     /// shape — kept, with a note on it — and `Ctrl+Z` answers with the note.
-    fn strand_what_the_empty_erased(&mut self, files: &Path) {
+    fn strand_what_the_empty_erased(&mut self) {
+        if self.doing != Queued::Empty {
+            return;
+        }
+        let Some(files) = self.running_path.clone() else { return };
         self.history.amend(|change, applied| {
             let next = if applied { ops::Next::Undo } else { ops::Next::Redo };
-            if let Some(marked) = ops::stranded_by_empty(change, files, next) {
+            if let Some(marked) = ops::stranded_by_empty(change, &files, next) {
                 *change = marked;
             }
         });
@@ -1308,10 +1312,7 @@ impl Edits {
                 // rather than when the command was given, because a queue that
                 // was stopped before this trash was reached has taken nothing
                 // away from it.
-                if self.doing == Queued::Empty {
-                    let emptied = change.subject().to_path_buf();
-                    self.strand_what_the_empty_erased(&emptied);
-                }
+                self.strand_what_the_empty_erased();
                 // **One gesture is one undo.** A queue of two hundred pastes
                 // used to record two hundred entries, so `Ctrl+Z` after it took
                 // back the last file and left the other hundred and ninety-nine
@@ -1380,6 +1381,8 @@ impl Edits {
             }
             Outcome::Did(Err(problem)) => {
                 self.walking = None;
+                // A failed empty still erased everything but what it reported.
+                self.strand_what_the_empty_erased();
                 if !self.cancelled_queue {
                     self.issue = Some(problem.message());
                     self.retain_failed(false);
