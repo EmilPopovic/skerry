@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A secondary click on a quick look opens the menu of the file being previewed.
+  Before, it opened the menu of whichever row lay under the panel, so Move to
+  Trash named a file nobody could see. Inside a text, animation or PDF preview
+  the panel's own menu still opens; the file's menu is on the panel's title
+  strip.
+
 ## [1.0.0-alpha.2] - 2026-10-25
 
 ### Added

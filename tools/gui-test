@@ -1466,7 +1466,7 @@ SCENARIOS = {}
 # count in the summary, and the count is only noticed by somebody who remembers
 # what it was. Removing a scenario on purpose means lowering this in the same
 # commit, which is where the argument for removing it belongs.
-FEWEST_SCENARIOS = 151
+FEWEST_SCENARIOS = 152
 
 
 def scenario(name, fresh: bool = False, bus: bool = False):
@@ -2178,6 +2178,48 @@ def a_text_preview_selects_and_copies(run: Run, fixture: Path) -> None:
     run.drive(f"move {aimed[0]:.2f} {aimed[1]:.2f}\nclick left\nsleep 400\n")
     if clipboard(run) == "\n".join(lines):
         raise Failure("the menu's Copy copied the whole file rather than the drag")
+
+
+@scenario("a-secondary-click-on-a-preview-is-about-its-file", fresh=True)
+def secondary_click_on_a_preview(run: Run, fixture: Path) -> None:
+    """**The menu over a picture is the picture's, not the row's under the panel.**
+
+    The panel covers the list, and a secondary click on it fell through to
+    whatever row the pointer would have been over without it — so Move to Trash
+    named a file nobody could see. Aimed at the middle of the panel, which is a
+    row of the fixture or the background below them depending on the window's
+    height: either way the answer used to be something other than this file.
+    """
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + tag + body + struct.pack(">I", zlib.crc32(tag + body))
+
+    raw = b"".join(b"\x00" + bytes(v for _ in range(32) for v in (40, 90, 200)) for _ in range(32))
+    (fixture / "picture.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 32, 32, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+    settled = listed(run)
+    before = int(settled["rows"])
+    run.drive("key f5\nsleep 400\n")
+    holds(run, lambda it: int(it["rows"]) >= before + 1, f"more than {before} rows")
+    run.drive("text picture\nsleep 400\n")
+    until(run, cursor="picture.png")
+    run.drive("key space\nsleep 600\n")
+    state = until_looking(run, "picture.png", "picture")
+
+    inner = [float(v) for v in state["panel_area"].split(":")]
+    at = aim(run, state, inner[0] + inner[2] / 2.0, inner[1] + inner[3] / 2.0)
+    run.drive(f"move {at[0]:.2f} {at[1]:.2f}\nsleep 200\nclick right\nsleep 400\nkey f12\nsleep 150\n")
+    opened = holds(run, lambda it: bool(it.get("menu_aim")), "a menu with drawn rows")
+    if "file.trash" not in opened["menu_aim"]:
+        raise Failure(f"the preview opened a menu with no Move to Trash: {opened['menu_aim']!r}")
+    expect(opened, cursor="picture.png", selected="1", looking="picture.png:picture")
 
 
 @scenario("a-double-click-in-a-preview-takes-a-word", fresh=True)

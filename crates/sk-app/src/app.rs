@@ -12703,24 +12703,51 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             self.menu_wanted = Some((position, crate::menu::IN_A_LOOK));
             return;
         }
+        // **Anywhere else on the panel, the menu is the previewed file's.** The
+        // row under the pointer is hidden by the panel, and a menu about it would
+        // trash or rename a file nobody can see while the one on screen is
+        // untouched. Only that file is selected, whatever else was: the pointer is
+        // on one file, and a Move to Trash that also took four rows behind the
+        // panel would be acting on more than the person is looking at.
+        if self.quick_look.is_some()
+            && (crate::view::quick_look_area(&self.layout).contains(position.x, position.y)
+                || crate::view::quick_look_strip(&self.layout).contains(position.x, position.y))
+        {
+            let Some(id) = self.looked_at() else { return };
+            self.panes.focused_mut().selection.replace_with(id);
+            self.menu_wanted = Some((position, self.menu_for(true)));
+            return;
+        }
         let row = self.row_under(position);
         if let Some(id) = row.and_then(|row| self.panes.focused().listing.at(row))
             && !self.panes.focused().selection.contains(id)
         {
             self.panes.focused_mut().selection.replace_with(id);
         }
-        let groups = if self.trash_context() && row.is_some() {
-            crate::menu::IN_TRASH
-        } else if self.in_recent() && row.is_some() {
-            crate::menu::IN_RECENT
-        } else if row.is_some() {
-            crate::menu::ON_ROW
-        } else if self.trash_context() {
-            crate::menu::ON_TRASH_BACKGROUND
-        } else {
-            crate::menu::ON_BACKGROUND
-        };
-        self.menu_wanted = Some((position, groups));
+        self.menu_wanted = Some((position, self.menu_for(row.is_some())));
+    }
+
+    /// Which table a context menu is built from, over a row or over the background.
+    fn menu_for(&self, on_a_row: bool) -> &'static [&'static [&'static str]] {
+        match (on_a_row, self.trash_context(), self.in_recent()) {
+            (true, true, _) => crate::menu::IN_TRASH,
+            (true, false, true) => crate::menu::IN_RECENT,
+            (true, false, false) => crate::menu::ON_ROW,
+            (false, true, _) => crate::menu::ON_TRASH_BACKGROUND,
+            (false, false, _) => crate::menu::ON_BACKGROUND,
+        }
+    }
+
+    /// The entry the quick look is showing, if it is still in the list.
+    ///
+    /// **The cursor, checked against the panel's own path.** Every way a look
+    /// opens or moves puts the cursor on its file, but the listing behind it can
+    /// be re-read — a rename, a watcher event — and a cursor that has moved on is
+    /// a different file from the one being read.
+    fn looked_at(&self) -> Option<sk_model::EntryId> {
+        let look = self.quick_look.as_ref()?;
+        let pane = self.panes.focused();
+        pane.selection.cursor().filter(|id| pane.path_of(*id) == look.path)
     }
 
     /// Closes the menu that is up, and forgets what it was about. Whether one
@@ -12765,20 +12792,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             }
             None => Point::new(self.placement.here.body.x + 8.0, self.placement.here.body.y + 8.0),
         };
-        let groups = if self.panes.focused().cursor_row().is_some() {
-            if self.trash_context() {
-                crate::menu::IN_TRASH
-            } else if self.in_recent() {
-                crate::menu::IN_RECENT
-            } else {
-                crate::menu::ON_ROW
-            }
-        } else if self.trash_context() {
-            crate::menu::ON_TRASH_BACKGROUND
-        } else {
-            crate::menu::ON_BACKGROUND
-        };
-        self.menu_wanted = Some((at, groups));
+        self.menu_wanted = Some((at, self.menu_for(self.panes.focused().cursor_row().is_some())));
     }
 
     /// What the diagnostic line says about the column view.
