@@ -48,11 +48,12 @@ const CHUNK_HEADROOM: usize = 4096;
 
 /// How long past [`SELECTION_TIMEOUT`] a conversion is kept.
 ///
-/// **The reader gives up first, so it can say why.** It waits the same
-/// timeout, started a moment after the request; abandoning at exactly that
-/// instant closed the pipe before the reader's own deadline, and a peer that
-/// stalled read as one that answered with nothing — a drop that did nothing and
-/// said nothing.
+/// **The reader gives up first, so it can say why.** Its deadline is taken
+/// before the request and this one at it, so the reader's is never the later
+/// of the two — but a pipe closed at the instant the reader's `poll` times out
+/// can wake it as an end-of-file instead, which reads as an answer of nothing:
+/// a drop that did nothing and said nothing. The margin is for that wake-up,
+/// not for a pool slow to start the reader, which the shared start covers.
 const OUTLIVES_THE_READER: Duration = Duration::from_secs(1);
 
 /// What this window is publishing on one selection.
@@ -751,7 +752,7 @@ mod tests {
     /// What the reader ends up with. A pipe whose writer has gone reads to
     /// end-of-file at once; one still held times out, which is the failure.
     fn read(fd: &OwnedFd) -> std::io::Result<Vec<u8>> {
-        crate::clipboard::receive(fd, usize::MAX, Duration::from_millis(200))
+        crate::clipboard::receive(fd, usize::MAX, Instant::now() + Duration::from_millis(200))
     }
 
     #[test]

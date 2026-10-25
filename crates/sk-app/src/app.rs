@@ -3058,12 +3058,12 @@ impl App {
         else {
             return;
         };
+        let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
         let Some(fd) = self.window.request_selection(selection, mime) else { return };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let limit = sk_plat::SELECTION_LIMIT;
-            let reply = match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+            let reply = match sk_plat::receive_selection(&fd, sk_plat::SELECTION_LIMIT, deadline) {
                 Ok(bytes) => {
                     // The first line only: this is one line of text, and a
                     // filename cannot hold a newline at all.
@@ -6288,6 +6288,7 @@ impl App {
         if mime != "x-special/gnome-copied-files"
             && offered.iter().any(|mime| mime == "application/x-kde-cutselection")
         {
+            let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
             let Some(fd) = self
                 .window
                 .request_selection(Selection::Clipboard, "application/x-kde-cutselection")
@@ -6299,7 +6300,7 @@ impl App {
             let wake = self.waker.handle();
             self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
                 // Two bytes, not the selection limit: the marker is one.
-                let reply = match sk_plat::receive_selection(&fd, 2, sk_plat::SELECTION_TIMEOUT) {
+                let reply = match sk_plat::receive_selection(&fd, 2, deadline) {
                     Ok(bytes) => Pasted::KdeIntent(bytes == b"1", generation, into),
                     Err(_) => Pasted::NotFiles,
                 };
@@ -6347,6 +6348,7 @@ impl App {
     }
 
     fn read_file_paste(&mut self, mime: &str, verb: Verb, generation: u64, into: PathBuf) {
+        let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
         let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else {
             self.clipboard_failed();
             return;
@@ -6355,8 +6357,7 @@ impl App {
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let limit = sk_plat::SELECTION_LIMIT;
-            let bytes = match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+            let bytes = match sk_plat::receive_selection(&fd, sk_plat::SELECTION_LIMIT, deadline) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let _ = sender.send(refusal(&error).map_or(Pasted::NotFiles, Pasted::Refused));
@@ -6511,12 +6512,12 @@ impl App {
             ));
             return;
         };
+        let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
         let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let limit = sk_plat::SELECTION_LIMIT;
-            let bytes = match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+            let bytes = match sk_plat::receive_selection(&fd, sk_plat::SELECTION_LIMIT, deadline) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let reply = refusal(&error).map_or(Pasted::NotAFolder, Pasted::Refused);
@@ -11766,6 +11767,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         let into = self.drop_target().unwrap_or_else(|| self.panes.focused().path.clone());
         self.files_drag = None;
         self.dirty = true;
+        let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
         let Some(fd) = self.window.take_drop("text/uri-list") else { return };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
@@ -11775,9 +11777,8 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         let took = std::sync::Arc::clone(&self.drops_took);
         let delivered = std::sync::Arc::clone(&self.drops_delivered);
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let limit = sk_plat::SELECTION_LIMIT;
             let (bytes, refused) =
-                match sk_plat::receive_selection(&fd, limit, sk_plat::SELECTION_TIMEOUT) {
+                match sk_plat::receive_selection(&fd, sk_plat::SELECTION_LIMIT, deadline) {
                     Ok(bytes) => (bytes, None),
                     Err(error) => (Vec::new(), refusal(&error)),
                 };

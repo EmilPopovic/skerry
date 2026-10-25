@@ -177,10 +177,12 @@ pub const SELECTION_LIMIT: usize = 16 * 1024 * 1024;
 
 /// How long a peer has to finish answering a paste or a drop.
 ///
-/// A reader gives up after this and can say why. The X11 backend, which
-/// collects an answer before the reader sees any of it, abandons the
-/// conversion a moment later and closes its pipe, so nothing is left holding
-/// a peer that stopped halfway or never started.
+/// Measured from **before** the request: a caller takes
+/// `Instant::now() + SELECTION_TIMEOUT` and only then asks, so the reader's
+/// deadline can never be later than the X11 backend's, which is taken at the
+/// request. That backend abandons a conversion a moment after the reader has
+/// given up and said why, so nothing is left holding a peer that stopped
+/// halfway or never started.
 pub const SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A pipe for one selection read, closed on exec at both ends.
@@ -195,22 +197,23 @@ pub(crate) fn selection_pipe() -> Option<(OwnedFd, OwnedFd)> {
 }
 
 /// Read a selection on a worker, refusing oversized or stalled transfers.
+///
+/// `deadline` is when the peer must have finished, taken before the request —
+/// see [`SELECTION_TIMEOUT`]. **What is already in the pipe is read even after
+/// it**, so a job the pool started late does not refuse an answer that arrived
+/// in time; only waiting for more stops there.
 pub fn receive(
     fd: &OwnedFd,
     limit: usize,
-    timeout: std::time::Duration,
+    deadline: std::time::Instant,
 ) -> std::io::Result<Vec<u8>> {
     use rustix::event::{PollFd, PollFlags};
     let flags = rustix::fs::fcntl_getfl(fd)?;
     rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)?;
-    let deadline = std::time::Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return Err(std::io::ErrorKind::TimedOut.into());
-        }
         let timeout = rustix::event::Timespec::try_from(left)
             .map_err(|_| std::io::ErrorKind::InvalidInput)?;
         let mut fds = [PollFd::new(&fd, PollFlags::IN)];
@@ -453,19 +456,40 @@ mod tests {
     /// this test does not finish.
     #[test]
     fn selection_reads_stop_at_the_byte_limit_and_deadline() {
+        let soon = || Instant::now() + std::time::Duration::from_secs(1);
         let (read, write) = selection_pipe().unwrap();
         rustix::io::write(&write, b"abc").unwrap();
         drop(write);
-        assert_eq!(super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap(), b"abc");
+        assert_eq!(super::receive(&read, 3, soon()).unwrap(), b"abc");
         let (read, write) = selection_pipe().unwrap();
         rustix::io::write(&write, b"abcd").unwrap();
         assert_eq!(
-            super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap_err().kind(),
+            super::receive(&read, 3, soon()).unwrap_err().kind(),
             std::io::ErrorKind::FileTooLarge
         );
         let (read, _held) = selection_pipe().unwrap();
+        let passed = Instant::now() + std::time::Duration::from_millis(1);
         assert_eq!(
-            super::receive(&read, 3, std::time::Duration::from_millis(1)).unwrap_err().kind(),
+            super::receive(&read, 3, passed).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    /// The deadline is taken before the request, so a pool busy for longer
+    /// than it starts the reader after it has passed. An answer that had
+    /// finished by then is still the answer; one still arriving is not.
+    #[test]
+    fn an_answer_that_finished_in_time_is_read_by_a_reader_that_started_late() {
+        let passed = Instant::now();
+        let (read, write) = selection_pipe().unwrap();
+        rustix::io::write(&write, b"abc").unwrap();
+        drop(write);
+        assert_eq!(super::receive(&read, 3, passed).unwrap(), b"abc");
+
+        let (read, held) = selection_pipe().unwrap();
+        rustix::io::write(&held, b"ab").unwrap();
+        assert_eq!(
+            super::receive(&read, 3, passed).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
     }
