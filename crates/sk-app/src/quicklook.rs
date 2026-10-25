@@ -34,7 +34,7 @@ use crate::previews::Shows;
 /// of log is a hundred megabytes of allocation for the forty lines a panel can
 /// draw. The same figure `sk_fs::text` uses for *Copy the text inside*, for the
 /// same reason.
-const TEXT_LIMIT: usize = 256 * 1024;
+pub(crate) const TEXT_LIMIT: usize = 256 * 1024;
 
 /// How many pages are rendered before they are asked for.
 ///

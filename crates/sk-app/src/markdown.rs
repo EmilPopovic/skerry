@@ -1115,4 +1115,90 @@ mod tests {
         assert_eq!(inline("just some words").len(), 1);
         assert_eq!(inline(""), vec![Run::plain("")]);
     }
+
+    /// A document built to make the parser slow, `bytes` long, or `None` for a
+    /// case nobody wrote.
+    ///
+    /// Each is one paragraph, and each starts with a letter so that it stays
+    /// one — a line of nothing but `*` is a rule and a line of backticks is a
+    /// fence.
+    fn hostile(case: &str, bytes: usize) -> Option<String> {
+        let fill = |unit: &str| {
+            let mut out = "x".to_owned();
+            while out.len() + unit.len() <= bytes {
+                out.push_str(unit);
+            }
+            out
+        };
+        Some(match case {
+            "stars" => fill("*"),
+            "ticks" => fill("`"),
+            "brackets" => fill("["),
+            "angles" => fill("<"),
+            "alternating" => fill("*_"),
+            "nested" => {
+                let depth = bytes / 5;
+                format!("{}x{}", "[".repeat(depth), "](u)".repeat(depth))
+            }
+            "honest" => include_str!("../../../docs/12-measurement.md").to_owned(),
+            _ => return None,
+        })
+    }
+
+    /// What one parse costs, over a document built to be slow or an honest one.
+    ///
+    /// One case per process, because before the depth bound the deepest of them
+    /// overflowed the stack and took the process with it. Each repetition parses
+    /// on a fresh thread with the job pool's stack — two mebibytes, Rust's
+    /// default, which is what `sk_util::Pool` asks for by asking for nothing —
+    /// unless `SKERRY_MARKDOWN_STACK_MIB` says otherwise:
+    ///
+    /// ```text
+    /// SKERRY_MARKDOWN_CASE=brackets cargo test -p sk-app --release --lib \
+    ///     measure_the_parser -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement; run it deliberately"]
+    fn measure_the_parser() {
+        let number = |name: &str, default: usize| {
+            std::env::var(name).ok().and_then(|it| it.parse().ok()).unwrap_or(default)
+        };
+        let case = std::env::var("SKERRY_MARKDOWN_CASE").unwrap_or_else(|_| "honest".to_owned());
+        let bytes = number("SKERRY_MARKDOWN_BYTES", crate::quicklook::TEXT_LIMIT);
+        let repetitions = number("SKERRY_MARKDOWN_REPS", 11);
+        let stack = number("SKERRY_MARKDOWN_STACK_MIB", 2) * 1024 * 1024;
+        let budget = std::time::Duration::from_secs(number("SKERRY_MARKDOWN_BUDGET_S", 300) as u64);
+        let Some(text) = hostile(&case, bytes) else {
+            println!("skerry-markdown no case called {case:?}");
+            return;
+        };
+        let load = || std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
+        println!("skerry-markdown load before {}", load().trim());
+        let text = std::sync::Arc::new(text);
+        let started = std::time::Instant::now();
+        let mut taken = Vec::new();
+        let mut blocks = 0;
+        while taken.len() < repetitions && (taken.is_empty() || started.elapsed() < budget) {
+            let text = std::sync::Arc::clone(&text);
+            let worker = std::thread::Builder::new().stack_size(stack).spawn(move || {
+                let at = std::time::Instant::now();
+                let parsed = parse(&text);
+                (at.elapsed(), parsed.len())
+            });
+            let (took, count) = worker.expect("a thread").join().expect("the parse");
+            taken.push(took.as_secs_f64() * 1000.0);
+            blocks = count;
+        }
+        taken.sort_by(f64::total_cmp);
+        println!(
+            "skerry-markdown case={case} bytes={} reps={} blocks={blocks} \
+             min={:.3} median={:.3} max={:.3} ms",
+            text.len(),
+            taken.len(),
+            taken[0],
+            taken[taken.len() / 2],
+            taken[taken.len() - 1],
+        );
+        println!("skerry-markdown load after {}", load().trim());
+    }
 }
