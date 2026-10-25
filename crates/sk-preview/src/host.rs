@@ -449,14 +449,16 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
         }
         let request = Request {
             ask: want.ask,
-            within: want.within,
+            within: crate::wire::bounded(want.within),
             page: want.page,
             path: want.path.as_os_str().as_encoded_bytes().to_vec(),
         };
         let asked = std::time::Instant::now();
         writing.get_mut().until(asked + DEADLINE);
         reading.get_mut().until(asked + DEADLINE);
-        let answered = request.write_to(&mut writing).and_then(|()| Reply::read_from(&mut reading));
+        let answered = request
+            .write_to(&mut writing)
+            .and_then(|()| Reply::read_from(&mut reading, request.within));
         match answered {
             Ok(reply) if asked.elapsed() < DEADLINE => answers.push(Answer {
                 key: want.key(),
@@ -530,7 +532,8 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
     }
 }
 
-fn terminate(child: &mut Child) {
+/// Kills a helper started by [`helper`] and everything in its process group.
+pub(crate) fn terminate(child: &mut Child) {
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: helpers start in their own process group; a negative pid targets it.
         unsafe {

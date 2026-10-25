@@ -437,3 +437,49 @@ fn unpack_single(name: &str, mut bytes: detect::Bytes, place: &mut Place) -> Res
     place.wrote(name, 0, total);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::{Ask, Place, Refusal, Request, detect, place, unpack_tar};
+    use std::os::fd::BorrowedFd;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A filesystem with bytes to spare whose inodes run short after the first
+    /// time it is asked.
+    #[expect(clippy::unnecessary_wraps, reason = "the shape `Place::measured_by` takes")]
+    fn running_out(_: BorrowedFd<'_>) -> Result<place::Left, Refusal> {
+        static ASKED: AtomicU64 = AtomicU64::new(0);
+        let first = ASKED.fetch_add(1, Ordering::Relaxed) == 0;
+        let files_free = if first { 1_000_000 } else { 300 };
+        Ok(place::Left { bytes: 1 << 40, files: 1_000_000, files_free })
+    }
+
+    /// **A tar of empty files is stopped by the inode reserve**, at the first
+    /// check after the inodes ran short — not by a count of entries, which
+    /// refused honest archives of a hundred thousand files as well.
+    #[test]
+    fn a_tar_of_empty_files_stops_where_the_inodes_run_short() {
+        let at = std::env::temp_dir().join(format!("skerry-archive-inodes-{}", std::process::id()));
+        let into = at.join("into");
+        std::fs::create_dir_all(&into).unwrap();
+        let mut tar = Vec::new();
+        for index in 0..3_000 {
+            crate::tar::tests::member(&mut tar, &format!("empty{index}"), b'0', b"");
+        }
+        tar.resize(tar.len() + 1024, 0);
+        let archive = at.join("empty.tar");
+        std::fs::write(&archive, tar).unwrap();
+
+        let mut place = Place::under(&into).unwrap().measured_by(running_out);
+        let Ok(detect::Opened::Tar { bytes, .. }) = detect::open(&archive) else {
+            panic!("the fixture was not read as a tar");
+        };
+        let request = Request { ask: Ask::Unpack, archive, into, only: Vec::new() };
+        let outcome = unpack_tar(bytes, &request, &mut place, &mut Vec::new(), &mut |_, _| Ok(()));
+        assert_eq!(outcome.map_err(|(refusal, _)| refusal), Err(Refusal::NoRoom));
+        assert_eq!(place.written.entries, place::MAKE_EVERY, "it stopped at some other check");
+        std::fs::remove_dir_all(&at).unwrap();
+    }
+}

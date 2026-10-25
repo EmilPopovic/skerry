@@ -381,7 +381,7 @@ fn parser_campaign_tar() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
@@ -446,7 +446,7 @@ mod tests {
         }
     }
 
-    fn member(out: &mut Vec<u8>, name: &str, kind: u8, data: &[u8]) {
+    pub(crate) fn member(out: &mut Vec<u8>, name: &str, kind: u8, data: &[u8]) {
         out.extend_from_slice(&header(name, data.len() as u64, kind));
         out.extend_from_slice(data);
         out.resize(out.len().next_multiple_of(BLOCK), 0);

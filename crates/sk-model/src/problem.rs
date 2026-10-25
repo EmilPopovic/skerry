@@ -113,6 +113,12 @@ pub enum ProblemKind {
     Incomplete,
     /// A container variant cannot be extracted safely by this reader.
     UnsupportedArchive,
+    /// A helper started answering and went silent, and was stopped for it.
+    ///
+    /// Its own kind because the only other sentence a helper that stopped could
+    /// get is [`Self::NoUnpacker`]'s, which tells somebody to install a program
+    /// that was installed and running.
+    Stalled,
     /// The bytes are not text, so they cannot be treated as text.
     ///
     /// Its own kind because the answer is not "this failed" but "this is not the
@@ -154,6 +160,7 @@ impl ProblemKind {
             Self::Damaged => "error.damaged",
             Self::Incomplete => "error.incomplete",
             Self::UnsupportedArchive => "error.unsupported_archive",
+            Self::Stalled => "error.stalled",
             Self::NotUnpackable => "error.not_unpackable",
             Self::NotText => "error.not_text",
             Self::TrashEmptied => "error.trash_emptied",
@@ -243,6 +250,7 @@ mod tests {
             ProblemKind::NoDisplay,
             ProblemKind::NoGpu,
             ProblemKind::NoFont,
+            ProblemKind::Stalled,
         ] {
             let message = Problem::plain(kind, "detail").message();
             assert!(!message.starts_with("error."), "`{kind:?}` has no catalogue entry");

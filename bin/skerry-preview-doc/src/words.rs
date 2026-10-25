@@ -47,10 +47,14 @@ pub fn of(path: &Path, page: u32, turned: u32) -> Option<Words> {
 }
 
 /// poppler's answer: `pdftotext -bbox-layout`.
+///
+/// **From the `CropBox`, as the page is drawn.** Without `-cropbox` the layer is
+/// the `MediaBox`'s — a different page size and every word's top measured from a
+/// different edge — and the highlights land off the words on any cropped page.
 fn poppler(path: &Path, page: u32, turned: u32) -> Option<Words> {
     let page = page.max(1).to_string();
     let done = Command::new("pdftotext")
-        .args(["-bbox-layout", "-f", &page, "-l", &page])
+        .args(["-bbox-layout", "-cropbox", "-f", &page, "-l", &page])
         .arg(path)
         .arg("-")
         .output()
@@ -60,7 +64,7 @@ fn poppler(path: &Path, page: u32, turned: u32) -> Option<Words> {
     }
     let mut layer = parse(&String::from_utf8_lossy(&done.stdout))?;
     // **A quarter turn swaps the page and nothing else.** On a `/Rotate 90` page
-    // poppler reports the *unrotated* `MediaBox` as the page's size and the word
+    // poppler reports the *unrotated* page box as the page's size and the word
     // boxes in the *rotated* space — a 420-point-wide page with a word at x=496 —
     // while `pdftoppm` renders the rotated image. Dividing by the reported width
     // put every highlight a factor of 1.4 from its word and off the paper.

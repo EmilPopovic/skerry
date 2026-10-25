@@ -497,6 +497,7 @@ archive.elsewhere = A {0} archive is not something Skerry reads. Open it with an
 archive.no_room = There is no room left on this disk for what the archive holds.
 archive.stopped = Stopped.
 archive.interrupted = The archive helper stopped before it answered. Press Space again to retry.
+archive.stalled = The archive helper stopped answering partway through and was ended. Press Space again to retry.
 archive.summary[one]   = {0} entry · {1} unpacked · {2}
 archive.summary[other] = {0} entries · {1} unpacked · {2}
 archive.capped[one]   = the first {0} of {1} entry · {2} unpacked · {3}
@@ -743,6 +744,7 @@ error.incomplete = {0}: some entries could not be extracted. The partial output 
 archive.partial = Some entries could not be extracted. The partial output was kept.
 
 error.unsupported_archive = {0} uses an unsupported archive variant. Use another archive tool. Any partial output was kept and can be undone.
+error.stalled = The archive helper stopped answering while unpacking {0} and was ended. What it wrote was kept and can be undone; try again.
 archive.unsupported = This archive uses a variant Skerry cannot read safely. Use another archive tool.
 
 error.trash_unavailable = Cannot use Trash for {0}. The file has been kept. Check the volume is mounted and its trash is writable, then try again.

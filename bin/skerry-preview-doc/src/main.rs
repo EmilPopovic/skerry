@@ -210,7 +210,8 @@ fn on_path(program: &str) -> bool {
 /// its output and a second spawn per render is a tenth of what the render costs.
 #[derive(Clone, Copy, Default)]
 struct Facts {
-    /// The `MediaBox`, in points, **unrotated** — which is what poppler prints.
+    /// The `CropBox`, in points, **unrotated** — which is what `pdfinfo` prints as
+    /// a page's size, and what every renderer here is told to draw.
     size: Option<(f32, f32)>,
     /// Degrees clockwise, 0, 90, 180 or 270.
     rotation: u32,
@@ -251,7 +252,7 @@ fn facts(path: &Path, page: u32) -> Facts {
 /// How far the page is turned, for the text layer.
 ///
 /// **A `/Rotate 90` page is where poppler's own two answers disagree**: its text
-/// layer reports the unrotated `MediaBox` as the page's size and the boxes in the
+/// layer reports the unrotated page box as the page's size and the boxes in the
 /// rotated space, and its renderer draws the rotated image. Zero where nothing
 /// can say, which is the same as no rotation and is what every page that is not
 /// turned reports anyway.
@@ -311,7 +312,12 @@ fn render(
     // Four thousand a side is the wire's own ceiling, and no lower: a preview
     // whose long edge is capped below the panel's is a preview that gets *worse*
     // on a better screen.
-    let within = (within.0.clamp(64, 4096), within.1.clamp(64, 4096));
+    //
+    // **And one pixel is the floor, not sixty-four.** The host refuses a page
+    // larger than the box it asked for, and a floor above the box is exactly
+    // that: measured, a draft box 44 pixels wide came back 64 wide from mupdf
+    // and 65 from poppler.
+    let within = sk_preview::wire::bounded(within);
     let page_number = page.to_string();
     let mut command = Command::new(match tool {
         Tool::PdfToPpm => "pdftoppm",
@@ -322,11 +328,24 @@ fn render(
             // **Poppler distorts when given both axes** — `-scale-to-x 1000
             // -scale-to-y 200` answers 1000×200 for an A5 page — so the fit is
             // computed here from what `pdfinfo` says the page is, and one long
-            // edge is passed. Without a size to fit against, the old behaviour is
-            // the fallback: a long edge, which is never *smaller* than right.
+            // edge is passed.
+            //
+            // **Then cropped to the box**, because poppler rounds the edge it
+            // derives up: measured over 120 boxes on three documents, 21 came back
+            // one pixel wider than the box with the long edge exactly right.
+            // `-W`/`-H` take that pixel, which is margin, off a page the host
+            // would otherwise refuse.
+            //
+            // **And drawn from the `CropBox`**, which is the box `pdfinfo` sized
+            // the fit from and the one mupdf draws. poppler's default is the
+            // `MediaBox`: a 612×792 page cropped to 612×400, in a 1000×600 box,
+            // was drawn whole at the crop's scale and came back 710×600 — the
+            // top of a page that was not the one asked for.
             let long = fitted_long_edge(path, page, within);
+            let (width, height) = (within.0.to_string(), within.1.to_string());
             command
-                .args(["-png", "-f", &page_number, "-l", &page_number, "-scale-to", &long])
+                .args(["-png", "-cropbox", "-f", &page_number, "-l", &page_number])
+                .args(["-scale-to", &long, "-W", &width, "-H", &height])
                 .arg(path);
         }
         Tool::MuTool => {
@@ -343,16 +362,17 @@ fn render(
     if !done.status.success() || done.stdout.is_empty() {
         return Err(Refusal::Undecodable);
     }
-    decode_png(&done.stdout)
+    decode_png(&done.stdout, within)
 }
 
 /// The long edge to render at, so the page lands inside `within`.
 ///
 /// The page's own size decides which axis binds. Where `pdfinfo` says nothing —
-/// no poppler, an encrypted document, a page it will not describe — the box's
-/// long edge is the answer, which is what this did before and is never too small.
+/// an encrypted document, a page it will not describe — the box's short edge is
+/// the answer: a page that long fits the box whichever way it is turned, where
+/// the box's long edge, which this used to answer, is a page the crop cuts.
 fn fitted_long_edge(path: &Path, page: u32, within: (u32, u32)) -> String {
-    let fallback = within.0.max(within.1);
+    let fallback = within.0.min(within.1);
     let Some((width, height)) = facts(path, page).drawn() else { return fallback.to_string() };
     if width <= 0.0 || height <= 0.0 {
         return fallback.to_string();
@@ -361,15 +381,25 @@ fn fitted_long_edge(path: &Path, page: u32, within: (u32, u32)) -> String {
     let long = (width.max(height) * scale).round();
     // Clamped to the same ceiling the box is, because a page thirty times as tall
     // as it is wide would otherwise ask for a render the wire cannot carry.
-    (long.clamp(64.0, 4096.0) as u32).to_string()
+    (long.clamp(1.0, sk_preview::wire::MOST_SIDE as f32) as u32).to_string()
 }
 
-/// The renderer's PNG, as straight `RGBA8`.
-fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, (u32, u32)), Refusal> {
+/// The renderer's PNG, as straight `RGBA8`, if it fits inside `within`.
+///
+/// **The size is the renderer's claim, and it is checked before a pixel is
+/// decoded.** The renderer is a program off `PATH` reading a file out of a
+/// download directory: a PNG of 65,536 × 256 is exactly the wire's byte ceiling,
+/// and relaying it reached a `create_texture` past the device's limit, which
+/// `wgpu` answers with a panic. Both renderers are asked for a page inside
+/// `within`, so a page past it is not a page this asked for.
+fn decode_png(bytes: &[u8], within: (u32, u32)) -> Result<(Vec<u8>, (u32, u32)), Refusal> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reading = decoder.read_info().map_err(|_| Refusal::Undecodable)?;
     let (width, height) = (reading.info().width, reading.info().height);
+    if width > within.0 || height > within.1 {
+        return Err(Refusal::TooLarge);
+    }
     let mut raw = vec![0u8; reading.output_buffer_size().ok_or(Refusal::TooLarge)?];
     let frame = reading.next_frame(&mut raw).map_err(|_| Refusal::Undecodable)?;
     let raw = &raw[..frame.buffer_size()];
@@ -393,9 +423,122 @@ fn decode_png(bytes: &[u8]) -> Result<(Vec<u8>, (u32, u32)), Refusal> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{decode_png, looks_like_pdf, on_path};
+    use super::{Tool, decode_png, fitted_long_edge, looks_like_pdf, on_path, render};
     use sk_preview::Refusal;
     use std::io::Write;
+    use std::path::Path;
+
+    /// A one-page PDF whose page dictionary carries `boxes` and which draws
+    /// `content` in Helvetica, written with a correct cross-reference table so
+    /// neither renderer has to repair it.
+    fn one_page_pdf(path: &Path, boxes: &str, content: &str) {
+        let page = format!(
+            "<< /Type /Page /Parent 2 0 R {boxes} /Resources << /Font << /F1 5 0 R >> >> \
+             /Contents 4 0 R >>"
+        );
+        let stream = format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len() + 1);
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            page.as_str(),
+            stream.as_str(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ];
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(format!("{} 0 obj {object} endobj\n", index + 1).as_bytes());
+        }
+        let xref = bytes.len();
+        bytes.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        let trailer = format!("trailer << /Size {} /Root 1 0 R >>\n", objects.len() + 1);
+        bytes.extend_from_slice(trailer.as_bytes());
+        bytes.extend_from_slice(format!("startxref\n{xref}\n%%EOF\n").as_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// **An honest render fits the box it was asked into, to the pixel**, because
+    /// the host now refuses one that does not. Each box is one that came back too
+    /// large before: poppler's derived edge a pixel over, and a box under the old
+    /// sixty-four-pixel floor raised to it.
+    #[test]
+    fn a_rendered_page_lands_inside_its_box() {
+        let dir = std::env::temp_dir().join(format!("skerry-doc-fit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("a4.pdf");
+        one_page_pdf(&pdf, "/MediaBox [0 0 595 842]", "");
+        for (tool, program) in [(Tool::PdfToPpm, "pdftoppm"), (Tool::MuTool, "mutool")] {
+            if !on_path(program) {
+                eprintln!("skerry-preview-doc: no {program} on this machine — skipped");
+                continue;
+            }
+            for within in [(828, 1353), (118, 168), (141, 1178), (44, 1013), (1000, 30)] {
+                let (_, size) = render(tool, &pdf, within, 1).unwrap();
+                assert!(
+                    size.0 <= within.0 && size.1 <= within.1,
+                    "{program}: {size:?} in {within:?}"
+                );
+                // And it still fills the edge that binds, or the fix is a page
+                // that got smaller to fit.
+                let filled = (size.0 as f32 / within.0 as f32).max(size.1 as f32 / within.1 as f32);
+                assert!(filled > 0.97, "{program}: {size:?} leaves {within:?} unfilled");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A cropped page is drawn as cropped, whole, with its words where it is
+    /// drawn.** `pdfinfo` sizes a page by its `CropBox` and poppler draws the
+    /// `MediaBox` unless told otherwise, so the fit was computed for one box and
+    /// drawn for another — and the crop to the panel then cut it.
+    #[test]
+    fn a_cropped_page_is_drawn_whole_from_its_crop_box() {
+        let dir = std::env::temp_dir().join(format!("skerry-doc-crop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf = dir.join("cropped.pdf");
+        // A black quarter in the crop's bottom left, a word inside the crop and
+        // one above it, on the part of the `MediaBox` the crop leaves out.
+        let content = "0 0 0 rg 0 0 306 200 re f\n\
+                       BT /F1 24 Tf 400 300 Td (Inside) Tj ET\n\
+                       BT /F1 24 Tf 400 700 Td (Outside) Tj ET";
+        one_page_pdf(&pdf, "/MediaBox [0 0 612 792] /CropBox [0 0 612 400]", content);
+        let dark = |pixels: &[u8], width: u32, at: (u32, u32)| {
+            pixels[((at.1 * width + at.0) * 4) as usize] < 64
+        };
+        for (tool, program) in [(Tool::PdfToPpm, "pdftoppm"), (Tool::MuTool, "mutool")] {
+            if !on_path(program) {
+                eprintln!("skerry-preview-doc: no {program} on this machine — skipped");
+                continue;
+            }
+            let (pixels, size) = render(tool, &pdf, (1000, 600), 1).unwrap();
+            assert_eq!(size, (918, 600), "{program} drew some other box");
+            assert!(dark(&pixels, size.0, (100, 500)), "{program}: the crop's corner is missing");
+            assert!(!dark(&pixels, size.0, (100, 100)), "{program}: the corner is not where it is");
+        }
+        if on_path("pdftotext") {
+            let layer = super::words::of(&pdf, 1, 0).unwrap();
+            assert_eq!(layer.page, (612.0, 400.0), "the words are measured on another page");
+            let said: Vec<&str> = layer.words.iter().map(|word| word.text.as_str()).collect();
+            assert_eq!(said, ["Inside"], "a word outside the crop was offered for selection");
+            assert!(layer.words[0].at.1 < 400.0);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where nothing says how big the page is, the box's short edge is the long
+    /// edge asked for, because that page fits the box whichever way it is turned.
+    #[test]
+    fn a_page_of_unknown_size_is_fitted_to_the_short_edge() {
+        let nowhere = Path::new("/nonexistent/skerry/page.pdf");
+        assert_eq!(fitted_long_edge(nowhere, 1, (1000, 500)), "500");
+        assert_eq!(fitted_long_edge(nowhere, 1, (300, 900)), "300");
+    }
 
     #[test]
     fn a_pdf_is_recognised_by_its_bytes_and_not_its_name() {
@@ -433,7 +576,40 @@ mod tests {
 
     #[test]
     fn something_that_is_not_a_png_is_undecodable_rather_than_a_panic() {
-        assert_eq!(decode_png(b"").err(), Some(Refusal::Undecodable));
-        assert_eq!(decode_png(b"\x89PNG\r\n\x1a\nand nothing").err(), Some(Refusal::Undecodable));
+        let within = (800, 600);
+        assert_eq!(decode_png(b"", within).err(), Some(Refusal::Undecodable));
+        assert_eq!(
+            decode_png(b"\x89PNG\r\n\x1a\nand nothing", within).err(),
+            Some(Refusal::Undecodable)
+        );
+    }
+
+    /// A one-bit grey PNG of `size`, which is how a picture this large stays a
+    /// fixture of a few kilobytes.
+    fn blank_png(size: (u32, u32)) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, size.0, size.1);
+        encoder.set_color(png::ColorType::Grayscale);
+        encoder.set_depth(png::BitDepth::One);
+        let mut writer = encoder.write_header().unwrap();
+        let row = size.0.div_ceil(8) as usize;
+        writer.write_image_data(&vec![0u8; row * size.1 as usize]).unwrap();
+        writer.finish().unwrap();
+        bytes
+    }
+
+    /// **A renderer's page is no larger than the box it was asked for.** The
+    /// 65,536 × 256 page is what a replaced `pdftoppm` would answer with: inside
+    /// the wire's byte ceiling, and sixteen times the side Vulkan guarantees.
+    #[test]
+    fn a_page_past_the_box_it_was_asked_for_is_refused() {
+        let hostile = blank_png((65_536, 256));
+        assert_eq!(decode_png(&hostile, (4096, 4096)).err(), Some(Refusal::TooLarge));
+
+        // The box itself is fine, and one pixel past it on either side is not.
+        let page = blank_png((3, 2));
+        assert_eq!(decode_png(&page, (3, 2)).map(|(_, size)| size), Ok((3, 2)));
+        assert_eq!(decode_png(&page, (2, 2)).err(), Some(Refusal::TooLarge));
+        assert_eq!(decode_png(&page, (3, 1)).err(), Some(Refusal::TooLarge));
     }
 }

@@ -488,6 +488,9 @@ fn refused(refusal: sk_preview::archive::Refusal, note: &str, archive: &Path) ->
             ProblemKind::NoUnpacker,
             if note.is_empty() { "skerry-archive".to_owned() } else { note.to_owned() },
         ),
+        // A helper that was there and went silent, which the arm above would
+        // call missing.
+        Refusal::Stalled => (ProblemKind::Stalled, named(archive)),
         Refusal::NoRoom => (ProblemKind::Full, named(archive)),
         Refusal::Partial => (ProblemKind::Incomplete, named(archive)),
         Refusal::Unsupported => (ProblemKind::UnsupportedArchive, named(archive)),
