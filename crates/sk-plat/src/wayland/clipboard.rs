@@ -285,10 +285,10 @@ impl super::Window {
 
     /// Reads what was dropped, as a descriptor.
     ///
-    /// Called after [`crate::Event::Dropped`]. `finish` and the destroy happen
-    /// here rather than being left to the caller: a source waits for `finish`
-    /// before it considers the drag over, and one that never gets it leaves a
-    /// grab on the pointer.
+    /// Called after [`crate::Event::Dropped`]. `finish` and the destroy are the
+    /// caller's, through `finish_drop`, on every path — a refused read
+    /// included: a source waits for `finish` before it considers the drag
+    /// over, and one that never gets it leaves a grab on the pointer.
     pub fn take_drop(&mut self, mime: &str) -> Result<std::os::fd::OwnedFd, Unasked> {
         let offer = self.state.drags.offer.as_ref().ok_or(Unasked::Unavailable)?;
         let (read, write) = selection_pipe().ok_or(Unasked::Unavailable)?;
