@@ -1,0 +1,9 @@
+# A pipe without close-on-exec is inherited by every helper and application this
+# process launches. Two clipboard pipes were, and a paste whose reader waits for
+# end-of-file then waited until whatever had been launched meanwhile exited.
+# Clippy resolves the real path, so an import or an alias does not hide a call.
+disallowed-methods = [
+    { path = "rustix::pipe::pipe", reason = "no close-on-exec: use rustix::pipe::pipe_with(PipeFlags::CLOEXEC). pipe_with(PipeFlags::empty()) is the same leak and no path lint can see it" },
+    { path = "libc::pipe", reason = "no close-on-exec: use rustix::pipe::pipe_with(PipeFlags::CLOEXEC)" },
+    { path = "libc::pipe2", reason = "its flags decide close-on-exec and a path lint cannot read them: use rustix::pipe::pipe_with(PipeFlags::CLOEXEC), or allow it with the reason the flags are right" },
+]

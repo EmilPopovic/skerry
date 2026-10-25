@@ -98,7 +98,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     fn pair() -> (std::fs::File, std::fs::File) {
-        let (read, write) = rustix::pipe::pipe().unwrap();
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         (read.into(), write.into())
     }
 
