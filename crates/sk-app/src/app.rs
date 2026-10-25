@@ -901,9 +901,15 @@ enum Pasted {
     ///
     /// Always a copy: a peer that asked for a move removes its own originals,
     /// and doing it here would delete somebody else's files on a confirmation
-    /// this program cannot get — see `sk_plat::drag`. The last field is what to
-    /// say when the read was refused; see [`refusal`].
-    Dropped(Vec<PathBuf>, PathBuf, Option<String>),
+    /// this program cannot get — see `sk_plat::drag`.
+    Dropped {
+        /// The files, already checked to exist.
+        paths: Vec<PathBuf>,
+        /// The directory they go into.
+        into: PathBuf,
+        /// What to say when the read was refused. See [`refusal`].
+        refused: Option<String>,
+    },
     /// The clipboard held nothing that names a file.
     NotFiles,
     /// Text to insert into whichever field still has the keyboard.
@@ -2457,7 +2463,7 @@ impl App {
                 };
                 self.said_it_is_busy(took);
             }
-            Pasted::Dropped(paths, into, refused) => {
+            Pasted::Dropped { paths, into, refused } => {
                 self.drops_drained = self.drops_drained.saturating_add(1);
                 // The bytes are in hand, so the drag is over: `wl_data_offer`
                 // wants `finish` *after* the read, and a source told earlier
@@ -11795,7 +11801,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
             // files on a confirmation this crate cannot get — see `sk_plat::drag`.
             // Sent even when it names nothing, so the drag is always closed:
             // an offer left open holds a source that is waiting on us.
-            let reply = Pasted::Dropped(paths, into, refused);
+            let reply = Pasted::Dropped { paths, into, refused };
             let spent = u32::try_from(asked.elapsed().as_millis()).unwrap_or(u32::MAX);
             took.store(spent, std::sync::atomic::Ordering::Relaxed);
             delivered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

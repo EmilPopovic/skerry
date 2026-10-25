@@ -378,8 +378,9 @@ impl Window {
     /// This is where "zero CPU at idle" lives on both backends. The thread
     /// sleeps in `poll` on the display connection and, optionally, on a job
     /// pool's eventfd. There is no timer and no polling interval; `timeout`
-    /// exists for an animation that has a next frame, and key repeat and a
-    /// selection read still in flight shorten it internally.
+    /// exists for an animation that has a next frame. Key repeat shortens it
+    /// internally on both backends, and on X11 so does a conversion still in
+    /// flight, which has a deadline there because X11 collects the answer itself.
     pub fn pump(&mut self, wake: Option<&Waker>, timeout: Option<Duration>) {
         forward!(self, pump, wake, timeout);
     }
