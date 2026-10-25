@@ -639,6 +639,16 @@ pub(crate) struct Unread {
 struct OutOfStep;
 
 #[cfg(test)]
+impl Bus {
+    /// A connection over a socket whose other end is a test, with no daemon,
+    /// no authentication and no `Hello` — for a test that plays the peer.
+    pub(crate) const fn over(socket: UnixStream) -> Self {
+        let unique = String::new();
+        Self { socket, serial: 0, unique, held: Vec::new(), discard: 0, names: Vec::new() }
+    }
+}
+
+#[cfg(test)]
 impl Front {
     /// The message, where there is a whole one.
     pub(crate) fn whole(self) -> Option<(Message, usize)> {
