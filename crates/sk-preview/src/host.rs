@@ -532,7 +532,8 @@ fn run_batch(kind: Kind, child: Option<Child>, batch: &[Want], cancel: &sk_util:
     }
 }
 
-fn terminate(child: &mut Child) {
+/// Kills a helper started by [`helper`] and everything in its process group.
+pub(crate) fn terminate(child: &mut Child) {
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: helpers start in their own process group; a negative pid targets it.
         unsafe {

@@ -9,10 +9,14 @@ pub(crate) struct Timed<T> {
     inner: T,
     cancel: sk_util::Cancel,
     deadline: Instant,
+    /// Where set, each read and write gets this long from when it starts, rather
+    /// than all of them sharing [`Timed::until`]'s one deadline.
+    stall: Option<Duration>,
     setup_error: Option<i32>,
 }
 
 impl<T: AsRawFd> Timed<T> {
+    /// A pipe whose every byte, from now, is due within `limit`.
     pub(crate) fn new(inner: T, cancel: sk_util::Cancel, limit: Duration) -> Self {
         // SAFETY: `inner` owns this pipe throughout these descriptor operations.
         let setup_error = unsafe {
@@ -25,15 +29,35 @@ impl<T: AsRawFd> Timed<T> {
                 None
             }
         };
-        Self { inner, cancel, deadline: Instant::now() + limit, setup_error }
+        Self { inner, cancel, deadline: Instant::now() + limit, stall: None, setup_error }
+    }
+
+    /// A pipe that may take as long as it likes in all, but never `limit`
+    /// without a byte.
+    ///
+    /// **For a frame whose length is an archive's rather than the protocol's**,
+    /// where a deadline on the whole is one a large enough archive misses and
+    /// what tells a wedged peer from an honest one is that it stopped moving.
+    pub(crate) fn stalling(inner: T, cancel: sk_util::Cancel, limit: Duration) -> Self {
+        Self { stall: Some(limit), ..Self::new(inner, cancel, limit) }
     }
 
     pub(crate) fn until(&mut self, deadline: Instant) {
         self.deadline = deadline;
     }
 
+    pub(crate) fn get_ref(&self) -> &T {
+        &self.inner
+    }
+
     pub(crate) fn into_inner(self) -> T {
         self.inner
+    }
+
+    fn restart(&mut self) {
+        if let Some(stall) = self.stall {
+            self.deadline = Instant::now() + stall;
+        }
     }
 
     fn ready(&self, events: i16) -> io::Result<()> {
@@ -67,6 +91,7 @@ impl<T: AsRawFd> Timed<T> {
 
 impl<T: Read + AsRawFd> Read for Timed<T> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        self.restart();
         loop {
             self.ready(libc::POLLIN)?;
             match self.inner.read(bytes) {
@@ -79,6 +104,7 @@ impl<T: Read + AsRawFd> Read for Timed<T> {
 
 impl<T: Write + AsRawFd> Write for Timed<T> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.restart();
         loop {
             self.ready(libc::POLLOUT)?;
             match self.inner.write(bytes) {
@@ -112,6 +138,33 @@ mod tests {
             assert_eq!(timed.read_exact(&mut [0; 4]).unwrap_err().kind(), io::ErrorKind::TimedOut);
             assert!(started.elapsed() < Duration::from_secs(1));
         }
+    }
+
+    /// **A stall limit is about silence, not length.** A peer that trickles one
+    /// byte at a time is honest however long the whole takes, and one that stops
+    /// is given up the stall after its last byte rather than never.
+    #[test]
+    fn a_stall_limit_is_reset_by_every_byte_and_fires_on_silence() {
+        let (reader, mut peer) = pair();
+        let stall = Duration::from_millis(400);
+        let mut timed = Timed::stalling(reader, sk_util::Cancel::new(), stall);
+        std::thread::spawn(move || {
+            for byte in 0..16u8 {
+                std::thread::sleep(Duration::from_millis(40)); // skerry-allow: no-blocking-ui — a slow peer
+                peer.write_all(&[byte]).unwrap();
+            }
+            // Holds the pipe open and silent, which is the wedged peer.
+            std::thread::sleep(Duration::from_secs(5)); // skerry-allow: no-blocking-ui — a wedged peer
+        });
+        let started = Instant::now();
+        let mut sixteen = [0u8; 16];
+        timed.read_exact(&mut sixteen).unwrap();
+        assert_eq!(sixteen[15], 15);
+        assert!(started.elapsed() > stall, "the whole should have outlasted one stall");
+
+        let silent = Instant::now();
+        assert_eq!(timed.read(&mut [0; 1]).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(silent.elapsed() < Duration::from_secs(2), "{:?}", silent.elapsed());
     }
 
     #[test]

@@ -26,7 +26,10 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, ChildStdout};
+use std::time::Duration;
+
+use crate::pipe::Timed;
 
 /// `SKAR`, so a child started by hand and fed something else says so at once.
 const MAGIC: u32 = 0x534b_4152;
@@ -565,15 +568,36 @@ impl Record {
     }
 }
 
+/// How long a frame may go without a byte once its first byte has arrived.
+///
+/// **Inside a frame and nowhere else.** The silences an honest child keeps are
+/// between frames — a compressed tar walked whole before its listing's first
+/// byte, one entry of many gigabytes written between two progress records — and
+/// those are as long as the archive, so they wait on a cancel with no clock, as
+/// ADR 0032 has them. A frame is one `write_all` of a buffer the child has
+/// already built, so once its first byte is in the pipe the rest is following
+/// it, and a child that stops there is wedged.
+///
+/// **Ten seconds, against a measured 6.5 ms.** The largest frame is a listing at
+/// the table ceiling: 27 MB from a 100,000-entry tar, read in 64 KiB chunks on a
+/// 24-core machine, had a worst gap between two reads of 0.27 ms idle and 6.5 ms
+/// with 48 processes spinning, over five runs each. Ten seconds is 1,500 times
+/// the loaded figure, and it is what a wedged child costs a job before the job
+/// is free again; a Stop does not wait for it.
+const STALL: Duration = Duration::from_secs(10);
+
+/// A child's `stdout`, through a pipe that gives up on [`STALL`] and on a cancel.
+type Reading = std::io::BufReader<Timed<ChildStdout>>;
+
 /// What is inside `archive`.
 ///
 /// **Runs on a job**, and takes as long as the machine's decompressor takes: a
 /// compressed tar has no index, so listing one is reading all of it. Nothing here
-/// has a deadline, because the thing waiting is a panel somebody can close —
-/// ADR 0032.
+/// has a deadline before the answer starts, because the thing waiting is a panel
+/// somebody can close — ADR 0032.
 #[must_use]
 pub fn list(archive: &Path, cancel: &sk_util::Cancel) -> Listing {
-    let Some(mut child) = spawn() else {
+    let Some(child) = spawn() else {
         return Listing::refused(Refusal::NoUnpacker, "skerry-archive".to_owned());
     };
     let request = Request {
@@ -582,22 +606,27 @@ pub fn list(archive: &Path, cancel: &sk_util::Cancel) -> Listing {
         into: PathBuf::new(),
         only: Vec::new(),
     };
-    let mut stopped = false;
-    let answer = ask(&mut child, &request, |output| {
-        if waited(output.get_ref(), cancel) {
+    listed(child, &request, cancel, STALL)
+}
+
+/// [`list`], from a child already started.
+fn listed(
+    mut child: Child,
+    request: &Request,
+    cancel: &sk_util::Cancel,
+    stall: Duration,
+) -> Listing {
+    let answer = ask(&mut child, request, cancel, stall, |output| {
+        if waited(output.get_ref().get_ref(), cancel) {
             return Listing::read_from(output);
         }
-        stopped = true;
         Ok(Listing::refused(Refusal::Stopped, String::new()))
     });
-    // **A cancelled listing takes its child with it.** A panel closed over a
-    // four-gigabyte `tar.xz` would otherwise leave an `xz` decompressing the
-    // rest of it into a pipe nobody will ever read.
-    if stopped || cancel.is_cancelled() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    answer.unwrap_or_else(|| Listing::refused(Refusal::Interrupted, String::new()))
+    ended(&mut child);
+    answer.unwrap_or_else(|| {
+        let refusal = if cancel.is_cancelled() { Refusal::Stopped } else { Refusal::Interrupted };
+        Listing::refused(refusal, String::new())
+    })
 }
 
 /// Whether there is a record to read, waiting for one unless the caller has
@@ -607,21 +636,17 @@ pub fn list(archive: &Path, cancel: &sk_util::Cancel) -> Listing {
 /// arrive in one read and `poll` would report nothing readable while two of them
 /// were already in hand — a hundred milliseconds of waiting per record, on a
 /// pipe that had nothing left to deliver.
-fn ready(
-    output: &mut std::io::BufReader<std::process::ChildStdout>,
-    cancel: &sk_util::Cancel,
-) -> bool {
-    !output.buffer().is_empty() || waited(output.get_ref(), cancel)
+fn ready(output: &mut Reading, cancel: &sk_util::Cancel) -> bool {
+    !output.buffer().is_empty() || waited(output.get_ref().get_ref(), cancel)
 }
 
 /// Waits until the child has something to say, or until the caller stops caring.
 ///
-/// **A tenth of a second at a time.** The one read that can take seconds is the
-/// first — a compressed tar has no index, so the child says nothing until it has
-/// walked the whole archive — and everything after it is already in the pipe. So
-/// this is the only place a cancel can land, and polling it costs ten wake-ups a
-/// second on a thread that would otherwise be blocked.
-fn waited(output: &std::process::ChildStdout, cancel: &sk_util::Cancel) -> bool {
+/// **A tenth of a second at a time, and no deadline.** This is the wait between
+/// frames, where an honest child can be silent for as long as the archive takes
+/// to walk — [`STALL`] is the wait inside one. Polling the cancel costs ten
+/// wake-ups a second on a thread that would otherwise be blocked.
+fn waited(output: &ChildStdout, cancel: &sk_util::Cancel) -> bool {
     use std::os::fd::AsFd;
     let pipe = output.as_fd();
     loop {
@@ -632,7 +657,7 @@ fn waited(output: &std::process::ChildStdout, cancel: &sk_util::Cancel) -> bool 
         let tenth = rustix::event::Timespec { tv_sec: 0, tv_nsec: 100_000_000 };
         // Anything but a timeout means go and read: ready, a closed pipe — which
         // the read reports as the interruption it is — or a `poll` that failed,
-        // where blocking on the read is a better answer than giving up here.
+        // where the read's own stall limit is a better answer than giving up here.
         if rustix::event::poll(&mut waiting, Some(&tenth)) != Ok(0) {
             return true;
         }
@@ -655,13 +680,12 @@ pub fn unpack(
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(Progress),
 ) -> Unpacked {
-    let interrupted = |note: &str| Unpacked {
-        refusal: Refusal::Interrupted,
-        note: note.to_owned(),
-        progress: Progress::default(),
-    };
-    let Some(mut child) = spawn() else {
-        return interrupted("skerry-archive");
+    let Some(child) = spawn() else {
+        return Unpacked {
+            refusal: Refusal::Interrupted,
+            note: "skerry-archive".to_owned(),
+            progress: Progress::default(),
+        };
     };
     let request = Request {
         ask: Ask::Unpack,
@@ -669,8 +693,20 @@ pub fn unpack(
         into: into.to_path_buf(),
         only: only.to_vec(),
     };
-    let answer = ask(&mut child, &request, |output| {
-        let mut last = Progress::default();
+    unpacked(child, &request, cancel, watch, STALL)
+}
+
+/// [`unpack`], from a child already started.
+fn unpacked(
+    mut child: Child,
+    request: &Request,
+    cancel: &sk_util::Cancel,
+    watch: &mut dyn FnMut(Progress),
+    stall: Duration,
+) -> Unpacked {
+    let ending = |refusal, progress| Unpacked { refusal, note: String::new(), progress };
+    let mut last = Progress::default();
+    let answer = ask(&mut child, request, cancel, stall, |output| {
         loop {
             // **Waited for rather than blocked on**, so a Stop lands inside the
             // hundred milliseconds rather than when the child next has something
@@ -678,62 +714,69 @@ pub fn unpack(
             // silence, and without this the Cancel button would do nothing
             // visible until it had been written.
             if !ready(output, cancel) {
-                return Ok(Unpacked {
-                    refusal: Refusal::Stopped,
-                    note: String::new(),
-                    progress: last,
-                });
+                return Ok(ending(Refusal::Stopped, last));
             }
             match Record::read_from(output) {
                 Ok(Some(Record::Went(progress))) => {
                     last = progress;
                     watch(progress);
                     if cancel.is_cancelled() {
-                        return Ok(Unpacked {
-                            refusal: Refusal::Stopped,
-                            note: String::new(),
-                            progress,
-                        });
+                        return Ok(ending(Refusal::Stopped, progress));
                     }
                 }
                 Ok(Some(Record::Done(done))) => return Ok(*done),
-                // The child died without a final record. What it wrote is still
-                // on disk, so the count comes back with the reason: an unpack
-                // that reported nothing would leave files nothing describes.
-                Ok(None) | Err(_) => {
-                    return Ok(Unpacked {
-                        refusal: Refusal::Interrupted,
-                        note: String::new(),
-                        progress: last,
-                    });
-                }
+                // A Stop that landed inside a record, which the pipe answers by
+                // giving up the read.
+                _ if cancel.is_cancelled() => return Ok(ending(Refusal::Stopped, last)),
+                // The child died, or stalled inside a record, without a final
+                // one. What it wrote is still on disk, so the count comes back
+                // with the reason: an unpack that reported nothing would leave
+                // files nothing describes.
+                Ok(None) | Err(_) => return Ok(ending(Refusal::Interrupted, last)),
             }
         }
     });
-    // A cancelled unpack is a child still writing files. It goes now rather than
-    // when it finishes the archive.
-    if cancel.is_cancelled() {
-        let _ = child.kill();
-    }
-    let _ = child.wait();
-    answer.unwrap_or_else(|| interrupted(""))
+    ended(&mut child);
+    answer.unwrap_or_else(|| {
+        let refusal = if cancel.is_cancelled() { Refusal::Stopped } else { Refusal::Interrupted };
+        ending(refusal, last)
+    })
 }
 
 /// Writes a request, then reads the answer with `read`.
+///
+/// **Both directions through [`Timed`]**, so a child that stops reading its
+/// request is as bounded as one that stops writing its answer, and a cancel lands
+/// in either.
 fn ask<T>(
     child: &mut Child,
     request: &Request,
-    read: impl FnOnce(&mut std::io::BufReader<std::process::ChildStdout>) -> std::io::Result<T>,
+    cancel: &sk_util::Cancel,
+    stall: Duration,
+    read: impl FnOnce(&mut Reading) -> std::io::Result<T>,
 ) -> Option<T> {
-    let mut input = child.stdin.take()?;
+    let mut input = Timed::stalling(child.stdin.take()?, cancel.clone(), stall);
     let output = child.stdout.take()?;
     request.write_to(&mut input).ok()?;
     // **Closed before the answer is read.** The child reads until end of file to
     // know the request is whole, so a host still holding the pipe is a host and
     // a child both waiting for the other one.
     drop(input);
-    let mut reading = std::io::BufReader::new(output);
+    let mut reading = std::io::BufReader::new(Timed::stalling(output, cancel.clone(), stall));
     read(&mut reading).ok()
+}
+
+/// Kills the child and everything in its process group, then reaps it.
+///
+/// **Every exchange ends here, answered or not.** A child that has answered has
+/// nothing left to do; one that has not is stopped, wedged or broken, and a
+/// `wait` on a child that will not exit is the wedge [`STALL`] exists to end. The
+/// group rather than the pid, because a filter is the child's child, and one
+/// blocked reading its input never writes into the closed pipe that would
+/// otherwise end it.
+fn ended(child: &mut Child) {
+    crate::host::terminate(child);
+    let _ = child.wait();
 }
 
 /// Starts the helper, from beside this binary and then from `PATH`.
@@ -897,5 +940,133 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         assert!(Request::read_from(&mut bytes.as_slice()).is_err());
+    }
+
+    /// A child started the way [`crate::host::helper`] starts one — in a process
+    /// group of its own — running `script` in place of `skerry-archive`.
+    fn shell(script: &str) -> Child {
+        use std::os::unix::process::CommandExt as _;
+        std::process::Command::new("sh")
+            .args(["-c", script])
+            .process_group(0)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    fn listing_request() -> Request {
+        Request {
+            ask: Ask::List,
+            archive: PathBuf::from("/x.tar"),
+            into: PathBuf::new(),
+            only: Vec::new(),
+        }
+    }
+
+    /// Runs `exchange` on a thread of its own and gives it `limit`, so a test of
+    /// a wedge fails rather than becoming one.
+    fn within<T: Send + 'static>(
+        limit: Duration,
+        exchange: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(exchange());
+        });
+        finished.recv_timeout(limit).expect("the exchange never returned")
+    }
+
+    /// Stops `cancel` after `delay`, from another thread.
+    fn stop_after(cancel: &sk_util::Cancel, delay: Duration) {
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay); // skerry-allow: no-blocking-ui — a person pressing Stop
+            cancel.cancel();
+        });
+    }
+
+    /// Whether `pid` has died, waiting up to `limit` for it to.
+    fn gone(pid: i32, limit: Duration) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < limit {
+            // A zombie is dead, and waiting for whoever adopted it to reap it.
+            let dead = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
+                stat.rsplit_once(") ").is_some_and(|(_, rest)| rest.starts_with('Z'))
+            });
+            if dead {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20)); // skerry-allow: no-blocking-ui — a death is the claim
+        }
+        false
+    }
+
+    /// **One byte and then silence is a wedge, and it ends.** The read after a
+    /// frame's first byte used to block on the raw pipe with no clock and no
+    /// cancel, and the job it ran on was gone for the rest of the session.
+    #[test]
+    fn a_child_that_stops_inside_a_frame_is_given_up() {
+        let child = shell("printf S; exec sleep 30");
+        let started = std::time::Instant::now();
+        let listing = within(Duration::from_secs(10), move || {
+            listed(child, &listing_request(), &sk_util::Cancel::new(), Duration::from_millis(200))
+        });
+        assert_eq!(listing.refusal, Refusal::Interrupted);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    /// **A Stop lands inside a frame**, not when the child next writes — and it
+    /// takes the child's whole process group, which is where its filter is.
+    #[test]
+    fn a_stop_inside_a_frame_takes_what_the_child_started() {
+        let pidfile =
+            std::env::temp_dir().join(format!("skerry-archive-group-{}", std::process::id()));
+        let child = shell(&format!("sleep 30 & echo $! > '{}'; printf S; wait", pidfile.display()));
+        let cancel = sk_util::Cancel::new();
+        stop_after(&cancel, Duration::from_millis(300));
+        let listing = within(Duration::from_secs(10), move || {
+            listed(child, &listing_request(), &cancel, Duration::from_secs(60))
+        });
+        assert_eq!(listing.refusal, Refusal::Stopped);
+        let started: i32 = std::fs::read_to_string(&pidfile).unwrap().trim().parse().unwrap();
+        let _ = std::fs::remove_file(&pidfile);
+        assert!(gone(started, Duration::from_secs(3)), "the child's own child outlived the Stop");
+    }
+
+    /// **An unpack that stalls inside a record keeps what it had reported**,
+    /// because the files that count describes are on disk.
+    #[test]
+    fn an_unpack_that_stalls_inside_a_record_says_how_far_it_got() {
+        let far = Progress { entries: 16, bytes: 4096 };
+        let mut said = Vec::new();
+        Record::Went(far).write_to(&mut said).unwrap();
+        // The first byte of a record that never finishes.
+        said.push(0x52);
+        let script =
+            std::env::temp_dir().join(format!("skerry-archive-stall-{}", std::process::id()));
+        std::fs::write(&script, &said).unwrap();
+        let child = shell(&format!("cat '{}'; exec sleep 30", script.display()));
+        let request = Request {
+            ask: Ask::Unpack,
+            archive: PathBuf::from("/x.tar"),
+            into: PathBuf::from("/nowhere"),
+            only: Vec::new(),
+        };
+        let (done, watched) = within(Duration::from_secs(10), move || {
+            let mut watched = Vec::new();
+            let done = unpacked(
+                child,
+                &request,
+                &sk_util::Cancel::new(),
+                &mut |progress| watched.push(progress),
+                Duration::from_millis(200),
+            );
+            (done, watched)
+        });
+        let _ = std::fs::remove_file(&script);
+        assert_eq!(done.refusal, Refusal::Interrupted);
+        assert_eq!(done.progress, far);
+        assert_eq!(watched, vec![far]);
     }
 }
