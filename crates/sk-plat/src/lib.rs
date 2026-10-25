@@ -49,7 +49,7 @@ use sk_model::{Problem, ProblemKind};
 use sk_util::Waker;
 
 pub use clipboard::{
-    Clipboard, Content, Intent, Selection, Selections, decode_copied_files, decode_uri,
+    Clipboard, Content, Intent, Selection, Selections, Unasked, decode_copied_files, decode_uri,
 };
 pub use drag::{Drag, DragAction};
 pub use event::{Button, Event, Key, KeyEvent, Modifiers, Named, Point, Size, Swipe, TextChange};
@@ -287,7 +287,7 @@ impl Window {
         &mut self,
         selection: Selection,
         mime: &str,
-    ) -> Option<std::os::fd::OwnedFd> {
+    ) -> Result<std::os::fd::OwnedFd, Unasked> {
         forward!(self, request_selection, selection, mime)
     }
 
@@ -369,7 +369,10 @@ impl Window {
     }
 
     /// Reads what was dropped, as a descriptor to read at leisure.
-    pub fn take_drop(&mut self, mime: &str) -> Option<std::os::fd::OwnedFd> {
+    ///
+    /// The drop still needs [`Self::finish_drop`] when this fails: the source
+    /// waits for it whether or not anything was read.
+    pub fn take_drop(&mut self, mime: &str) -> Result<std::os::fd::OwnedFd, Unasked> {
         forward!(self, take_drop, mime)
     }
 

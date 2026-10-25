@@ -714,7 +714,7 @@ impl Window {
     }
 
     /// Reads what was dropped, as a descriptor.
-    pub fn take_drop(&mut self, mime: &str) -> Option<std::os::fd::OwnedFd> {
+    pub fn take_drop(&mut self, mime: &str) -> Result<std::os::fd::OwnedFd, crate::Unasked> {
         let ask = ask!(self);
         self.xdnd.take(&ask, &mut self.selections, &mut self.transfers, mime)
     }
@@ -736,7 +736,7 @@ impl Window {
         &mut self,
         selection: Selection,
         mime: &str,
-    ) -> Option<std::os::fd::OwnedFd> {
+    ) -> Result<std::os::fd::OwnedFd, crate::Unasked> {
         self.selections.request(&ask!(self), selection, mime)
     }
 

@@ -34,7 +34,8 @@ use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::wrapper::ConnectionExt as _;
 
 use crate::clipboard::{
-    Content, SELECTION_LIMIT, SELECTION_TIMEOUT, Selection, Transfer, selection_pipe, send_to,
+    Content, SELECTION_LIMIT, SELECTION_TIMEOUT, Selection, Transfer, Unasked, selection_pipe,
+    send_to,
 };
 
 use super::atoms::Atoms;
@@ -458,7 +459,7 @@ impl Selections {
         ask: &Ask<'_, impl Connection>,
         selection: Selection,
         mime: &str,
-    ) -> Option<OwnedFd> {
+    ) -> Result<OwnedFd, Unasked> {
         self.request_from(ask, atom_of(ask.atoms, selection), mime)
     }
 
@@ -468,27 +469,29 @@ impl Selections {
         ask: &Ask<'_, impl Connection>,
         selection: xproto::Atom,
         mime: &str,
-    ) -> Option<OwnedFd> {
+    ) -> Result<OwnedFd, Unasked> {
         let Ask { connection, atoms, types, window, time } = *ask;
-        let target = types.atom(mime)?;
-        let property = self.free_property(&atoms.conversions())?;
-        let (read, write) = selection_pipe()?;
+        let target = types.atom(mime).ok_or(Unasked::Unavailable)?;
+        let property = self.free_property(&atoms.conversions()).ok_or(Unasked::Busy)?;
+        let (read, write) = selection_pipe().ok_or(Unasked::Unavailable)?;
         // The property is deleted first so the arrival of *this* conversion is
         // distinguishable from whatever was left in it by the last one.
         let _ = connection.delete_property(window, property);
-        connection.convert_selection(window, selection, target, property, time).ok()?;
+        connection
+            .convert_selection(window, selection, target, property, time)
+            .map_err(|_| Unasked::Unavailable)?;
         let _ = connection.flush();
         let incoming = Incoming::new(selection, target, Some(write), false, Instant::now());
         self.incoming.push_back((property, incoming));
-        Some(read)
+        Ok(read)
     }
 
     /// Asks an owner what it offers. The reply lands in [`Self::arrived`].
     pub(super) fn ask_targets(&mut self, ask: &Ask<'_, impl Connection>, selection: Selection) {
         let Ask { connection, atoms, window, time, .. } = *ask;
-        let Some(property) = self.free_property(&atoms.conversions()) else { return };
-        let _ = connection.delete_property(window, property);
         let asked = atom_of(atoms, selection);
+        let Some(property) = self.targets_property(&atoms.conversions(), asked) else { return };
+        let _ = connection.delete_property(window, property);
         if connection.convert_selection(window, asked, atoms.TARGETS, property, time).is_err() {
             return;
         }
@@ -563,6 +566,24 @@ impl Selections {
             send_to(transfers, pipe, reply.value.into());
         }
         None
+    }
+
+    /// A property for a `TARGETS` question about `selection`, after forgetting
+    /// any earlier one still unanswered.
+    ///
+    /// **At most one per selection.** One is asked every time a selection
+    /// changes hands, and they shared the pool with pastes and drops: an owner
+    /// that never answered, or a client re-taking PRIMARY over and over, filled
+    /// every property with questions nobody would answer, and each paste after
+    /// that was refused. The earlier question is about an owner that has since
+    /// lost the selection, so its answer was stale anyway.
+    fn targets_property(
+        &mut self,
+        pool: &[xproto::Atom],
+        selection: xproto::Atom,
+    ) -> Option<xproto::Atom> {
+        self.incoming.retain(|(_, it)| it.pipe.is_some() || it.selection != selection);
+        self.free_property(pool)
     }
 
     /// Which conversion in flight `event` answers: by its property, or by what
@@ -878,9 +899,18 @@ mod tests {
     /// does.
     fn ask(selections: &mut Selections, pool: &[xproto::Atom]) -> Option<xproto::Atom> {
         let property = selections.free_property(pool)?;
-        let incoming = Incoming::new(1, TYPES.uri_list, None, false, Instant::now());
+        let (_, write) = selection_pipe().unwrap();
+        let incoming = Incoming::new(1, TYPES.uri_list, Some(write), false, Instant::now());
         selections.incoming.push_back((property, incoming));
         Some(property)
+    }
+
+    /// Puts a `TARGETS` question in flight, as a change of owner does.
+    fn ask_what_is_offered(selections: &mut Selections, pool: &[xproto::Atom], of: xproto::Atom) {
+        if let Some(property) = selections.targets_property(pool, of) {
+            let incoming = Incoming::new(of, TYPES.targets, None, false, Instant::now());
+            selections.incoming.push_back((property, incoming));
+        }
     }
 
     /// Two conversions in one property is how a late peer's chunk became the
@@ -905,6 +935,21 @@ mod tests {
         selections.incoming.retain(|(property, _)| *property != 10);
         assert_eq!(ask(&mut selections, &pool), Some(12));
         assert_eq!(ask(&mut selections, &pool), Some(10), "only once nothing else is free");
+    }
+
+    /// A selection is asked about every time it changes hands, and a client
+    /// that re-takes PRIMARY over and over without answering is enough to ask
+    /// a hundred times. Watched failing with the earlier question kept: all
+    /// eight properties held one, which leaves a paste none.
+    #[test]
+    fn owners_that_never_answer_cannot_use_up_the_properties_a_paste_needs() {
+        let pool = [10, 11, 12, 13, 14, 15, 16, 17];
+        let mut selections = Selections::default();
+        for change in 0..100 {
+            ask_what_is_offered(&mut selections, &pool, if change % 2 == 0 { 1 } else { 2 });
+        }
+        assert_eq!(selections.awaiting(), 2, "more than one question per selection");
+        assert!(ask(&mut selections, &pool).is_some(), "a paste found no property");
     }
 
     /// A refusal names no property, so it is matched on what was asked — and

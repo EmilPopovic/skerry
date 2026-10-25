@@ -190,6 +190,20 @@ pub const SELECTION_LIMIT: usize = 16 * 1024 * 1024;
 /// halfway or never started.
 pub const SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Why a selection could not be asked for at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unasked {
+    /// Nothing is on offer, or the display server would not take the request.
+    Unavailable,
+    /// Every conversion this process can have in flight is waiting on a peer.
+    ///
+    /// X11 only, where each lands in a property of its own and there are eight.
+    /// A peer that does not answer holds one until its deadline, so this
+    /// passes in seconds — and a caller says so, because a paste that did
+    /// nothing reads exactly like an empty clipboard.
+    Busy,
+}
+
 /// A pipe for one selection read, closed on exec at both ends.
 ///
 /// **At creation, not after.** A helper or an application launched while a paste

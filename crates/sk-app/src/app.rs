@@ -3065,7 +3065,13 @@ impl App {
             return;
         };
         let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
-        let Some(fd) = self.window.request_selection(selection, mime) else { return };
+        let fd = match self.window.request_selection(selection, mime) {
+            Ok(fd) => fd,
+            Err(unasked) => {
+                self.said_busy(unasked);
+                return;
+            }
+        };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
@@ -6295,12 +6301,15 @@ impl App {
             && offered.iter().any(|mime| mime == "application/x-kde-cutselection")
         {
             let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
-            let Some(fd) = self
-                .window
-                .request_selection(Selection::Clipboard, "application/x-kde-cutselection")
-            else {
-                self.clipboard_failed();
-                return;
+            let marker = "application/x-kde-cutselection";
+            let fd = match self.window.request_selection(Selection::Clipboard, marker) {
+                Ok(fd) => fd,
+                Err(unasked) => {
+                    if !self.said_busy(unasked) {
+                        self.clipboard_failed();
+                    }
+                    return;
+                }
             };
             let sender = self.replies.paste_tx.clone();
             let wake = self.waker.handle();
@@ -6353,11 +6362,31 @@ impl App {
         self.dirty = true;
     }
 
+    /// Says so when a selection could not be asked for because every
+    /// conversion is already waiting on a peer. Whether it said anything.
+    ///
+    /// **Its own sentence, not the empty clipboard's.** The other failures
+    /// mean there was nothing to read; this one means there may well be, and
+    /// a few seconds will free a slot.
+    fn said_busy(&mut self, unasked: sk_plat::Unasked) -> bool {
+        if unasked != sk_plat::Unasked::Busy {
+            return false;
+        }
+        self.notice = Some((sk_model::t!("error.selection_busy").to_owned(), Instant::now()));
+        self.dirty = true;
+        true
+    }
+
     fn read_file_paste(&mut self, mime: &str, verb: Verb, generation: u64, into: PathBuf) {
         let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
-        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else {
-            self.clipboard_failed();
-            return;
+        let fd = match self.window.request_selection(Selection::Clipboard, mime) {
+            Ok(fd) => fd,
+            Err(unasked) => {
+                if !self.said_busy(unasked) {
+                    self.clipboard_failed();
+                }
+                return;
+            }
         };
         let carries_verb = mime == "x-special/gnome-copied-files";
         let sender = self.replies.paste_tx.clone();
@@ -6519,7 +6548,13 @@ impl App {
             return;
         };
         let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
-        let Some(fd) = self.window.request_selection(Selection::Clipboard, mime) else { return };
+        let fd = match self.window.request_selection(Selection::Clipboard, mime) {
+            Ok(fd) => fd,
+            Err(unasked) => {
+                self.said_busy(unasked);
+                return;
+            }
+        };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
@@ -11774,7 +11809,16 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
         self.files_drag = None;
         self.dirty = true;
         let deadline = Instant::now() + sk_plat::SELECTION_TIMEOUT;
-        let Some(fd) = self.window.take_drop("text/uri-list") else { return };
+        let fd = match self.window.take_drop("text/uri-list") {
+            Ok(fd) => fd,
+            Err(unasked) => {
+                // Closed with nothing read: the source waits for this either
+                // way, and an X11 one keeps its pointer grab until it comes.
+                self.window.finish_drop();
+                self.said_busy(unasked);
+                return;
+            }
+        };
         let sender = self.replies.paste_tx.clone();
         let wake = self.waker.handle();
         self.drops_started = self.drops_started.saturating_add(1);
