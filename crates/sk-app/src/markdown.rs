@@ -136,8 +136,12 @@ fn spoken(block: &Block) -> String {
 /// How deep nesting may go before it is flattened.
 ///
 /// **Because a parser that recurses on input is a parser that can be handed
-/// input.** Sixteen is deeper than any document written to be read, and a
-/// seventeenth level is drawn at the sixteenth's indent rather than refused.
+/// input.** Sixteen is deeper than any document written to be read. A
+/// seventeenth quote or list level is drawn at the sixteenth's indent rather
+/// than refused, and what is inside a seventeenth emphasis or link is drawn as
+/// the characters it is made of. Inline nesting had no bound until 52,428 links
+/// each inside the last — what 256 KiB holds — overflowed an eight-mebibyte
+/// stack, and eight thousand of them a job thread's two.
 const DEEPEST: u8 = 16;
 
 /// Parses a document into blocks, in the order they are drawn.
@@ -523,15 +527,30 @@ fn row_cells(line: &str) -> Vec<String> {
 /// here, by every branch falling through to "push the character".
 #[must_use]
 pub(crate) fn inline(text: &str) -> Vec<Run> {
+    let letters: Vec<char> = text.chars().collect();
+    spans(&letters, 0)
+}
+
+/// [`inline`] over `letters`, which are inside `depth` emphases and links.
+///
+/// **Linear in the length at each depth, and [`DEEPEST`] depths at most.** An
+/// opener's questions — how long its run is, where its closer is, which `]`
+/// is its own — are answered from [`Found`], which is one pass over the text.
+/// They used to be answered by scanning ahead from the opener, and an opener
+/// with nothing to close it scanned to the end of the paragraph before the
+/// parser moved on by one character: 10.5 seconds over 256 KiB of `[`.
+fn spans(letters: &[char], depth: u8) -> Vec<Run> {
+    if depth >= DEEPEST {
+        return vec![Run::plain(letters.iter().collect::<String>())];
+    }
     let mut out: Vec<Run> = Vec::new();
     let mut held = String::new();
-    let style = Style::default();
-    let letters: Vec<char> = text.chars().collect();
+    let mut found = Found::new(letters);
     let mut at = 0;
 
-    let flush = |held: &mut String, style: Style, out: &mut Vec<Run>| {
+    let flush = |held: &mut String, out: &mut Vec<Run>| {
         if !held.is_empty() {
-            out.push(Run { text: std::mem::take(held), style, href: None });
+            out.push(Run::plain(std::mem::take(held)));
         }
     };
 
@@ -543,13 +562,13 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
                 at += 2;
             }
             '`' => {
-                let ticks = letters[at..].iter().take_while(|it| **it == '`').count();
-                if let Some(end) = closing(&letters, at + ticks, '`', ticks) {
-                    flush(&mut held, style, &mut out);
+                let ticks = found.run(at);
+                if let Some(end) = found.closing(at + ticks, '`', ticks) {
+                    flush(&mut held, &mut out);
                     let body: String = letters[at + ticks..end].iter().collect();
                     out.push(Run {
                         text: body.trim().to_owned(),
-                        style: Style { code: true, ..style },
+                        style: Style { code: true, ..Style::default() },
                         href: None,
                     });
                     at = end + ticks;
@@ -559,8 +578,8 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
                 }
             }
             '*' | '_' | '~' => {
-                if let Some((end, runs)) = emphasis(&letters, at, letter, style) {
-                    flush(&mut held, style, &mut out);
+                if let Some((end, runs)) = emphasis(&mut found, at, letter, depth) {
+                    flush(&mut held, &mut out);
                     out.extend(runs);
                     at = end;
                 } else {
@@ -569,8 +588,8 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
                 }
             }
             '<' | '!' | '[' => {
-                if let Some((end, runs)) = linked(&letters, at, style) {
-                    flush(&mut held, style, &mut out);
+                if let Some((end, runs)) = linked(&mut found, at, depth) {
+                    flush(&mut held, &mut out);
                     out.extend(runs);
                     at = end;
                 } else {
@@ -584,7 +603,7 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
             }
         }
     }
-    flush(&mut held, style, &mut out);
+    flush(&mut held, &mut out);
     if out.is_empty() {
         out.push(Run::plain(""));
     }
@@ -596,8 +615,9 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
 /// **One, two or three of `*` or `_`** — emphasis, strong and both. `***this***`
 /// is the third and is common enough in a README that treating it as two openers
 /// loses the text between them. `~~` is the fourth mark and behaves the same way.
-fn emphasis(letters: &[char], at: usize, mark: char, style: Style) -> Option<(usize, Vec<Run>)> {
-    let count = letters[at..].iter().take_while(|it| **it == mark).count();
+fn emphasis(found: &mut Found<'_>, at: usize, mark: char, depth: u8) -> Option<(usize, Vec<Run>)> {
+    let letters = found.letters;
+    let count = found.run(at);
     let run = if mark == '~' {
         if count < 2 {
             return None;
@@ -616,21 +636,15 @@ fn emphasis(letters: &[char], at: usize, mark: char, style: Style) -> Option<(us
     {
         return None;
     }
-    let end = closing(letters, at + run, mark, run)?;
-    let body: String = letters[at + run..end].iter().collect();
-    let deeper = Style {
-        strong: style.strong || (mark != '~' && run >= 2),
-        emphasis: style.emphasis || (mark != '~' && run % 2 == 1),
-        struck: style.struck || mark == '~',
-        ..style
-    };
-    let runs = inline(&body)
+    let end = found.closing(at + run, mark, run)?;
+    let strong = mark != '~' && run >= 2;
+    let slanted = mark != '~' && run % 2 == 1;
+    let runs = spans(&letters[at + run..end], depth + 1)
         .into_iter()
         .map(|mut nested| {
-            nested.style.strong |= deeper.strong;
-            nested.style.emphasis |= deeper.emphasis;
-            nested.style.struck |= deeper.struck;
-            nested.style.link |= deeper.link;
+            nested.style.strong |= strong;
+            nested.style.emphasis |= slanted;
+            nested.style.struck |= mark == '~';
             nested
         })
         .collect();
@@ -638,19 +652,29 @@ fn emphasis(letters: &[char], at: usize, mark: char, style: Style) -> Option<(us
 }
 
 /// A link, an image or an autolink: where it ends and the runs it becomes.
-fn linked(letters: &[char], at: usize, style: Style) -> Option<(usize, Vec<Run>)> {
+fn linked(found: &mut Found<'_>, at: usize, depth: u8) -> Option<(usize, Vec<Run>)> {
+    let letters = found.letters;
     if letters[at] == '<' {
-        let (end, url) = autolink(letters, at)?;
-        let run = Run { text: url.clone(), style: Style { link: true, ..style }, href: Some(url) };
-        return Some((end, vec![run]));
+        let (end, url) = autolink(found, at)?;
+        let style = Style { link: true, ..Style::default() };
+        return Some((end, vec![Run { text: url.clone(), style, href: Some(url) }]));
     }
     let image = letters[at] == '!';
-    let (end, label, href) = link_at(letters, if image { at + 1 } else { at })?;
+    let open = if image { at + 1 } else { at };
+    let (close, end) = link_at(found, open)?;
+    let target: String = letters[close + 2..end].iter().collect();
+    // A title after the destination — `(url "the title")` — is not shown.
+    let href = target.split_whitespace().next().unwrap_or("").to_owned();
     // **An image is its alt text.** Fetching it is a decode, a sandbox and a
     // network question; the words the author wrote for somebody who cannot see it
     // are already here.
-    let shown = if image && label.is_empty() { href.clone() } else { label };
-    let runs = inline(&shown)
+    let label = &letters[open + 1..close];
+    let runs = if image && label.is_empty() {
+        spans(&href.chars().collect::<Vec<_>>(), depth + 1)
+    } else {
+        spans(label, depth + 1)
+    };
+    let runs = runs
         .into_iter()
         .map(|mut nested| {
             nested.style.link = true;
@@ -658,84 +682,214 @@ fn linked(letters: &[char], at: usize, style: Style) -> Option<(usize, Vec<Run>)
             nested
         })
         .collect();
-    Some((end, runs))
-}
-
-/// Where a run of `count` `mark`s closes, searching from `from`.
-fn closing(letters: &[char], from: usize, mark: char, count: usize) -> Option<usize> {
-    let mut at = from;
-    while at < letters.len() {
-        if letters[at] == mark {
-            let run = letters[at..].iter().take_while(|it| **it == mark).count();
-            if run >= count {
-                return Some(at);
-            }
-            at += run;
-        } else {
-            at += 1;
-        }
-    }
-    None
+    Some((end + 1, runs))
 }
 
 /// A `<http://…>` autolink: where it ends, and what it points at.
-fn autolink(letters: &[char], at: usize) -> Option<(usize, String)> {
-    let end = letters[at..].iter().position(|it| *it == '>')? + at;
-    let inside: String = letters[at + 1..end].iter().collect();
+fn autolink(found: &mut Found<'_>, at: usize) -> Option<(usize, String)> {
+    let letters = found.letters;
+    let after = &letters[at + 1..];
     let looks_like = ["http://", "https://", "mailto:", "ftp://"];
-    if inside.contains(char::is_whitespace) || !looks_like.iter().any(|it| inside.starts_with(it)) {
+    if !looks_like.iter().any(|scheme| after.iter().copied().take(scheme.len()).eq(scheme.chars()))
+    {
         return None;
     }
-    Some((end + 1, inside))
+    // None of the schemes holds a space or a `>`, so the first of either past
+    // the `<` is where the address ends — and it is only one if it is a `>`.
+    let end = found.stop(at + 1);
+    if letters.get(end) != Some(&'>') {
+        return None;
+    }
+    Some((end + 1, letters[at + 1..end].iter().collect()))
 }
 
-/// A `[label](href)` starting at the bracket: where it ends, and its two parts.
-fn link_at(letters: &[char], at: usize) -> Option<(usize, String, String)> {
-    if letters.get(at) != Some(&'[') {
+/// A `[label](href)` whose `[` is at `at`: where its `]` is, and its `)`.
+fn link_at(found: &mut Found<'_>, at: usize) -> Option<(usize, usize)> {
+    if found.letters.get(at) != Some(&'[') {
         return None;
     }
     // Brackets nest: `[![badge](a)](b)` is a link around an image, which is what
     // the top of every README is made of.
-    let mut depth = 0;
-    let mut close = None;
-    for (offset, letter) in letters[at..].iter().enumerate() {
-        match letter {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(at + offset);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let close = close?;
-    if letters.get(close + 1) != Some(&'(') {
+    let close = found.bracket(at)?;
+    if found.letters.get(close + 1) != Some(&'(') {
         return None;
     }
-    let mut round = 0;
-    let mut end = None;
-    for (offset, letter) in letters[close + 1..].iter().enumerate() {
-        match letter {
-            '(' => round += 1,
-            ')' => {
-                round -= 1;
-                if round == 0 {
-                    end = Some(close + 1 + offset);
-                    break;
+    let end = found.paren(close + 1)?;
+    Some((close, end))
+}
+
+/// The four marks that come in runs, in the order of [`Found::runs`].
+const MARKS: [char; 4] = ['`', '*', '_', '~'];
+
+/// One maximal run of a mark.
+#[derive(Clone, Copy)]
+struct Stretch {
+    start: usize,
+    length: usize,
+    /// The longest run of the same mark from this one to the end of the text,
+    /// which is what lets an opener with nothing to close it find that out at
+    /// once.
+    longest: usize,
+}
+
+impl Stretch {
+    fn end(self) -> usize {
+        self.start + self.length
+    }
+}
+
+/// Where things are in one stretch of text, found once rather than by every
+/// opener that asks.
+///
+/// **Each part is worked out the first time it is wanted, and each mark's runs
+/// on their own**, because most of what [`spans`] is handed is the few words
+/// inside one emphasis, with one mark in them or none.
+struct Found<'a> {
+    letters: &'a [char],
+    /// The runs of each of [`MARKS`], in order.
+    runs: [Option<Marked>; 4],
+    /// Every `[` in order, and the `]` that closes it if one does.
+    brackets: Option<Vec<(usize, Option<usize>)>>,
+    /// Every `(` in order, and the `)` that closes it if one does.
+    parens: Option<Vec<(usize, Option<usize>)>>,
+    /// The last [`Self::stop`] asked, and what it answered.
+    stopped: Option<(usize, usize)>,
+}
+
+/// The runs of one mark, and where the last question about them was answered.
+struct Marked {
+    each: Vec<Stretch>,
+    /// The index [`Found::locate`] last answered with.
+    ///
+    /// **Walked from rather than searched for**, because the parser only moves
+    /// forward and so the next answer is almost always this one or the next.
+    /// Over 256 KiB of `*_`, a binary search per opener took 16.2 ms where the
+    /// scan this replaced took 6.6 ms; walking takes 9.2 ms. Medians of 41,
+    /// interleaved in one process, release build, load average 3.5.
+    near: usize,
+}
+
+impl<'a> Found<'a> {
+    fn new(letters: &'a [char]) -> Self {
+        Self { letters, runs: Default::default(), brackets: None, parens: None, stopped: None }
+    }
+
+    /// Every run of `mark` in order, and the index of the first that ends past
+    /// `at`.
+    fn locate(&mut self, mark: char, at: usize) -> (&[Stretch], usize) {
+        let letters = self.letters;
+        let slot = MARKS.iter().position(|it| *it == mark).unwrap_or(MARKS.len() - 1);
+        let marked = self.runs[slot].get_or_insert_with(|| {
+            let mut each = Vec::new();
+            let mut at = 0;
+            while at < letters.len() {
+                if letters[at] == mark {
+                    let length = letters[at..].iter().take_while(|it| **it == mark).count();
+                    each.push(Stretch { start: at, length, longest: length });
+                    at += length;
+                } else {
+                    at += 1;
                 }
             }
-            _ => {}
+            let mut longest = 0;
+            for stretch in each.iter_mut().rev() {
+                longest = longest.max(stretch.length);
+                stretch.longest = longest;
+            }
+            Marked { each, near: 0 }
+        });
+        let each = &marked.each;
+        let mut index = marked.near;
+        while index > 0 && each[index - 1].end() > at {
+            index -= 1;
+        }
+        while index < each.len() && each[index].end() <= at {
+            index += 1;
+        }
+        marked.near = index;
+        (&marked.each, index)
+    }
+
+    /// How many of the mark at `at` there are from `at` to the end of its run.
+    fn run(&mut self, at: usize) -> usize {
+        let (runs, index) = self.locate(self.letters[at], at);
+        runs.get(index).map_or(1, |it| it.end() - at)
+    }
+
+    /// Where a run of at least `count` `mark`s starts, searching from `from`.
+    ///
+    /// **The part of a run `from` lands inside counts as a run**, which is what
+    /// the scan this replaces did and what `****bold****` is parsed by.
+    fn closing(&mut self, from: usize, mark: char, count: usize) -> Option<usize> {
+        let (runs, mut index) = self.locate(mark, from);
+        if let Some(inside) = runs.get(index)
+            && inside.start <= from
+        {
+            if inside.end() - from >= count {
+                return Some(from);
+            }
+            index += 1;
+        }
+        if runs.get(index).map_or(0, |it| it.longest) < count {
+            return None;
+        }
+        runs[index..].iter().find(|it| it.length >= count).map(|it| it.start)
+    }
+
+    /// The `]` that closes the `[` at `at`.
+    fn bracket(&mut self, at: usize) -> Option<usize> {
+        let letters = self.letters;
+        let pairs = self.brackets.get_or_insert_with(|| pairs(letters, '[', ']'));
+        pairs.binary_search_by_key(&at, |it| it.0).ok().and_then(|index| pairs[index].1)
+    }
+
+    /// The `)` that closes the `(` at `at`.
+    fn paren(&mut self, at: usize) -> Option<usize> {
+        let letters = self.letters;
+        let pairs = self.parens.get_or_insert_with(|| pairs(letters, '(', ')'));
+        pairs.binary_search_by_key(&at, |it| it.0).ok().and_then(|index| pairs[index].1)
+    }
+
+    /// The first whitespace or `>` at or after `from`, or the end.
+    ///
+    /// **Remembered, because `from` only moves forward** within one stretch: an
+    /// answer past the new `from` is still the first one, so a paragraph of
+    /// `<http://` with no `>` is scanned once rather than once per `<`.
+    fn stop(&mut self, from: usize) -> usize {
+        if let Some((asked, answer)) = self.stopped
+            && asked <= from
+            && from <= answer
+        {
+            return answer;
+        }
+        let answer = self.letters[from..]
+            .iter()
+            .position(|it| it.is_whitespace() || *it == '>')
+            .map_or(self.letters.len(), |it| from + it);
+        self.stopped = Some((from, answer));
+        answer
+    }
+}
+
+/// Every `open` in `letters`, in order, and the `close` that ends it.
+///
+/// **Counted, not parsed** — a bracket inside a code span counts — because that
+/// is what the scan this replaces did: the first `close` at which as many have
+/// closed as opened since.
+fn pairs(letters: &[char], open: char, close: char) -> Vec<(usize, Option<usize>)> {
+    let mut out = Vec::new();
+    let mut waiting = Vec::new();
+    for (at, letter) in letters.iter().enumerate() {
+        if *letter == open {
+            waiting.push(out.len());
+            out.push((at, None));
+        } else if *letter == close
+            && let Some(index) = waiting.pop()
+        {
+            out[index].1 = Some(at);
         }
     }
-    let end = end?;
-    let label: String = letters[at + 1..close].iter().collect();
-    let target: String = letters[close + 2..end].iter().collect();
-    // A title after the destination — `(url "the title")` — is not shown.
-    let href = target.split_whitespace().next().unwrap_or("").to_owned();
-    Some((end + 1, label, href))
+    out
 }
 
 #[cfg(test)]
@@ -1143,6 +1297,70 @@ mod tests {
             "honest" => include_str!("../../../docs/12-measurement.md").to_owned(),
             _ => return None,
         })
+    }
+
+    /// How long a test waits for a parse of the most the panel reads.
+    ///
+    /// **Loose on purpose.** All four of the openers' paragraphs parse in 0.24 s
+    /// in a debug build, and the fastest of them took longer than this before in
+    /// the same build, so it is a bound the old parser fails with twenty times
+    /// the room the new one needs — which is what a debug build beside somebody
+    /// else's compile asks for.
+    const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+    /// The blocks of `text`, or `None` if the parse was still running after
+    /// `bound`.
+    ///
+    /// **On a thread of its own, so a regression fails at the bound** rather
+    /// than after the minutes a quadratic parse takes in a debug build; the
+    /// thread is left to finish on its own. Its stack is Rust's default, which is
+    /// the job pool's, which is where the window parses.
+    fn parsed_within(text: String, bound: std::time::Duration) -> Option<Vec<Block>> {
+        let (done, waiting) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(parse(&text));
+        });
+        waiting.recv_timeout(bound).ok()
+    }
+
+    /// **No paragraph costs more than time linear in its length.** Each of these
+    /// took seconds over 256 KiB in a release build — 2.6 s for the asterisks,
+    /// 10.5 s for the brackets — because every opener without a closer scanned
+    /// to the end of its paragraph and the parser then moved on by one character.
+    #[test]
+    fn a_paragraph_of_openers_is_parsed_in_linear_time() {
+        for case in ["stars", "ticks", "brackets", "angles"] {
+            let text = hostile(case, crate::quicklook::TEXT_LIMIT).expect("a case");
+            let blocks = parsed_within(text.clone(), BOUND)
+                .unwrap_or_else(|| panic!("{case} took longer than {BOUND:?}"));
+            assert_eq!(blocks.len(), 1, "{case} is one paragraph");
+            // An opener nothing closes is its own text, which for these three is
+            // every one of them.
+            if case != "stars" {
+                assert_eq!(words(&blocks[0]), text, "{case} lost a character");
+            }
+        }
+    }
+
+    /// **A link inside a link inside a link stops being parsed at a depth**, and
+    /// what is past it is drawn as the characters it is made of.
+    ///
+    /// Before the bound, this document — 52,428 links each inside the last, the
+    /// most the panel reads — overflowed an eight-mebibyte stack, and eight
+    /// thousand of them overflowed a job thread's two.
+    #[test]
+    fn nesting_inside_a_paragraph_stops_at_a_depth() {
+        let text = hostile("nested", crate::quicklook::TEXT_LIMIT).expect("a case");
+        let levels = text.matches('[').count();
+        let blocks = parsed_within(text, BOUND).expect("the parse finished");
+        let past = levels - usize::from(super::DEEPEST);
+        let Kind::Paragraph(runs) = &blocks[0].kind else { panic!("{:?}", blocks[0]) };
+        assert_eq!(
+            runs.iter().map(|it| it.text.as_str()).collect::<String>(),
+            format!("{}x{}", "[".repeat(past), "](u)".repeat(past)),
+            "the first sixteen levels are links and the rest is text"
+        );
+        assert!(runs.iter().all(|it| it.style.link), "inside sixteen links is inside a link");
     }
 
     /// What one parse costs, over a document built to be slow or an honest one.
