@@ -63,6 +63,12 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    # One output per architecture, because the legs of a matrix share one set of
+    # job outputs: each leg sets only its own, and the runner skips an output
+    # that is empty rather than letting it overwrite the other leg's.
+    outputs:
+      x86_64: ${{ steps.artifact.outputs.x86_64 }}
+      aarch64: ${{ steps.artifact.outputs.aarch64 }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -99,14 +105,28 @@ jobs:
         env:
           SOURCE_DATE_EPOCH: 0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        id: upload
         with:
           name: ${{ steps.stage.outputs.name }}
           path: |
             ${{ steps.stage.outputs.archive }}
             ${{ steps.stage.outputs.archive }}.sha256
           if-no-files-found: error
+      - name: Artifact ID
+        id: artifact
+        env:
+          ARCH: ${{ matrix.arch }}
+          ID: ${{ steps.upload.outputs.artifact-id }}
+        run: echo "$ARCH=$ID" >> "$GITHUB_OUTPUT"
 
   publish:
+    # Both architectures or neither: `needs` waits on every leg of the matrix,
+    # so one failed architecture now keeps the other off the release as well.
+    # Before the split each leg attached its own tarball, and a tag could
+    # publish one architecture with nothing saying the other was missing; now
+    # the attestation and the upload are one act over a complete set.
+    # `fail-fast: false` still lets the other leg finish, so its artifact is
+    # there to inspect.
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
@@ -118,9 +138,20 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: What build uploaded
+        # By ID rather than by a name pattern, so an artifact that any other job
+        # in this run uploaded under a matching name is neither attested nor
+        # published.
+        id: ids
+        env:
+          X86_64: ${{ needs.build.outputs.x86_64 }}
+          AARCH64: ${{ needs.build.outputs.aarch64 }}
+        run: |
+          [[ "$X86_64" =~ ^[0-9]+$ && "$AARCH64" =~ ^[0-9]+$ ]]
+          echo "ids=$X86_64,$AARCH64" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: skerry-*-linux
+          artifact-ids: ${{ steps.ids.outputs.ids }}
           path: dist
           merge-multiple: true
       - name: Checksums

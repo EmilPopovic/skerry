@@ -70,7 +70,8 @@ built it; check one with the [GitHub CLI](https://cli.github.com) before
 extracting it:
 
 ```sh
-gh attestation verify skerry-VERSION-ARCH-linux.tar.gz --repo EmilPopovic/skerry
+gh attestation verify skerry-VERSION-ARCH-linux.tar.gz --repo EmilPopovic/skerry \
+  --signer-workflow EmilPopovic/skerry/.github/workflows/release.yml
 ```
 
 See [packaging/README.binary.md](packaging/README.binary.md).
