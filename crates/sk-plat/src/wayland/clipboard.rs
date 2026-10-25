@@ -36,7 +36,7 @@ use wayland_protocols::wp::primary_selection::zv1::client::{
 };
 
 use super::State;
-use crate::clipboard::{Content, Selection, send_to};
+use crate::clipboard::{Content, Selection, Unasked, selection_pipe, send_to};
 use crate::event::Event;
 
 /// The Wayland transport for the two selections.
@@ -113,16 +113,20 @@ impl super::Window {
     /// **The caller reads on a job.** The peer writes whenever it likes and may
     /// never write at all; a read here would be rule 1's canonical failure with a
     /// different cause.
-    #[must_use]
-    pub fn request_selection(&mut self, selection: Selection, mime: &str) -> Option<OwnedFd> {
-        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).ok()?;
+    pub fn request_selection(
+        &mut self,
+        selection: Selection,
+        mime: &str,
+    ) -> Result<OwnedFd, Unasked> {
+        let (read, write) = selection_pipe().ok_or(Unasked::Unavailable)?;
         match selection {
             Selection::Clipboard => {
-                let offer = self.state.clipboard.offer.as_ref()?;
+                let offer = self.state.clipboard.offer.as_ref().ok_or(Unasked::Unavailable)?;
                 offer.receive(mime.to_owned(), write.as_fd());
             }
             Selection::Primary => {
-                let offer = self.state.clipboard.primary_offer.as_ref()?;
+                let offer =
+                    self.state.clipboard.primary_offer.as_ref().ok_or(Unasked::Unavailable)?;
                 offer.receive(mime.to_owned(), write.as_fd());
             }
         }
@@ -131,8 +135,8 @@ impl super::Window {
         drop(write);
         // And the request has to reach the compositor before anyone waits on the
         // pipe, which is the whole reason this flush is not optional.
-        self.queue.flush().ok()?;
-        Some(read)
+        self.queue.flush().map_err(|_| Unasked::Unavailable)?;
+        Ok(read)
     }
 
     /// What the peer is offering, on both selections.
@@ -285,9 +289,9 @@ impl super::Window {
     /// here rather than being left to the caller: a source waits for `finish`
     /// before it considers the drag over, and one that never gets it leaves a
     /// grab on the pointer.
-    pub fn take_drop(&mut self, mime: &str) -> Option<std::os::fd::OwnedFd> {
-        let offer = self.state.drags.offer.as_ref()?;
-        let (read, write) = rustix::pipe::pipe().ok()?;
+    pub fn take_drop(&mut self, mime: &str) -> Result<std::os::fd::OwnedFd, Unasked> {
+        let offer = self.state.drags.offer.as_ref().ok_or(Unasked::Unavailable)?;
+        let (read, write) = selection_pipe().ok_or(Unasked::Unavailable)?;
         offer.receive(mime.to_owned(), write.as_fd());
         drop(write);
         let _ = self.connection.flush();
@@ -296,7 +300,7 @@ impl super::Window {
         // source's `send`: measured, one drag in three from a GTK peer produced
         // no transfer at all, with our side of it looking identical in the trace.
         // The caller closes it with `finish_drop` once the read is done.
-        Some(read)
+        Ok(read)
     }
 }
 

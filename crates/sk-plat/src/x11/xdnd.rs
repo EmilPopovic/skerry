@@ -230,7 +230,7 @@ impl Xdnd {
         selections: &mut Selections,
         transfers: &mut Vec<Transfer>,
         mime: &str,
-    ) -> Option<std::os::fd::OwnedFd> {
+    ) -> Result<std::os::fd::OwnedFd, crate::Unasked> {
         let _ = transfers;
         // **`XdndFinished` is not sent here.** The specification puts it after
         // the transfer, and sending it with the conversion still in flight tells

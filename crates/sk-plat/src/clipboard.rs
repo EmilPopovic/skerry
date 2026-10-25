@@ -165,23 +165,74 @@ impl Content {
     }
 }
 
+/// The most a peer's answer to a paste or a drop may hold.
+///
+/// **Counted where the bytes first gather.** Wayland hands the peer a pipe, so
+/// [`receive`] counts what comes through it. X11 has the peer write properties
+/// that this process collects before anything reaches the pipe, so the X11
+/// backend counts too: a peer answering with `INCR` could otherwise keep
+/// writing until this process ran out of memory.
+///
+/// **Read with [`receive`] and a limit no larger than this.** An X11 answer
+/// that passes it reaches the pipe as more than this many bytes, so the
+/// reader's own count refuses it with `FileTooLarge` and can say so; a reader
+/// that did not count would take the first sixteen megabytes of an answer as
+/// all of it.
+pub const SELECTION_LIMIT: usize = 16 * 1024 * 1024;
+
+/// How long a peer has to finish answering a paste or a drop.
+///
+/// Measured from **before** the request: a caller takes
+/// `Instant::now() + SELECTION_TIMEOUT` and only then asks, so the reader's
+/// deadline can never be later than the X11 backend's, which is taken at the
+/// request. That backend abandons a conversion a moment after the reader has
+/// given up and said why, so nothing is left holding a peer that stopped
+/// halfway or never started.
+pub const SELECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why a selection could not be asked for at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unasked {
+    /// Nothing is on offer, or the display server would not take the request.
+    Unavailable,
+    /// Every conversion this process can have in flight is waiting on a peer.
+    ///
+    /// X11 only, where each lands in a property of its own and there are eight.
+    /// A peer that does not answer holds one until its deadline, so this
+    /// passes in seconds — and a caller says so, because a paste that did
+    /// nothing reads exactly like an empty clipboard.
+    Busy,
+}
+
+/// A pipe for one selection read, closed on exec at both ends.
+///
+/// **At creation, not after.** A helper or an application launched while a paste
+/// or a drop is in flight otherwise inherits the write end: the job reading the
+/// other end waits for an end-of-file that comes only when that process exits,
+/// and the process can read the bytes or write its own. An `fcntl` after `pipe`
+/// leaves a window in which another thread's `fork` takes both ends with it.
+pub(crate) fn selection_pipe() -> Option<(OwnedFd, OwnedFd)> {
+    rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).ok()
+}
+
 /// Read a selection on a worker, refusing oversized or stalled transfers.
+///
+/// `deadline` is when the peer must have finished, taken before the request —
+/// see [`SELECTION_TIMEOUT`]. **What is already in the pipe is read even after
+/// it**, so a job the pool started late does not refuse an answer that arrived
+/// in time; only waiting for more stops there.
 pub fn receive(
     fd: &OwnedFd,
     limit: usize,
-    timeout: std::time::Duration,
+    deadline: std::time::Instant,
 ) -> std::io::Result<Vec<u8>> {
     use rustix::event::{PollFd, PollFlags};
     let flags = rustix::fs::fcntl_getfl(fd)?;
     rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)?;
-    let deadline = std::time::Instant::now() + timeout;
     let mut bytes = Vec::new();
     let mut buffer = [0u8; 8192];
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return Err(std::io::ErrorKind::TimedOut.into());
-        }
         let timeout = rustix::event::Timespec::try_from(left)
             .map_err(|_| std::io::ErrorKind::InvalidInput)?;
         let mut fds = [PollFd::new(&fd, PollFlags::IN)];
@@ -424,21 +475,54 @@ mod tests {
     /// this test does not finish.
     #[test]
     fn selection_reads_stop_at_the_byte_limit_and_deadline() {
-        let (read, write) = rustix::pipe::pipe().unwrap();
+        let soon = || Instant::now() + std::time::Duration::from_secs(1);
+        let (read, write) = selection_pipe().unwrap();
         rustix::io::write(&write, b"abc").unwrap();
         drop(write);
-        assert_eq!(super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap(), b"abc");
-        let (read, write) = rustix::pipe::pipe().unwrap();
+        assert_eq!(super::receive(&read, 3, soon()).unwrap(), b"abc");
+        let (read, write) = selection_pipe().unwrap();
         rustix::io::write(&write, b"abcd").unwrap();
         assert_eq!(
-            super::receive(&read, 3, std::time::Duration::from_secs(1)).unwrap_err().kind(),
+            super::receive(&read, 3, soon()).unwrap_err().kind(),
             std::io::ErrorKind::FileTooLarge
         );
-        let (read, _held) = rustix::pipe::pipe().unwrap();
+        let (read, _held) = selection_pipe().unwrap();
+        let passed = Instant::now() + std::time::Duration::from_millis(1);
         assert_eq!(
-            super::receive(&read, 3, std::time::Duration::from_millis(1)).unwrap_err().kind(),
+            super::receive(&read, 3, passed).unwrap_err().kind(),
             std::io::ErrorKind::TimedOut
         );
+    }
+
+    /// The deadline is taken before the request, so a pool busy for longer
+    /// than it starts the reader after it has passed. An answer that had
+    /// finished by then is still the answer; one still arriving is not.
+    #[test]
+    fn an_answer_that_finished_in_time_is_read_by_a_reader_that_started_late() {
+        let passed = Instant::now();
+        let (read, write) = selection_pipe().unwrap();
+        rustix::io::write(&write, b"abc").unwrap();
+        drop(write);
+        assert_eq!(super::receive(&read, 3, passed).unwrap(), b"abc");
+
+        let (read, held) = selection_pipe().unwrap();
+        rustix::io::write(&held, b"ab").unwrap();
+        assert_eq!(
+            super::receive(&read, 3, passed).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    /// Both ends, because both leak something different: the write end held by
+    /// a launched application keeps the reader from ever seeing end-of-file, and
+    /// the read end hands it the bytes. Watched failing with `pipe()` restored.
+    #[test]
+    fn a_selection_pipe_is_not_inherited_by_anything_this_process_launches() {
+        let (read, write) = selection_pipe().unwrap();
+        for (end, fd) in [("read", &read), ("write", &write)] {
+            let flags = rustix::io::fcntl_getfd(fd).unwrap();
+            assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "the {end} end survives exec");
+        }
     }
 
     #[test]
