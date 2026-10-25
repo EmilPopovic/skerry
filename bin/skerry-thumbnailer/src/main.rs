@@ -52,7 +52,7 @@ fn main() {
                 let out = into.parent().filter(|it| !it.as_os_str().is_empty());
                 let writable: Vec<&Path> = out.into_iter().collect();
                 let report = sk_preview::sandbox::confine(
-                    sk_preview::sandbox::Limits::PREVIEW,
+                    sk_preview::sandbox::Role::Thumbnails,
                     &[Path::new("/")],
                     &[],
                     &writable,
@@ -91,7 +91,7 @@ fn confine() {
     // reason to start a program, so it is granted no execute right anywhere —
     // which means a decoder talked into spawning something cannot.
     let report = sk_preview::sandbox::confine(
-        sk_preview::sandbox::Limits::PREVIEW,
+        sk_preview::sandbox::Role::Thumbnails,
         &[Path::new("/")],
         &[],
         &writable,
@@ -190,7 +190,7 @@ fn modified(path: &Path) -> i64 {
 /// Decodes one file and says what happened, for a person at a terminal.
 fn probe(path: Option<&Path>) {
     let report = sk_preview::sandbox::confine(
-        sk_preview::sandbox::Limits::PREVIEW,
+        sk_preview::sandbox::Role::Thumbnails,
         &[Path::new("/")],
         &[],
         &[],
@@ -234,16 +234,22 @@ fn write_out(path: &Path, into: &Path, side: u32) {
         Err(refusal) => println!("skerry-thumbnailer: refused: {refusal:?}"),
         Ok(decoded) => {
             let (width, height) = decoded.raster.size;
-            let written = std::fs::File::create(into).map_err(|_| ()).and_then(|file| {
+            // **Replaced by unlinking and creating, never by `O_TRUNC`**, which
+            // the filter denies below Landlock ABI 3 — ADR 0046. A diagnostic
+            // that could not overwrite its own last output there is one nobody
+            // could run twice.
+            let _ = std::fs::remove_file(into);
+            let created = std::fs::OpenOptions::new().write(true).create_new(true).open(into);
+            let written = created.map_err(|error| error.to_string()).and_then(|file| {
                 let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
                 encoder.set_color(png::ColorType::Rgba);
                 encoder.set_depth(png::BitDepth::Eight);
-                let mut writing = encoder.write_header().map_err(|_| ())?;
-                writing.write_image_data(&decoded.raster.pixels).map_err(|_| ())
+                let mut writing = encoder.write_header().map_err(|error| error.to_string())?;
+                writing.write_image_data(&decoded.raster.pixels).map_err(|error| error.to_string())
             });
             let said = match written {
                 Ok(()) => format!("wrote {width}×{height} to {}", into.display()),
-                Err(()) => format!("could not write {}", into.display()),
+                Err(why) => format!("could not write {}: {why}", into.display()),
             };
             println!("skerry-thumbnailer: {said}");
         }

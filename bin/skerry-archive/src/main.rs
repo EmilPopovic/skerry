@@ -29,7 +29,7 @@ use sk_preview::archive::{
     Ask, Entry, Kind, Listing, MOST_ENTRIES, MOST_TABLE, Progress, Record, Refusal, Request,
     Unpacked,
 };
-use sk_preview::sandbox::{self, Limits};
+use sk_preview::sandbox::{self, Role};
 
 use detect::Opened;
 use place::Place;
@@ -82,11 +82,11 @@ fn main() {
     // nowhere else, and a listing may write nothing anywhere.
     let writable: Vec<&Path> =
         if request.ask == Ask::Unpack { vec![&request.into] } else { Vec::new() };
-    let limits = if request.ask == Ask::Unpack { Limits::UNPACK } else { Limits::PREVIEW };
+    let role = if request.ask == Ask::Unpack { Role::Unpacking } else { Role::Listing };
     let root = [Path::new("/")];
     let tools = sandbox::executables(&["xz", "zstd", "bzip2"]);
     let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
-    let report = sandbox::confine(limits, &root, &executable, &writable);
+    let report = sandbox::confine(role, &root, &executable, &writable);
     eprintln!("skerry-archive: {}", report.line());
 
     let mut out = std::io::stdout().lock();
@@ -109,7 +109,7 @@ fn probe() {
     let root = [Path::new("/")];
     let tools = sandbox::executables(&["xz", "zstd", "bzip2"]);
     let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
-    let report = sandbox::confine(Limits::PREVIEW, &root, &executable, &[]);
+    let report = sandbox::confine(Role::Listing, &root, &executable, &[]);
     println!("skerry-archive: {}", report.line());
     for filter in [
         sk_preview::archive::Filter::Xz,

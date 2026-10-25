@@ -79,7 +79,7 @@ fn confine() {
     let tools = sk_preview::sandbox::executables(&["pdftoppm", "pdftotext", "pdfinfo", "mutool"]);
     let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
     let report =
-        sk_preview::sandbox::confine(sk_preview::sandbox::Limits::PREVIEW, &root, &executable, &[]);
+        sk_preview::sandbox::confine(sk_preview::sandbox::Role::Pages, &root, &executable, &[]);
     let _ = writeln!(std::io::stderr(), "skerry-preview-doc: {}", report.line());
 }
 
