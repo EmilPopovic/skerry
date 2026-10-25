@@ -153,16 +153,22 @@ fn svg(bytes: &[u8], within: (u32, u32)) -> Result<Raster, Refusal> {
     // [`crate::fonts`], which is where the reason an SVG's text used to render as
     // nothing at all is written down.
     let fonts = crate::fonts::shared();
-    let mut options = resvg::usvg::Options {
+    // **An `href` that is not a `data:` URI resolves to nothing.** `usvg`'s
+    // default is `std::fs::read` on the raw text (0.48.1, `parser/image.rs`): an
+    // absolute path reads any picture the sandbox's read-only `/` reaches, a
+    // FIFO holds the child until the host's deadline, and what was read lands in
+    // the shared cache under the SVG's name. The price is an `<image>` linked by
+    // absolute path rather than embedded — what Inkscape writes for a linked
+    // image — which now draws as nothing.
+    let options = resvg::usvg::Options {
         font_family: fonts.default.clone(),
         fontdb: std::sync::Arc::clone(&fonts.db),
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: resvg::usvg::ImageHrefResolver::default_data_resolver(),
+            resolve_string: Box::new(|_, _| None),
+        },
         ..resvg::usvg::Options::default()
     };
-    // The document's own directory, so an `<image xlink:href="logo.png">` beside
-    // it resolves — a relative link is relative to the file and the child is
-    // given bytes, so without this the only images that render are the embedded
-    // ones. Left empty here, because what this helper is handed is the bytes.
-    options.resources_dir = None;
     let tree = resvg::usvg::Tree::from_data(bytes, &options).map_err(|_| Refusal::Undecodable)?;
     // **A vector fills its box, up as well as down**, which is the whole point of
     // a vector: an icon whose document says `width="10"` asked for at 128 is asked
@@ -493,6 +499,35 @@ mod tests {
         let raster = raster_of(source.as_bytes(), (20, 20), 1).expect("an SVG");
         let lit = raster.pixels.as_chunks::<4>().0.iter().filter(|pixel| pixel[0] > 200).count();
         assert!(lit > 50, "the embedded image drew {lit} white pixels");
+    }
+
+    /// **An `<image>` that names a file draws nothing**, however readable the file.
+    ///
+    /// `usvg`'s default resolver hands the `href` to `std::fs::read`, so a
+    /// downloaded SVG could name `~/Pictures/private.png` and the thumbnail —
+    /// written to a cache every file manager reads — would carry that picture
+    /// under the SVG's name. The white square here is that private picture.
+    #[test]
+    fn an_image_an_svg_names_by_path_is_not_read() {
+        let folder =
+            std::env::temp_dir().join(format!("skerry-thumbnailer-href-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let private = folder.join("private.png");
+        let mut encoder = png::Encoder::new(std::fs::File::create(&private).unwrap(), 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&[255; 2 * 2 * 4]).unwrap();
+        let source = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" \
+             width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"#000000\"/>\
+             <image x=\"4\" y=\"4\" width=\"12\" height=\"12\" xlink:href=\"{}\"/></svg>",
+            private.display()
+        );
+        let raster = raster_of(source.as_bytes(), (20, 20), 1);
+        let _ = std::fs::remove_dir_all(&folder);
+        let raster = raster.expect("an SVG whose image is refused still renders its shapes");
+        let lit = raster.pixels.as_chunks::<4>().0.iter().filter(|pixel| pixel[0] > 200).count();
+        assert_eq!(lit, 0, "a file named by an <image> drew {lit} of its pixels");
     }
 
     #[test]

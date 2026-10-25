@@ -55,6 +55,18 @@ const HEADER: usize = 56;
 /// modified.
 const PER_ENTRY: usize = 4 + 4 + 2 + 2 + 8 + 8;
 
+/// The largest index file this reads: 64 bytes an entry for 32 Mi entries, 2 GiB.
+///
+/// **Read whole into memory, so a file's size is an allocation**, and a sparse
+/// file planted at an index's name can claim terabytes for free. Indexes measure
+/// 44.9 to 49.6 bytes an entry
+/// ([09](../../../docs/09-performance-budgets.md#what-the-index-measured)), so 64 leaves
+/// room for longer names; the largest tree measured, every local filesystem of
+/// the machine that measured it, is 6.9 million entries and 342 MB, and this is
+/// nearly five times that. An index of a larger tree is refused and the search
+/// walks, which is what every other refusal here costs too.
+const LARGEST: u64 = 64 * 32 * 1024 * 1024;
+
 /// The parent of an entry that sits directly in the root.
 const NO_PARENT: u32 = u32::MAX;
 
@@ -480,17 +492,26 @@ fn count_one(directory: &Path, device: u64, seen: &mut usize, pending: &mut Vec<
 /// a walk.
 #[must_use]
 pub fn save(index: &Index) -> bool {
-    path_for(&index.root).is_some_and(|file| save_to(index, &file))
+    let Some(file) = path_for(&index.root) else { return false };
+    if let Some(folder) = file.parent() {
+        seal(folder);
+    }
+    save_to(index, &file)
 }
 
 /// As [`save`], to a named file.
 ///
 /// The seam a test uses. `$XDG_CACHE_HOME` is process-global, and a test that
 /// moved it would be a test that moves it for every other test running beside it.
+///
+/// **0600, in folders made 0700.** An index of a home folder names everything
+/// beneath it, `~/.ssh`'s contents included, so an index anybody could read
+/// publishes what those folders' own modes keep private.
 #[must_use]
 pub fn save_to(index: &Index, file: &Path) -> bool {
-    let Some(directory) = file.parent() else { return false };
-    if std::fs::create_dir_all(directory).is_err() {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let (Some(directory), Some(name)) = (file.parent(), file.file_name()) else { return false };
+    if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).is_err() {
         return false;
     }
     let arena_len = index.columns_at - index.arena_at;
@@ -505,17 +526,119 @@ pub fn save_to(index: &Index, file: &Path) -> bool {
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&hash(&index.bytes).to_le_bytes());
     out.extend_from_slice(&index.bytes);
+    publish(directory, name, &out).is_ok()
+}
 
-    let staging = file.with_extension("new");
-    if std::fs::write(&staging, &out).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
+/// How a folder this module writes into, or closes, is opened.
+///
+/// **Not through a link at its name**, and never waiting: `O_DIRECTORY` refuses a
+/// FIFO swapped in for the folder before the open could block on it.
+const FOLDER: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::NONBLOCK)
+    .union(OFlags::CLOEXEC);
+
+/// The name an index is written under until the rename makes it the index.
+///
+/// **One per index rather than one per save**, so a save that a crash or `kill
+/// -9` cut short leaves one file behind — a whole index, 45 bytes an entry — and
+/// the next save of that root removes it. Two saves of one root do not overlap:
+/// starting a build of a root cancels the one before it, and a cancelled build
+/// saves nothing.
+fn staging_for(name: &std::ffi::OsStr) -> std::ffi::OsString {
+    let mut staging = std::ffi::OsString::from(".");
+    staging.push(name);
+    staging.push(".new");
+    staging
+}
+
+/// Puts `bytes` at `name` in `directory`, through a file only this call created.
+///
+/// Everything happens against one descriptor for the folder, so the file is
+/// staged and published in the same place; and the rename replaces a link at
+/// `name` rather than following it.
+fn publish(directory: &Path, name: &std::ffi::OsStr, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let folder = rustix::fs::open(directory, FOLDER, Mode::empty())?;
+    let staging = staging_for(name);
+    match rustix::fs::unlinkat(&folder, &staging, rustix::fs::AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(error.into()),
     }
-    if std::fs::rename(&staging, file).is_err() {
-        let _ = std::fs::remove_file(&staging);
-        return false;
+    let written = stage(&folder, &staging)?.write_all(bytes).and_then(|()| {
+        rustix::fs::renameat(&folder, &staging, &folder, name).map_err(std::io::Error::from)
+    });
+    if written.is_err() {
+        let _ = rustix::fs::unlinkat(&folder, &staging, rustix::fs::AtFlags::empty());
     }
-    true
+    written
+}
+
+/// Creates the staging file, 0600, refusing anything already at its name.
+///
+/// **`O_EXCL` is what makes the `unlinkat` before it safe.** A link planted again
+/// in between is a name that exists, and the create fails "regardless of the
+/// contents of the symbolic link" (POSIX `open`) rather than writing through it.
+fn stage(
+    folder: &impl rustix::fd::AsFd,
+    staging: &std::ffi::OsStr,
+) -> std::io::Result<std::fs::File> {
+    let create =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let handle = rustix::fs::openat(folder, staging, create, Mode::from_raw_mode(0o600))?;
+    Ok(std::fs::File::from(handle))
+}
+
+/// Takes group and other access off the index folder an older version left open.
+///
+/// **From [`save`] and [`load`], not from [`save_to`]**, because only the folder
+/// [`path_for`] names is this program's to close — a test saves into the
+/// system's temporary directory. `load` is what makes it prompt: a rebuild is
+/// only ever asked for, so the first search after an upgrade is what puts the
+/// indexes an older version wrote 0644 behind a closed folder.
+///
+/// A folder somebody else owns is left alone, so a process running as root with
+/// another person's `$HOME` changes nothing of theirs.
+fn seal(folder: &Path) {
+    let Ok(fd) = rustix::fs::open(folder, FOLDER, Mode::empty()) else { return };
+    let asked = StatxFlags::MODE | StatxFlags::UID;
+    let Ok(stat) = rustix::fs::statx(&fd, "", rustix::fs::AtFlags::EMPTY_PATH, asked) else {
+        return;
+    };
+    let mode = u32::from(stat.stx_mode);
+    let shared = mode & 0o077;
+    if shared != 0 && stat.stx_uid == rustix::process::geteuid().as_raw() {
+        let _ = rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode & 0o700));
+    }
+}
+
+/// Reads a whole file, if what is at `file` is one.
+///
+/// **A regular file at that very name, or nothing.** The cache is writable by
+/// whoever runs this, so what is there may have been planted: a link is not
+/// followed, and a FIFO opens without waiting for a writer and is then refused,
+/// rather than holding a pool thread until somebody writes to it. Nothing larger
+/// than [`LARGEST`] is read.
+fn read_regular(file: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let open = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(file, open, Mode::empty())?;
+    let asked = StatxFlags::TYPE | StatxFlags::SIZE;
+    let stat = rustix::fs::statx(&fd, "", rustix::fs::AtFlags::EMPTY_PATH, asked)?;
+    if FileType::from_raw_mode(u32::from(stat.stx_mode)) != FileType::RegularFile {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    if stat.stx_size > LARGEST {
+        return Err(std::io::Error::other("larger than any index"));
+    }
+    // **Fallible, and bounded by the ceiling rather than the size.** An
+    // infallible reservation aborts the process when it cannot be met, and the
+    // file can grow between the `statx` and the read.
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(usize::try_from(stat.stx_size).map_err(std::io::Error::other)?)?;
+    std::fs::File::from(fd).take(LARGEST).read_to_end(&mut raw)?;
+    Ok(raw)
 }
 
 /// Reads the index for `root`, or nothing if there is not a usable one.
@@ -525,13 +648,15 @@ pub fn save_to(index: &Index, file: &Path) -> bool {
 /// the one that reads all fifty megabytes.
 #[must_use]
 pub fn load(root: &Path) -> Option<Index> {
-    load_from(&path_for(root)?, root)
+    let file = path_for(root)?;
+    seal(file.parent()?);
+    load_from(&file, root)
 }
 
 /// As [`load`], from a named file.
 #[must_use]
 pub fn load_from(file: &Path, root: &Path) -> Option<Index> {
-    let raw = std::fs::read(file).ok()?;
+    let raw = read_regular(file).ok()?;
     if raw.len() < HEADER || raw.get(..4)? != MAGIC {
         return None;
     }
@@ -813,7 +938,10 @@ fn now() -> i64 {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{HEADER, Index, MOST, build, count, load_from, save_to, scan_by, search, shard_of};
+    use super::{
+        HEADER, Index, LARGEST, MOST, build, count, load_from, save_to, scan_by, seal, search,
+        shard_of, stage,
+    };
     use sk_util::{Cancel, Pool};
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
@@ -934,6 +1062,181 @@ mod tests {
         assert_eq!(names(&hunt(&back, "report")), ["Report.pdf", "report-2024.pdf", "reports"]);
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn mode(path: &Path) -> String {
+        format!("{:o}", std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777)
+    }
+
+    /// A scratch folder of its own, beside the fixtures.
+    fn folder(label: &str) -> PathBuf {
+        let folder =
+            std::env::temp_dir().join(format!("skerry-store-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    /// Runs `work`, failing the test rather than hanging it if it blocks.
+    fn promptly<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(work()));
+        receiver.recv_timeout(std::time::Duration::from_secs(10)).expect("it blocked")
+    }
+
+    /// **0600 in 0700.** An index of a home folder names everything beneath it,
+    /// `~/.ssh`'s contents included, so a file anybody can read publishes what
+    /// those folders' own modes keep private. Every folder the save has to make
+    /// is made 0700, which is what the basedir specification asks of
+    /// `$XDG_CACHE_HOME` itself.
+    #[test]
+    fn a_saved_index_is_readable_by_its_owner_alone() {
+        let root = fixture("private");
+        let index = built(&root);
+        let cache = root.join("..").join(format!("{}-private-cache", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let folder = cache.join("skerry").join("index");
+        let file = folder.join("0123.skix");
+        assert!(save_to(&index, &file), "the index would not save");
+        assert_eq!(mode(&file), "600", "the index");
+        for made in [&folder, &cache.join("skerry"), &cache] {
+            assert_eq!(mode(made), "700", "{}", made.display());
+        }
+        let staging = folder.join(".0123.skix.new");
+        assert!(staging.symlink_metadata().is_err(), "the staging file was left beside the index");
+        std::fs::remove_dir_all(cache).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **What a save cut short left behind, the next one removes**, because it is
+    /// a whole index under a name nothing else would ever clean up.
+    #[test]
+    fn a_staging_file_a_crash_left_is_gone_after_the_next_save() {
+        let root = fixture("leftover");
+        let index = built(&root);
+        let folder = folder("leftover-cache");
+        let (file, staging) = (folder.join("0123.skix"), folder.join(".0123.skix.new"));
+        std::fs::write(&staging, vec![0u8; 4096]).unwrap();
+        assert!(save_to(&index, &file), "a leftover staging file stopped the save");
+        assert!(staging.symlink_metadata().is_err(), "the leftover is still there");
+        assert!(load_from(&file, &root).is_some(), "the index the save wrote does not load");
+        std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A link in the index folder is never written through**: not at the
+    /// staging name, which is removed rather than opened, and not at the index's
+    /// own name, which the rename replaces rather than follows.
+    #[test]
+    fn a_link_planted_in_the_index_folder_is_not_written_through() {
+        let root = fixture("links");
+        let index = built(&root);
+        let folder = folder("links-cache");
+        let file = folder.join("0123.skix");
+        let (staged, named) = (folder.join("staged-victim"), folder.join("named-victim"));
+        std::fs::write(&staged, "unrelated").unwrap();
+        std::fs::write(&named, "unrelated").unwrap();
+        std::os::unix::fs::symlink(&staged, folder.join(".0123.skix.new")).unwrap();
+        std::os::unix::fs::symlink(&named, &file).unwrap();
+        assert!(save_to(&index, &file), "a planted link stopped the save");
+        assert_eq!(std::fs::read(&staged).unwrap(), b"unrelated", "the staging link");
+        assert_eq!(std::fs::read(&named).unwrap(), b"unrelated", "the index's own name");
+        assert_eq!(mode(&file), "600", "the index is not the file the save made");
+        std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **The staging file is created, never opened**: a link put back at its name
+    /// between the save's `unlinkat` and its create is refused, and the file it
+    /// points at is untouched. The save cannot be made to lose that race on
+    /// demand, so this asks the create directly.
+    #[test]
+    fn a_link_at_the_staging_name_is_refused_by_the_create() {
+        use rustix::fs::{Mode, OFlags};
+        let folder = folder("stage");
+        let victim = folder.join("victim");
+        std::fs::write(&victim, "unrelated").unwrap();
+        std::os::unix::fs::symlink(&victim, folder.join(".0123.skix.new")).unwrap();
+        let open = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+        let fd = rustix::fs::open(&folder, open, Mode::empty()).unwrap();
+        let refused = stage(&fd, std::ffi::OsStr::new(".0123.skix.new")).unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unrelated");
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// **Only a regular file at the index's own name is read.** A link is not
+    /// followed, and a FIFO is refused at once rather than holding a pool thread
+    /// until something writes to it.
+    #[test]
+    fn a_link_or_a_fifo_at_the_index_name_is_not_read() {
+        let root = fixture("planted");
+        let index = built(&root);
+        let folder = folder("planted-cache");
+        let file = folder.join("0123.skix");
+        assert!(save_to(&index, &file));
+        let linked = folder.join("linked.skix");
+        std::os::unix::fs::symlink(&file, &linked).unwrap();
+        assert!(load_from(&linked, &root).is_none(), "an index was read through a link");
+
+        let fifo = folder.join("fifo.skix");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, rustix::fs::Mode::from_raw_mode(0o600))
+            .unwrap();
+        let held = root.clone();
+        assert!(promptly(move || load_from(&fifo, &held).is_none()), "a FIFO was read");
+        std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A file past the ceiling is refused before anything is read or
+    /// reserved.** Sparse, so it claims its size without occupying it: one byte
+    /// past [`LARGEST`], and the eight terabytes that aborted the window on every
+    /// search of the root when the read reserved whatever the file claimed.
+    #[test]
+    fn a_file_larger_than_any_index_is_refused_unread() {
+        let root = fixture("sparse");
+        let folder = folder("sparse-cache");
+        for claimed in [LARGEST + 1, 1 << 43] {
+            let file = folder.join(format!("{claimed}.skix"));
+            std::fs::File::create(&file).unwrap().set_len(claimed).unwrap();
+            let (held, root) = (file.clone(), root.clone());
+            assert!(promptly(move || load_from(&held, &root).is_none()), "{claimed} bytes");
+            std::fs::remove_file(file).unwrap();
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **A folder an older version left open is closed**, which reaches every
+    /// index it already wrote 0644 without waiting for a rebuild — and nothing
+    /// above it, behind a link at its name, or a FIFO in its place, is touched or
+    /// waited on.
+    #[test]
+    fn an_index_folder_left_open_is_closed_and_nothing_else_is() {
+        use std::fs::Permissions;
+        let cache = folder("seal");
+        let folder = cache.join("skerry").join("index");
+        let elsewhere = cache.join("elsewhere");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for open in [&cache, &cache.join("skerry"), &folder, &elsewhere] {
+            std::fs::set_permissions(open, Permissions::from_mode(0o755)).unwrap();
+        }
+        seal(&folder);
+        assert_eq!(mode(&folder), "700", "the index folder");
+        assert_eq!(mode(&cache.join("skerry")), "755", "the folder above it");
+
+        let linked = cache.join("linked");
+        std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+        seal(&linked);
+        assert_eq!(mode(&elsewhere), "755", "the close went through a link");
+
+        let fifo = cache.join("fifo");
+        rustix::fs::mkfifoat(rustix::fs::CWD, &fifo, rustix::fs::Mode::from_raw_mode(0o644))
+            .unwrap();
+        promptly(move || seal(&fifo));
+        assert_eq!(mode(&cache.join("fifo")), "644", "a FIFO was changed");
+        std::fs::remove_dir_all(cache).unwrap();
     }
 
     /// Every corruption is a walk, which is ADR 0008's third constraint.

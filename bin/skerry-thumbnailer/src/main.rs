@@ -85,7 +85,7 @@ fn confine() {
     // The cache has to exist before it can be granted, because a rule is a
     // descriptor and there is no descriptor for a directory that is not there.
     for directory in &writable {
-        let _ = std::fs::create_dir_all(directory);
+        cache::prepare(directory);
     }
     // **Nothing executable.** A thumbnailer decodes in-process and has no
     // reason to start a program, so it is granted no execute right anywhere —
