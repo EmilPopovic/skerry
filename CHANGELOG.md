@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A unified custom icon set now covers files, menus and controls. New
+  configurations use Skerry icons by default.
+
 ### Fixed
 
 - A secondary click on a quick look opens the menu of the file being previewed.

@@ -22,6 +22,7 @@ pub mod discover;
 pub mod fonts;
 pub mod layout;
 pub mod shape;
+pub mod symbols;
 
 pub use fonts::{Fonts, GlyphImage, GlyphKey, Metrics, SUBPIXEL_BUCKETS, Weight};
 pub use layout::{LayoutCache, RunKey};

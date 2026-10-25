@@ -52,6 +52,7 @@ Format: Context · Decision · Consequences · Revisit trigger · Status.
 | [0042](0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md) | Where a mark comes from is a setting, and an icon is a band in its own atlas | Accepted |
 | [0043](0043-recents-are-two-stores-read-as-one-list-and-ours-is-the-one-rule-6-counts.md) | Recents are two stores read as one list, and ours is the one rule 6 counts | Accepted — the shared write is staged behind the measurement the record names |
 | [0044](0044-a-launch-that-names-nothing-is-a-new-window.md) | A launch that names nothing is a new window | Accepted — supersedes one sentence of 0038 |
+| [0045](0045-bundled-symbols-use-the-glyph-mask-cache.md) | Bundled symbols use the glyph mask cache | Accepted — supersedes built-in drawing and the fresh-install default in 0042 |
 
 ## Triggers that have been answered
 

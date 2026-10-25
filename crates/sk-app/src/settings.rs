@@ -142,22 +142,15 @@ impl Setting {
     }
 }
 
-/// Where a file's mark comes from.
-///
-/// **[ADR 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md),
-/// and the marks are one of three rather than the branch nothing chose.** A file
-/// manager that draws the desktop's icons everywhere looks like every other
-/// window on that desktop; somebody who prefers nine hues over a geometric mark
-/// at 0.012 ms a frame should not have to uninstall a theme to keep them. A
-/// branch nobody can choose is a branch that rots.
+/// The source of file icons. Bundled vectors are the default; desktop and named
+/// themes remain explicit choices. See ADR 0045.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Icons {
-    /// Skerry's own geometric marks. Nothing parses an `index.theme` and the
+    /// Skerry's bundled vectors, the default. Nothing parses an `index.theme` and the
     /// lookup is never called.
-    Marks,
-    /// Whatever the desktop is using, asked at start-up. What a fresh install
-    /// takes, so a machine with a theme installed looks like the rest of it.
     #[default]
+    Marks,
+    /// Whatever the desktop is using, when explicitly selected.
     Desktop,
     /// One theme, whatever the desktop does.
     Named(String),
@@ -589,7 +582,7 @@ mod tests {
             assert!(read.take(Setting::Icons, &word), "icons refused its own {word:?}");
             assert_eq!(read.icons, icons, "{word:?} did not survive");
         }
-        assert_eq!(Values::default().icons, Icons::Desktop, "a fresh install is not the desktop's");
+        assert_eq!(Values::default().icons, Icons::Marks, "a fresh install uses bundled icons");
         assert!(matches!(Setting::Icons.kind(), Kind::Choice));
     }
 
@@ -601,7 +594,7 @@ mod tests {
         for word in ["", "   ", "Adwaita Dark", "\ttwo words\t"] {
             let mut values = Values::default();
             assert!(!values.take(Setting::Icons, word), "{word:?} was taken as a theme");
-            assert_eq!(values.icons, Icons::Desktop, "a refused word still moved the setting");
+            assert_eq!(values.icons, Icons::Marks, "a refused word still moved the setting");
         }
     }
 
@@ -624,9 +617,9 @@ mod tests {
         // With no theme named there are two positions and no third to reach.
         let mut two = Values::default();
         two.step(1, None);
-        assert_eq!(two.icons, Icons::Marks);
-        two.step(1, None);
         assert_eq!(two.icons, Icons::Desktop);
+        two.step(1, None);
+        assert_eq!(two.icons, Icons::Marks);
     }
 
     #[test]

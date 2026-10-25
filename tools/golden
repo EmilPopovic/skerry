@@ -465,8 +465,8 @@ FRAMES = [
     # so a unit of the grid is a fractional pixel at thirteen, which is where a
     # mark that is only right on whole pixels shows it; and in both palettes,
     # because the recessed emblem is a darker tone of the ink on either ground.
-    ("marks", ["--size", "1230x470", "--scale", "150", "--marks"]),
-    ("marks-light", ["--size", "1230x470", "--scale", "150", "--marks", "--light"]),
+    ("marks", ["--size", "1230x2320", "--scale", "150", "--marks"]),
+    ("marks-light", ["--size", "1230x2320", "--scale", "150", "--marks", "--light"]),
     # The path bar as a field, with the caret a third of the way along it —
     # which is the only frame that would catch the caret's position drifting
     # from the shaped width of the text before it.

@@ -456,6 +456,9 @@ impl Fonts {
     /// Rasterizes one glyph at exactly the size and offset it will be drawn at.
     #[must_use]
     pub fn rasterize(&mut self, key: GlyphKey) -> Option<GlyphImage> {
+        if key.face == crate::symbols::FACE {
+            return crate::symbols::rasterize(key);
+        }
         // Split the borrow: `faces` is read while `scale_context` is mutated,
         // and they are disjoint fields.
         let Self { faces, scale_context, .. } = self;

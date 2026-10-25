@@ -38,6 +38,40 @@ pub(crate) fn of_file(kind: Category, mime: Option<&str>, types: Option<&MimeDat
 
 /// A mark more specific than the kind, where the type has one.
 fn by_type(mime: &str, generic: Option<&str>) -> Option<Mark> {
+    let specific = match mime {
+        "application/pdf" => Some(Mark::FilePdf),
+        "application/epub+zip" | "application/x-mobipocket-ebook" => Some(Mark::FileEbook),
+        "image/svg+xml" => Some(Mark::FileVector),
+        "application/json"
+        | "application/ld+json"
+        | "application/xml"
+        | "text/xml"
+        | "application/yaml"
+        | "text/yaml"
+        | "application/toml" => Some(Mark::FileData),
+        "application/x-shellscript"
+        | "text/x-shellscript"
+        | "text/x-python"
+        | "application/x-python"
+        | "text/x-perl"
+        | "application/javascript"
+        | "text/javascript" => Some(Mark::FileScript),
+        "application/x-sqlite3" | "application/vnd.sqlite3" | "application/sql" => {
+            Some(Mark::FileDatabase)
+        }
+        "application/x-sharedlib" => Some(Mark::FileLibrary),
+        "application/x-object" | "application/x-executable-binary" => Some(Mark::FileBinary),
+        "application/x-desktop" | "text/x-ini" | "application/x-config" => Some(Mark::FileConfig),
+        "application/x-pem-key" | "application/pgp-keys" => Some(Mark::FileKey),
+        "application/pkix-cert" | "application/x-x509-ca-cert" | "application/x-pkcs12" => {
+            Some(Mark::FileCertificate)
+        }
+        _ if mime.starts_with("model/") => Some(Mark::FileModel),
+        _ => None,
+    };
+    if specific.is_some() {
+        return specific;
+    }
     match generic {
         Some("x-office-spreadsheet") => return Some(Mark::Spreadsheet),
         Some("x-office-presentation") => return Some(Mark::Presentation),
@@ -55,6 +89,13 @@ fn by_type(mime: &str, generic: Option<&str>) -> Option<Mark> {
 /// **Checked in order, and the order matters once**: `text/csv` is text to the
 /// kinds and a table to anybody looking at it, so the table is first.
 const SPELLED: &[(&str, Mark)] = &[
+    ("-raw", Mark::FileRaw),
+    ("x-canon-cr", Mark::FileRaw),
+    ("x-nikon-nef", Mark::FileRaw),
+    ("x-sony-arw", Mark::FileRaw),
+    ("debian", Mark::FilePackage),
+    ("x-rpm", Mark::FilePackage),
+    ("appimage", Mark::FilePackage),
     ("text/csv", Mark::Spreadsheet),
     ("spreadsheet", Mark::Spreadsheet),
     ("ms-excel", Mark::Spreadsheet),
@@ -71,7 +112,7 @@ const SPELLED: &[(&str, Mark)] = &[
     ("vmdk", Mark::DiskImage),
     ("qemu-disk", Mark::DiskImage),
     ("virtualbox-vdi", Mark::DiskImage),
-    ("epub", Mark::Document),
+    ("epub", Mark::FileEbook),
 ];
 
 /// The mark for one of the well-known directories.
@@ -118,14 +159,21 @@ fn hue_of(mark: Mark, palette: &sk_ui::Palette) -> sk_gpu::Color {
         _ if mark.is_folder() => kinds.folder,
         Mark::Trash | Mark::TrashFull | Mark::Recent => palette.dim,
         Mark::Drive | Mark::Removable | Mark::Optical | Mark::Unknown => kinds.unknown,
-        Mark::Image => kinds.image,
+        Mark::Image | Mark::FileVector | Mark::FileRaw | Mark::FileModel => kinds.image,
         // A network mount shares audio's hue in the sidebar, where it was first.
         Mark::Audio | Mark::Network => kinds.audio,
         Mark::Video => kinds.video,
-        Mark::Archive | Mark::DiskImage => kinds.archive,
-        Mark::Code | Mark::Web => kinds.code,
+        Mark::Archive | Mark::DiskImage | Mark::FilePackage => kinds.archive,
+        Mark::Code | Mark::Web | Mark::FileScript | Mark::FileConfig | Mark::FileData => kinds.code,
         Mark::Executable => kinds.executable,
-        _ => kinds.document,
+        Mark::Text
+        | Mark::Document
+        | Mark::Spreadsheet
+        | Mark::Presentation
+        | Mark::Font
+        | Mark::FilePdf
+        | Mark::FileEbook => kinds.document,
+        _ => palette.text,
     }
 }
 
@@ -198,7 +246,7 @@ mod tests {
             of(Category::Document, "application/vnd.oasis.opendocument.presentation"),
             Mark::Presentation
         );
-        assert_eq!(of(Category::Document, "application/pdf"), Mark::Document);
+        assert_eq!(of(Category::Document, "application/pdf"), Mark::FilePdf);
         assert_eq!(of(Category::Document, "text/plain"), Mark::Text);
         assert_eq!(of(Category::Document, "text/csv"), Mark::Spreadsheet);
         assert_eq!(of(Category::Code, "text/html"), Mark::Web);

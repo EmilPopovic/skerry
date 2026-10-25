@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Drawing text, hairlines and the two icon shapes, in device pixels.
+//! Drawing text, bundled symbols and chrome in device pixels.
 
 use sk_gpu::{Color, Direction, DrawList, Rect};
 
@@ -476,12 +476,19 @@ impl Painter<'_> {
     /// why that is a value rather than four call sites.
     pub fn icon(&mut self, icon: Icon, box_rect: Rect, color: Color) {
         match icon {
-            Icon::Mark(mark) => crate::marks::draw(self.list, mark, box_rect, color),
+            Icon::Mark(mark) => {
+                crate::marks::draw(self.list, mark, box_rect, color, self.theme.palette.background);
+            }
             // The tint carries only its alpha, so a caller can fade a thumbnail
             // in without a second code path — see [`Self::image`].
             Icon::Picture(key) => self.image(key, box_rect, color),
             Icon::Themed(key) => self.themed(key, box_rect, color),
         }
+    }
+
+    /// A bundled mark whose opaque cutouts match the surface behind it.
+    pub fn mark_on(&mut self, mark: crate::Mark, area: Rect, ink: Color, backing: Color) {
+        crate::marks::draw(self.list, mark, area, ink, backing);
     }
 
     /// A thumbnail, fitted inside `box_rect` and centred in it.
@@ -526,39 +533,14 @@ impl Painter<'_> {
         self.list.preview(key, box_rect, tint);
     }
 
-    /// A check box: a framed square with a block of `ink` in it when it is on.
-    ///
-    /// **No tick, because a tick is a diagonal.** The display list has rectangles,
-    /// rounded rectangles and a triangle with its apex on one of four edges — see
-    /// [`Self::triangle`], which says why a font glyph is not the alternative
-    /// either: `↻` and `⟳` are both missing from this machine's chain and render as
-    /// a box, and which glyphs somebody else has is somebody else's decision. A
-    /// block inside a frame is a state a person reads at fourteen pixels without
-    /// one, and it is the shape the panel that asks about a taken name already drew
-    /// by hand — this is that shape with one home instead of two.
-    ///
-    /// **Proportional, not fourteen pixels.** The panel's box is fourteen and the
-    /// one over a list entry's mark is sixteen, so the inner block is a fraction of
-    /// the frame rather than a constant; at any size the two read as the same
-    /// control.
-    ///
-    /// It draws no ground. Over a panel there is nothing to hide, and over a mark
-    /// the caller paints one — which is the caller's business, because what is
-    /// behind the box is what the caller put there.
+    /// A selection frame and the bundled check symbol, on the caller's ground.
     pub fn checkbox(&mut self, box_rect: Rect, ink: Color, frame: Color, on: bool) {
         let ring = self.px(1.0).round().max(1.0);
         self.list.stroke(box_rect, frame, self.px(3.0), ring);
         if !on {
             return;
         }
-        let inset = (box_rect.width * (4.0 / 14.0)).round();
-        let block = Rect::new(
-            box_rect.x + inset,
-            box_rect.y + inset,
-            (box_rect.width - inset * 2.0).max(1.0),
-            (box_rect.height - inset * 2.0).max(1.0),
-        );
-        self.list.rect(block, ink, self.px(1.0));
+        self.icon(Icon::Mark(crate::Mark::Check), box_rect, ink);
     }
 }
 
@@ -571,7 +553,7 @@ impl Painter<'_> {
 /// only thing that draws: one of Skerry's own [`crate::marks`], a theme's icon,
 /// or a thumbnail.
 ///
-/// A new mark is a variant of [`crate::Mark`] and an arm in its drawing, and
+/// The icon generator adds a variant of [`crate::Mark`] and its geometry, and
 /// nothing in the view moves; which entries get it is `sk_app::marks`. Render
 /// the specimen sheet — `--capture --marks` at 100% and at 200% — and look at
 /// both before blessing anything, which is the rule
@@ -579,8 +561,8 @@ impl Painter<'_> {
 /// already states: at thirteen logical pixels an emblem is five pixels wide.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
-    /// One of Skerry's own marks — [`crate::marks`], drawn from the display
-    /// list's shapes in the first frame and under a themed icon until it lands.
+    /// One of Skerry's own marks — [`crate::marks`], drawn from the
+    /// glyph cache at the requested device size.
     Mark(crate::marks::Mark),
     /// An icon from the desktop's theme, which the caller asked for by name.
     ///

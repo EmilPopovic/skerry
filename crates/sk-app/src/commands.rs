@@ -1728,6 +1728,11 @@ mod tests {
     fn every_command_is_reachable_and_named() {
         let registry = registry();
         for command in registry.iter() {
+            assert!(
+                crate::action_marks::of_command(command.id).is_some(),
+                "{} has no bundled icon",
+                command.id
+            );
             assert!(!command.name.is_empty(), "`{}` has no name", command.id);
             assert_ne!(
                 command.name, command.id,

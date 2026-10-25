@@ -24,6 +24,7 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 mod a11y;
+mod action_marks;
 mod app;
 mod archive;
 mod bench;

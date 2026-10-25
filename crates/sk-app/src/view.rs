@@ -949,7 +949,7 @@ fn menu_width(painter: &mut Painter<'_>, drawn: &[crate::menu::Item]) -> f32 {
             name + if mark > 0.0 { SPACING + mark } else { 0.0 }
         })
         .fold(0.0f32, f32::max);
-    (widest + INSET * 2.0).clamp(WIDTH.0, WIDTH.1)
+    (widest + INSET * 2.0 + 24.0).clamp(WIDTH.0, WIDTH.1)
 }
 
 /// The rows of one panel — the menu's or its submenu's — into `area`. `open` is
@@ -1012,6 +1012,18 @@ fn menu_rows(
             painter.list.rect(box_, ink, painter.px(dot / 2.0));
             x += dot + 8.0;
             inner -= dot + 8.0;
+        }
+        if crate::colours::of_command(&item.id).is_none() {
+            let mark = crate::action_marks::of_command(&item.id).or(match &item.kind {
+                crate::menu::Kind::Launch { .. } => Some(sk_ui::Mark::OpenWith),
+                crate::menu::Kind::Instantiate { .. } => Some(sk_ui::Mark::NewFile),
+                _ => None,
+            });
+            if let Some(mark) = mark {
+                action_mark(painter, mark, (x + 8.0, top + STEP / 2.0), 16.0, name_colour);
+            }
+            x += 24.0;
+            inner -= 24.0;
         }
         // **A row that opens says so where its chord would be.** The chevron is
         // the one mark every desktop uses for it, and a row with a chord and a
@@ -1466,15 +1478,8 @@ fn quick_look_controls(
             painter.list.rect(shape, theme.palette.button_hover, painter.px(metrics.radius));
         }
         let ink = theme.palette.accent;
-        let middle = area.y + (side - 10.0) / 2.0;
-        if look.playing {
-            for offset in [0.0, 6.0] {
-                let bar = painter.rect(area.x + 9.0 + offset, middle, 3.0, 10.0);
-                painter.list.rect(bar, ink, 0.0);
-            }
-        } else {
-            painter.triangle(area.x + 10.0, middle, 8.0, 10.0, ink, Direction::Right);
-        }
+        let mark = if look.playing { sk_ui::Mark::Pause } else { sk_ui::Mark::Play };
+        action_mark(painter, mark, (area.x + side / 2.0, area.y + side / 2.0), 18.0, ink);
         hits.look.push((LookControl::Play, area));
         right = area.x - 2.0;
     }
@@ -3247,7 +3252,17 @@ fn command_palette(painter: &mut Painter<'_>, layout: &Layout, palette: &Palette
         let keys_width = text_width(painter, &row.keys, metrics.header_size, true);
         let name_style = TextStyle::new(metrics.text_size, name_colour);
         let x = area.x + INSET;
-        line(painter, &row.name, name_style, x, inner - keys_width - SPACING * 0.5, baseline);
+        if let Some(mark) = crate::action_marks::of_command(row.id) {
+            action_mark(painter, mark, (x + 8.0, top + STEP / 2.0), 16.0, name_colour);
+        }
+        line(
+            painter,
+            &row.name,
+            name_style,
+            x + 24.0,
+            inner - 24.0 - keys_width - SPACING * 0.5,
+            baseline,
+        );
         let keys_style = TextStyle::new(metrics.header_size, keys_colour).right();
         line(painter, &row.keys, keys_style, x, inner, baseline);
     }
@@ -4027,7 +4042,14 @@ fn place_row(
             painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Network), icon, kinds.audio);
         }
         Mark::Volume => painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Drive), icon, kinds.unknown),
-        Mark::Trash => painter.icon(sk_ui::Icon::Mark(sk_ui::Mark::Trash), icon, theme.palette.dim),
+        Mark::Trash => {
+            let mark = if row.held.is_some_and(|held| held.items > 0) {
+                sk_ui::Mark::TrashFull
+            } else {
+                sk_ui::Mark::Trash
+            };
+            painter.icon(sk_ui::Icon::Mark(mark), icon, theme.palette.dim);
+        }
         Mark::Place(place) => {
             painter.icon(sk_ui::Icon::Mark(crate::marks::of_place(place)), icon, kinds.folder);
         }
@@ -4154,15 +4176,18 @@ fn fullness(
     painter.list.rect(painter.rect(from, top, filled, height), ink, radius);
 }
 
-/// Back, forward, parent and reload, drawn from triangles and rectangles.
-///
-/// Not font glyphs: `↻` and `⟳` are both missing from this machine's chain and
-/// render as a box, and a toolbar with a box in it is worse than one with no
-/// reload button. The arrows are a triangle for the head and a bar for the shaft,
-/// which is the same shape at every scale and needs nobody's font.
-///
-/// Dimmed from the command's own `enabled`, so a Back button with nowhere to go
-/// looks like a dimmed menu item and not like a broken one.
+/// One bundled control, centred in logical coordinates.
+fn action_mark(
+    painter: &mut Painter<'_>,
+    mark: sk_ui::Mark,
+    centre: (f32, f32),
+    side: f32,
+    ink: Color,
+) {
+    let at = painter.rect(centre.0 - side / 2.0, centre.1 - side / 2.0, side, side);
+    painter.icon(sk_ui::Icon::Mark(mark), at, ink);
+}
+
 fn tool_buttons(painter: &mut Painter<'_>, pane: &Pane, leaf: &PaneLayout, chrome: &Chrome<'_>) {
     let theme = *painter.theme;
     for (tool, area) in Tool::ALL.into_iter().zip(leaf.tools) {
@@ -4234,131 +4259,36 @@ fn mode_buttons(painter: &mut Painter<'_>, pane: &Pane, leaf: &PaneLayout, chrom
 
 /// Four squares in a square, for the grid.
 fn grid_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
-    /// One square, and the space between two of them.
-    const CELL: f32 = 5.0;
-    const GAP: f32 = 2.5;
-    let (x, y) = centre;
-    let span = CELL * 2.0 + GAP;
-    for row in 0..2 {
-        for column in 0..2 {
-            let rect = painter.rect(
-                x - span / 2.0 + column as f32 * (CELL + GAP),
-                y - span / 2.0 + row as f32 * (CELL + GAP),
-                CELL,
-                CELL,
-            );
-            painter.list.rect(rect, ink, painter.px(1.0));
-        }
-    }
+    action_mark(painter, sk_ui::Mark::ViewGrid, centre, 18.0, ink);
 }
 
 /// Three upright panes side by side, for the column view.
 fn columns_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
-    /// The whole mark, and the rule between two panes.
-    const SPAN: f32 = 13.0;
-    const HEIGHT: f32 = 11.0;
-    const WEIGHT: f32 = 1.5;
-    let (x, y) = centre;
-    let frame = painter.rect(x - SPAN / 2.0, y - HEIGHT / 2.0, SPAN, HEIGHT);
-    painter.list.stroke(frame, ink, painter.px(1.5), painter.px(WEIGHT).max(1.0));
-    // Two rules rather than three panes drawn: the frame is the outer two edges,
-    // so the divisions are what is left to say.
-    for third in 1..3 {
-        let at = x - SPAN / 2.0 + SPAN * third as f32 / 3.0;
-        painter.vline(at, y - HEIGHT / 2.0, HEIGHT, ink);
-    }
+    action_mark(painter, sk_ui::Mark::ViewColumns, centre, 18.0, ink);
 }
 
 /// Three rows of a dot and a line, for the details list.
 fn list_mark(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
-    /// Between one row's baseline and the next.
-    const PITCH: f32 = 4.5;
-    const DOT: f32 = 2.0;
-    const RULE: f32 = 8.0;
-    const WEIGHT: f32 = 1.5;
-    let (x, y) = centre;
-    let left = x - (DOT + 2.0 + RULE) / 2.0;
-    for row in -1..2 {
-        let top = y + row as f32 * PITCH - WEIGHT / 2.0;
-        let dot = painter.rect(left, top - (DOT - WEIGHT) / 2.0, DOT, DOT);
-        painter.list.rect(dot, ink, painter.px(1.0));
-        let rule = painter.rect(left + DOT + 2.0, top, RULE, WEIGHT);
-        painter.list.rect(rule, ink, 0.0);
-    }
+    action_mark(painter, sk_ui::Mark::ViewDetails, centre, 18.0, ink);
 }
 
 /// The head and the shaft of one arrow, centred on a point.
 fn arrow(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color, at: Direction) {
-    /// Across the head, and how far it reaches from the shaft.
-    const HEAD: f32 = 7.0;
-    const REACH: f32 = 4.0;
-    /// Tip to tail.
-    const LENGTH: f32 = 11.0;
-    const WEIGHT: f32 = 1.5;
-    let (x, y) = centre;
-    let half = LENGTH / 2.0;
-    let bar = |painter: &mut Painter<'_>, x: f32, y: f32, w: f32, h: f32| {
-        let rect = painter.rect(x, y, w, h);
-        painter.list.rect(rect, ink, 0.0);
+    let mark = match at {
+        Direction::Left => sk_ui::Mark::Back,
+        Direction::Right => sk_ui::Mark::Forward,
+        Direction::Up => sk_ui::Mark::Parent,
+        Direction::Down => sk_ui::Mark::Down,
     };
-    match at {
-        Direction::Left => {
-            painter.triangle(x - half, y - HEAD / 2.0, REACH, HEAD, ink, at);
-            bar(painter, x - half + REACH - 0.5, y - WEIGHT / 2.0, LENGTH - REACH, WEIGHT);
-        }
-        Direction::Right => {
-            painter.triangle(x + half - REACH, y - HEAD / 2.0, REACH, HEAD, ink, at);
-            bar(painter, x - half, y - WEIGHT / 2.0, LENGTH - REACH + 0.5, WEIGHT);
-        }
-        Direction::Up | Direction::Down => {
-            painter.triangle(x - HEAD / 2.0, y - half, HEAD, REACH, ink, at);
-            bar(painter, x - WEIGHT / 2.0, y - half + REACH - 0.5, WEIGHT, LENGTH - REACH);
-        }
-    }
+    action_mark(painter, mark, centre, 18.0, ink);
 }
 
-/// A circular arrow: an arc, and a head where the arc ends.
-///
-/// The arc is the ring **drawn around a hole** rather than a ring with the hole
-/// painted over it. A clip is an intersection, so leaving a quadrant out means
-/// two clipped passes — which is three lines more than painting the gap in the
-/// background colour, and the reason to prefer it is that there is no background
-/// colour: the button is chrome underneath and a translucent hover tint on top,
-/// and an "erase" that has to know which was a mark that did not erase.
-///
-/// The head goes at twelve o'clock pointing right, because that is where a
-/// clockwise arc ends and which way it is travelling when it gets there. The
-/// first version put it outside the ring at half past one, where it read as a
-/// circle with a flag on it.
+/// The shared reload symbol.
 fn reload(painter: &mut Painter<'_>, centre: (f32, f32), ink: Color) {
-    const SIZE: f32 = 11.0;
-    let (x, y) = centre;
-    let half = SIZE / 2.0;
-    let ring = painter.rect(x - half, y - half, SIZE, SIZE);
-    let weight = painter.snap(1.5).max(1.0);
-    for (left, top, width, height) in [
-        // Everything left of centre, and the right side from a third of the way
-        // up: together they are the ring minus a wedge from twelve o'clock to
-        // about half past one, which is as much of a gap as the head needs.
-        (x - half - 1.0, y - half - 1.0, half + 1.0, SIZE + 2.0),
-        (x, y - half * 0.35, half + 1.0, SIZE),
-    ] {
-        let clip = painter.rect(left, top, width, height);
-        painter.list.push_clip(clip);
-        painter.list.stroke(ring, ink, painter.px(half), weight);
-        painter.list.pop_clip();
-    }
-    // Base on the ring at twelve o'clock, apex to the right: where a clockwise
-    // arc ends, and which way it is travelling when it gets there.
-    painter.triangle(x - 1.5, y - half - 2.0, 5.0, 5.5, ink, Direction::Right);
+    action_mark(painter, sk_ui::Mark::Reload, centre, 18.0, ink);
 }
 
-/// Minimise, maximise and close, drawn rather than taken from an icon theme.
-///
-/// Three marks, all of them drawn: two from axis-aligned rectangles and the
-/// close cross from two stroked segments. An icon theme would be four hundred
-/// lines of `index.theme` parsing and a dependency on the user having one
-/// installed, for three ten-pixel marks.
+/// Window controls share the bundled symbol family.
 fn window_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_>) {
     let theme = *painter.theme;
     for (button, area) in Button::ALL.into_iter().zip(layout.buttons) {
@@ -4382,31 +4312,13 @@ fn window_buttons(painter: &mut Painter<'_>, layout: &Layout, chrome: &Chrome<'_
             ink = theme.palette.selected_text;
         }
         let centre = (area.x + area.width / 2.0, area.y + area.height / 2.0);
-        match button {
-            Button::Minimize => {
-                let bar = painter.rect(centre.0 - 5.0, centre.1, 10.0, 1.0);
-                painter.list.rect(bar, ink, 0.0);
-            }
-            Button::Maximize => {
-                let box_rect = painter.rect(centre.0 - 4.5, centre.1 - 4.5, 9.0, 9.0);
-                // Two offset squares mean restore, one means maximise — the
-                // convention every desktop uses, and the only way the button
-                // says what it will do rather than what it is.
-                if chrome.window.maximized {
-                    let behind = painter.rect(centre.0 - 2.5, centre.1 - 6.5, 9.0, 9.0);
-                    painter.list.stroke(behind, ink.with_alpha(120), 1.0, painter.snap(1.0));
-                }
-                painter.list.stroke(box_rect, ink, 1.0, painter.snap(1.0));
-            }
-            Button::Close => {
-                // **Drawn, not the font's `×`.** The glyph is a different weight
-                // from the two marks beside it, is centred on the font's own
-                // idea of the middle rather than the button's, and is the one
-                // piece of this frame that changed shape with the font chain.
-                let box_rect = painter.rect(centre.0 - 5.0, centre.1 - 5.0, 10.0, 10.0);
-                painter.cross(box_rect, ink, 1.25);
-            }
-        }
+        let mark = match button {
+            Button::Minimize => sk_ui::Mark::Minimize,
+            Button::Maximize if chrome.window.maximized => sk_ui::Mark::RestoreWindow,
+            Button::Maximize => sk_ui::Mark::Maximize,
+            Button::Close => sk_ui::Mark::Close,
+        };
+        action_mark(painter, mark, centre, 18.0, ink);
     }
 }
 
@@ -4564,14 +4476,13 @@ fn tab_strip(
 /// diagonal — a staircase at every scale, and the one mark in the window that
 /// looked like it had been plotted rather than drawn.
 fn cross(painter: &mut Painter<'_>, area: Area, ink: Color) {
-    let inset = 5.0;
-    let box_ = painter.rect(
-        area.x + inset,
-        area.y + inset,
-        area.width - inset * 2.0,
-        area.height - inset * 2.0,
+    action_mark(
+        painter,
+        sk_ui::Mark::Close,
+        (area.x + area.width / 2.0, area.y + area.height / 2.0),
+        18.0,
+        ink,
     );
-    painter.cross(box_, ink, 1.25);
 }
 
 /// The line between two panes.
@@ -4951,6 +4862,7 @@ fn column_row(
         ),
     };
     painter.icon(mark, icon_box, ink);
+    link_badge(painter, flags, icon_box, background);
 
     let baseline = painter.baseline(top, metrics.row_height, metrics.text_size);
     let colour = if broken { theme.palette.dim } else { theme.palette.text };
@@ -5367,6 +5279,29 @@ fn mark_at(
     let box_ = painter.rect(mark.x, mark.y, mark.width, mark.height);
     let (icon, colour) = icon_of(&theme, pane, id, state, known);
     painter.icon(icon, box_, colour);
+    let background = theme.row_background(pane.selection.contains(id), false);
+    link_badge(painter, pane.listing.flags(id), box_, background);
+}
+
+fn link_badge(painter: &mut Painter<'_>, flags: Flags, area: sk_gpu::Rect, background: Color) {
+    if !flags.has(Flags::SYMLINK) {
+        return;
+    }
+    let palette = painter.theme.palette;
+    let (mark, ink) = if flags.has(Flags::BROKEN) {
+        (sk_ui::Mark::BadgeBroken, palette.danger)
+    } else {
+        (sk_ui::Mark::BadgeLink, palette.text)
+    };
+    let side = (area.width * 0.48).clamp(painter.px(8.0), painter.px(16.0));
+    let at = sk_gpu::Rect::new(
+        area.right() - side + painter.px(1.0),
+        area.bottom() - side + painter.px(1.0),
+        side,
+        side,
+    );
+    let backing = palette.background.mix(background, f32::from(background.components().3) / 255.0);
+    painter.mark_on(mark, at, ink, backing);
 }
 
 /// Which mark an entry gets, and what colour to draw it in.
@@ -5423,6 +5358,9 @@ fn our_mark(
     if directory {
         let name = listing.name(id);
         return specials.iter().find(|(it, _)| *it == name).map_or(sk_ui::Mark::Folder, |it| it.1);
+    }
+    if listing.flags(id).has(sk_model::Flags::SPECIAL) {
+        return sk_ui::Mark::FileSpecial;
     }
     let (kind, mime) = sk_desktop::kind_and_type_of(listing, id, types);
     crate::marks::of_file(kind, mime, types)
@@ -5948,19 +5886,25 @@ fn strip_buttons(
     let mut right_edge = layout.status.width - metrics.gutter;
     let button = |painter: &mut Painter<'_>, right_edge: &mut f32, key: &'static str, ink| {
         let text = i18n::lookup(key);
-        let width = text_width(painter, text, metrics.header_size, false) + 12.0;
+        let width = text_width(painter, text, metrics.header_size, false) + 32.0;
         let area = Area {
             x: *right_edge - width,
             y: layout.status.y,
             width,
             height: layout.status.height,
         };
+        let mark = match key {
+            "status.pause" => sk_ui::Mark::Pause,
+            "status.cancel" => sk_ui::Mark::Stop,
+            _ => sk_ui::Mark::Play,
+        };
+        action_mark(painter, mark, (area.x + 13.0, area.y + area.height / 2.0), 16.0, ink);
         line(
             painter,
             text,
             TextStyle::new(metrics.header_size, ink),
-            area.x + 6.0,
-            width,
+            area.x + 26.0,
+            width - 26.0,
             baseline,
         );
         *right_edge -= width + 8.0;
