@@ -153,7 +153,7 @@ impl Bytes {
             return None;
         }
         let len = usize::try_from(stat.st_size).ok().filter(|&len| len > 0)?;
-        if only_root_can_rewrite(stat.st_uid, stat.st_mode) {
+        if only_root_can_rewrite(stat.st_uid, stat.st_mode, host_root_is_unmapped()) {
             return Mapping::of(&file, len).map(Self::Mapped);
         }
         let mut bytes = Vec::with_capacity(len);
@@ -177,17 +177,42 @@ impl Bytes {
 /// back. An ACL that grants a named user write shows in the group bits, which
 /// are the ACL's mask when it has one.
 ///
-/// **The overflow uid counts as root.** It is how a user namespace shows a file
-/// whose owner it does not map, which inside a Flatpak is every file the host's
-/// root owns — `/run/host/fonts` included — and reading those would copy the
-/// whole chain into every sandboxed window.
-fn only_root_can_rewrite(owner: u32, mode: u32) -> bool {
-    matches!(owner, 0 | OVERFLOW_UID) && mode & 0o022 == 0
+/// **The overflow uid counts as root only where root is unmapped.** A user
+/// namespace shows every owner it does not map as the overflow uid, which inside
+/// a Flatpak is every file the host's root owns — `/run/host/fonts` included —
+/// and reading those would copy the whole chain into every sandboxed window. On
+/// the host the same number is `nobody`, and an NFS export with `root_squash`
+/// gives it to whatever a client wrote as root, so there it is anybody's.
+fn only_root_can_rewrite(owner: u32, mode: u32, host_root_unmapped: bool) -> bool {
+    let roots = owner == 0 || (owner == OVERFLOW_UID && host_root_unmapped);
+    roots && mode & 0o022 == 0
 }
 
 /// `/proc/sys/kernel/overflowuid` as the kernel ships it. A machine that changed
 /// it reads those fonts rather than mapping them, which is the safe direction.
 const OVERFLOW_UID: u32 = 65_534;
+
+/// Whether this process's user namespace leaves the uid outside it that is 0
+/// unmapped, read once from `/proc/self/uid_map`.
+///
+/// Unreadable is answered as mapped, which reads the overflow uid's fonts rather
+/// than trusting them. In a namespace nested inside another, the map names the
+/// parent's uids rather than the host's, and a parent's 0 that is a person's own
+/// uid on the host reads as mapped — the same safe direction.
+fn host_root_is_unmapped() -> bool {
+    static UNMAPPED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UNMAPPED.get_or_init(|| {
+        std::fs::read_to_string("/proc/self/uid_map").is_ok_and(|map| root_unmapped_in(&map))
+    })
+}
+
+/// Whether a `uid_map` — lines of *inside outside count* — maps no range that
+/// starts at outside uid 0. A range covers 0 only by starting there.
+fn root_unmapped_in(map: &str) -> bool {
+    !map.lines().any(|line| {
+        line.split_whitespace().nth(1).and_then(|outside| outside.parse::<u32>().ok()) == Some(0)
+    })
+}
 
 /// A read-only mapping of a font file.
 struct Mapping {
@@ -728,30 +753,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The other half: a font only root can write is still mapped, so the 18 MiB
-    /// of a CJK collection is not copied into every window that opens.
+    /// The other half: a font the distribution installed is still mapped, so the
+    /// 18 MiB of a CJK collection is not copied into every window that opens.
+    ///
+    /// The expectation is spelled out from the file's own `stat` — root's, and
+    /// writable by nobody else, which is what a package manager installs — rather
+    /// than asked of the predicate the code under test asks.
     #[test]
-    fn a_font_only_root_can_write_is_mapped() {
+    fn a_font_the_distribution_installed_is_mapped() {
         let Some(fonts) = fonts() else { return };
+        let mut checked = 0;
         for path in fonts.paths() {
             let stat = rustix::fs::stat(path).unwrap();
+            if stat.st_uid != 0 || stat.st_mode & 0o022 != 0 {
+                continue;
+            }
             let face = super::Face::open(path).unwrap();
-            let mapped = matches!(face.data, super::Bytes::Mapped(_));
-            let expected = super::only_root_can_rewrite(stat.st_uid, stat.st_mode);
-            assert_eq!(mapped, expected, "{}", path.display());
+            assert!(matches!(face.data, super::Bytes::Mapped(_)), "{} was read", path.display());
+            checked += 1;
+        }
+        // Inside a user namespace root's files show as the overflow uid and none
+        // of them is checked here; anywhere else a distribution's chain has one.
+        let distributed = fonts.paths().iter().any(|path| path.starts_with("/usr/share/fonts"));
+        if distributed && !super::host_root_is_unmapped() {
+            assert!(checked > 0, "no face in the chain was root's: {:?}", fonts.paths());
         }
     }
 
     #[test]
     fn only_a_file_root_owns_and_nobody_else_can_write_counts_as_roots() {
-        use super::only_root_can_rewrite as roots;
+        let roots = |owner, mode| super::only_root_can_rewrite(owner, mode, false);
         assert!(roots(0, 0o100_644), "a distribution's font");
         assert!(roots(0, 0o100_444), "a font in the Nix store");
-        assert!(roots(65_534, 0o100_644), "the host's font, seen from inside a Flatpak");
         assert!(!roots(0, 0o100_664), "group-writable, or an ACL granting somebody write");
         assert!(!roots(0, 0o100_646), "world-writable");
         assert!(!roots(1000, 0o100_644), "a font somebody installed for themselves");
         assert!(!roots(1000, 0o100_444), "read-only to its owner, who can chmod it back");
+        assert!(!roots(65_534, 0o100_644), "nobody's, or root_squash's, on the host");
+    }
+
+    #[test]
+    fn the_overflow_uid_is_roots_only_where_root_is_unmapped() {
+        let inside = |owner| super::only_root_can_rewrite(owner, 0o100_644, true);
+        assert!(inside(65_534), "the host's font, seen from inside a Flatpak");
+        assert!(inside(0));
+        assert!(!inside(1000));
+
+        let unmapped = super::root_unmapped_in;
+        assert!(!unmapped("         0          0 4294967295\n"), "the initial namespace");
+        assert!(unmapped("      1000       1000          1\n"), "a Flatpak's");
+        assert!(unmapped("         0       1000          1\n"), "unshare -r");
+        assert!(!unmapped("      1000          0          1\n"), "the parent's root mapped in");
+        assert!(!unmapped("         0     100000      65536\n         1          0          1\n"));
+        assert!(unmapped(""), "a namespace nobody has written a map for yet");
     }
 
     /// A FIFO named like a font would hold start-up open forever: opening one
