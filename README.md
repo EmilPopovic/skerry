@@ -3,7 +3,12 @@
 A fast, keyboard-and-mouse file manager for Linux, written in Rust. It runs on
 Wayland and X11 on any distribution and does not depend on GTK, Qt or GLib.
 
-This is an alpha (`0.1.0-alpha.1`). Keep backups of important files.
+This is an alpha. Keep backups of important files.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/hero-dark.png">
+  <img alt="Skerry showing a home folder in the details view, with the sidebar on the left" src="docs/screenshots/hero-light.png">
+</picture>
 
 ## What it does
 
@@ -20,6 +25,18 @@ This is an alpha (`0.1.0-alpha.1`). Keep backups of important files.
 - Keybindings and settings live in one plain-text file: `~/.config/skerry/config`
 - Restores your tabs and layout after a restart, including after a crash
 - Early screen-reader support (AT-SPI), and input methods on Wayland
+
+## Screenshots
+
+| Tabs and split panes | Column view |
+| --- | --- |
+| ![Two panes stacked, the lower one with two tabs](docs/screenshots/split.png) | ![A column view four levels deep](docs/screenshots/columns.png) |
+| **Grid with thumbnails** | **Grouped by date** |
+| ![A folder of pictures in the grid view](docs/screenshots/grid.png) | ![Downloads grouped into Today, Yesterday, Previous 7 days and Previous 30 days](docs/screenshots/grouped.png) |
+| **Quick look at Markdown** | **Quick look at source code** |
+| ![A Markdown file rendered in quick look, with headings, task boxes and a table](docs/screenshots/markdown.png) | ![A Rust file in quick look with syntax highlighting and line numbers](docs/screenshots/code.png) |
+| **Command palette** | **Undo history** |
+| ![The command palette narrowed by a query](docs/screenshots/palette.png) | ![The undo history open below the file list](docs/screenshots/history.png) |
 
 ## Building
 
