@@ -19,6 +19,7 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod discover;
+pub mod escape;
 pub mod fonts;
 pub mod layout;
 pub mod shape;

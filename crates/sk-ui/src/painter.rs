@@ -623,6 +623,7 @@ fn emit(
     px_size: f32,
     color: Color,
 ) {
+    let color = if glyph.escape { quieter(color) } else { color };
     let x = origin + glyph.x;
     // Horizontal subpixel positioning: the raster is made at the fractional
     // offset the glyph will actually sit at, and drawn at the whole pixel below
@@ -637,6 +638,19 @@ fn emit(
         subpixel: bucket,
     };
     list.glyph(key, x.floor(), (baseline + glyph.y).round(), color);
+}
+
+/// The ink an escape for a hidden code point is drawn in — [`sk_text::escape`].
+///
+/// **The run's own colour at a little over half its opacity**, rather than a
+/// theme colour, because the run's colour is the only one that is right on every
+/// ground an escape lands on: a selected row, a danger panel, a field. Half is
+/// where `<U+202E>` still reads as a note about the name rather than as letters
+/// of it, on the dark and the light palette and in the dim colour the
+/// delete-for-good panel already lists names in.
+fn quieter(color: Color) -> Color {
+    let (_, _, _, alpha) = color.components();
+    color.with_alpha((u16::from(alpha) * 9 / 16) as u8)
 }
 
 /// The cache key for the ellipsis at one size.
@@ -679,6 +693,7 @@ mod tests {
             "report.pdf",
             "café-étude.txt",
             "/home/tester/repos/skerry/crates/sk-app/src/view.rs",
+            "invoice\u{202E}fdp.desktop",
             "a",
             "",
         ] {
@@ -718,5 +733,35 @@ mod tests {
             assert_eq!(caret_offset(&mut fonts, text, style, px_size, -10.0), 0);
             assert_eq!(caret_offset(&mut fonts, text, style, px_size, 1e6), text.len());
         }
+    }
+
+    /// **A field shows a hidden code point as its escape, and edits the real
+    /// one.** The rename field holds the name as it is on disk; what it draws, and
+    /// where its caret goes, both come from shaping a prefix of that name — so
+    /// the escape is one step for the caret, and a click on its middle lands on
+    /// one side of the code point, never inside eight characters that are not
+    /// in the name.
+    #[test]
+    fn a_caret_steps_over_an_escape_as_one_character() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let style = TextStyle::new(13.0, Color::hex(0xffffff));
+        let text = "invoice\u{202E}fdp.desktop";
+        let before = "invoice".len();
+        let after = before + '\u{202E}'.len_utf8();
+        let left = super::advance_to(&mut fonts, text, style.weight, 13.0, before);
+        let right = super::advance_to(&mut fonts, text, style.weight, 13.0, after);
+        let one_letter = super::advance_to(&mut fonts, "x", style.weight, 13.0, 1);
+        assert!(right - left > one_letter * 4.0, "the escape is {} px wide", right - left);
+        let middle = caret_offset(&mut fonts, text, style, 13.0, f32::midpoint(left, right));
+        assert!(middle == before || middle == after, "a click inside the escape gave {middle}");
+    }
+
+    #[test]
+    fn an_escape_is_drawn_in_its_runs_colour_at_less_of_its_opacity() {
+        let ink = Color::rgba(200, 120, 40, 255);
+        let (red, green, blue, alpha) = super::quieter(ink).components();
+        assert_eq!((red, green, blue), (200, 120, 40));
+        assert!(alpha > 96 && alpha < 192, "{alpha}");
+        assert!(super::quieter(Color::NONE).is_invisible());
     }
 }

@@ -19,6 +19,10 @@ pub struct ShapedGlyph {
     pub x: f32,
     /// Baseline offset, downward positive.
     pub y: f32,
+    /// Whether this glyph draws a hidden code point's escape rather than the
+    /// text — see [`crate::escape`]. The painter dims it, so an escape cannot be
+    /// mistaken for the same eight characters typed into a name.
+    pub escape: bool,
 }
 
 /// A shaped line.
@@ -59,9 +63,17 @@ impl Fonts {
     /// Segmentation is per run rather than per paragraph: filenames are short,
     /// and a full Unicode bidi pass over a thirty-character string costs more
     /// than it buys. What is kept from UAX #9 is documented on [`segment`].
+    ///
+    /// The run is of what [`crate::escape::shown`] draws `text` as, so a hidden
+    /// code point is shaped as its escape — here, once, for every string any view
+    /// draws. `source_len` stays the length of `text` itself, because that is the
+    /// string the layout cache is asked about.
     pub fn shape(&mut self, text: &str, px_size: f32, weight: Weight) -> ShapedRun {
+        let source_len = text.len();
         let primary = self.primary(weight) as usize;
         let Self { faces, shape_context, scratch, .. } = self;
+        let shown = crate::escape::shown(text, &mut scratch.escapes);
+        let text = shown.as_ref();
         segment(text, scratch);
 
         let mut glyphs = Vec::with_capacity(text.len());
@@ -95,6 +107,8 @@ impl Fonts {
             );
 
             while parser.next(&mut cluster) {
+                let at = start + cluster.range().start as usize;
+                let escape = scratch.escapes.iter().any(|range| range.contains(&at));
                 // Cluster-level fallback: the first face that maps the whole
                 // cluster wins; a partial map is remembered in case nothing
                 // better appears. The primary face is tried first regardless of
@@ -127,7 +141,14 @@ impl Fonts {
                 let sink = &mut scratch.glyphs;
                 shaper.shape_with(|shaped| {
                     for glyph in shaped.glyphs {
-                        sink.push((chosen as u16, glyph.id, glyph.advance, glyph.x, glyph.y));
+                        sink.push((
+                            chosen as u16,
+                            glyph.id,
+                            glyph.advance,
+                            glyph.x,
+                            glyph.y,
+                            escape,
+                        ));
                     }
                 });
             }
@@ -138,14 +159,15 @@ impl Fonts {
                 let from = scratch.cluster_starts[index];
                 let to =
                     scratch.cluster_starts.get(index + 1).copied().unwrap_or(scratch.glyphs.len());
-                for &(face, id, advance, x_offset, y_offset) in &scratch.glyphs[from..to] {
-                    glyphs.push(ShapedGlyph { face, glyph: id, x: pen + x_offset, y: y_offset });
+                for &(face, id, advance, x_offset, y_offset, escape) in &scratch.glyphs[from..to] {
+                    let x = pen + x_offset;
+                    glyphs.push(ShapedGlyph { face, glyph: id, x, y: y_offset, escape });
                     pen += advance;
                 }
             }
         }
 
-        ShapedRun { advance: pen, glyphs, source_len: text.len() }
+        ShapedRun { advance: pen, glyphs, source_len }
     }
 }
 
@@ -160,8 +182,10 @@ pub(crate) struct Scratch {
     prev_strong: Vec<Option<usize>>,
     next_strong: Vec<Option<usize>>,
     runs: Vec<Run>,
-    glyphs: Vec<(u16, u16, f32, f32, f32)>,
+    glyphs: Vec<(u16, u16, f32, f32, f32, bool)>,
     cluster_starts: Vec<usize>,
+    /// Where [`crate::escape::shown`] put each escape in the string being shaped.
+    escapes: Vec<std::ops::Range<usize>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,5 +335,49 @@ mod tests {
         let (count, advance) = run.truncate_at(run.advance / 2.0);
         assert!(count > 0 && count < run.glyphs.len(), "{count} of {}", run.glyphs.len());
         assert!(advance <= run.advance / 2.0);
+    }
+
+    /// **The defect, as a unit: two names that were the same pixels.** Before
+    /// escaping, `pay\u{200D}pal.txt` shaped to exactly the glyphs of
+    /// `paypal.txt`, and `invoice\u{202E}fdp.desktop` to those of
+    /// `invoicefdp.desktop`.
+    #[test]
+    fn a_hidden_code_point_is_drawn_where_it_is_and_marked_as_an_escape() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        for (hidden, plain, at) in [
+            ("pay\u{200D}pal.txt", "paypal.txt", 3),
+            ("invoice\u{202E}fdp.desktop", "invoicefdp.desktop", 7),
+            ("line\nbreak.txt", "linebreak.txt", 4),
+        ] {
+            let run = fonts.shape(hidden, 13.0, Weight::Regular);
+            let without = fonts.shape(plain, 13.0, Weight::Regular);
+            assert!(run.advance > without.advance, "{hidden:?} draws as wide as {plain:?}");
+            assert_eq!(run.source_len, hidden.len(), "the cache is asked about the real name");
+            // `<U+XXXX>` is eight ASCII clusters, one glyph each in any UI face,
+            // and it sits exactly where the code point is — U+202E reorders
+            // nothing, before this change or after it.
+            let marked: Vec<usize> =
+                (0..run.glyphs.len()).filter(|&index| run.glyphs[index].escape).collect();
+            assert_eq!(marked, (at..at + 8).collect::<Vec<_>>(), "{hidden:?}");
+            for pair in run.glyphs.windows(2) {
+                assert!(pair[0].x <= pair[1].x, "{hidden:?} is not in logical order");
+            }
+        }
+    }
+
+    /// And nothing else is dimmed: an ordinary name, an emoji sequence held
+    /// together by joiners, and a right-to-left name all shape with no escape.
+    #[test]
+    fn a_name_with_nothing_hidden_has_no_escape_glyphs() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        for text in [
+            "report.pdf",
+            "family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}.jpg",
+            "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}.txt",
+            "קובץ.webp",
+        ] {
+            let run = fonts.shape(text, 13.0, Weight::Regular);
+            assert!(run.glyphs.iter().all(|glyph| !glyph.escape), "{text:?}");
+        }
     }
 }
