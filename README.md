@@ -62,8 +62,7 @@ rendering works. PDF previews use a PDF renderer on your `PATH` if one is instal
 - No encrypted (LUKS) volumes
 - Files copied to the clipboard cannot be pasted into sandboxed Flatpak apps
 
-[RELEASE-NOTES.md](RELEASE-NOTES.md) has the full list of known limits. To
-report a security issue, see [SECURITY.md](SECURITY.md).
+To report a security issue, see [SECURITY.md](SECURITY.md).
 
 ## Licence
 
