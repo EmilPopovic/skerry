@@ -65,9 +65,16 @@ x11rb::atom_manager! {
         SAVE_TARGETS,
         INCR,
         UTF8_STRING,
-        // Ours: where a conversion result is deposited on our own window.
-        SKERRY_SELECTION,
-        SKERRY_TARGETS,
+        // Ours: where conversion results are deposited on our own window, one
+        // property per conversion in flight. See `Selections::free_property`.
+        SKERRY_SELECTION_0,
+        SKERRY_SELECTION_1,
+        SKERRY_SELECTION_2,
+        SKERRY_SELECTION_3,
+        SKERRY_SELECTION_4,
+        SKERRY_SELECTION_5,
+        SKERRY_SELECTION_6,
+        SKERRY_SELECTION_7,
 
         // The types a file manager publishes and reads.
         text_uri_list: b"text/uri-list",
@@ -75,5 +82,21 @@ x11rb::atom_manager! {
         text_plain: b"text/plain",
         gnome_copied_files: b"x-special/gnome-copied-files",
         kde_cutselection: b"application/x-kde-cutselection",
+    }
+}
+
+impl Atoms {
+    /// The properties a conversion may land in on our own window.
+    pub(super) const fn conversions(&self) -> [x11rb::protocol::xproto::Atom; 8] {
+        [
+            self.SKERRY_SELECTION_0,
+            self.SKERRY_SELECTION_1,
+            self.SKERRY_SELECTION_2,
+            self.SKERRY_SELECTION_3,
+            self.SKERRY_SELECTION_4,
+            self.SKERRY_SELECTION_5,
+            self.SKERRY_SELECTION_6,
+            self.SKERRY_SELECTION_7,
+        ]
     }
 }

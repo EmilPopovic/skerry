@@ -171,8 +171,13 @@ impl Content {
 /// [`receive`] counts what comes through it. X11 has the peer write properties
 /// that this process collects before anything reaches the pipe, so the X11
 /// backend counts too: a peer answering with `INCR` could otherwise keep
-/// writing until this process ran out of memory, and the worker's limit would
-/// only see what was left afterwards.
+/// writing until this process ran out of memory.
+///
+/// **Read with [`receive`] and a limit no larger than this.** An X11 answer
+/// that passes it reaches the pipe as more than this many bytes, so the
+/// reader's own count refuses it with `FileTooLarge` and can say so; a reader
+/// that did not count would take the first sixteen megabytes of an answer as
+/// all of it.
 pub const SELECTION_LIMIT: usize = 16 * 1024 * 1024;
 
 /// How long a peer has to finish answering a paste or a drop.
