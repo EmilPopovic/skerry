@@ -13,6 +13,7 @@
 //! these. The two that climb out of their destination are ours, because no
 //! archiver will write one on purpose.
 
+#![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};

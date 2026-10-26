@@ -360,8 +360,12 @@ fn sample_quick_look(
 
 /// An undo stack for the frame, with a sample history on it where one was asked
 /// for.
-fn sample_edits(request: &Capture, session: &crate::headless::Session) -> crate::edit::Edits {
-    let mut edits = crate::edit::Edits::new(session.waker.handle());
+fn sample_edits(
+    request: &Capture,
+    session: &crate::headless::Session,
+    trash: &sk_fs::trash::Trash,
+) -> crate::edit::Edits {
+    let mut edits = crate::edit::Edits::new(session.waker.handle(), trash.clone());
     if request.history {
         sample_history(&mut edits, &request.path);
     }
@@ -803,15 +807,15 @@ fn expand_sample(menu: &mut crate::menu::Menu, owner: &str, enabled: impl Fn(&st
 /// panel's whole content is two files' facts and four answers. The two files are
 /// the fixture's own, so the sizes and the dates in the frame are the ones every
 /// other frame already shows.
-fn sample_clash(path: &std::path::Path) -> crate::edit::Clash {
+fn sample_clash(path: &std::path::Path, trash: &sk_fs::trash::Trash) -> crate::edit::Clash {
     let existing = path.join("report.pdf");
     let source = path.join("build").join("report.pdf");
     crate::edit::Clash {
-        theirs: sk_fs::facts::describe(&existing),
+        theirs: sk_fs::facts::describe(trash, &existing),
         // Not on disk — the fixture holds one `report.pdf`, not two — so this
         // states what the other one would be. A frame of "Cannot be read" in
         // the arriving column would be a frame of the empty case.
-        ours: sk_fs::facts::describe(&existing).map(|mut facts| {
+        ours: sk_fs::facts::describe(trash, &existing).map(|mut facts| {
             facts.path.clone_from(&source);
             facts.size = 4_512_000;
             facts.modified = FIXED_MTIME - 60 * 60 * 24 * 400;
@@ -1091,6 +1095,7 @@ fn sample_overlays(
     here: &crate::panes::PaneLayout,
     pane: &mut Pane,
     jobs: &crate::pane::Jobs,
+    trash: &sk_fs::trash::Trash,
 ) -> Overlays {
     // A query that matches some of the fixture and not all of it, so the frame
     // carries the count as well as the field.
@@ -1122,7 +1127,7 @@ fn sample_overlays(
         // and ADR 0042's point is that this state is a choice rather than a
         // fallback — so it is the one the golden frame keeps honest.
         icons: crate::icons::Source::Ours,
-        clash: request.clash.then(|| sample_clash(&request.path)),
+        clash: request.clash.then(|| sample_clash(&request.path, trash)),
         search: request.search.then(|| sample_search(&request.path)),
         // Stated, because a capture has no pointer: the card follows one, and
         // this puts it where a pointer resting over the list would be.
@@ -1621,13 +1626,17 @@ pub fn run(request: &Capture) -> Result<(), Problem> {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().cast_signed());
 
-    let overlays = sample_overlays(request, &here, panes.focused_mut(), &session.jobs);
+    // **The capture's one read of where the home trash is**, for the same
+    // reason the window has one: the frame asks it twice, and two reads are two
+    // answers the environment could disagree between.
+    let trash = sk_fs::trash::Trash::from_environment();
+    let overlays = sample_overlays(request, &here, panes.focused_mut(), &session.jobs, &trash);
 
     // Frames until the atlas owes nothing. The first rasterizes; the second draws
     // from a warm atlas. A frame is repeated only while texels are still queued,
     // so a capture is never an image with holes in the text.
     let keyboard_hint = crate::commands::hint(&crate::commands::registry());
-    let edits = sample_edits(request, &session);
+    let edits = sample_edits(request, &session, &trash);
     let look =
         sample_quick_look(request, &mut session, panes.focused(), (&layout, &theme, &mut cache));
     let sample = Sample {

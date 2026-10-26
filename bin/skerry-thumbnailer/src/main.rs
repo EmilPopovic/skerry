@@ -18,6 +18,7 @@
 //! ```
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![forbid(unsafe_code)]
 
 mod cache;
 mod decode;
@@ -26,7 +27,12 @@ mod fonts;
 mod gif;
 mod md5;
 
+#[cfg(test)]
+#[path = "../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
 use std::io::{BufReader, BufWriter, Write};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use sk_preview::wire::{Ask, Refusal, Reply, Request};
@@ -68,10 +74,11 @@ fn main() {
         probe(arguments.get(at + 1).map(PathBuf::from).as_deref());
         return;
     }
-    let report = confine(sk_preview::sandbox::confine);
+    let cache = cache::folder();
+    let report = confine(sk_preview::sandbox::confine, cache.as_deref());
     // Rule 7's shape: say what is in force, including what is not.
     let _ = writeln!(std::io::stderr(), "skerry-thumbnailer: {}", report.line());
-    serve();
+    serve(cache.as_deref());
 }
 
 /// Locks the process down before a single byte of a request is read.
@@ -81,9 +88,8 @@ fn main() {
 /// like no restriction and is not: it is *read* only, so a decoder that is talked
 /// into writing has nowhere to write but the thumbnail directory, and Landlock's
 /// filesystem rights are the whole of what a decoder could reach.
-fn confine(how: sk_preview::sandbox::Confine) -> sk_preview::sandbox::Report {
-    let cache = cache::place(Path::new("/")).and_then(|it| it.parent().map(Path::to_path_buf));
-    let writable: Vec<&Path> = cache.as_deref().into_iter().collect();
+fn confine(how: sk_preview::sandbox::Confine, cache: Option<&Path>) -> sk_preview::sandbox::Report {
+    let writable: Vec<&Path> = cache.into_iter().collect();
     // The cache has to exist before it can be granted, because a rule is a
     // descriptor and there is no descriptor for a directory that is not there.
     for directory in &writable {
@@ -96,11 +102,11 @@ fn confine(how: sk_preview::sandbox::Confine) -> sk_preview::sandbox::Report {
 }
 
 /// Answers requests until the host closes the pipe.
-fn serve() {
+fn serve(cache: Option<&Path>) {
     let mut input = BufReader::new(std::io::stdin());
     let mut output = BufWriter::new(std::io::stdout());
     while let Ok(request) = Request::read_from(&mut input) {
-        let reply = answer(&request);
+        let reply = answer(&request, cache);
         if reply.write_to(&mut output).is_err() {
             return;
         }
@@ -113,16 +119,15 @@ fn serve() {
 /// time at whatever size the panel is, so caching it would be writing a file per
 /// window size for a picture somebody is looking at once — see
 /// [ADR 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md).
-fn answer(request: &Request) -> Reply {
-    let path = PathBuf::from(std::ffi::OsString::from(unsafe {
-        // SAFETY: the bytes came from `OsStr::as_encoded_bytes` in the host, which
-        // is exactly the contract this function documents — the same process
-        // family, the same encoding, no round trip through text.
-        std::ffi::OsStr::from_encoded_bytes_unchecked(&request.path)
-    }));
+fn answer(request: &Request, cache: Option<&Path>) -> Reply {
+    // **Any bytes are a path on Linux**, so what the host sent comes back through
+    // the conversion that has no contract to keep rather than one whose contract
+    // is about the build at the other end of a pipe.
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(&request.path));
     let mtime = modified(&path);
     if request.ask == Ask::Thumbnail
-        && let Some((pixels, width, height)) = cache::read(&path, mtime)
+        && let Some(cache) = cache
+        && let Some((pixels, width, height)) = cache::read(cache, &path, mtime)
     {
         // **Zero pages, because an image is not paged.** ADR 0019's field is a
         // document's business and this helper never has one.
@@ -153,8 +158,10 @@ fn answer(request: &Request) -> Reply {
     match decode::decode(&bytes, within, frame) {
         Ok(decoded) => {
             let raster = decoded.raster;
-            if request.ask == Ask::Thumbnail {
-                cache::write(&path, mtime, &raster.pixels, raster.size);
+            if request.ask == Ask::Thumbnail
+                && let Some(cache) = cache
+            {
+                cache::write(cache, &path, mtime, &raster.pixels, raster.size);
             }
             Reply {
                 refusal: Refusal::None,
@@ -207,7 +214,7 @@ fn probe(path: Option<&Path>) {
                 decoded.raster.size.1,
                 decoded.raster.pixels.len(),
                 decoded.frames,
-                cache::place(path)
+                cache::folder().map(|folder| cache::place(&folder, path))
             ),
             Err(refusal) => println!("skerry-thumbnailer: refused: {refusal:?}"),
         },
@@ -277,7 +284,8 @@ mod tests {
             } else {
                 |role, readable, run, write| confine_below(2, role, readable, run, write)
             };
-            let report = super::confine(below);
+            let cache = super::cache::folder();
+            let report = super::confine(below, cache.as_deref());
             assert!(report.landlock.is_none_or(|abi| abi == 2), "{}", report.line());
             let mtime = super::modified(&picture);
             let request = Request {
@@ -286,8 +294,9 @@ mod tests {
                 page: 0,
                 path: picture.as_os_str().as_encoded_bytes().to_vec(),
             };
-            assert_eq!(super::answer(&request).refusal, Refusal::None);
-            assert!(super::cache::read(&picture, mtime).is_some(), "nothing was cached");
+            assert_eq!(super::answer(&request, cache.as_deref()).refusal, Refusal::None);
+            let cache = cache.expect("the parent named a cache folder");
+            assert!(super::cache::read(&cache, &picture, mtime).is_some(), "nothing was cached");
             return;
         }
         let root = std::env::temp_dir().join(format!("skerry-ceiling-{}", std::process::id()));

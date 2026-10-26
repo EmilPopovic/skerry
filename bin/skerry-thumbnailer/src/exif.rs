@@ -272,4 +272,28 @@ mod tests {
         let (out, size) = turn(&pixels, (2, 2), Orientation::Upright);
         assert_eq!((out, size), (pixels, (2, 2)));
     }
+
+    /// **A JPEG's metadata is the camera's, or anybody's** — ADR 0040's campaign
+    /// over the one parse of it that is ours. Seeded with this module's own
+    /// tagged files: both byte orders, quarter turns, a half turn, a transpose,
+    /// and a value the specification does not have.
+    ///
+    /// What is read is then applied, as the decoder applies it, to a picture two
+    /// by three — so an orientation that reached the wrong transform is a size
+    /// that came out wrong, not only a panic.
+    #[test]
+    fn parser_campaign_exif() {
+        let seeds: Vec<Vec<u8>> = [(6, true), (8, false), (3, true), (5, false), (99, true)]
+            .into_iter()
+            .map(|(value, little)| tagged(value, little))
+            .collect();
+        let seeds: Vec<&[u8]> = seeds.iter().map(Vec::as_slice).collect();
+        let pixels = vec![7u8; 2 * 3 * 4];
+        crate::fuzz_support::campaign("exif", &seeds, |bytes| {
+            let how = orientation(bytes);
+            let (turned, size) = turn(&pixels, (2, 3), how);
+            assert_eq!(size, if how.turns() { (3, 2) } else { (2, 3) }, "{how:?}");
+            assert_eq!(turned.len(), pixels.len(), "{how:?}");
+        });
+    }
 }

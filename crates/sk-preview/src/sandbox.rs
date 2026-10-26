@@ -1108,6 +1108,8 @@ mod tests {
                 let fd = unsafe { libc::socket(family, libc::SOCK_STREAM, 0) };
                 let error = std::io::Error::last_os_error().raw_os_error();
                 if fd >= 0 {
+                    // SAFETY: `fd` was just returned by `socket` to this thread
+                    // and is closed once, here, before anything else sees it.
                     unsafe {
                         libc::close(fd);
                     }

@@ -209,6 +209,22 @@ pub(crate) struct Quad {
     pub border: f32,
 }
 
+// **No padding, by arithmetic rather than by comment.** The renderer hands these
+// to the GPU as raw bytes, and padding is bytes nobody wrote. The fields' own
+// sizes add up to the whole only where there is none, so a field narrowed into
+// padding changes the sum, and a field added without a line here stops the
+// literal from compiling.
+const _: () = {
+    let quad = Quad { rect: [0.0; 4], uv: [0.0; 4], color: 0, kind: 0, radius: 0.0, border: 0.0 };
+    let fields = size_of_val(&quad.rect)
+        + size_of_val(&quad.uv)
+        + size_of_val(&quad.color)
+        + size_of_val(&quad.kind)
+        + size_of_val(&quad.radius)
+        + size_of_val(&quad.border);
+    assert!(fields == size_of::<Quad>(), "Quad has padding the GPU would read");
+};
+
 /// One thing to draw, in the order the caller wrote it.
 ///
 /// A glyph carries its key rather than an atlas rectangle because rasterization

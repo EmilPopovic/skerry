@@ -15,6 +15,7 @@
 //! draws — see [docs/04-architecture.md](../../../docs/04-architecture.md#crate-responsibilities).
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![forbid(unsafe_code)]
 // `missing_docs` and `clippy::pedantic` are warned workspace-wide from the lint
 // table in Cargo.toml, together with the few pedantic lints allowed there with a
 // reason. Repeating `warn(clippy::pedantic)` here would override those.

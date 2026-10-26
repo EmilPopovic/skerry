@@ -18,6 +18,7 @@
 //! time, and a cache that skipped that check would show yesterday's picture of a
 //! file somebody re-exported this morning.
 
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -28,14 +29,28 @@ use rustix::fs::{AtFlags, FileType, Mode, OFlags, StatxFlags};
 /// has one slot size and this is it.
 pub const SIDE: u32 = 128;
 
-/// Where a file's thumbnail lives, or nothing if there is no cache directory.
-pub fn place(path: &Path) -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
+/// The folder `normal` thumbnails go in, or nothing if there is no cache
+/// directory.
+///
+/// **Read from the environment once**, by `main`, and handed to everything after
+/// it. A test asks [`folder_from`] instead of writing `$XDG_CACHE_HOME`, which is
+/// process-wide and read by C in the same process.
+pub fn folder() -> Option<PathBuf> {
+    folder_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
+/// [`folder`] over the two values it reads.
+fn folder_from(cache_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let base = cache_home
         .map(PathBuf::from)
         .filter(|it| it.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
-    let name = format!("{}.png", crate::md5::hex(uri(path).as_bytes()));
-    Some(base.join("thumbnails").join("normal").join(name))
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(base.join("thumbnails").join("normal"))
+}
+
+/// Where a file's thumbnail lives in `folder`.
+pub fn place(folder: &Path, path: &Path) -> PathBuf {
+    folder.join(format!("{}.png", crate::md5::hex(uri(path).as_bytes())))
 }
 
 /// The `file://` URI of a path, percent-encoded as the specification requires.
@@ -62,8 +77,8 @@ fn uri(path: &Path) -> String {
 ///
 /// Returns the RGBA and its size. A thumbnail whose recorded `Thumb::MTime`
 /// disagrees with `mtime` is stale and is treated as absent.
-pub fn read(path: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
-    read_from(&place(path)?, mtime)
+pub fn read(folder: &Path, path: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
+    read_from(&place(folder, path), mtime)
 }
 
 /// As [`read`], from a named file — the seam a test uses.
@@ -103,10 +118,8 @@ fn read_from(file: &Path, mtime: i64) -> Option<(Vec<u8>, u32, u32)> {
 /// which is the same three steps the session file takes: a reader sees a whole
 /// thumbnail or none, never a torn one. Failure is silent on purpose — a cache
 /// that cannot be written is a slower program, not a broken one.
-pub fn write(path: &Path, mtime: i64, pixels: &[u8], size: (u32, u32)) {
-    if let Some(file) = place(path) {
-        let _ = write_to(&file, path, mtime, pixels, size);
-    }
+pub fn write(folder: &Path, path: &Path, mtime: i64, pixels: &[u8], size: (u32, u32)) {
+    let _ = write_to(&place(folder, path), path, mtime, pixels, size);
 }
 
 /// How a cache folder is opened, to write into or to close.
@@ -172,8 +185,6 @@ fn seal(folder: &Path) {
 }
 
 /// As [`write`], to a named file, and saying why it did not.
-///
-/// The seam a test uses, because `$XDG_CACHE_HOME` is process-global.
 ///
 /// Everything happens against one descriptor for the folder, so the thumbnail is
 /// staged and published in the same place, and the rename replaces a link at
@@ -265,7 +276,10 @@ fn to_rgba(raw: &[u8], colour: png::ColorType) -> Option<Vec<u8>> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{SIDE, place, prepare, read_from, seal, stage, to_rgba, uri, write_to};
+    use super::{
+        SIDE, folder_from, place, prepare, read_from, seal, stage, to_rgba, uri, write_to,
+    };
+    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
@@ -427,28 +441,28 @@ mod tests {
         assert_eq!(uri(Path::new("/a/my file.png")), "file:///a/my%20file.png");
         assert_eq!(uri(Path::new("/a/ä.png")), "file:///a/%C3%A4.png");
         // A path that is not UTF-8 still has one answer rather than a lossy one.
-        let messy =
-            Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(b"/a/\xff.png") });
+        let messy = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xff.png"));
         assert_eq!(uri(messy), "file:///a/%FF.png");
     }
 
     /// The name is the digest of the URI, and the directory is the specification's.
+    ///
+    /// **From two values, never from the process.** Writing `$XDG_CACHE_HOME`
+    /// here raced every other test in the binary that reads the environment.
     #[test]
     fn a_thumbnail_lands_where_the_specification_says() {
-        // SAFETY: single-threaded test, restored below.
-        let saved = std::env::var_os("XDG_CACHE_HOME");
-        unsafe { std::env::set_var("XDG_CACHE_HOME", "/tmp/cache-for-a-test") };
-        let at = place(Path::new("/home/a/photo.png")).unwrap();
+        let folder = folder_from(Some("/tmp/cache-for-a-test".into()), Some("/h".into())).unwrap();
+        let at = place(&folder, Path::new("/home/a/photo.png"));
         assert!(at.starts_with("/tmp/cache-for-a-test/thumbnails/normal"), "{at:?}");
         assert_eq!(
             at.file_name().unwrap().to_string_lossy(),
             format!("{}.png", crate::md5::hex(b"file:///home/a/photo.png"))
         );
-        match saved {
-            // SAFETY: as above.
-            Some(had) => unsafe { std::env::set_var("XDG_CACHE_HOME", had) },
-            None => unsafe { std::env::remove_var("XDG_CACHE_HOME") },
-        }
+        // A relative cache home is invalid by the base directory specification,
+        // so the one under the home directory is used instead.
+        let fallback = folder_from(Some("cache".into()), Some("/h".into())).unwrap();
+        assert_eq!(fallback, Path::new("/h/.cache/thumbnails/normal"));
+        assert_eq!(folder_from(None, None), None);
     }
 
     #[test]

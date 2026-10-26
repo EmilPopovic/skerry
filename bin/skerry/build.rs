@@ -5,6 +5,8 @@
 //! git and it answers, `unknown` otherwise — a tarball build has no history and
 //! must not fail for the want of one.
 
+#![forbid(unsafe_code)]
+
 use std::process::Command;
 
 fn main() {

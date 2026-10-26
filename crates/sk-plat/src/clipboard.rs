@@ -752,4 +752,46 @@ mod tests {
         assert_eq!(super::decode_uri(uri), Some(path));
         assert!(super::decode_uri("file:///tmp/%00").is_none());
     }
+
+    /// **A paste is bytes another application chose** — ADR 0040's campaign over
+    /// the two readers of them, `x-special/gnome-copied-files` and a `file://`
+    /// URI, which `text/uri-list` and a D-Bus `ShowFolders` call are lines of.
+    /// Seeded with what this module itself publishes for awkward names, and with
+    /// the shapes its tests refuse.
+    ///
+    /// Anything decoded is a path a person's files are then copied from or moved
+    /// out of, so it has to be absolute with no NUL in it; and written back out
+    /// the way this program writes it, it has to read back the same — the paths
+    /// and, for a cut, the verb that decides whether the originals are removed.
+    #[test]
+    fn parser_campaign_uris() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+        let names = [
+            PathBuf::from("/tmp/a file"),
+            PathBuf::from("/tmp/caf\u{e9} #1 %25"),
+            PathBuf::from(std::ffi::OsString::from_vec(b"/x/\xff\n".to_vec())),
+        ];
+        let cut = Content::paths(&names, Intent::Cut);
+        let seeds: &[&[u8]] = &[
+            cut.bytes_for("x-special/gnome-copied-files").unwrap(),
+            cut.bytes_for("text/uri-list").unwrap(),
+            b"copy\nfile:///tmp/one\nfile://host/x\nhttp://y/z\n\nfile:///%00",
+            b"file:///tmp/%2\nfile:///%zz\nfile:///\nfile://\n",
+        ];
+        crate::fuzz_support::campaign("uris", seeds, |bytes| {
+            if let Some((intent, paths)) = decode_copied_files(bytes) {
+                assert!(!paths.is_empty(), "a verb with nothing to do");
+                let again = Content::paths(&paths, intent);
+                let copied = again.bytes_for("x-special/gnome-copied-files").unwrap();
+                assert_eq!(decode_copied_files(copied), Some((intent, paths)), "the round trip");
+            }
+            for line in String::from_utf8_lossy(bytes).lines() {
+                let Some(path) = decode_uri(line) else { continue };
+                let raw = path.as_os_str().as_bytes();
+                assert!(path.is_absolute() && !raw.contains(&0), "{path:?}");
+                let uri = format!("file://{}", encode_bytes(raw));
+                assert_eq!(decode_uri(&uri).as_deref(), Some(path.as_path()), "{uri}");
+            }
+        });
+    }
 }

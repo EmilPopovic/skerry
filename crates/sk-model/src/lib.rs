@@ -18,6 +18,7 @@
 //!   place a crate can be reached from all of them. It depends on nothing.
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![forbid(unsafe_code)]
 // `missing_docs` and `clippy::pedantic` are warned workspace-wide from the lint
 // table in Cargo.toml, together with the few pedantic lints allowed there with a
 // reason. Repeating `warn(clippy::pedantic)` here would override those.

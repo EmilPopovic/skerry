@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
 use sk_desktop::{Kind, Place};
+use sk_fs::trash::Trash;
 use sk_util::{Cancel, Lane, WakeHandle};
 
 use crate::pane::Jobs;
@@ -220,12 +221,14 @@ pub struct Sidebar {
     /// the trashes the old one named.
     counting: Option<Cancel>,
     wake: WakeHandle,
+    /// The home trash the Places section offers, as the window was given it.
+    trash: Trash,
 }
 
 impl Sidebar {
     /// An empty sidebar, and the job that fills it.
     #[must_use]
-    pub fn new(jobs: &Jobs, wake: WakeHandle, open: bool, width: f32) -> Self {
+    pub fn new(jobs: &Jobs, wake: WakeHandle, open: bool, width: f32, trash: Trash) -> Self {
         let (sender, loaded) = std::sync::mpsc::channel();
         let (count_tx, count_rx) = std::sync::mpsc::channel();
         let sidebar = Self {
@@ -243,6 +246,7 @@ impl Sidebar {
             count_tx,
             counting: None,
             wake,
+            trash,
         };
         sidebar.reload(jobs);
         sidebar
@@ -256,11 +260,12 @@ impl Sidebar {
     pub fn reload(&self, jobs: &Jobs) {
         let sender = self.sender.clone();
         let wake = self.wake.clone();
+        let trash = self.trash.clone();
         // **Not cancellable, and the token says so.** Three small file reads
         // that finish in under a millisecond: a cancel would arrive after the
         // work, and the reply is dropped anyway when the receiver is gone.
         jobs.pool.spawn(Lane::Parallel, Cancel::new(), move |_| {
-            if sender.send(build()).is_ok() {
+            if sender.send(build(&trash)).is_ok() {
                 wake.wake();
             }
         });
@@ -705,7 +710,7 @@ pub(crate) fn sample(root: &Path, pinned: bool, opened: bool) -> Vec<Row> {
 }
 
 /// Reads the three sources and arranges them.
-pub(crate) fn build() -> Vec<Section> {
+pub(crate) fn build(trash: &Trash) -> Vec<Section> {
     let places = sk_desktop::user_dirs();
     // A bookmark that is already one of the user directories is the same row
     // twice: this machine's `bookmarks` file lists Documents, Music, Pictures,
@@ -719,7 +724,7 @@ pub(crate) fn build() -> Vec<Section> {
 
     let mut sections = Vec::with_capacity(3);
     let mut entries: Vec<Entry> = places.iter().map(row).collect();
-    if let Ok(path) = sk_fs::trash::home_files() {
+    if let Ok(path) = trash.home_files() {
         entries.push(trash_row(path, sk_model::i18n::lookup("sidebar.trash").to_owned()));
     }
     for mount in &mounts {
@@ -841,7 +846,19 @@ mod tests {
 
     use super::{Entry, Mark, Section, Sidebar, build};
     use sk_desktop::Kind;
+    use sk_fs::trash::Trash;
     use std::path::{Path, PathBuf};
+
+    /// A directory of the test's own for the home trash [`build`] lists.
+    ///
+    /// Listing the home trash makes it if it is missing, and a test has no
+    /// business making one in the person's data directory.
+    fn scratch(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("skerry-sidebar-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
 
     /// A sidebar holding `sections`, with no job behind it.
     ///
@@ -867,6 +884,7 @@ mod tests {
             count_tx,
             counting: None,
             wake: waker.handle(),
+            trash: Trash::from_variables(None, None),
         };
         sidebar.settle();
         sidebar
@@ -924,7 +942,8 @@ mod tests {
     /// navigates. Its own claims are below it.
     #[test]
     fn what_this_machine_offers_is_a_list_of_places_that_exist() {
-        let sections = build();
+        let root = scratch("places");
+        let sections = build(&Trash::at(root.join("data/Trash")));
         assert!(!sections.is_empty(), "no sections at all");
         let rows: Vec<&Entry> =
             sections.iter().flat_map(|section| section.entries.iter()).collect();
@@ -951,6 +970,7 @@ mod tests {
         devices.sort_unstable();
         devices.dedup();
         assert_eq!(devices.len(), devices_count, "the same device twice: {rows:?}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **What a disk leaving looks like from here**, and the three things that
@@ -1018,7 +1038,9 @@ mod tests {
     /// `statvfs` answers both or is not called at all.
     #[test]
     fn a_volume_says_how_much_is_left_and_how_much_there_is() {
-        let sections = build();
+        let root = scratch("volumes");
+        let sections = build(&Trash::at(root.join("data/Trash")));
+        let _ = std::fs::remove_dir_all(&root);
         let volumes: Vec<&Entry> = sections
             .iter()
             .flat_map(|section| section.entries.iter())

@@ -30,7 +30,7 @@ mod xdnd;
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::AsFd as _;
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags};
@@ -762,7 +762,7 @@ impl Window {
         // at its deadline whether or not the peer ever says anything again.
         let timeout = shorter(timeout, self.repeat.next_in());
         let timeout = shorter(timeout, self.selections.next_deadline(Instant::now()));
-        let display = unsafe_borrowed_fd(self.connection.as_raw_fd());
+        let display = self.connection.as_fd();
         let wake_fd = wake.map(Waker::as_fd);
         let mut fds = Vec::with_capacity(2 + self.transfers.len());
         fds.push(PollFd::new(&display, PollFlags::IN));
@@ -1311,17 +1311,6 @@ fn probe(connection: &XCBConnection, root: xproto::Window, atoms: &Atoms) -> Cap
         render_device: None,
         advertised,
     }
-}
-
-/// The X connection's descriptor, borrowed for the length of one `poll`.
-///
-/// `XCBConnection` owns it and closes it on drop, and it outlives every borrow
-/// here because the borrow does not escape `pump`.
-fn unsafe_borrowed_fd(raw: std::os::fd::RawFd) -> BorrowedFd<'static> {
-    // SAFETY: `raw` comes from the live `XCBConnection` held by this `Window`,
-    // which is not dropped while `pump` runs, and the returned borrow does not
-    // escape it.
-    unsafe { BorrowedFd::borrow_raw(raw) }
 }
 
 #[cfg(test)]

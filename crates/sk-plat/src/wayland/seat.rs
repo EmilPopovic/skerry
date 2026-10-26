@@ -186,8 +186,11 @@ impl Seat {
     }
 
     fn load_keymap(&mut self, fd: OwnedFd, size: u32) {
-        // SAFETY: the compositor sends a descriptor to a private, read-only
-        // mapping of exactly `size` bytes, per wl_keyboard.keymap.
+        // SAFETY: `fd` is owned and open. `new_from_fd` maps `size` bytes
+        // private and read-only and drops the mapping before it returns, so the
+        // mapping is sound as long as the file holds `size` bytes for that call —
+        // which wl_keyboard.keymap has the compositor promise, and the
+        // compositor is the one peer this process already trusts with its input.
         let keymap = unsafe {
             xkb::Keymap::new_from_fd(
                 &self.context,

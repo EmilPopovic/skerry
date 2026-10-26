@@ -22,10 +22,16 @@
 //! for a process to do a `read`.
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![forbid(unsafe_code)]
 
 mod words;
 
+#[cfg(test)]
+#[path = "../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
 use std::io::{BufReader, BufWriter, Write};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -95,12 +101,10 @@ fn serve() {
 }
 
 fn answer(request: &Request) -> Reply {
-    let path = PathBuf::from(std::ffi::OsString::from(unsafe {
-        // SAFETY: the bytes came from `OsStr::as_encoded_bytes` in the host — the
-        // same encoding, no round trip through text. `sk_preview::wire` documents
-        // it as the contract of the `path` field.
-        std::ffi::OsStr::from_encoded_bytes_unchecked(&request.path)
-    }));
+    // **Any bytes are a path on Linux**, so what the host sent comes back through
+    // the conversion that has no contract to keep rather than one whose contract
+    // is about the build at the other end of a pipe.
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(&request.path));
     if !looks_like_pdf(&path) {
         return Reply::refused(Refusal::NotItsKind);
     }

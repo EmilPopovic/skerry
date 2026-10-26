@@ -617,6 +617,7 @@ struct Background {
     replies: Replies,
     watcher: sk_fs::Watcher,
     changes: Receiver<sk_fs::Change>,
+    trash: sk_fs::trash::Trash,
 }
 
 impl Background {
@@ -633,6 +634,11 @@ impl Background {
         };
         let mut pane = Pane::new(path);
         pane.reload(&jobs);
+        // **The window's one read of where the home trash is.** Everything in
+        // it that trashes, restores or refuses to act inside a trash is handed
+        // this value. `--capture` opens no window and has a read of its own, in
+        // `capture::run`.
+        let trash = sk_fs::trash::Trash::from_environment();
 
         // Open by default, which is what every file manager a person has met
         // does. Reading what goes in it is a job, started with the others.
@@ -641,6 +647,7 @@ impl Background {
             waker.handle(),
             true,
             crate::sidebar::DEFAULT_WIDTH,
+            trash.clone(),
         );
         let desktop_rx = read_desktop_databases(&jobs, &waker);
         let (watch_sender, changes) = mpsc::channel();
@@ -659,6 +666,7 @@ impl Background {
             replies: Replies::new(),
             watcher,
             changes,
+            trash,
         })
     }
 }
@@ -2026,6 +2034,7 @@ impl App {
             replies,
             watcher,
             changes,
+            trash,
         } = background;
         let watch_target = pane.path.clone();
 
@@ -2036,7 +2045,7 @@ impl App {
         let capabilities = describe(&window);
         let (measurer, edits, now) = (
             Measurer::new(waker.handle()),
-            crate::edit::Edits::new(waker.handle()),
+            crate::edit::Edits::new(waker.handle(), trash),
             Instant::now(),
         );
         let mut app = Self {
@@ -4725,7 +4734,7 @@ impl App {
         !self.busy()
             && !paths.is_empty()
             && paths.iter().all(|path| {
-                sk_fs::trash::contains(path)
+                self.edits.trash().contains(path)
                     && path.parent().and_then(std::path::Path::file_name)
                         == Some(std::ffi::OsStr::new("files"))
             })
@@ -4733,8 +4742,9 @@ impl App {
 
     /// Prevent ordinary mutations from separating trash data from its metadata.
     pub(crate) fn trash_context(&self) -> bool {
-        sk_fs::trash::contains(&self.panes.focused().path)
-            || self.selected_paths().iter().any(|p| sk_fs::trash::contains(p))
+        let trash = self.edits.trash();
+        trash.contains(&self.panes.focused().path)
+            || self.selected_paths().iter().any(|p| trash.contains(p))
     }
 
     /// Moves selected items into trash.
@@ -8038,8 +8048,9 @@ impl App {
             let sender = self.replies.facts_tx.clone();
             let wake = self.waker.handle();
             let path = path.clone();
+            let trash = self.edits.trash().clone();
             self.jobs.pool.spawn(self.panes.focused().lane(), sk_util::Cancel::new(), move |_| {
-                let Some(facts) = sk_fs::facts::describe(&path) else { return };
+                let Some(facts) = sk_fs::facts::describe(&trash, &path) else { return };
                 if sender.send(facts).is_ok() {
                     wake.wake();
                 }
@@ -8469,11 +8480,9 @@ scope_aim={scope_aim:?}",
             let built = sk_index::store::build(&root, cancel, &mut said);
             // Saved before it is delivered, so the window that asked for it and
             // the next window to open the folder get the same answer.
-            let held = built.map(|index| {
-                let _ = sk_index::store::save(&index);
-                std::sync::Arc::new(index)
-            });
-            if sender.send(crate::indexing::Note::Built(held)).is_ok() {
+            let unsaved = built.as_ref().and_then(|index| sk_index::store::save(index).err());
+            let held = built.map(std::sync::Arc::new);
+            if sender.send(crate::indexing::Note::Built(held, unsaved)).is_ok() {
                 wake.wake();
             }
         });
@@ -8536,10 +8545,8 @@ scope_aim={scope_aim:?}",
 
     /// Takes delivery of index reports.
     fn drain_index(&mut self) {
-        while let Ok(note) = self.replies.index_rx.try_recv() {
-            if self.indexes.arrived(note) {
-                self.dirty = true;
-            }
+        if self.indexes.drain(&self.replies.index_rx, &mut self.notice) {
+            self.dirty = true;
         }
         // **The next root, when one is owed and nothing is running.** This is
         // where a queued build steps: the reply that ends one is the event that
@@ -14138,6 +14145,7 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
     /// A queue is one run, timed from its first operation rather than its last.
     #[test]
     fn a_queue_is_one_run_from_its_first_operation() {

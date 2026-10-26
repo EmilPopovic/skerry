@@ -85,7 +85,7 @@ impl Kind {
 ///
 /// **Runs on a job.**
 #[must_use]
-pub fn describe(path: &Path) -> Option<Facts> {
+pub fn describe(trash: &crate::trash::Trash, path: &Path) -> Option<Facts> {
     let wanted = StatxFlags::TYPE
         | StatxFlags::MODE
         | StatxFlags::SIZE
@@ -114,8 +114,9 @@ pub fn describe(path: &Path) -> Option<Facts> {
 
     Some(Facts {
         path: path.to_path_buf(),
-        original: crate::trash::contains(path)
-            .then(|| crate::trash::read(path).ok().map(|entry| entry.original))
+        original: trash
+            .contains(path)
+            .then(|| trash.read(path).ok().map(|entry| entry.original))
             .flatten(),
         size: stat.stx_size,
         // 512-byte blocks, which is what `statx` reports whatever the
@@ -194,10 +195,13 @@ const NAME_BUFFER_LIMIT: usize = 1 << 20;
 
 fn owner_name(uid: u32) -> Option<String> {
     with_buffer(|buffer, buffer_len| {
+        // SAFETY: `passwd` is integers and pointers, for which all zeroes is a
+        // valid value; the lookup overwrites it anyway.
         let mut record: libc::passwd = unsafe { std::mem::zeroed() };
         let mut found: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: `getpwuid_r` writes `record` and the buffer it is handed, and
-        // sets `found` to `record` or to null. Nothing else is read.
+        // SAFETY: `getpwuid_r` writes `record` and the buffer it is handed —
+        // `buffer_len` writable bytes, as `with_buffer` allocates them — and
+        // sets `found` to `record` or to null. No other memory of ours is read.
         let code =
             unsafe { libc::getpwuid_r(uid, &raw mut record, buffer, buffer_len, &raw mut found) };
         (code, (!found.is_null()).then_some(record.pw_name))
@@ -206,6 +210,7 @@ fn owner_name(uid: u32) -> Option<String> {
 
 fn group_name(gid: u32) -> Option<String> {
     with_buffer(|buffer, buffer_len| {
+        // SAFETY: as above — `group` is integers and pointers.
         let mut record: libc::group = unsafe { std::mem::zeroed() };
         let mut found: *mut libc::group = std::ptr::null_mut();
         // SAFETY: as above, for the group file's record.
@@ -269,7 +274,13 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Kind, accounts, describe, mine, permissions};
-    use std::path::PathBuf;
+    use crate::trash::Trash;
+    use std::path::{Path, PathBuf};
+
+    /// A home trash inside the fixture, which these never put anything in.
+    fn bin_in(root: &Path) -> Trash {
+        Trash::at(root.join("data/Trash"))
+    }
 
     fn fixture(label: &str) -> PathBuf {
         let root =
@@ -284,7 +295,7 @@ mod tests {
         let root = fixture("file");
         let path = root.join("thing.txt");
         std::fs::write(&path, b"0123456789").unwrap();
-        let facts = describe(&path).expect("described");
+        let facts = describe(&bin_in(&root), &path).expect("described");
         assert_eq!(facts.size, 10);
         assert_eq!(facts.kind, Kind::File);
         assert_eq!(facts.links, 1);
@@ -300,7 +311,7 @@ mod tests {
         let root = fixture("link");
         let link = root.join("points-nowhere");
         std::os::unix::fs::symlink("/nonexistent-skerry-target", &link).unwrap();
-        let facts = describe(&link).expect("described");
+        let facts = describe(&bin_in(&root), &link).expect("described");
         assert_eq!(facts.kind, Kind::Symlink);
         assert_eq!(
             facts.target.as_deref(),
@@ -312,8 +323,8 @@ mod tests {
     #[test]
     fn a_directory_is_a_directory_and_a_missing_path_is_nothing() {
         let root = fixture("dir");
-        assert_eq!(describe(&root).expect("described").kind, Kind::Directory);
-        assert!(describe(&root.join("not-there")).is_none());
+        assert_eq!(describe(&bin_in(&root), &root).expect("described").kind, Kind::Directory);
+        assert!(describe(&bin_in(&root), &root.join("not-there")).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -352,7 +363,7 @@ mod tests {
         let root = fixture("owner");
         let path = root.join("ours.txt");
         std::fs::write(&path, b"contents").unwrap();
-        let facts = describe(&path).expect("described");
+        let facts = describe(&bin_in(&root), &path).expect("described");
         assert!(mine(facts.uid), "a file we just wrote was not ours to change");
         assert_eq!(
             mine(0xFFFF_FFFE),

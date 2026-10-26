@@ -241,7 +241,9 @@ impl Mapping {
 
     fn bytes(&self) -> &[u8] {
         // SAFETY: the mapping is `len` readable bytes for as long as `self`
-        // lives, and the returned slice borrows `self`.
+        // lives, and the returned slice borrows `self`. It stays readable because
+        // `Bytes::open` maps only a file root alone can rewrite, so nothing this
+        // program runs beside can truncate it into `SIGBUS` under the slice.
         unsafe { std::slice::from_raw_parts(self.address.cast::<u8>(), self.len) }
     }
 }
@@ -255,8 +257,9 @@ impl Drop for Mapping {
 
 // SAFETY: a read-only mapping is immutable for its whole life, so sharing the
 // address across threads cannot race. This is needed because `Fonts` is built on
-// one thread and may be used on another.
+// one thread and may be used on another, and `munmap` may run on any thread.
 unsafe impl Send for Mapping {}
+// SAFETY: `&Mapping` offers only `bytes`, a shared read of memory nobody writes.
 unsafe impl Sync for Mapping {}
 
 /// A font file's bytes and what `swash` needs to read them. `swash` borrows from
