@@ -731,23 +731,6 @@ enum Claim {
     Search,
 }
 
-/// Measures text with the window's own faces, for the markdown layout.
-///
-/// **Logical pixels in and out.** Everything above `sk-plat` works in logical
-/// pixels and the shaper works in device ones, so the conversion happens here —
-/// once, in the one place the layout touches the font stack.
-struct Shaper<'a> {
-    cache: &'a mut sk_text::LayoutCache,
-    fonts: &'a mut sk_text::Fonts,
-    scale: f32,
-}
-
-impl crate::mdlayout::Measure for Shaper<'_> {
-    fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
-        sk_ui::advance_of(self.cache, self.fonts, text, weight, size * self.scale) / self.scale
-    }
-}
-
 /// Seconds since the epoch, for the `Modified` column's sense of "today".
 fn clock_seconds() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs().cast_signed())
@@ -4629,7 +4612,7 @@ impl App {
         };
         if look.editing {
             "editing"
-        } else if look.rendered {
+        } else if look.showing_rendered() {
             "rendered"
         } else {
             "source"
@@ -4650,7 +4633,10 @@ impl App {
         if look.blocks.is_empty() {
             return;
         }
-        look.rendered = !look.rendered;
+        // **From what is on screen**, which is the source while a rendering is
+        // on its way — so the button that says *Show it rendered* then leaves
+        // it coming rather than turning it off.
+        look.rendered = !look.showing_rendered();
         // The two views scroll different distances, and a position measured in
         // one is meaningless in the other.
         look.scroll.to(0.0);
@@ -8928,30 +8914,23 @@ scope_aim={scope_aim:?}",
         true
     }
 
-    /// Lays the rendered markdown out, if it is showing and the width changed.
+    /// Asks for the rendered markdown laid out at the panel's width, and scrolls
+    /// over whichever layout is on screen.
     ///
-    /// **Once per width, never per frame** — [`crate::mdlayout`]. Measuring a
-    /// thousand words costs more than a frame has, and a panel that is not being
-    /// resized asks the same question every time.
+    /// **Asked for, never done here** — [`crate::quicklook::QuickLook::lay_out_for`]
+    /// puts it on a job, because it is work in proportion to the document and
+    /// this runs inside the frame. The scroll's extent is the layout's on
+    /// screen, which during a resize is the one at the old width.
     fn lay_the_markdown_out(&mut self) {
         let inner = crate::view::quick_look_area(&self.layout);
         let size = self.theme.metrics.text_size;
         let scale = self.window.scale();
         let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size * 4.0);
-        let Some(look) = self.quick_look.as_ref() else { return };
-        if !look.rendered || look.blocks.is_empty() || look.parsing() {
-            return;
+        let Some(look) = self.quick_look.as_mut() else { return };
+        look.lay_out_for((room, size, scale), &self.jobs);
+        if let Some(laid) = look.laid.as_ref().filter(|_| look.rendered) {
+            look.scroll.set_extent(laid.height, inner.height);
         }
-        if look.laid.as_ref().is_some_and(|laid| laid.fits(room, size, scale)) {
-            return;
-        }
-        let Self { quick_look, cache, fonts, .. } = self;
-        let Some(look) = quick_look.as_mut() else { return };
-        let mut shaper = Shaper { cache, fonts, scale };
-        let laid = crate::mdlayout::lay_out(&look.blocks, room, size, scale, &mut shaper);
-        look.scroll.set_extent(laid.height, inner.height);
-        look.laid = Some(laid);
-        self.dirty = true;
     }
 
     /// Which page a document was last left on, if this one was.

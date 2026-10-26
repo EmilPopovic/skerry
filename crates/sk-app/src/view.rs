@@ -1423,8 +1423,9 @@ fn quick_look_controls(
     // is the one that must be visible because leaving edit mode *writes*.
     let mut right = strip.right() - 8.0;
     let source = look.has_markdown().then(|| {
-        let key = if look.rendered { "action.look_source" } else { "action.look_rendered" };
-        let ink = if look.rendered { theme.palette.dim } else { theme.palette.accent };
+        let shown = look.showing_rendered();
+        let key = if shown { "action.look_source" } else { "action.look_rendered" };
+        let ink = if shown { theme.palette.dim } else { theme.palette.accent };
         (LookControl::Source, i18n::lookup(key), ink)
     });
     let extract = look

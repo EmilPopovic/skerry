@@ -500,6 +500,9 @@ preview.more = …
 # with neither a picture nor a sentence in it is the one state it must never be
 # in — a person cannot tell it apart from a program that has stopped.
 preview.unavailable = This file could not be shown.
+# A job of ours died while reading, parsing or laying the file out. The file is
+# not at fault, so the sentence says so rather than calling it unreadable.
+preview.failed = Skerry failed while preparing this preview. Close it and open it again to retry; the log says what went wrong.
 preview.interrupted = The preview helper is unavailable or stopped before answering. Check that Skerry and its helpers are installed together; reopen the preview to retry.
 archive.unreadable = This archive could not be read.
 archive.undecodable = This archive is damaged — these are the entries that could be read before it stopped.

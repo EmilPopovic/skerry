@@ -514,13 +514,124 @@ const WORDS_KEPT: usize = 4;
 ///
 /// **Everything the bytes become is made on the job**, so taking delivery is a
 /// move — rule 1. The parse used to be the frame loop's: a 256 KiB paragraph of
-/// `[` held the window for 10.5 seconds before the parser was made linear, and
-/// a 187 KB document written to be read still costs 2.7 ms in a release build
-/// on a 24-thread laptop — a third of the frame before anything is drawn, and
-/// more on every slower machine.
+/// `[` held the window for 10.5 seconds (median of three, release build, load
+/// 7 to 20) before the parser was made linear, and a 187 KB document written to
+/// be read still costs 2.74 ms (median of 41, release build, load 3.5) — a third
+/// of the frame before anything is drawn, and more on every slower machine.
 struct Read {
     text: Text,
-    blocks: Vec<crate::markdown::Block>,
+    blocks: std::sync::Arc<[crate::markdown::Block]>,
+}
+
+/// A layout of the rendered document on its way from a job, and what it was
+/// asked for.
+struct Laying {
+    /// The width, size and scale, keyed the way [`crate::mdlayout::Laid::fits`]
+    /// keys them.
+    against: (u32, u32, u32),
+    waiting: mpsc::Receiver<Option<crate::mdlayout::Laid>>,
+    /// Cancelled when a different width is asked for, or the look goes.
+    stop: sk_util::Cancel,
+}
+
+/// Wakes the frame loop when it goes out of scope.
+///
+/// **At the end of a job, and on the way out of one that panicked**, which is
+/// the case it exists for: a `wake` written as the job's last line is skipped by
+/// the unwind, so the frame loop learned that the job had died only on the next
+/// wake-up that happened to be somebody else's. Declared before the sender it
+/// guards, so it is dropped after it and the loop wakes to a closed channel.
+struct Waking(sk_util::WakeHandle);
+
+impl Drop for Waking {
+    fn drop(&mut self) {
+        self.0.wake();
+    }
+}
+
+/// The faces a layout job measures with.
+///
+/// **A second set, because the window's are the frame loop's**: they shape and
+/// rasterize every frame and cannot be lent to a job for the length of a
+/// layout. Found by the first layout that wants them — 0.88 ms, median of 11,
+/// release build, load 4 — and kept for the process behind a lock, because only
+/// one document is being looked at.
+struct Typesetter {
+    fonts: sk_text::Fonts,
+    cache: sk_text::LayoutCache,
+}
+
+static TYPESETTER: std::sync::Mutex<Option<Typesetter>> = std::sync::Mutex::new(None);
+
+/// Lays `blocks` out against `(width, size, scale)` with [`TYPESETTER`]'s faces,
+/// or answers nothing where no faces can be found.
+fn typeset(
+    blocks: &[crate::markdown::Block],
+    against: (f32, f32, f32),
+    stop: &sk_util::Cancel,
+) -> Option<crate::mdlayout::Laid> {
+    let mut held = TYPESETTER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.is_none() {
+        *held = sk_text::Fonts::discover()
+            .ok()
+            .map(|fonts| Typesetter { fonts, cache: sk_text::LayoutCache::new(64) });
+    }
+    let typesetter = held.as_mut()?;
+    let (width, size, scale) = against;
+    Some(crate::mdlayout::lay_out(
+        blocks,
+        width,
+        size,
+        scale,
+        &mut Setting { typesetter, scale, stop },
+    ))
+}
+
+/// One layout's measuring: the faces, the scale, and whether it is still wanted.
+///
+/// **Logical pixels in and out.** Everything above `sk-plat` works in logical
+/// pixels and the shaper works in device ones, so the conversion happens here —
+/// once, in the one place the layout touches the font stack.
+struct Setting<'a> {
+    typesetter: &'a mut Typesetter,
+    scale: f32,
+    stop: &'a sk_util::Cancel,
+}
+
+impl crate::mdlayout::Measure for Setting<'_> {
+    fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
+        let Typesetter { fonts, cache } = &mut *self.typesetter;
+        sk_ui::advance_of(cache, fonts, text, weight, size * self.scale) / self.scale
+    }
+
+    /// **The word's own glyphs, where it has one per character**, which is what
+    /// a URL, a hash and a line of CJK have: the gap from each pen position to
+    /// the next, kerning included. A ligature or a cluster of several glyphs
+    /// breaks that correspondence, and there each character is measured alone.
+    /// Glyphs are in visual order, so a right-to-left word is measured mirrored;
+    /// its letters are near enough one width that a cut lands where it should.
+    fn advances(&mut self, word: &str, weight: sk_text::Weight, size: f32) -> Vec<f32> {
+        let Typesetter { fonts, cache } = &mut *self.typesetter;
+        let run = cache.get_or_shape_label(word, weight, size * self.scale, fonts);
+        if run.glyphs.len() == word.chars().count() {
+            let scale = self.scale;
+            return run
+                .glyphs
+                .iter()
+                .enumerate()
+                .map(|(index, glyph)| {
+                    let next = run.glyphs.get(index + 1).map_or(run.advance, |it| it.x);
+                    (next - glyph.x).max(0.0) / scale
+                })
+                .collect();
+        }
+        let mut letter = [0; 4];
+        word.chars().map(|it| self.width_of(it.encode_utf8(&mut letter), weight, size)).collect()
+    }
+
+    fn stopped(&self) -> bool {
+        self.stop.is_cancelled()
+    }
 }
 
 /// What is on screen, and what is still coming.
@@ -558,7 +669,8 @@ pub(crate) struct QuickLook {
     /// The document, parsed, where the file is markdown. Empty otherwise.
     ///
     /// **[ADR 0029](../../../docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).**
-    pub(crate) blocks: Vec<crate::markdown::Block>,
+    /// Shared, because a layout job reads it while the panel draws.
+    pub(crate) blocks: std::sync::Arc<[crate::markdown::Block]>,
     /// Whether the rendering was showing when the editor was opened.
     ///
     /// See [`Self::start_editing`]: the source is what an editor edits, and this
@@ -571,8 +683,14 @@ pub(crate) struct QuickLook {
     /// setting, and a setting owes a precedence rule against the session file
     /// that ADR 0027 has not been asked for here.
     pub(crate) rendered: bool,
-    /// The rendered document laid out for the width it was last drawn at.
+    /// The rendered document, laid out for the width it was last drawn at.
+    ///
+    /// **Laid out on a job, and kept until the next one lands** — see
+    /// [`Self::lay_out_for`]. A layout at the old width is what a resize shows
+    /// for the frames the new one takes, which is better than nothing at all.
     pub(crate) laid: Option<crate::mdlayout::Laid>,
+    /// The layout on its way, if one is.
+    laying: Option<Laying>,
     /// What is selected in the rendered view, as places in its visual lines.
     pub(crate) picked: Option<Chosen>,
     /// Whether a drag is choosing in the rendered view.
@@ -683,9 +801,23 @@ pub(crate) struct QuickLook {
     /// starts and replaced by every save.
     as_on_disk: Option<String>,
     reading: Option<mpsc::Receiver<Option<Read>>>,
+    /// The token the read and every parse of this look's text hold.
+    ///
+    /// **Held, and cancelled when the look goes**, so arrowing past a file
+    /// stops its read and its parse at the next stage rather than leaving both
+    /// to finish for nobody.
+    work: sk_util::Cancel,
+    /// Where what this look lets go of is dropped — see [`Self::let_go`].
+    pool: std::sync::Arc<sk_util::Pool>,
+    /// Whether a job working on this look died rather than answering.
+    ///
+    /// **Not a refusal, because nothing refused.** The file was readable and
+    /// the parse or the layout panicked; saying "this file could not be read"
+    /// would send somebody looking at the file for a fault that is ours.
+    failed: bool,
     /// The edited text's blocks, while a job parses it — see
     /// [`Self::stop_editing`].
-    parsing: Option<mpsc::Receiver<Vec<crate::markdown::Block>>>,
+    parsing: Option<mpsc::Receiver<std::sync::Arc<[crate::markdown::Block]>>>,
     /// What is inside the archive, once the child has said.
     pub(crate) inside: Option<crate::archive::Inside>,
     listed: Option<mpsc::Receiver<sk_preview::archive::Listing>>,
@@ -700,13 +832,20 @@ pub(crate) struct QuickLook {
 }
 
 impl Drop for QuickLook {
-    /// **Where the listing is stopped**, rather than in each of the several
-    /// places a panel can close: `Escape`, `Space` again, a click outside, a new
-    /// look, a disk being unplugged. One of those would have been forgotten.
+    /// **Where the work is stopped** — the listing, the read, the parse and the
+    /// layout — rather than in each of the several places a panel can close:
+    /// `Escape`, `Space` again, a click outside, a new look, a disk being
+    /// unplugged. One of those would have been forgotten.
     fn drop(&mut self) {
+        self.work.cancel();
         if let Some(stop) = &self.stop {
             stop.cancel();
         }
+        if let Some(laying) = &self.laying {
+            laying.stop.cancel();
+        }
+        let gone = (std::mem::take(&mut self.blocks), self.laid.take());
+        self.let_go(gone);
     }
 }
 
@@ -722,10 +861,11 @@ impl QuickLook {
             held: std::collections::HashMap::new(),
             ahead: None,
             coarse: shows == Shows::Page,
-            blocks: Vec::new(),
+            blocks: std::sync::Arc::default(),
             rendered: false,
             was_rendered: false,
             laid: None,
+            laying: None,
             picked: None,
             picking: false,
             drafted: false,
@@ -750,6 +890,9 @@ impl QuickLook {
             shown_at: None,
             as_on_disk: None,
             reading: None,
+            work: sk_util::Cancel::new(),
+            pool: std::sync::Arc::clone(&jobs.pool),
+            failed: false,
             parsing: None,
             inside: None,
             listed: None,
@@ -771,14 +914,27 @@ impl QuickLook {
         let path = self.path.clone();
         let language = crate::highlight::Language::of(&self.title());
         let markdown = is_markdown(&self.title());
-        let wake = jobs.wake.clone();
-        jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let read = sk_fs::text::read_text(&path, TEXT_LIMIT).ok().map(|body| Read {
-                blocks: if markdown { crate::markdown::parse(&body) } else { Vec::new() },
-                text: Text::of(&body, language),
-            });
-            let _ = done.send(read);
-            wake.wake();
+        let wake = Waking(jobs.wake.clone());
+        jobs.pool.spawn(sk_util::Lane::Parallel, self.work.clone(), move |cancel| {
+            let _wake = wake;
+            let done = done;
+            // Stopped between stages: a read is bounded by the limit and a parse
+            // is linear, so a stage is the most a look nobody wants still costs.
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Ok(body) = sk_fs::text::read_text(&path, TEXT_LIMIT) else {
+                let _ = done.send(None);
+                return;
+            };
+            if cancel.is_cancelled() {
+                return;
+            }
+            let blocks = if markdown { crate::markdown::parse(&body).into() } else { [].into() };
+            if cancel.is_cancelled() {
+                return;
+            }
+            let _ = done.send(Some(Read { text: Text::of(&body, language), blocks }));
         });
     }
 
@@ -786,13 +942,58 @@ impl QuickLook {
     fn start_parsing(&mut self, jobs: &crate::pane::Jobs) {
         let Some(text) = self.text.as_ref() else { return };
         let body = text.body();
+        // A layout of the blocks from before the edit, landing after this, would
+        // draw them.
+        if let Some(laying) = self.laying.take() {
+            laying.stop.cancel();
+        }
         let (done, waiting) = mpsc::channel();
         self.parsing = Some(waiting);
-        let wake = jobs.wake.clone();
-        jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
-            let _ = done.send(crate::markdown::parse(&body));
-            wake.wake();
+        let wake = Waking(jobs.wake.clone());
+        jobs.pool.spawn(sk_util::Lane::Parallel, self.work.clone(), move |cancel| {
+            let _wake = wake;
+            let done = done;
+            if !cancel.is_cancelled() {
+                let _ = done.send(crate::markdown::parse(&body).into());
+            }
         });
+    }
+
+    /// Lays the rendered document out for a column `width` wide, on a job,
+    /// unless a layout for it is on screen or on its way.
+    ///
+    /// **Rule 1, and the layout is the expensive half.** Measuring 187 KB of
+    /// prose took 36.7 ms (median of five, release build, load 3.5) on the frame
+    /// loop, on every open, after every edit, and on every frame of a resize. A
+    /// layout for a width nobody wants any more is stopped rather than finished.
+    pub(crate) fn lay_out_for(&mut self, against: (f32, f32, f32), jobs: &crate::pane::Jobs) {
+        if !self.rendered || self.blocks.is_empty() || self.parsing() {
+            return;
+        }
+        let (width, size, scale) = against;
+        if self.laid.as_ref().is_some_and(|laid| laid.fits(width, size, scale)) {
+            if let Some(laying) = self.laying.take() {
+                laying.stop.cancel();
+            }
+            return;
+        }
+        let key = crate::mdlayout::key(width, size, scale);
+        if self.laying.as_ref().is_some_and(|laying| laying.against == key) {
+            return;
+        }
+        if let Some(laying) = self.laying.take() {
+            laying.stop.cancel();
+        }
+        let (done, waiting) = mpsc::channel();
+        let stop = sk_util::Cancel::new();
+        let blocks = std::sync::Arc::clone(&self.blocks);
+        let wake = Waking(jobs.wake.clone());
+        jobs.pool.spawn(sk_util::Lane::Parallel, stop.clone(), move |cancel| {
+            let _wake = wake;
+            let done = done;
+            let _ = done.send(typeset(&blocks, against, cancel));
+        });
+        self.laying = Some(Laying { against: key, waiting, stop });
     }
 
     /// Whether the rendering is waiting for a parse of the edited text.
@@ -805,18 +1006,34 @@ impl QuickLook {
         self.parsing.is_some()
     }
 
+    /// Whether a layout is on its way from a job.
+    pub(crate) fn laying(&self) -> bool {
+        self.laying.is_some()
+    }
+
+    /// Drops `value` on a job rather than here.
+    ///
+    /// **Because freeing a layout is work in proportion to it.** Dropping the
+    /// layout of a 256 KiB table cell 98,301 lines deep took 7.0 ms, and of
+    /// 131,070 lines of code 6.2 ms (medians of five, release build, load 4) —
+    /// on the frame loop, on every frame of a resize and when the panel closed.
+    fn let_go<T: Send + 'static>(&self, value: T) {
+        self.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| drop(value));
+    }
+
     /// Asks a child what is inside, on a job — rule 1, and the read is a whole
     /// decompression for anything but a zip.
     fn start_listing(&mut self, jobs: &crate::pane::Jobs) {
         let (done, waiting) = mpsc::channel();
         self.listed = Some(waiting);
         let path = self.path.clone();
-        let wake = jobs.wake.clone();
+        let wake = Waking(jobs.wake.clone());
         let stop = sk_util::Cancel::new();
         self.stop = Some(stop.clone());
         jobs.pool.spawn(sk_util::Lane::Parallel, stop, move |cancel| {
+            let _wake = wake;
+            let done = done;
             let _ = done.send(sk_preview::archive::list(&path, cancel));
-            wake.wake();
         });
     }
 
@@ -834,14 +1051,19 @@ impl QuickLook {
     /// anything arrived.
     pub(crate) fn drain(&mut self) -> bool {
         let parsed = self.drain_parse();
-        let Some(waiting) = &self.reading else { return parsed };
+        let laid = self.drain_layout();
+        let Some(waiting) = &self.reading else { return parsed || laid };
         let read = match waiting.try_recv() {
             Ok(read) => read,
-            Err(mpsc::TryRecvError::Empty) => return parsed,
+            Err(mpsc::TryRecvError::Empty) => return parsed || laid,
             // **A job that panicked drops its sender**, and now that the parse
             // is the job's that is a parser bug — which on the frame loop was a
-            // crash, and here would be a panel waiting for ever.
-            Err(mpsc::TryRecvError::Disconnected) => None,
+            // crash, and is said here as ours rather than as the file's.
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.reading = None;
+                self.failed = true;
+                return true;
+            }
         };
         self.reading = None;
         match read {
@@ -865,8 +1087,9 @@ impl QuickLook {
         let Some(waiting) = &self.parsing else { return false };
         match waiting.try_recv() {
             Ok(blocks) => {
-                self.blocks = blocks;
-                self.laid = None;
+                let before = std::mem::replace(&mut self.blocks, blocks);
+                let gone = (before, self.laid.take());
+                self.let_go(gone);
                 self.picked = None;
             }
             Err(mpsc::TryRecvError::Empty) => return false,
@@ -875,6 +1098,27 @@ impl QuickLook {
             Err(mpsc::TryRecvError::Disconnected) => self.rendered = false,
         }
         self.parsing = None;
+        true
+    }
+
+    /// Takes delivery of [`Self::lay_out_for`]'s layout. Whether it arrived.
+    fn drain_layout(&mut self) -> bool {
+        let Some(laying) = &self.laying else { return false };
+        let laid = match laying.waiting.try_recv() {
+            Ok(laid) => laid,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.laying = None;
+        match laid {
+            Some(laid) => {
+                let before = self.laid.replace(laid);
+                self.let_go(before);
+            }
+            // No faces to measure with, or a layout that died: the source is
+            // what can still be shown, and is a true picture of the file.
+            None => self.rendered = false,
+        }
         true
     }
 
@@ -1297,6 +1541,9 @@ impl QuickLook {
     /// something odder still. Either way the panel says one sentence rather than
     /// looking like a program that has stopped.
     pub(crate) fn said(&self) -> Option<&'static str> {
+        if self.failed {
+            return Some("preview.failed");
+        }
         let refusal = self.refusal?;
         Some(refusal.message().unwrap_or("preview.unavailable"))
     }
@@ -1416,6 +1663,16 @@ impl QuickLook {
         !self.blocks.is_empty()
     }
 
+    /// Whether the rendering is what is on screen.
+    ///
+    /// **Not the same as [`Self::rendered`]**, which is what was asked for: a
+    /// rendering whose layout is still on a job is asked for and the source is
+    /// what is drawn — and a label or a scenario that read the request rather
+    /// than the screen said *rendered* over mono text.
+    pub(crate) fn showing_rendered(&self) -> bool {
+        self.rendered && self.laid.is_some()
+    }
+
     /// Whether there is text on screen at all — a file's, or a page's words.
     pub(crate) fn has_text(&self) -> bool {
         self.text.is_some() || self.page_text.is_some()
@@ -1493,7 +1750,8 @@ impl QuickLook {
         self.editing = false;
         self.rendered = std::mem::take(&mut self.was_rendered);
         if self.rendered {
-            self.laid = None;
+            let gone = self.laid.take();
+            self.let_go(gone);
             self.start_parsing(jobs);
         }
     }
@@ -1882,6 +2140,16 @@ mod tests {
         assert!(!look.show_held((800, 600)));
     }
 
+    /// The pool a test's look drops what it lets go of on — one for the crate's
+    /// tests, rather than a pool's threads per look.
+    fn one_pool() -> std::sync::Arc<sk_util::Pool> {
+        static POOL: std::sync::OnceLock<std::sync::Arc<sk_util::Pool>> =
+            std::sync::OnceLock::new();
+        std::sync::Arc::clone(
+            POOL.get_or_init(|| std::sync::Arc::new(sk_util::Pool::with_width(1))),
+        )
+    }
+
     /// A look with no child behind it, for the page arithmetic.
     fn paged(pages: u32) -> QuickLook {
         QuickLook {
@@ -1897,10 +2165,11 @@ mod tests {
             held: std::collections::HashMap::new(),
             ahead: None,
             coarse: false,
-            blocks: Vec::new(),
+            blocks: std::sync::Arc::default(),
             rendered: false,
             was_rendered: false,
             laid: None,
+            laying: None,
             picked: None,
             picking: false,
             drafted: false,
@@ -1921,6 +2190,9 @@ mod tests {
             shown_at: None,
             as_on_disk: None,
             reading: None,
+            work: sk_util::Cancel::new(),
+            pool: one_pool(),
+            failed: false,
             parsing: None,
             inside: None,
             listed: None,
@@ -2510,7 +2782,8 @@ two
 
     /// **A markdown file arrives already parsed**, so taking delivery costs the
     /// frame nothing whatever the file says — rule 1. A paragraph of `[` is the
-    /// document that held the window for 10.5 seconds when `drain` parsed it.
+    /// document that held the window for 10.5 seconds (median of three, release
+    /// build, load 7 to 20) when `drain` parsed it.
     #[test]
     fn a_markdown_file_arrives_already_parsed() {
         let (jobs, _waker, root) = harness("arrives-parsed");
@@ -2558,6 +2831,93 @@ two
             })
             .collect();
         assert_eq!(said, "Edited. A paragraph.");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Calls `drain` the way the frame loop does until `done` says so.
+    fn until(look: &mut QuickLook, done: impl Fn(&QuickLook) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !done(look) {
+            assert!(std::time::Instant::now() < deadline, "it never happened");
+            look.drain();
+            std::thread::yield_now();
+        }
+    }
+
+    /// **The layout is asked for here and made on a job**, and while a new width
+    /// is on its way the old layout is what is on screen — rule 1, and the
+    /// difference between a resize that shows the document at the old width for
+    /// a frame and one that shows nothing.
+    #[test]
+    fn a_layout_is_made_on_a_job_and_the_last_one_shows_until_it_lands() {
+        // A machine with no faces has nothing to lay out with, and says so by
+        // falling back to the source — which is a different test.
+        if sk_text::Fonts::discover().is_err() {
+            return;
+        }
+        let (jobs, _waker, root) = harness("laid-on-a-job");
+        let path = root.join("notes.md");
+        std::fs::write(&path, "# Title\n\nA paragraph of a few words.\n").expect("a fixture");
+        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        delivered(&mut look);
+
+        look.lay_out_for((400.0, 13.0, 1.0), &jobs);
+        assert!(look.laid.is_none() && look.laying(), "it was laid out here, not asked for");
+        assert!(!look.showing_rendered(), "the source is what is on screen until it lands");
+        until(&mut look, |look| !look.laying());
+        let first = look.laid.clone().expect("a layout");
+        assert!(first.fits(400.0, 13.0, 1.0));
+        assert!(look.showing_rendered());
+
+        look.lay_out_for((300.0, 13.0, 1.0), &jobs);
+        assert_eq!(look.laid.as_ref(), Some(&first), "the old width is on screen meanwhile");
+        until(&mut look, |look| !look.laying());
+        assert!(look.laid.as_ref().is_some_and(|laid| laid.fits(300.0, 13.0, 1.0)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **Moving on stops the work**: a look that goes cancels its read, its
+    /// parse and its layout rather than leaving them to finish for nobody.
+    #[test]
+    fn a_look_that_goes_stops_its_jobs() {
+        let (jobs, _waker, root) = harness("stops-its-jobs");
+        let path = root.join("notes.md");
+        std::fs::write(&path, "# Title\n").expect("a fixture");
+        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        delivered(&mut look);
+        look.lay_out_for((400.0, 13.0, 1.0), &jobs);
+        let work = look.work.clone();
+        let layout = look.laying.as_ref().map(|it| it.stop.clone());
+        drop(look);
+        assert!(work.is_cancelled(), "the read and the parse were left running");
+        assert!(layout.is_none_or(|it| it.is_cancelled()), "the layout was left running");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A job that panics still wakes the frame loop**, and the panel says the
+    /// preview failed rather than that the file could not be read. The wake was
+    /// the job's last line, so the unwind skipped it and the panel waited for
+    /// somebody else's wake-up to learn that the job had died.
+    #[test]
+    fn a_job_that_panics_wakes_the_loop_and_is_not_called_unreadable() {
+        let (jobs, waker, root) = harness("panic-wakes");
+        let mut look = texted("");
+        let (done, waiting) = std::sync::mpsc::channel::<Option<super::Read>>();
+        look.reading = Some(waiting);
+        let _ = waker.drain();
+        let wake = super::Waking(jobs.wake.clone());
+        jobs.pool.spawn(sk_util::Lane::Parallel, sk_util::Cancel::new(), move |_| {
+            let _wake = wake;
+            let _done = done;
+            panic!("a parser bug, deliberately");
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !waker.drain() {
+            assert!(std::time::Instant::now() < deadline, "the panic did not wake the loop");
+            std::thread::yield_now();
+        }
+        assert!(look.drain(), "the dead job was not noticed on its own wake-up");
+        assert_eq!(look.said(), Some("preview.failed"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
