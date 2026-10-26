@@ -9,10 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A "Decode files without Landlock" setting. `F2` now shows whether the helpers
+  are sandboxed.
+
 ### Changed
 
 - A unified custom icon set now covers files, menus and controls. New
   configurations use Skerry icons by default.
+- Without Landlock, previews, thumbnails and archive unpacking are refused
+  unless that setting is on (ADR 0046).
+- Invisible characters in file names (controls, bidi and zero-width marks) show
+  as a dimmed `<U+XXXX>`. Emoji presentation selectors are honoured, so symbols
+  such as ☕ and ⭐ draw as colour emoji.
+- `make install` no longer builds. Run `make` first.
+
+### Security
+
+- Helpers are confined further: no changing other files' metadata, signalling
+  other processes, using the keyring or leaving their process group. Each runs
+  in its own session with a minimal environment.
+- Copies and moves walk folders through descriptors, so a symlink swapped in
+  mid-copy is refused. Copies drop setuid and setgid bits and other users'
+  ACLs.
+- A move between filesystems removes only what it copied. Delete for good stops
+  at mount points.
+- Malformed or oversized D-Bus messages are refused without stalling the
+  connection. Paste and drop data is limited to 16 MiB and 5 seconds.
+- Index files and thumbnails are written 0600 in 0700 folders and never through
+  a symlink. An SVG can no longer draw a local file into its thumbnail.
+- Release builds no longer hold a write token, and published archives carry
+  build provenance.
+
+### Fixed
+
+- Markdown preview no longer holds the window on long or deeply nested
+  documents.
+- A session file with a non-ASCII sort token no longer crashes startup.
+- Large tar archives unpack fully. Unpacking stops before the disk runs out of
+  inodes.
+- PDF pages with a crop box are shown whole.
+- An interlaced GIF frame with zero width no longer stops a thumbnail batch.
 
 ### Fixed
 

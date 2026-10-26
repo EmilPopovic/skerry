@@ -318,6 +318,13 @@ retrofitting extraction across twelve crates costs weeks.
 ./tools/check          # links, layering, dependency budget, invariants
 ```
 
+**A meaningful change gets a line in [CHANGELOG.md](CHANGELOG.md)** under
+`[Unreleased]`, in the same commit. A meaningful change is anything a person
+using or packaging Skerry would notice: a feature, a behaviour change, a fix, a
+security fix, a new setting or a build change. One or two sentences in Keep a
+Changelog's sections, written for that person rather than for a reviewer.
+Refactors, tests and internal docs need no entry.
+
 That is also all CI runs — [check.yml](.github/workflows/check.yml) calls the same
 script, because a gate that exists only in a workflow file is a gate nobody can
 reproduce. Alongside it: the golden frames on lavapipe, and `cargo check` on the

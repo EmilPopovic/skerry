@@ -46,6 +46,10 @@ latency bug that only appears under load.
 **Strings.** A user-visible string not going through `t!()`, or a sentence built
 by concatenation, which cannot be translated.
 
+**Changelog.** A change a user or packager would notice with no line under
+`[Unreleased]` in `CHANGELOG.md` in the same diff (CLAUDE.md, "Before you
+propose a change").
+
 **Errors.** An error reaching a human without a message saying what happened and
 what to do, separate from the debug chain. `unwrap` outside a named invariant.
 A panic in a job that is not caught at the pool boundary.
