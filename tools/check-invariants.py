@@ -91,14 +91,26 @@ def unsafe_check(report: Report) -> None:
     """
     for manifest in manifests(torture=False):
         package = manifest.parent
-        sources = sorted(p for p in package.rglob("*.rs") if "target" not in p.parts)
-        code = (line.split("//")[0] for p in sources for line in p.read_text().splitlines())
+        roots = [root for pattern in CRATE_ROOTS for root in sorted(package.glob(pattern))]
+        roots += build_script(manifest)
+        sources = {p for p in package.rglob("*.rs") if "target" not in p.parts} | set(roots)
+        code = (line.split("//")[0] for p in sorted(sources) for line in p.read_text().splitlines())
         if any(UNSAFE_CODE.search(line) for line in code):
             continue
-        for pattern in CRATE_ROOTS:
-            for root in sorted(package.glob(pattern)):
-                if FORBID not in root.read_text():
-                    report.fail(rel(root), f"no `unsafe` in {rel(package)}, so the root says {FORBID}")
+        for root in roots:
+            if FORBID not in root.read_text():
+                report.fail(rel(root), f"no `unsafe` in {rel(package)}, so the root says {FORBID}")
+
+
+def build_script(manifest) -> list:
+    """The package's build script, which is a crate root of its own.
+
+    Named by `package.build` where the manifest says — three helpers share
+    `bin/skerry/build.rs` that way — and `build.rs` beside the manifest otherwise.
+    """
+    named = load(manifest).get("package", {}).get("build")
+    script = (manifest.parent / named).resolve() if isinstance(named, str) else manifest.parent / "build.rs"
+    return [script] if script.is_file() else []
 
 
 def source_check(report: Report) -> None:

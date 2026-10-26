@@ -715,73 +715,110 @@ fn in_a_volume_trash(path: &Path) -> bool {
     })
 }
 
-/// Every record in a trash outside `scratch` for something that was under it.
+/// What a test needs to show its trash stayed in its own scratch directory.
 ///
-/// **For tests**, which hand [`Trash::at`] a directory inside their own scratch
-/// root and use this to show that nothing they trashed went anywhere else. Read:
-/// the home trash the environment names, and the two volume trashes of every
-/// directory above `scratch` — the top of its filesystem is one of them,
-/// whichever that is. A test that did not route its trash this way left a folder
-/// in `/tmp/.Trash-1000` on every run, 104 of them on the machine that found it.
-///
-/// A record's `Path=` is absolute in the home trash and relative to the top of
-/// the filesystem in a volume one, which is why each trash is read against its
-/// own top. Storage is opened the way every other reader here opens it, so a
-/// trash somebody else owns or a link planted at its name is skipped.
+/// **Here and not in a test module** because the tests that need it are in
+/// `sk-app` as well as here, and it reads storage the way this module does —
+/// hidden from the documentation, the way `sk_preview::sandbox::confine_below`
+/// is, because nothing but a test has a reason to call it.
 #[doc(hidden)]
-#[must_use]
-pub fn strays(scratch: &Path) -> Vec<PathBuf> {
-    let Ok(scratch) = std::fs::canonicalize(scratch) else { return Vec::new() };
-    let mut trashes: Vec<(PathBuf, Option<&Path>)> = Vec::new();
-    if let Ok(home) = Trash::from_environment().home() {
-        trashes.push((home.to_path_buf(), None));
+pub mod testing {
+    use std::ffi::OsStr;
+    use std::fs::File;
+    use std::io::Read as _;
+    use std::os::fd::OwnedFd;
+    use std::path::{Path, PathBuf};
+
+    use rustix::fs::{Mode, OFlags};
+
+    use super::{Storage, Trash, children, decode_path, uid};
+
+    /// Now, as a record's `DeletionDate=` says it: local, to the second.
+    ///
+    /// Taken when a test starts and handed to [`strays`], so a record left by an
+    /// earlier run is not this one's.
+    #[must_use]
+    pub fn now() -> String {
+        crate::ops::deletion_date()
     }
-    for top in scratch.ancestors().skip(1) {
-        trashes.push((top.join(format!(".Trash-{}", uid())), Some(top)));
-        trashes.push((top.join(".Trash").join(uid().to_string()), Some(top)));
-    }
-    let mut found = Vec::new();
-    for (root, top) in trashes {
-        let Ok(storage) = Storage::open(&root, false) else { continue };
-        let Ok(names) = children(&storage.info) else { continue };
-        for name in names {
-            let Some(original) = record_at(&storage.info, &name).and_then(|record| {
-                record.lines().find_map(|line| line.strip_prefix("Path=")).and_then(decode_path)
-            }) else {
-                continue;
-            };
-            let original = match top {
-                Some(top) if original.is_relative() => top.join(original),
-                _ => original,
-            };
-            if original.starts_with(&scratch) {
-                found.push(root.join("info").join(name));
+
+    /// Every record in a trash outside `scratch`, made at or after `since`, for
+    /// something that was under it.
+    ///
+    /// A test hands [`Trash::at`] a directory inside its own scratch root and uses
+    /// this to show that nothing it trashed went anywhere else. Read: the home
+    /// trash the environment names, and the two volume trashes of every directory
+    /// above `scratch` — the top of its filesystem is one of them, whichever that
+    /// is. A test that did not route its trash this way left a folder in
+    /// `/tmp/.Trash-1000` on every run, 104 of them on the machine that found it.
+    ///
+    /// **`since`, because a scratch directory's name is the process's and a pid is
+    /// reused.** Those 104 are named after the test that left them, and a later
+    /// run with one of their pids would otherwise be failed for them. Compared as
+    /// text, which orders `YYYY-MM-DDThh:mm:ss` by time — local time, so the hour
+    /// a clock goes back is an hour this cannot see into.
+    ///
+    /// A record's `Path=` is absolute in the home trash and relative to the top of
+    /// the filesystem in a volume one, which is why each trash is read against its
+    /// own top. Storage is opened the way every other reader here opens it, so a
+    /// trash somebody else owns or a link planted at its name is skipped.
+    #[must_use]
+    pub fn strays(scratch: &Path, since: &str) -> Vec<PathBuf> {
+        let Ok(scratch) = std::fs::canonicalize(scratch) else { return Vec::new() };
+        let mut trashes: Vec<(PathBuf, Option<&Path>)> = Vec::new();
+        if let Ok(home) = Trash::from_environment().home() {
+            trashes.push((home.to_path_buf(), None));
+        }
+        for top in scratch.ancestors().skip(1) {
+            trashes.push((top.join(format!(".Trash-{}", uid())), Some(top)));
+            trashes.push((top.join(".Trash").join(uid().to_string()), Some(top)));
+        }
+        let mut found = Vec::new();
+        for (root, top) in trashes {
+            let Ok(storage) = Storage::open(&root, false) else { continue };
+            let Ok(names) = children(&storage.info) else { continue };
+            for name in names {
+                let Some(record) = record_at(&storage.info, &name) else { continue };
+                let field = |key: &str| record.lines().find_map(|line| line.strip_prefix(key));
+                if field("DeletionDate=").is_none_or(|made| made < since) {
+                    continue;
+                }
+                let Some(original) = field("Path=").and_then(decode_path) else { continue };
+                let original = match top {
+                    Some(top) if original.is_relative() => top.join(original),
+                    _ => original,
+                };
+                if original.starts_with(&scratch) {
+                    found.push(root.join("info").join(name));
+                }
             }
         }
+        found
     }
-    found
-}
 
-/// One record's text, read through the open `info` directory without following
-/// a link or waiting on a FIFO, and no longer than [`read`] would accept.
-fn record_at(info: &OwnedFd, name: &OsStr) -> Option<String> {
-    let fd = rustix::fs::openat(
-        info,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .ok()?;
-    let mut record = String::new();
-    File::from(fd).take(65537).read_to_string(&mut record).ok()?;
-    Some(record)
+    /// One record's text, read through the open `info` directory without
+    /// following a link or waiting on a FIFO, and no longer than a read of a
+    /// trash entry accepts.
+    fn record_at(info: &OwnedFd, name: &OsStr) -> Option<String> {
+        let fd = rustix::fs::openat(
+            info,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+        let mut record = String::new();
+        File::from(fd).take(65537).read_to_string(&mut record).ok()?;
+        Some(record)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Trash, strays, uid};
+    use super::testing::strays;
+    use super::{Trash, uid};
     use std::ffi::OsString;
     use std::os::unix::fs::DirBuilderExt as _;
     use std::path::{Path, PathBuf};
@@ -815,7 +852,8 @@ mod tests {
     /// **The check has to be seen finding one.** A volume trash on a directory
     /// above the scratch holds a record for something inside it, which is the
     /// shape `/tmp/.Trash-1000` had — built one level down, inside a scratch of
-    /// its own, so no real trash is written to.
+    /// its own, so no real trash is written to. **And seen not finding one left
+    /// before the run began**, which is what a reused pid meets.
     #[test]
     fn a_record_above_the_scratch_for_something_in_it_is_a_stray() {
         let top = scratch("strays");
@@ -824,18 +862,20 @@ mod tests {
         for directory in [&inner, &volume.join("files"), &volume.join("info")] {
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).unwrap();
         }
-        let record = |name: &str, path: &str| {
+        let record = |name: &str, path: &str, when: &str| {
             std::fs::write(
                 volume.join("info").join(format!("{name}.trashinfo")),
-                format!("[Trash Info]\nPath={path}\nDeletionDate=2026-10-26T10:00:00\n"),
+                format!("[Trash Info]\nPath={path}\nDeletionDate={when}\n"),
             )
             .unwrap();
         };
-        record("elsewhere", "elsewhere/source");
-        assert!(strays(&inner).is_empty(), "a record for a sibling was called a stray");
+        let since = "2026-10-26T10:00:00";
+        record("elsewhere", "elsewhere/source", since);
+        record("earlier", "inner/into/source", "2026-10-25T17:15:24");
+        assert!(strays(&inner, since).is_empty(), "a sibling's record, or an older run's");
 
-        record("source", "inner/into/source");
-        let found = strays(&inner);
+        record("source", "inner/into/source", since);
+        let found = strays(&inner, since);
         assert_eq!(found, vec![volume.join("info/source.trashinfo")], "{found:?}");
         std::fs::remove_dir_all(&top).unwrap();
     }

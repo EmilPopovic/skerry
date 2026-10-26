@@ -1836,18 +1836,23 @@ mod tests {
     /// finds nothing and passes. An undo of a copy here used to trash the copy
     /// through the person's real trash: `/tmp` is not the home filesystem, so
     /// every run left a folder in `/tmp/.Trash-1000`.
-    struct Scratch(PathBuf);
+    struct Scratch {
+        root: PathBuf,
+        /// When it was made, so a record an earlier run left is not this one's.
+        since: String,
+    }
 
     impl Scratch {
         fn new(label: &str) -> Self {
             let root =
                 std::env::temp_dir().join(format!("skerry-edits-{}-{label}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
-            Self(root)
+            Self { root, since: sk_fs::trash::testing::now() }
         }
 
         fn trash(&self) -> Trash {
-            Trash::at(self.0.join("data/Trash"))
+            Trash::at(self.root.join("data/Trash"))
         }
     }
 
@@ -1855,16 +1860,16 @@ mod tests {
         type Target = Path;
 
         fn deref(&self) -> &Path {
-            &self.0
+            &self.root
         }
     }
 
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let strays = sk_fs::trash::strays(&self.0);
-            let _ = std::fs::remove_dir_all(&self.0);
+            let strays = sk_fs::trash::testing::strays(&self.root, &self.since);
+            let _ = std::fs::remove_dir_all(&self.root);
             if !std::thread::panicking() {
-                assert!(strays.is_empty(), "{} trashed elsewhere: {strays:?}", self.0.display());
+                assert!(strays.is_empty(), "{} trashed elsewhere: {strays:?}", self.root.display());
             }
         }
     }

@@ -22,6 +22,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::time::Instant;
+
+use sk_index::store::Unsaved;
 
 /// What a job working on an index has to say.
 pub(crate) enum Note {
@@ -213,6 +217,28 @@ impl Indexes {
         self.held.push(index);
     }
 
+    /// Takes every reply waiting on `notes`, and puts in `notice` what a person
+    /// has to be told about them. Whether anything changed on screen.
+    ///
+    /// **The notice is set here rather than by the window** so that a test can
+    /// see a build too large to keep reach it, which is the only place it is
+    /// said: the index is searched until the panel closes and then never again,
+    /// and nothing else on screen would show why the next search is slower.
+    pub(crate) fn drain(
+        &mut self,
+        notes: &Receiver<Note>,
+        notice: &mut Option<(String, Instant)>,
+    ) -> bool {
+        let mut changed = false;
+        while let Ok(note) = notes.try_recv() {
+            if let Note::Built(Some(index), Some(Unsaved::TooLarge)) = &note {
+                *notice = Some((too_large(index.len()), Instant::now()));
+            }
+            changed |= self.arrived(note);
+        }
+        changed
+    }
+
     /// Takes a reply. Whether anything changed on screen.
     pub(crate) fn arrived(&mut self, note: Note) -> bool {
         match note {
@@ -249,12 +275,57 @@ impl Indexes {
     }
 }
 
+/// What a build that came out too large to keep tells a person: how many
+/// entries, the size an index may be, and what to do instead.
+fn too_large(entries: usize) -> String {
+    let count = sk_ui::format::grouped(entries);
+    let ceiling = sk_ui::format::size(sk_index::store::LARGEST);
+    sk_model::tp!("notice.index_too_large", entries, count, ceiling)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Indexes, Note};
+    use sk_index::store::Unsaved;
     use std::path::Path;
+
+    /// **A build too large to keep reaches the notice, and nothing else does.**
+    /// One real index, small, delivered three ways: too large, unwritable, and
+    /// saved. Only the first is said — an unwritable cache is a slower program,
+    /// which is the bargain every cache here makes — and it is said as a
+    /// sentence a person can act on, with the count and the ceiling in it.
+    #[test]
+    fn an_index_too_large_to_keep_is_said() {
+        let root =
+            std::env::temp_dir().join(format!("skerry-indexing-{}-too-large", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("inside")).unwrap();
+        let built = sk_index::store::build(&root, &sk_util::Cancel::new(), &mut |_| {})
+            .map(std::sync::Arc::new)
+            .expect("an index of the fixture");
+        let entries = built.len();
+
+        for (unsaved, said) in
+            [(Some(Unsaved::TooLarge), true), (Some(Unsaved::Unwritable), false), (None, false)]
+        {
+            let (sender, notes) = std::sync::mpsc::channel();
+            sender.send(Note::Built(Some(std::sync::Arc::clone(&built)), unsaved)).unwrap();
+            let mut notice = None;
+            assert!(Indexes::default().drain(&notes, &mut notice), "{unsaved:?} changed nothing");
+            assert_eq!(notice.is_some(), said, "{unsaved:?}: {notice:?}");
+            let Some((sentence, _)) = notice else { continue };
+            assert!(!sentence.starts_with("notice."), "{sentence}");
+            assert!(sentence.contains(&sk_ui::format::grouped(entries)), "{sentence}");
+            assert!(
+                sentence.contains(&sk_ui::format::size(sk_index::store::LARGEST)),
+                "{sentence}"
+            );
+            assert!(sentence.contains("instead of using an index"), "{sentence}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     /// A reply for a folder nobody is looking at any more must not land.
     ///

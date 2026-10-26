@@ -634,8 +634,10 @@ impl Background {
         };
         let mut pane = Pane::new(path);
         pane.reload(&jobs);
-        // **The one read of where the home trash is.** Everything that trashes,
-        // restores or refuses to act inside a trash is handed this value.
+        // **The window's one read of where the home trash is.** Everything in
+        // it that trashes, restores or refuses to act inside a trash is handed
+        // this value. `--capture` opens no window and has a read of its own, in
+        // `capture::run`.
         let trash = sk_fs::trash::Trash::from_environment();
 
         // Open by default, which is what every file manager a person has met
@@ -941,17 +943,6 @@ fn refusal(error: &std::io::Error) -> Option<String> {
         std::io::ErrorKind::TimedOut => Some(sk_model::t!("error.selection_stalled").to_owned()),
         _ => None,
     }
-}
-
-/// What a build that came out too large to keep tells a person.
-///
-/// **Said, because what it costs is silent.** The index is searched until the
-/// panel closes and then never again: every later search of the root walks, and
-/// the line under the results would say so only as a slower answer.
-fn too_large(entries: usize) -> String {
-    let count = sk_ui::format::grouped(entries);
-    let ceiling = sk_ui::format::size(sk_index::store::LARGEST);
-    sk_model::tp!("notice.index_too_large", entries, count, ceiling)
 }
 
 /// The three channels a job answers the frame loop on.
@@ -8554,17 +8545,8 @@ scope_aim={scope_aim:?}",
 
     /// Takes delivery of index reports.
     fn drain_index(&mut self) {
-        while let Ok(note) = self.replies.index_rx.try_recv() {
-            if let crate::indexing::Note::Built(
-                Some(index),
-                Some(sk_index::store::Unsaved::TooLarge),
-            ) = &note
-            {
-                self.notice = Some((too_large(index.len()), Instant::now()));
-            }
-            if self.indexes.arrived(note) {
-                self.dirty = true;
-            }
+        if self.indexes.drain(&self.replies.index_rx, &mut self.notice) {
+            self.dirty = true;
         }
         // **The next root, when one is owed and nothing is running.** This is
         // where a queued build steps: the reply that ends one is the event that
@@ -14163,17 +14145,6 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
-
-    /// **An index too large to keep is said as a sentence, not a key**: how many
-    /// entries, the ceiling the load keeps, and what to do instead.
-    #[test]
-    fn an_index_too_large_to_keep_says_how_large_and_what_to_do() {
-        let said = super::too_large(45_000_000);
-        assert!(!said.starts_with("notice."), "{said}");
-        assert!(said.contains(&sk_ui::format::grouped(45_000_000)), "{said}");
-        assert!(said.contains(&sk_ui::format::size(sk_index::store::LARGEST)), "{said}");
-        assert!(said.contains("index a folder inside it"), "{said}");
-    }
 
     /// A queue is one run, timed from its first operation rather than its last.
     #[test]

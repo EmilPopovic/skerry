@@ -353,8 +353,8 @@ fn many_key(one: &'static str) -> &'static str {
 /// Makes a directory called `name` inside `parent`.
 ///
 /// **Runs on a job.**
-pub fn create_directory(trash: &Trash, parent: &Path, name: &str) -> Result<Change, Problem> {
-    trash.writable(parent)?;
+pub fn create_directory(bin: &Trash, parent: &Path, name: &str) -> Result<Change, Problem> {
+    bin.writable(parent)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -368,8 +368,8 @@ pub fn create_directory(trash: &Trash, parent: &Path, name: &str) -> Result<Chan
 }
 
 /// The name a creation is allowed to use, or why it is not one.
-fn usable(trash: &Trash, parent: &Path, name: &str) -> Result<PathBuf, Problem> {
-    trash.writable(parent)?;
+fn usable(bin: &Trash, parent: &Path, name: &str) -> Result<PathBuf, Problem> {
+    bin.writable(parent)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -383,8 +383,8 @@ fn usable(trash: &Trash, parent: &Path, name: &str) -> Result<PathBuf, Problem> 
 /// somebody else can write in.
 ///
 /// **Runs on a job.**
-pub fn create_file(trash: &Trash, parent: &Path, name: &str) -> Result<Change, Problem> {
-    let path = usable(trash, parent, name)?;
+pub fn create_file(bin: &Trash, parent: &Path, name: &str) -> Result<Change, Problem> {
+    let path = usable(bin, parent, name)?;
     rustix::fs::open(
         &path,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
@@ -403,12 +403,12 @@ pub fn create_file(trash: &Trash, parent: &Path, name: &str) -> Result<Change, P
 ///
 /// **Runs on a job.**
 pub fn create_link(
-    trash: &Trash,
+    bin: &Trash,
     parent: &Path,
     name: &str,
     target: &Path,
 ) -> Result<Change, Problem> {
-    let path = usable(trash, parent, name)?;
+    let path = usable(bin, parent, name)?;
     rustix::fs::symlink(target, &path).map_err(|error| problem(error, &path))?;
     Ok(Change::Created { path, made: Made::Link(target.to_path_buf()) })
 }
@@ -441,8 +441,8 @@ fn unmake(path: &Path, made: &Made) -> Result<(), Problem> {
 /// Renames `from` to `name`, in the same directory.
 ///
 /// **Runs on a job.**
-pub fn rename(trash: &Trash, from: &Path, name: &str) -> Result<Change, Problem> {
-    trash.writable(from)?;
+pub fn rename(bin: &Trash, from: &Path, name: &str) -> Result<Change, Problem> {
+    bin.writable(from)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -460,8 +460,8 @@ pub fn rename(trash: &Trash, from: &Path, name: &str) -> Result<Change, Problem>
 /// Moves `path` into the trash, per the freedesktop specification.
 ///
 /// **Runs on a job.**
-pub fn trash(trash: &Trash, path: &Path) -> Result<Change, Problem> {
-    let entry = trash.put(path)?;
+pub fn trash(bin: &Trash, path: &Path) -> Result<Change, Problem> {
+    let entry = bin.put(path)?;
     let change =
         Change::Trashed { original: entry.original, stored: entry.stored, info: entry.info };
     Ok(match entry.warning {
@@ -473,8 +473,8 @@ pub fn trash(trash: &Trash, path: &Path) -> Result<Change, Problem> {
 }
 
 /// Restores a persistent trash entry. Runs on a filesystem job.
-pub fn restore(trash: &Trash, stored: &Path) -> Result<Change, Problem> {
-    let entry = trash.restore(stored)?;
+pub fn restore(bin: &Trash, stored: &Path) -> Result<Change, Problem> {
+    let entry = bin.restore(stored)?;
     let warning = entry.warning.clone();
     let change = Change::Restored(entry);
     Ok(match warning {
@@ -490,14 +490,14 @@ pub fn restore(trash: &Trash, stored: &Path) -> Result<Change, Problem> {
 /// **Runs on a job.** The engine is `crate::copy`, ported from Spike E; this is
 /// the part that turns its result into something the undo stack can hold.
 pub fn copy_into(
-    trash: &Trash,
+    bin: &Trash,
     source: &Path,
     into: &Path,
     conflict: Conflict,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
-    trash.writable(into)?;
+    bin.writable(into)?;
     let Some(name) = source.file_name() else {
         return Err(Problem::new(
             ProblemKind::BadName,
@@ -531,7 +531,7 @@ pub fn copy_into(
     let destination = into.join(name);
     let existed = taken(&destination);
     if conflict == Conflict::Replace && taken(&destination) {
-        return replace_into(trash, name, into, None, &mut |staging| {
+        return replace_into(bin, name, into, None, &mut |staging| {
             crate::copy::copy_to(source, staging, cancel, watch)
         })
         .map(|displaced| {
@@ -569,13 +569,13 @@ pub fn copy_into(
 ///
 /// The caller must retain ownership of that entry throughout recovery.
 pub fn resume_copy(
-    trash: &Trash,
+    bin: &Trash,
     source: &Path,
     destination: &Path,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
-    trash.writable(destination)?;
+    bin.writable(destination)?;
     let options = crate::copy::Options { resume: true, ..Default::default() };
     let change =
         Change::Copied { source: source.to_path_buf(), destination: destination.to_path_buf() };
@@ -646,12 +646,8 @@ pub fn erase(path: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
 /// [`stranded_by_empty`], which the caller runs over the history afterwards.
 ///
 /// **Runs on a job.**
-pub fn empty_trash(
-    trash: &Trash,
-    files: &Path,
-    cancel: &sk_util::Cancel,
-) -> Result<Change, Problem> {
-    trash.empty(files, cancel)?;
+pub fn empty_trash(bin: &Trash, files: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
+    bin.empty(files, cancel)?;
     Ok(Change::Erased { path: files.to_path_buf() })
 }
 
@@ -735,15 +731,15 @@ pub fn stranded_by_empty(change: &Change, files: &Path, next: Next) -> Option<Ch
 ///
 /// **Runs on a job.**
 pub fn move_into(
-    trash: &Trash,
+    bin: &Trash,
     source: &Path,
     into: &Path,
     conflict: Conflict,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
-    trash.writable(source)?;
-    trash.writable(into)?;
+    bin.writable(source)?;
+    bin.writable(into)?;
     // **A move never renames.** [`Conflict::Rename`] is a copy's answer, and a
     // move that quietly renamed would leave two files under names neither of
     // them chose — so it is not offered for one, and reaching here with it
@@ -754,7 +750,7 @@ pub fn move_into(
     {
         let destination = into.join(name);
         let mut left = None;
-        let displaced = replace_into(trash, name, into, Some(source), &mut |staging| {
+        let displaced = replace_into(bin, name, into, Some(source), &mut |staging| {
             left = crate::copy::move_to(source, staging, cancel, watch)?;
             Ok(())
         })?;
@@ -798,8 +794,8 @@ fn with_left(change: Change, left: Option<Problem>) -> Change {
 /// this is the only thing in the program that can produce one.
 ///
 /// **Runs on a job.**
-pub fn write_text(trash: &Trash, path: &Path, text: &str) -> Result<(), Problem> {
-    trash.writable(path)?;
+pub fn write_text(bin: &Trash, path: &Path, text: &str) -> Result<(), Problem> {
+    bin.writable(path)?;
     crate::save::write(path, text).map_err(|error| io_problem(&error, path))
 }
 
@@ -809,10 +805,10 @@ pub fn write_text(trash: &Trash, path: &Path, text: &str) -> Result<(), Problem>
 /// there is nowhere to read it from.
 ///
 /// **Runs on a job.**
-pub fn edit_text(trash: &Trash, path: &Path, after: &str) -> Result<Change, Problem> {
+pub fn edit_text(bin: &Trash, path: &Path, after: &str) -> Result<Change, Problem> {
     let before = crate::read_text(path, crate::TEXT_LIMIT)?;
     let change = Change::Edited { path: path.to_path_buf(), before, after: after.to_owned() };
-    match write_text(trash, path, after) {
+    match write_text(bin, path, after) {
         Ok(()) => Ok(change),
         // A directory sync can fail after publication. Keep the committed edit
         // undoable while still reporting that durability was not acknowledged.
@@ -845,8 +841,8 @@ pub fn edit_text(trash: &Trash, path: &Path, after: &str) -> Result<Change, Prob
 /// the alternative to refusing is changing a file nobody pointed at.
 ///
 /// **Runs on a job.**
-pub fn set_permissions(trash: &Trash, path: &Path, nine: u16) -> Result<Change, Problem> {
-    trash.writable(path)?;
+pub fn set_permissions(bin: &Trash, path: &Path, nine: u16) -> Result<Change, Problem> {
+    bin.writable(path)?;
     let (held, before) = hold(path)?;
     let after = (before & 0o7000) | (nine & 0o777);
     chmod(&held, path, after)?;
@@ -982,7 +978,7 @@ fn taken(path: &Path) -> bool {
 /// if recovery itself is refused, the staged bytes remain and the error names
 /// the recovery failure.
 fn replace_into(
-    trash: &Trash,
+    bin: &Trash,
     name: &std::ffi::OsStr,
     into: &Path,
     original: Option<&Path>,
@@ -1020,7 +1016,7 @@ fn replace_into(
         discard()?;
         return Err(problem);
     }
-    let displaced = match self::trash(trash, &destination) {
+    let displaced = match trash(bin, &destination) {
         Ok(change) => change,
         Err(problem) => {
             discard()?;
@@ -1031,7 +1027,7 @@ fn replace_into(
         // The name was freed one line ago, so this is very close to impossible —
         // and "very close to" is why what was trashed is put back rather than
         // left in the Trash with nothing on the undo stack pointing at it.
-        let _ = revert(trash, &displaced);
+        let _ = revert(bin, &displaced);
         discard()?;
         return Err(problem);
     }
@@ -1042,7 +1038,7 @@ fn replace_into(
 /// Undoes a change. Refuses rather than guessing.
 ///
 /// **Runs on a job.**
-pub fn revert(trash: &Trash, change: &Change) -> Result<(), Problem> {
+pub fn revert(bin: &Trash, change: &Change) -> Result<(), Problem> {
     match change {
         Change::Restored(entry) => crate::trash::put_back(entry),
         // **The note is the answer, not a remark beside one.** Whatever this
@@ -1054,11 +1050,11 @@ pub fn revert(trash: &Trash, change: &Change) -> Result<(), Problem> {
             change.subject().display().to_string(),
             note.clone(),
         )),
-        Change::Noted { change, .. } => revert(trash, change),
+        Change::Noted { change, .. } => revert(bin, change),
         // Backwards, and the first failure stops it: a batch half undone is a
         // state somebody can look at and act on, where carrying on past an
         // error would keep changing a filesystem that has already surprised us.
-        Change::Batch(changes) => changes.iter().rev().try_for_each(|change| revert(trash, change)),
+        Change::Batch(changes) => changes.iter().rev().try_for_each(|change| revert(bin, change)),
         // **Never reached through the undo stack**, which does not hold these —
         // but `revert` is public and the compiler asks, and an answer that
         // pretended to succeed would be worse than one that says no.
@@ -1080,9 +1076,9 @@ pub fn revert(trash: &Trash, change: &Change) -> Result<(), Problem> {
             }
         }
         // Trash preserves files added after the original operation.
-        Change::Copied { destination, .. } => self::trash(trash, destination).map(|_| ()),
+        Change::Copied { destination, .. } => trash(bin, destination).map(|_| ()),
         // Extraction output gets the same recoverable inverse as a copy.
-        Change::Unpacked { root, .. } => self::trash(trash, root).map(|_| ()),
+        Change::Unpacked { root, .. } => trash(bin, root).map(|_| ()),
         // Straight back to what it held, which is the only way to undo bytes.
         Change::Edited { path, before, after } => {
             if crate::read_text(path, crate::TEXT_LIMIT)? != *after {
@@ -1092,20 +1088,20 @@ pub fn revert(trash: &Trash, change: &Change) -> Result<(), Problem> {
                     "contents changed after edit",
                 ));
             }
-            write_text(trash, path, before)
+            write_text(bin, path, before)
         }
         // The bits it had, put back only if nothing else has moved them.
         Change::Permissions { path, before, after } => restore_mode(path, *after, *before),
-        Change::Trashed { .. } => revert_recorded(trash, change).map(|_| ()),
+        Change::Trashed { .. } => revert_recorded(bin, change).map(|_| ()),
     }
 }
 
 /// Does a change again, after it was undone.
 ///
 /// **Runs on a job.**
-pub fn apply(trash: &Trash, change: &Change) -> Result<Change, Problem> {
+pub fn apply(bin: &Trash, change: &Change) -> Result<Change, Problem> {
     match change {
-        Change::Restored(entry) => restore(trash, &entry.stored),
+        Change::Restored(entry) => restore(bin, &entry.stored),
         // The same refusal `revert` gives, and for the same reason: there is
         // nothing left to do again either.
         Change::Noted { change, note, stranded: true, .. } => Err(Problem::new(
@@ -1113,10 +1109,10 @@ pub fn apply(trash: &Trash, change: &Change) -> Result<Change, Problem> {
             change.subject().display().to_string(),
             note.clone(),
         )),
-        Change::Noted { change, .. } => apply(trash, change),
+        Change::Noted { change, .. } => apply(bin, change),
         Change::Batch(changes) => changes
             .iter()
-            .map(|change| apply(trash, change))
+            .map(|change| apply(bin, change))
             .collect::<Result<_, _>>()
             .map(Change::Batch),
         // The bytes it held after the edit, put back after an undo took them away.
@@ -1128,7 +1124,7 @@ pub fn apply(trash: &Trash, change: &Change) -> Result<Change, Problem> {
                     "contents changed after undo",
                 ));
             }
-            edit_text(trash, path, after)
+            edit_text(bin, path, after)
         }
         // And the bits it had after the change, put back after an undo took them
         // away.
@@ -1157,9 +1153,9 @@ pub fn apply(trash: &Trash, change: &Change) -> Result<Change, Problem> {
                 ));
             };
             match made {
-                Made::Directory => create_directory(trash, parent, name),
-                Made::File => create_file(trash, parent, name),
-                Made::Link(target) => create_link(trash, parent, name, target),
+                Made::Directory => create_directory(bin, parent, name),
+                Made::File => create_file(bin, parent, name),
+                Made::Link(target) => create_link(bin, parent, name, target),
             }
         }
         Change::Renamed { from, to } => {
@@ -1187,7 +1183,7 @@ pub fn apply(trash: &Trash, change: &Change) -> Result<Change, Problem> {
         // Re-trashed from scratch rather than by moving the same bytes back into
         // the same slot: the slot may have been taken, and `trash` is the thing
         // that knows how to claim one.
-        Change::Trashed { original, .. } => self::trash(trash, original),
+        Change::Trashed { original, .. } => trash(bin, original),
         // Never reached: a permanent delete is not recorded, so there is nothing
         // to redo. The compiler asks, and an answer that deleted something again
         // would be an answer to a question nobody asked.
@@ -1210,16 +1206,16 @@ pub struct Replay {
 }
 
 /// Undoes one leaf and retains a warning if publication succeeded before sync failed.
-pub fn revert_recorded(trash: &Trash, change: &Change) -> Result<Change, Problem> {
+pub fn revert_recorded(bin: &Trash, change: &Change) -> Result<Change, Problem> {
     if let Change::Trashed { original, stored, .. } = change {
-        if trash.read(stored)?.original != *original {
+        if bin.read(stored)?.original != *original {
             return Err(Problem::new(
                 ProblemKind::TrashUnavailable,
                 stored.display().to_string(),
                 "trash metadata changed after the operation",
             ));
         }
-        let restored = trash.restore(stored)?;
+        let restored = bin.restore(stored)?;
         return Ok(match restored.warning {
             Some(note) => Change::Noted {
                 change: Box::new(change.clone()),
@@ -1239,7 +1235,7 @@ pub fn revert_recorded(trash: &Trash, change: &Change) -> Result<Change, Problem
                 "contents changed after edit",
             ));
         }
-        return match edit_text(trash, path, before)? {
+        return match edit_text(bin, path, before)? {
             Change::Noted { note, .. } => Ok(Change::Noted {
                 change: Box::new(change.clone()),
                 note,
@@ -1253,7 +1249,7 @@ pub fn revert_recorded(trash: &Trash, change: &Change) -> Result<Change, Problem
         let left = crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})?;
         return Ok(with_left(change.clone(), left));
     }
-    revert(trash, change)?;
+    revert(bin, change)?;
     Ok(change.clone())
 }
 
@@ -2340,8 +2336,9 @@ mod tests {
     /// trash anywhere else.
     fn with_trash<T>(label: &str, body: impl FnOnce(&Path, &Trash) -> T) -> T {
         let root = scratch(label);
+        let since = crate::trash::testing::now();
         let outcome = body(&root, &bin_in(&root));
-        let strays = crate::trash::strays(&root);
+        let strays = crate::trash::testing::strays(&root, &since);
         let _ = std::fs::remove_dir_all(&root);
         assert!(strays.is_empty(), "{label} trashed outside its scratch: {strays:?}");
         outcome
