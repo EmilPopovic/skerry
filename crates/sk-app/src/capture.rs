@@ -361,7 +361,8 @@ fn sample_quick_look(
 /// An undo stack for the frame, with a sample history on it where one was asked
 /// for.
 fn sample_edits(request: &Capture, session: &crate::headless::Session) -> crate::edit::Edits {
-    let mut edits = crate::edit::Edits::new(session.waker.handle());
+    let mut edits =
+        crate::edit::Edits::new(session.waker.handle(), sk_fs::trash::Trash::from_environment());
     if request.history {
         sample_history(&mut edits, &request.path);
     }
@@ -806,12 +807,13 @@ fn expand_sample(menu: &mut crate::menu::Menu, owner: &str, enabled: impl Fn(&st
 fn sample_clash(path: &std::path::Path) -> crate::edit::Clash {
     let existing = path.join("report.pdf");
     let source = path.join("build").join("report.pdf");
+    let trash = sk_fs::trash::Trash::from_environment();
     crate::edit::Clash {
-        theirs: sk_fs::facts::describe(&existing),
+        theirs: sk_fs::facts::describe(&trash, &existing),
         // Not on disk — the fixture holds one `report.pdf`, not two — so this
         // states what the other one would be. A frame of "Cannot be read" in
         // the arriving column would be a frame of the empty case.
-        ours: sk_fs::facts::describe(&existing).map(|mut facts| {
+        ours: sk_fs::facts::describe(&trash, &existing).map(|mut facts| {
             facts.path.clone_from(&source);
             facts.size = 4_512_000;
             facts.modified = FIXED_MTIME - 60 * 60 * 24 * 400;

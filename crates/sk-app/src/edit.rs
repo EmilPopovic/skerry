@@ -17,6 +17,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use sk_cmd::History;
 use sk_fs::ops::{self, Change};
+use sk_fs::trash::Trash;
 use sk_model::Problem;
 use sk_util::{Cancel, Lane, Pause, WakeHandle};
 
@@ -236,6 +237,12 @@ pub struct Edits {
     done: Receiver<Outcome>,
     sender: Sender<Outcome>,
     wake: WakeHandle,
+    /// Where things go when they are trashed, and where nothing may be changed.
+    ///
+    /// **Given, never looked up.** The window reads it from the environment
+    /// once; a test gives one inside its own scratch directory, which is what
+    /// keeps an undo in a test out of the person's real trash.
+    trash: Trash,
 }
 
 /// What a stopped queue still owes.
@@ -334,6 +341,7 @@ impl Queued {
 /// a failure still leaves a root the undo stack can name — the same reason
 /// `copy_into` records a cancelled copy.
 fn unpack_beside(
+    trash: &Trash,
     archive: &Path,
     only: &[String],
     cancel: &Cancel,
@@ -356,7 +364,7 @@ fn unpack_beside(
     let mut made = None;
     for attempt in 1..1000u32 {
         let name = if attempt == 1 { wanted.clone() } else { format!("{wanted} {attempt}") };
-        match ops::create_directory(parent, &name) {
+        match ops::create_directory(trash, parent, &name) {
             Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
             Err(problem) => return Err(problem),
             Ok(_) => {
@@ -380,6 +388,7 @@ fn unpack_beside(
 /// The half a redo repeats, and the half `unpack_beside` does once it has chosen
 /// a name.
 fn unpack_again(
+    trash: &Trash,
     archive: &Path,
     root: &Path,
     only: &[String],
@@ -395,7 +404,7 @@ fn unpack_again(
             "no parent or name",
         ));
     };
-    ops::create_directory(parent, name)?;
+    ops::create_directory(trash, parent, name)?;
     Ok(unpack_owned(archive, root, only, cancel, watch))
 }
 
@@ -437,7 +446,7 @@ fn unpack_owned(
 /// `copy_into` chooses one here: a `statx` per candidate is not something the
 /// frame loop may do, and `create_link` refuses a taken name so the loop is the
 /// answer rather than a check that races with it.
-fn link_into(target: &Path, into: &Path) -> Result<Change, Problem> {
+fn link_into(trash: &Trash, target: &Path, into: &Path) -> Result<Change, Problem> {
     let Some(name) = target.file_name().and_then(|name| name.to_str()) else {
         return Err(Problem::new(
             sk_model::ProblemKind::BadName,
@@ -458,7 +467,7 @@ fn link_into(target: &Path, into: &Path) -> Result<Change, Problem> {
             1 => format!("{name} {suffix}"),
             _ => format!("{name} {suffix} {attempt}"),
         };
-        match ops::create_link(into, &candidate, target) {
+        match ops::create_link(trash, into, &candidate, target) {
             Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
             other => return other,
         }
@@ -598,6 +607,7 @@ pub enum Landed {
 /// already standing, or the copy is into the folder the file came from — which
 /// is a duplicate and has never asked.
 fn clash_at(
+    trash: &Trash,
     source: &std::path::Path,
     into: &std::path::Path,
     moving: bool,
@@ -611,12 +621,12 @@ fn clash_at(
         return None;
     }
     let existing = into.join(source.file_name()?);
-    let theirs = sk_fs::facts::describe(&existing)?;
+    let theirs = sk_fs::facts::describe(trash, &existing)?;
     Some(Clash {
         source: source.to_path_buf(),
         into: into.to_path_buf(),
         existing,
-        ours: sk_fs::facts::describe(source),
+        ours: sk_fs::facts::describe(trash, source),
         theirs: Some(theirs),
         moving,
         rest,
@@ -626,7 +636,7 @@ fn clash_at(
 impl Edits {
     /// An empty stack and nothing in flight.
     #[must_use]
-    pub fn new(wake: WakeHandle) -> Self {
+    pub fn new(wake: WakeHandle, trash: Trash) -> Self {
         let (sender, done) = std::sync::mpsc::channel();
         let (progress_tx, progress) = std::sync::mpsc::channel();
         let (totals_tx, totals) = std::sync::mpsc::channel();
@@ -667,7 +677,14 @@ impl Edits {
             done,
             sender,
             wake,
+            trash,
         }
+    }
+
+    /// The trash every operation here is given.
+    #[must_use]
+    pub const fn trash(&self) -> &Trash {
+        &self.trash
     }
 
     /// Whether an operation is in flight.
@@ -690,6 +707,7 @@ impl Edits {
 
     /// Makes a directory in `parent`, choosing a free name.
     pub fn new_directory(&mut self, parent: PathBuf, jobs: &Jobs) {
+        let trash = self.trash.clone();
         self.start(Pending::Doing, jobs, move |_| {
             // `New folder`, then `New folder 2`, and so on. `create_directory`
             // refuses a name that is taken, so the loop is the answer rather
@@ -697,12 +715,12 @@ impl Edits {
             let base = sk_model::i18n::lookup("name.new_folder");
             for attempt in 1..1000u32 {
                 let name = if attempt == 1 { base.to_owned() } else { format!("{base} {attempt}") };
-                match ops::create_directory(&parent, &name) {
+                match ops::create_directory(&trash, &parent, &name) {
                     Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
                     other => return Outcome::Did(other),
                 }
             }
-            Outcome::Did(ops::create_directory(&parent, base))
+            Outcome::Did(ops::create_directory(&trash, &parent, base))
         });
     }
 
@@ -712,16 +730,17 @@ impl Edits {
     /// create is the check, and a `statx` first would race with whatever else
     /// writes there.
     pub fn new_file(&mut self, parent: PathBuf, jobs: &Jobs) {
+        let trash = self.trash.clone();
         self.start(Pending::Doing, jobs, move |_| {
             let base = sk_model::i18n::lookup("name.new_file");
             for attempt in 1..1000_u32 {
                 let name = if attempt == 1 { base.to_owned() } else { format!("{base} {attempt}") };
-                match ops::create_file(&parent, &name) {
+                match ops::create_file(&trash, &parent, &name) {
                     Err(problem) if problem.kind() == sk_model::ProblemKind::NameTaken => {}
                     other => return Outcome::Did(other),
                 }
             }
-            Outcome::Did(ops::create_file(&parent, base))
+            Outcome::Did(ops::create_file(&trash, &parent, base))
         });
     }
 
@@ -764,7 +783,8 @@ impl Edits {
 
     /// Renames `path` to `name`.
     pub fn rename(&mut self, path: PathBuf, name: String, jobs: &Jobs) {
-        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::rename(&path, &name)));
+        let trash = self.trash.clone();
+        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::rename(&trash, &path, &name)));
     }
 
     /// Moves several paths to the trash, one at a time.
@@ -804,7 +824,10 @@ impl Edits {
     /// bytes travel on the change — see [`sk_fs::ops::Change::Edited`] — because
     /// after the write there is nowhere else to read them from.
     pub fn write_text(&mut self, path: PathBuf, after: String, jobs: &Jobs) {
-        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::edit_text(&path, &after)));
+        let trash = self.trash.clone();
+        self.start(Pending::Doing, jobs, move |_| {
+            Outcome::Did(ops::edit_text(&trash, &path, &after))
+        });
     }
 
     /// Sets the nine permission bits, as one undoable change.
@@ -814,7 +837,10 @@ impl Edits {
     /// reason: a mode is not a place, so there is nowhere else to read it back
     /// from.
     pub fn set_permissions(&mut self, path: PathBuf, nine: u16, jobs: &Jobs) {
-        self.start(Pending::Doing, jobs, move |_| Outcome::Did(ops::set_permissions(&path, nine)));
+        let trash = self.trash.clone();
+        self.start(Pending::Doing, jobs, move |_| {
+            Outcome::Did(ops::set_permissions(&trash, &path, nine))
+        });
     }
 
     /// Copies or moves several paths into `into`, one at a time.
@@ -1036,6 +1062,7 @@ impl Edits {
         let queue_left = self.queue.len();
         let pause = self.pause.clone();
         let reported = std::sync::Arc::clone(&self.reported);
+        let trash = self.trash.clone();
         self.start(Pending::Doing, jobs, move |cancel| {
             // Throttled to ten a second: a copy of ten thousand small files would
             // otherwise wake the frame loop ten thousand times, and the loop
@@ -1085,7 +1112,7 @@ impl Edits {
             let merging = resuming && !moving;
             if let Some(into) = &into
                 && !merging
-                && let Some(clash) = clash_at(&path, into, moving, answer, queue_left)
+                && let Some(clash) = clash_at(&trash, &path, into, moving, answer, queue_left)
             {
                 return Outcome::Clashed(Box::new(clash));
             }
@@ -1099,11 +1126,11 @@ impl Edits {
                 _ => sk_fs::ops::Conflict::Refuse,
             };
             Outcome::Did(match doing {
-                Queued::Restore => ops::restore(&path),
-                Queued::Trash => ops::trash(&path),
+                Queued::Restore => ops::restore(&trash, &path),
+                Queued::Trash => ops::trash(&trash, &path),
                 Queued::Erase => ops::erase(&path, cancel),
-                Queued::Empty => ops::empty_trash(&path, cancel),
-                Queued::Link { into } => link_into(&path, &into),
+                Queued::Empty => ops::empty_trash(&trash, &path, cancel),
+                Queued::Link { into } => link_into(&trash, &path, &into),
                 // **A paste into the folder the file came from renames**, with
                 // nothing asked: that is what Duplicate is and what pasting
                 // where you copied from means, and a panel asking "replace this
@@ -1111,6 +1138,7 @@ impl Edits {
                 Queued::Copy { into, conflict: policy } => {
                     if let Some(destination) = resume_destination {
                         return Outcome::Did(ops::resume_copy(
+                            &trash,
                             &path,
                             &destination,
                             cancel,
@@ -1119,10 +1147,12 @@ impl Edits {
                     }
                     let same = path.parent() == Some(into.as_path());
                     let conflict = if same { policy } else { conflict };
-                    ops::copy_into(&path, &into, conflict, cancel, &mut watch)
+                    ops::copy_into(&trash, &path, &into, conflict, cancel, &mut watch)
                 }
-                Queued::Move { into } => ops::move_into(&path, &into, conflict, cancel, &mut watch),
-                Queued::Unpack { only } => unpack_beside(&path, &only, cancel, &mut watch),
+                Queued::Move { into } => {
+                    ops::move_into(&trash, &path, &into, conflict, cancel, &mut watch)
+                }
+                Queued::Unpack { only } => unpack_beside(&trash, &path, &only, cancel, &mut watch),
             })
         });
     }
@@ -1195,8 +1225,11 @@ impl Edits {
             return;
         }
         self.stopped = None;
+        let trash = self.trash.clone();
         self.start(Pending::Undoing, jobs, move |_| {
-            Outcome::Undid(ops::replay(&change, true, &mut |leaf| ops::revert_recorded(leaf)))
+            Outcome::Undid(ops::replay(&change, true, &mut |leaf| {
+                ops::revert_recorded(&trash, leaf)
+            }))
         });
     }
 
@@ -1214,12 +1247,13 @@ impl Edits {
             return;
         }
         self.stopped = None;
+        let trash = self.trash.clone();
         self.start(Pending::Redoing, jobs, move |cancel| {
             Outcome::Redid(ops::replay(&change, false, &mut |leaf| {
                 if let Change::Unpacked { archive, root, only } = leaf {
-                    unpack_again(archive, root, only, cancel, &mut |_| {})
+                    unpack_again(&trash, archive, root, only, cancel, &mut |_| {})
                 } else {
-                    ops::apply(leaf)
+                    ops::apply(&trash, leaf)
                 }
             }))
         });
@@ -1717,27 +1751,27 @@ mod tests {
     /// its target that name is taken, so it becomes `… link`, then `… link 2`.
     #[test]
     fn a_link_takes_the_plain_name_where_it_is_free() {
-        let root = std::env::temp_dir().join(format!("skerry-link-names-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = Scratch::new("link-names");
+        let trash = root.trash();
         let (here, there) = (root.join("here"), root.join("there"));
         std::fs::create_dir_all(&here).unwrap();
         std::fs::create_dir_all(&there).unwrap();
         let target = here.join("report.pdf");
         std::fs::write(&target, b"%PDF").unwrap();
 
-        super::link_into(&target, &there).expect("a link into another folder");
+        super::link_into(&trash, &target, &there).expect("a link into another folder");
         assert!(there.join("report.pdf").is_symlink(), "the plain name was not taken first");
-        super::link_into(&target, &here).expect("a link beside its target");
+        super::link_into(&trash, &target, &here).expect("a link beside its target");
         assert!(here.join("report.pdf link").is_symlink());
-        super::link_into(&target, &here).expect("a second link beside its target");
+        super::link_into(&trash, &target, &here).expect("a second link beside its target");
         assert!(here.join("report.pdf link 2").is_symlink());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     use super::{Edits, Queued};
     use crate::pane::Jobs;
+    use sk_fs::trash::Trash;
     use sk_util::{Pool, Waker};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -1750,7 +1784,8 @@ mod tests {
     }
 
     impl Harness {
-        fn new() -> Self {
+        /// Every operation is given the home trash inside `scratch`.
+        fn new(scratch: &Scratch) -> Self {
             let waker = Waker::new().expect("eventfd");
             let (sender, updates) = mpsc::channel();
             let jobs = Jobs {
@@ -1759,7 +1794,8 @@ mod tests {
                 sender,
                 mime: None,
             };
-            Self { edits: Edits::new(waker.handle()), jobs, _waker: waker, _updates: updates }
+            let edits = Edits::new(waker.handle(), scratch.trash());
+            Self { edits, jobs, _waker: waker, _updates: updates }
         }
 
         /// Drains outcomes until the queue is idle, or the deadline passes.
@@ -1793,23 +1829,55 @@ mod tests {
         }
     }
 
-    fn scratch(label: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("skerry-edits-{}-{label}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    /// A test's own directory, holding the home trash its operations are given.
+    ///
+    /// **Dropped, it says whether anything reached a trash anywhere else** —
+    /// before it removes itself, because a check of a directory that is gone
+    /// finds nothing and passes. An undo of a copy here used to trash the copy
+    /// through the person's real trash: `/tmp` is not the home filesystem, so
+    /// every run left a folder in `/tmp/.Trash-1000`.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("skerry-edits-{}-{label}", std::process::id()));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn trash(&self) -> Trash {
+            Trash::at(self.0.join("data/Trash"))
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let strays = sk_fs::trash::strays(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
+            if !std::thread::panicking() {
+                assert!(strays.is_empty(), "{} trashed elsewhere: {strays:?}", self.0.display());
+            }
+        }
     }
 
     #[test]
     fn a_failed_item_retains_later_work_and_retry_preserves_order() {
-        let root = scratch("recover-queue");
+        let root = Scratch::new("recover-queue");
         let into = root.join("into");
         std::fs::create_dir(&into).unwrap();
         let first = root.join("first");
         let later = root.join("later");
         std::fs::write(&later, b"later").unwrap();
-        let mut harness = Harness::new();
+        let mut harness = Harness::new(&root);
         let doing = Queued::Copy { into: into.clone(), conflict: sk_fs::ops::Conflict::Refuse };
         assert!(harness.edits.queue_all(
             doing.clone(),
@@ -1831,17 +1899,16 @@ mod tests {
         assert_eq!(std::fs::read(into.join("later")).unwrap(), b"later");
         assert!(harness.edits.owed().is_none());
         assert!(harness.edits.history.can_undo());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn skipping_a_failed_item_keeps_the_later_item_and_the_issue() {
-        let root = scratch("skip-failed");
+        let root = Scratch::new("skip-failed");
         let into = root.join("into");
         std::fs::create_dir(&into).unwrap();
         let later = root.join("later");
         std::fs::write(&later, b"later").unwrap();
-        let mut harness = Harness::new();
+        let mut harness = Harness::new(&root);
         harness.edits.queue_all(
             Queued::Copy { into: into.clone(), conflict: sk_fs::ops::Conflict::Refuse },
             vec![root.join("missing"), later],
@@ -1855,19 +1922,18 @@ mod tests {
         assert!(harness.edits.progress_line().is_some());
         harness.edits.dismiss_issue();
         assert!(harness.edits.progress_line().is_none());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn metadata_warning_does_not_discard_or_pause_the_rest_of_a_paste() {
-        let root = scratch("warning-queue");
+        let root = Scratch::new("warning-queue");
         let into = root.join("into");
         std::fs::create_dir(&into).unwrap();
         let later = root.join("later");
         std::fs::write(&later, b"later").unwrap();
         let first = into.join("first");
         std::fs::write(&first, b"first").unwrap();
-        let mut harness = Harness::new();
+        let mut harness = Harness::new(&root);
         harness.edits.doing =
             Queued::Copy { into: into.clone(), conflict: sk_fs::ops::Conflict::Refuse };
         harness.edits.queued = 2;
@@ -1890,12 +1956,11 @@ mod tests {
         assert_eq!(harness.edits.history.len(), 1);
         assert_eq!(harness.edits.issue.as_deref(), Some("xattr could not be preserved"));
         assert!(harness.edits.owed().is_none());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn retrying_partial_output_does_not_create_two_undo_entries_for_one_destination() {
-        let root = scratch("partial-history");
+        let root = Scratch::new("partial-history");
         let source = root.join("source");
         let into = root.join("into");
         let destination = into.join("source");
@@ -1904,7 +1969,7 @@ mod tests {
         std::fs::write(source.join("first"), b"first").unwrap();
         std::fs::write(source.join("later"), b"later").unwrap();
         std::fs::write(destination.join("first"), b"first").unwrap();
-        let mut harness = Harness::new();
+        let mut harness = Harness::new(&root);
         harness.edits.doing = Queued::Copy { into, conflict: sk_fs::ops::Conflict::Refuse };
         harness.edits.queued = 1;
         harness.edits.running_path = Some(source.clone());
@@ -1931,7 +1996,8 @@ mod tests {
         harness.settle();
         assert!(!destination.exists());
         assert!(!harness.edits.history.can_undo());
-        std::fs::remove_dir_all(root).unwrap();
+        // Undoing a copy trashes it, and the trash is this test's own.
+        assert_eq!(std::fs::read(root.join("data/Trash/files/source/later")).unwrap(), b"later");
     }
 
     /// A stopped queue keeps what it owes, and picking it up finishes exactly
@@ -1944,7 +2010,7 @@ mod tests {
     /// the one with something to merge into.
     #[test]
     fn a_stopped_queue_keeps_what_it_owes_and_a_resume_finishes_it() {
-        let root = scratch("resume");
+        let root = Scratch::new("resume");
         let into = root.join("into");
         std::fs::create_dir(&into).unwrap();
         let paths: Vec<PathBuf> = ["one", "two", "three"]
@@ -1956,7 +2022,7 @@ mod tests {
             })
             .collect();
 
-        let mut harness = Harness::new();
+        let mut harness = Harness::new(&root);
         assert!(harness.edits.paste_all(paths, into.clone(), false, &harness.jobs));
         harness.edits.cancel();
         let (owed, of) = harness.edits.owed().expect("a stopped queue owes nothing");
@@ -1981,19 +2047,18 @@ mod tests {
                 "{name} did not arrive"
             );
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Starting unrelated work cannot silently discard unfinished work.
     #[test]
     fn a_new_operation_requires_dismissing_what_a_stopped_one_owed() {
-        let root = scratch("replaced");
+        let root = Scratch::new("replaced");
         let into = root.join("into");
         std::fs::create_dir(&into).unwrap();
         let first = root.join("first");
         std::fs::write(&first, b"x").unwrap();
 
-        let mut harness = Harness::new();
+        let mut harness = Harness::new(&root);
         assert!(harness.edits.paste_all(vec![first.clone()], into.clone(), false, &harness.jobs));
         harness.edits.cancel();
         harness.settle();
@@ -2007,13 +2072,13 @@ mod tests {
         assert!(!harness.edits.resumable(), "the old offer survived a new batch");
         harness.settle();
         assert!(into.join("second").is_file());
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Trash is not stoppable, so it leaves nothing to pick up.
     #[test]
     fn a_verb_that_cannot_be_stopped_leaves_no_offer() {
-        let mut harness = Harness::new();
+        let root = Scratch::new("unstoppable");
+        let mut harness = Harness::new(&root);
         assert!(!harness.edits.cancellable());
         harness.edits.cancel();
         assert!(!harness.edits.resumable());
@@ -2022,9 +2087,10 @@ mod tests {
 
     #[test]
     fn extraction_redo_refuses_an_occupied_root_before_starting_a_helper() {
-        let root = scratch("occupied-unpack");
+        let root = Scratch::new("occupied-unpack");
         std::fs::write(root.join("later"), "valuable").unwrap();
         let result = super::unpack_again(
+            &root.trash(),
             &root.join("missing.zip"),
             &root,
             &[],
@@ -2033,12 +2099,12 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(std::fs::read_to_string(root.join("later")).unwrap(), "valuable");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn a_queue_error_records_earlier_successes() {
-        let mut harness = Harness::new();
+        let root = Scratch::new("queue-error");
+        let mut harness = Harness::new(&root);
         let completed = sk_fs::ops::Change::Created {
             path: "/fixture/created".into(),
             made: sk_fs::ops::Made::Directory,

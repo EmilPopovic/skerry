@@ -41,18 +41,62 @@ fn uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// Configured home trash location. No filesystem access.
-pub fn home() -> Result<PathBuf, Problem> {
-    if let Some(data) =
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-    {
-        return Ok(data.join("Trash"));
+/// Where this user's home trash is, decided once and handed down.
+///
+/// **A value rather than a lookup per call.** The home trash is the one location
+/// the environment chooses, and [`Trash::from_environment`] reads it when the
+/// program starts; everything that puts into a trash, reads one or refuses to
+/// act inside one is given the same value. A test gives one inside its own
+/// scratch directory instead of writing `$XDG_DATA_HOME` — which, with C in the
+/// same process reading the environment (`localtime_r` reads `TZ`), is a data
+/// race, and is `unsafe` in edition 2024 for that reason.
+///
+/// A volume's own trash is not part of it: that is `.Trash-$uid` at the top of
+/// whichever mount a file is on, which the file decides and nothing configures.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Trash {
+    /// The home trash — the directory holding `files` and `info` — or nothing
+    /// where neither variable names an absolute directory.
+    home: Option<PathBuf>,
+}
+
+impl Trash {
+    /// `$XDG_DATA_HOME/Trash`, else `$HOME/.local/share/Trash`, per the
+    /// specification. No filesystem access.
+    #[must_use]
+    pub fn from_environment() -> Self {
+        Self::from_variables(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .map(|p| p.join(".local/share/Trash"))
-        .ok_or_else(|| failure(Path::new("Trash"), "no absolute home directory configured"))
+
+    /// [`Trash::from_environment`] over the two values it reads.
+    #[must_use]
+    pub fn from_variables(data_home: Option<OsString>, home: Option<OsString>) -> Self {
+        let data = data_home.map(PathBuf::from).filter(|p| p.is_absolute());
+        let home = data.map(|data| data.join("Trash")).or_else(|| {
+            home.map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|home| home.join(".local/share/Trash"))
+        });
+        Self { home }
+    }
+
+    /// A home trash at `home`, which is the directory `files` and `info` go in.
+    ///
+    /// A relative path is no trash at all, the same answer a relative
+    /// `$XDG_DATA_HOME` gets: every record written in it would be read back
+    /// against whatever the working directory had become.
+    #[must_use]
+    pub fn at(home: impl Into<PathBuf>) -> Self {
+        let home = home.into();
+        Self { home: home.is_absolute().then_some(home) }
+    }
+
+    /// The home trash's location. No filesystem access.
+    pub fn home(&self) -> Result<&Path, Problem> {
+        self.home
+            .as_deref()
+            .ok_or_else(|| failure(Path::new("Trash"), "no absolute home directory configured"))
+    }
 }
 
 fn private(
@@ -177,13 +221,29 @@ fn volume(top: &Path) -> Result<Storage, Problem> {
     Storage::open(&top.join(format!(".Trash-{}", uid())), true)
 }
 
-/// Trash on the source mount; no copy/delete fallback. Runs on a filesystem job.
-pub fn put(path: &Path) -> Result<Entry, Problem> {
+impl Trash {
+    /// Trash on the source mount; no copy/delete fallback. Runs on a filesystem job.
+    pub fn put(&self, path: &Path) -> Result<Entry, Problem> {
+        put(self.home()?, path)
+    }
+
+    /// Prepare the home Trash place. Runs on a filesystem job.
+    pub fn home_files(&self) -> Result<PathBuf, Problem> {
+        let home = self.home()?;
+        if let Some(parent) = home.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| failure(home, e))?;
+        }
+        Storage::open(home, true).map(|s| s.root.join("files"))
+    }
+}
+
+fn put(configured: &Path, path: &Path) -> Result<Entry, Problem> {
     let original = absolute(path)?;
-    let configured = home()?;
-    let parent = configured.parent().ok_or_else(|| failure(path, "no trash parent"))?;
+    let (Some(parent), Some(own)) = (configured.parent(), configured.file_name()) else {
+        return Err(failure(path, "no trash parent"));
+    };
     std::fs::create_dir_all(parent).map_err(|e| failure(path, e))?;
-    let home = std::fs::canonicalize(parent).map_err(|e| failure(path, e))?.join("Trash");
+    let home = std::fs::canonicalize(parent).map_err(|e| failure(path, e))?.join(own);
     let mounts = mount_paths();
     let top =
         mount_of(&original, &mounts).ok_or_else(|| failure(path, "source mount unavailable"))?;
@@ -259,15 +319,6 @@ pub fn locations(top: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Prepare the home Trash place. Runs on a filesystem job.
-pub fn home_files() -> Result<PathBuf, Problem> {
-    let home = home()?;
-    if let Some(parent) = home.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| failure(&home, e))?;
-    }
-    Storage::open(&home, true).map(|s| s.root.join("files"))
-}
-
 fn decode_path(value: &str) -> Option<PathBuf> {
     let mut out = Vec::new();
     let mut bytes = value.bytes();
@@ -289,7 +340,7 @@ fn decode_path(value: &str) -> Option<PathBuf> {
         .then_some(path)
 }
 
-fn origin(record: &str, root: &Path) -> Result<PathBuf, Problem> {
+fn origin(home: &Path, record: &str, root: &Path) -> Result<PathBuf, Problem> {
     let mut lines = record.lines();
     if lines.next() != Some("[Trash Info]") {
         return Err(failure(root, "invalid trash record header"));
@@ -298,8 +349,7 @@ fn origin(record: &str, root: &Path) -> Result<PathBuf, Problem> {
         .find_map(|line| line.strip_prefix("Path="))
         .and_then(decode_path)
         .ok_or_else(|| failure(root, "invalid original path in trash record"))?;
-    let home = home()?;
-    let home = absolute(&home)?;
+    let home = absolute(home)?;
     let is_home = absolute(root)? == home;
     let top = if is_home {
         home.parent()
@@ -328,26 +378,37 @@ fn origin(record: &str, root: &Path) -> Result<PathBuf, Problem> {
 /// The home one, or one of the two the specification allows on a volume. A
 /// directory that merely looks like a trash is refused, because everything that
 /// reads a trash here also writes to it or erases inside it.
-fn recognised(root: &Path) -> Result<(), Problem> {
+fn recognised(home: &Path, root: &Path) -> Result<(), Problem> {
     let mounts = mount_paths();
     let valid_volume = mount_of(root, &mounts).is_some_and(|top| {
         root == top.join(format!(".Trash-{}", uid()))
             || shared(top).is_some_and(|shared| root == shared)
     });
-    if absolute(root)? != absolute(&home()?)? && !valid_volume {
+    if absolute(root)? != absolute(home)? && !valid_volume {
         return Err(failure(root, "not a recognized trash location"));
     }
     Ok(())
 }
 
-/// Validate metadata for a direct trash child without following information-file symlinks.
-pub fn read(stored: &Path) -> Result<Entry, Problem> {
+impl Trash {
+    /// Validate metadata for a direct trash child without following information-file symlinks.
+    pub fn read(&self, stored: &Path) -> Result<Entry, Problem> {
+        read(self.home()?, stored)
+    }
+
+    /// Restore without replacing anything; the information record is removed only after moving.
+    pub fn restore(&self, stored: &Path) -> Result<Entry, Problem> {
+        restore(self.home()?, stored)
+    }
+}
+
+fn read(home: &Path, stored: &Path) -> Result<Entry, Problem> {
     let files = stored.parent().ok_or_else(|| failure(stored, "no trash directory"))?;
     if files.file_name() != Some(OsStr::new("files")) {
         return Err(failure(stored, "not a trash entry"));
     }
     let root = files.parent().ok_or_else(|| failure(stored, "no trash root"))?;
-    recognised(root).map_err(|problem| failure(stored, problem.detail()))?;
+    recognised(home, root).map_err(|problem| failure(stored, problem.detail()))?;
     let storage = Storage::open(root, false)?;
     let mut name = stored.file_name().ok_or_else(|| failure(stored, "no name"))?.to_owned();
     name.push(".trashinfo");
@@ -371,7 +432,7 @@ pub fn read(stored: &Path) -> Result<Entry, Problem> {
     if record.len() > 65536 {
         return Err(failure(stored, "oversized trash record"));
     }
-    let original = origin(&record, root)?;
+    let original = origin(home, &record, root)?;
     if original.starts_with(root) || original.file_name().is_none() {
         return Err(failure(stored, "invalid restore destination"));
     }
@@ -384,9 +445,8 @@ pub fn read(stored: &Path) -> Result<Entry, Problem> {
     })
 }
 
-/// Restore without replacing anything; the information record is removed only after moving.
-pub fn restore(stored: &Path) -> Result<Entry, Problem> {
-    let mut entry = read(stored)?;
+fn restore(home: &Path, stored: &Path) -> Result<Entry, Problem> {
+    let mut entry = read(home, stored)?;
     let root =
         entry.info.parent().and_then(Path::parent).ok_or_else(|| failure(stored, "no root"))?;
     let storage = Storage::open(root, false)?;
@@ -523,33 +583,12 @@ fn bytes_under(
     bytes
 }
 
-/// Erases everything in `files` and every record beside it.
-///
-/// **The contents and not the directories.** `files` and `info` stay, because
-/// [`put_back`] — the inverse of a restore that is already on the undo stack —
-/// opens them without creating them, and a trash emptied down to its own root
-/// would turn every one of those entries into a `TrashUnavailable` about a path
-/// nobody has looked at. Undoing a restore after an Empty Trash puts the file
-/// back into an empty trash, which is exactly what it says it does.
-///
-/// **The records go too, and they go second.** A record whose file is gone has
-/// nothing left to restore; a file whose record is gone has lost the one thing
-/// that says where it came from. So an interrupted empty leaves the first kind
-/// rather than the second — and emptying again takes what is left, because both
-/// directories are walked whole.
-///
-/// **One entry that will not go does not keep the rest.** Stopping at it left
-/// every name `getdents64` happened to return after it, and every record — a
-/// trash that looked untouched, with the failure in a status line. The first
-/// problem is still the answer; the entries that failed keep their records.
-///
-/// **Runs on a job.**
-pub fn empty(files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
+fn empty(home: &Path, files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
     if files.file_name() != Some(OsStr::new("files")) {
         return Err(failure(files, "not a trash's files directory"));
     }
     let root = files.parent().ok_or_else(|| failure(files, "no trash root"))?;
-    recognised(root)?;
+    recognised(home, root)?;
     let storage = Storage::open(root, false)?;
     #[cfg(test)]
     if let Some(hook) = AFTER_OPEN.take() {
@@ -626,12 +665,48 @@ fn children(directory: &impl std::os::fd::AsFd) -> Result<Vec<OsString>, Problem
     Ok(names)
 }
 
-/// Whether a path lies in a trash namespace. Pure path inspection for UI policy.
-#[must_use]
-pub fn contains(path: &Path) -> bool {
-    if home().is_ok_and(|root| path.starts_with(root)) {
-        return true;
+impl Trash {
+    /// Erases everything in `files` and every record beside it.
+    ///
+    /// **The contents and not the directories.** `files` and `info` stay, because
+    /// [`put_back`] — the inverse of a restore that is already on the undo stack —
+    /// opens them without creating them, and a trash emptied down to its own root
+    /// would turn every one of those entries into a `TrashUnavailable` about a path
+    /// nobody has looked at. Undoing a restore after an Empty Trash puts the file
+    /// back into an empty trash, which is exactly what it says it does.
+    ///
+    /// **The records go too, and they go second.** A record whose file is gone has
+    /// nothing left to restore; a file whose record is gone has lost the one thing
+    /// that says where it came from. So an interrupted empty leaves the first kind
+    /// rather than the second — and emptying again takes what is left, because both
+    /// directories are walked whole.
+    ///
+    /// **One entry that will not go does not keep the rest.** Stopping at it left
+    /// every name `getdents64` happened to return after it, and every record — a
+    /// trash that looked untouched, with the failure in a status line. The first
+    /// problem is still the answer; the entries that failed keep their records.
+    ///
+    /// **Runs on a job.**
+    pub fn empty(&self, files: &Path, cancel: &sk_util::Cancel) -> Result<(), Problem> {
+        empty(self.home()?, files, cancel)
     }
+
+    /// Whether a path lies in a trash namespace. Pure path inspection for UI policy.
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.home().is_ok_and(|root| path.starts_with(root)) || in_a_volume_trash(path)
+    }
+
+    pub(crate) fn writable(&self, path: &Path) -> Result<(), Problem> {
+        if self.contains(path) {
+            Err(failure(path, "restore the item before changing it"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn in_a_volume_trash(path: &Path) -> bool {
     let mine = format!(".Trash-{}", uid());
     let user = uid().to_string();
     path.ancestors().any(|part| {
@@ -641,6 +716,128 @@ pub fn contains(path: &Path) -> bool {
     })
 }
 
-pub(crate) fn writable(path: &Path) -> Result<(), Problem> {
-    if contains(path) { Err(failure(path, "restore the item before changing it")) } else { Ok(()) }
+/// Every record in a trash outside `scratch` for something that was under it.
+///
+/// **For tests**, which hand [`Trash::at`] a directory inside their own scratch
+/// root and use this to show that nothing they trashed went anywhere else. Read:
+/// the home trash the environment names, and the two volume trashes of every
+/// directory above `scratch` — the top of its filesystem is one of them,
+/// whichever that is. A test that did not route its trash this way left a folder
+/// in `/tmp/.Trash-1000` on every run, 104 of them on the machine that found it.
+///
+/// A record's `Path=` is absolute in the home trash and relative to the top of
+/// the filesystem in a volume one, which is why each trash is read against its
+/// own top. Storage is opened the way every other reader here opens it, so a
+/// trash somebody else owns or a link planted at its name is skipped.
+#[doc(hidden)]
+#[must_use]
+pub fn strays(scratch: &Path) -> Vec<PathBuf> {
+    let Ok(scratch) = std::fs::canonicalize(scratch) else { return Vec::new() };
+    let mut trashes: Vec<(PathBuf, Option<&Path>)> = Vec::new();
+    if let Ok(home) = Trash::from_environment().home() {
+        trashes.push((home.to_path_buf(), None));
+    }
+    for top in scratch.ancestors().skip(1) {
+        trashes.push((top.join(format!(".Trash-{}", uid())), Some(top)));
+        trashes.push((top.join(".Trash").join(uid().to_string()), Some(top)));
+    }
+    let mut found = Vec::new();
+    for (root, top) in trashes {
+        let Ok(storage) = Storage::open(&root, false) else { continue };
+        let Ok(names) = children(&storage.info) else { continue };
+        for name in names {
+            let Some(original) = record_at(&storage.info, &name).and_then(|record| {
+                record.lines().find_map(|line| line.strip_prefix("Path=")).and_then(decode_path)
+            }) else {
+                continue;
+            };
+            let original = match top {
+                Some(top) if original.is_relative() => top.join(original),
+                _ => original,
+            };
+            if original.starts_with(&scratch) {
+                found.push(root.join("info").join(name));
+            }
+        }
+    }
+    found
+}
+
+/// One record's text, read through the open `info` directory without following
+/// a link or waiting on a FIFO, and no longer than [`read`] would accept.
+fn record_at(info: &OwnedFd, name: &OsStr) -> Option<String> {
+    let fd = rustix::fs::openat(
+        info,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let mut record = String::new();
+    File::from(fd).take(65537).read_to_string(&mut record).ok()?;
+    Some(record)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::{Trash, strays, uid};
+    use std::ffi::OsString;
+    use std::os::unix::fs::DirBuilderExt as _;
+    use std::path::{Path, PathBuf};
+
+    fn scratch(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("skerry-trash-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The specification's order, read from two values rather than from the
+    /// process — so this runs beside every other test without writing either.
+    #[test]
+    fn the_home_trash_is_data_home_then_home_and_only_ever_absolute() {
+        let both = |data: Option<&str>, home: Option<&str>| {
+            Trash::from_variables(data.map(OsString::from), home.map(OsString::from))
+        };
+        assert_eq!(both(Some("/d"), Some("/h")).home().unwrap(), Path::new("/d/Trash"));
+        assert_eq!(both(None, Some("/h")).home().unwrap(), Path::new("/h/.local/share/Trash"));
+        // A relative data home is invalid by the base directory specification,
+        // and is passed over rather than resolved against the working directory.
+        assert_eq!(both(Some("d"), Some("/h")).home().unwrap(), Path::new("/h/.local/share/Trash"));
+        assert!(both(Some("d"), Some("h")).home().is_err());
+        assert!(both(None, None).home().is_err());
+        assert!(Trash::at("relative/Trash").home().is_err());
+        assert_eq!(Trash::at("/x/Bin").home().unwrap(), Path::new("/x/Bin"));
+    }
+
+    /// **The check has to be seen finding one.** A volume trash on a directory
+    /// above the scratch holds a record for something inside it, which is the
+    /// shape `/tmp/.Trash-1000` had — built one level down, inside a scratch of
+    /// its own, so no real trash is written to.
+    #[test]
+    fn a_record_above_the_scratch_for_something_in_it_is_a_stray() {
+        let top = scratch("strays");
+        let inner = top.join("inner");
+        let volume = top.join(format!(".Trash-{}", uid()));
+        for directory in [&inner, &volume.join("files"), &volume.join("info")] {
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).unwrap();
+        }
+        let record = |name: &str, path: &str| {
+            std::fs::write(
+                volume.join("info").join(format!("{name}.trashinfo")),
+                format!("[Trash Info]\nPath={path}\nDeletionDate=2026-10-26T10:00:00\n"),
+            )
+            .unwrap();
+        };
+        record("elsewhere", "elsewhere/source");
+        assert!(strays(&inner).is_empty(), "a record for a sibling was called a stray");
+
+        record("source", "inner/into/source");
+        let found = strays(&inner);
+        assert_eq!(found, vec![volume.join("info/source.trashinfo")], "{found:?}");
+        std::fs::remove_dir_all(&top).unwrap();
+    }
 }

@@ -18,6 +18,11 @@
 //! rather than a deletion because everything it removes is something the copy
 //! itself made. The bytes are `crate::copy`'s, ported from Spike E; what is here
 //! is the part that makes the result undoable.
+//!
+//! **Every mutation is handed the [`Trash`].** The ones that move something into
+//! a trash, or out of one, need to know where the home trash is; the rest refuse
+//! to act inside any trash, and so need to know the same thing. It is read from
+//! the environment once by whoever starts the program, never here per call.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -27,6 +32,8 @@ use std::path::{Path, PathBuf};
 
 use rustix::fs::{AtFlags, Mode, OFlags};
 use sk_model::{Problem, ProblemKind};
+
+use crate::trash::Trash;
 
 /// What a [`Change::Created`] made.
 ///
@@ -346,8 +353,8 @@ fn many_key(one: &'static str) -> &'static str {
 /// Makes a directory called `name` inside `parent`.
 ///
 /// **Runs on a job.**
-pub fn create_directory(parent: &Path, name: &str) -> Result<Change, Problem> {
-    crate::trash::writable(parent)?;
+pub fn create_directory(trash: &Trash, parent: &Path, name: &str) -> Result<Change, Problem> {
+    trash.writable(parent)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -361,8 +368,8 @@ pub fn create_directory(parent: &Path, name: &str) -> Result<Change, Problem> {
 }
 
 /// The name a creation is allowed to use, or why it is not one.
-fn usable(parent: &Path, name: &str) -> Result<PathBuf, Problem> {
-    crate::trash::writable(parent)?;
+fn usable(trash: &Trash, parent: &Path, name: &str) -> Result<PathBuf, Problem> {
+    trash.writable(parent)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -376,8 +383,8 @@ fn usable(parent: &Path, name: &str) -> Result<PathBuf, Problem> {
 /// somebody else can write in.
 ///
 /// **Runs on a job.**
-pub fn create_file(parent: &Path, name: &str) -> Result<Change, Problem> {
-    let path = usable(parent, name)?;
+pub fn create_file(trash: &Trash, parent: &Path, name: &str) -> Result<Change, Problem> {
+    let path = usable(trash, parent, name)?;
     rustix::fs::open(
         &path,
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
@@ -395,8 +402,13 @@ pub fn create_file(parent: &Path, name: &str) -> Result<Change, Problem> {
 /// allows.
 ///
 /// **Runs on a job.**
-pub fn create_link(parent: &Path, name: &str, target: &Path) -> Result<Change, Problem> {
-    let path = usable(parent, name)?;
+pub fn create_link(
+    trash: &Trash,
+    parent: &Path,
+    name: &str,
+    target: &Path,
+) -> Result<Change, Problem> {
+    let path = usable(trash, parent, name)?;
     rustix::fs::symlink(target, &path).map_err(|error| problem(error, &path))?;
     Ok(Change::Created { path, made: Made::Link(target.to_path_buf()) })
 }
@@ -429,8 +441,8 @@ fn unmake(path: &Path, made: &Made) -> Result<(), Problem> {
 /// Renames `from` to `name`, in the same directory.
 ///
 /// **Runs on a job.**
-pub fn rename(from: &Path, name: &str) -> Result<Change, Problem> {
-    crate::trash::writable(from)?;
+pub fn rename(trash: &Trash, from: &Path, name: &str) -> Result<Change, Problem> {
+    trash.writable(from)?;
     if name.is_empty() || name.contains('/') {
         return Err(Problem::new(ProblemKind::BadName, name, "empty, or contains a separator"));
     }
@@ -448,8 +460,8 @@ pub fn rename(from: &Path, name: &str) -> Result<Change, Problem> {
 /// Moves `path` into the trash, per the freedesktop specification.
 ///
 /// **Runs on a job.**
-pub fn trash(path: &Path) -> Result<Change, Problem> {
-    let entry = crate::trash::put(path)?;
+pub fn trash(trash: &Trash, path: &Path) -> Result<Change, Problem> {
+    let entry = trash.put(path)?;
     let change =
         Change::Trashed { original: entry.original, stored: entry.stored, info: entry.info };
     Ok(match entry.warning {
@@ -461,8 +473,8 @@ pub fn trash(path: &Path) -> Result<Change, Problem> {
 }
 
 /// Restores a persistent trash entry. Runs on a filesystem job.
-pub fn restore(stored: &Path) -> Result<Change, Problem> {
-    let entry = crate::trash::restore(stored)?;
+pub fn restore(trash: &Trash, stored: &Path) -> Result<Change, Problem> {
+    let entry = trash.restore(stored)?;
     let warning = entry.warning.clone();
     let change = Change::Restored(entry);
     Ok(match warning {
@@ -478,13 +490,14 @@ pub fn restore(stored: &Path) -> Result<Change, Problem> {
 /// **Runs on a job.** The engine is `crate::copy`, ported from Spike E; this is
 /// the part that turns its result into something the undo stack can hold.
 pub fn copy_into(
+    trash: &Trash,
     source: &Path,
     into: &Path,
     conflict: Conflict,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
-    crate::trash::writable(into)?;
+    trash.writable(into)?;
     let Some(name) = source.file_name() else {
         return Err(Problem::new(
             ProblemKind::BadName,
@@ -518,7 +531,7 @@ pub fn copy_into(
     let destination = into.join(name);
     let existed = taken(&destination);
     if conflict == Conflict::Replace && taken(&destination) {
-        return replace_into(name, into, None, &mut |staging| {
+        return replace_into(trash, name, into, None, &mut |staging| {
             crate::copy::copy_to(source, staging, cancel, watch)
         })
         .map(|displaced| {
@@ -556,12 +569,13 @@ pub fn copy_into(
 ///
 /// The caller must retain ownership of that entry throughout recovery.
 pub fn resume_copy(
+    trash: &Trash,
     source: &Path,
     destination: &Path,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
-    crate::trash::writable(destination)?;
+    trash.writable(destination)?;
     let options = crate::copy::Options { resume: true, ..Default::default() };
     let change =
         Change::Copied { source: source.to_path_buf(), destination: destination.to_path_buf() };
@@ -632,8 +646,12 @@ pub fn erase(path: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
 /// [`stranded_by_empty`], which the caller runs over the history afterwards.
 ///
 /// **Runs on a job.**
-pub fn empty_trash(files: &Path, cancel: &sk_util::Cancel) -> Result<Change, Problem> {
-    crate::trash::empty(files, cancel)?;
+pub fn empty_trash(
+    trash: &Trash,
+    files: &Path,
+    cancel: &sk_util::Cancel,
+) -> Result<Change, Problem> {
+    trash.empty(files, cancel)?;
     Ok(Change::Erased { path: files.to_path_buf() })
 }
 
@@ -717,14 +735,15 @@ pub fn stranded_by_empty(change: &Change, files: &Path, next: Next) -> Option<Ch
 ///
 /// **Runs on a job.**
 pub fn move_into(
+    trash: &Trash,
     source: &Path,
     into: &Path,
     conflict: Conflict,
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(crate::copy::Progress),
 ) -> Result<Change, Problem> {
-    crate::trash::writable(source)?;
-    crate::trash::writable(into)?;
+    trash.writable(source)?;
+    trash.writable(into)?;
     // **A move never renames.** [`Conflict::Rename`] is a copy's answer, and a
     // move that quietly renamed would leave two files under names neither of
     // them chose — so it is not offered for one, and reaching here with it
@@ -735,7 +754,7 @@ pub fn move_into(
     {
         let destination = into.join(name);
         let mut left = None;
-        let displaced = replace_into(name, into, Some(source), &mut |staging| {
+        let displaced = replace_into(trash, name, into, Some(source), &mut |staging| {
             left = crate::copy::move_to(source, staging, cancel, watch)?;
             Ok(())
         })?;
@@ -779,8 +798,8 @@ fn with_left(change: Change, left: Option<Problem>) -> Change {
 /// this is the only thing in the program that can produce one.
 ///
 /// **Runs on a job.**
-pub fn write_text(path: &Path, text: &str) -> Result<(), Problem> {
-    crate::trash::writable(path)?;
+pub fn write_text(trash: &Trash, path: &Path, text: &str) -> Result<(), Problem> {
+    trash.writable(path)?;
     crate::save::write(path, text).map_err(|error| io_problem(&error, path))
 }
 
@@ -790,10 +809,10 @@ pub fn write_text(path: &Path, text: &str) -> Result<(), Problem> {
 /// there is nowhere to read it from.
 ///
 /// **Runs on a job.**
-pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
+pub fn edit_text(trash: &Trash, path: &Path, after: &str) -> Result<Change, Problem> {
     let before = crate::read_text(path, crate::TEXT_LIMIT)?;
     let change = Change::Edited { path: path.to_path_buf(), before, after: after.to_owned() };
-    match write_text(path, after) {
+    match write_text(trash, path, after) {
         Ok(()) => Ok(change),
         // A directory sync can fail after publication. Keep the committed edit
         // undoable while still reporting that durability was not acknowledged.
@@ -826,8 +845,8 @@ pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
 /// the alternative to refusing is changing a file nobody pointed at.
 ///
 /// **Runs on a job.**
-pub fn set_permissions(path: &Path, nine: u16) -> Result<Change, Problem> {
-    crate::trash::writable(path)?;
+pub fn set_permissions(trash: &Trash, path: &Path, nine: u16) -> Result<Change, Problem> {
+    trash.writable(path)?;
     let (held, before) = hold(path)?;
     let after = (before & 0o7000) | (nine & 0o777);
     chmod(&held, path, after)?;
@@ -963,6 +982,7 @@ fn taken(path: &Path) -> bool {
 /// if recovery itself is refused, the staged bytes remain and the error names
 /// the recovery failure.
 fn replace_into(
+    trash: &Trash,
     name: &std::ffi::OsStr,
     into: &Path,
     original: Option<&Path>,
@@ -1000,7 +1020,7 @@ fn replace_into(
         discard()?;
         return Err(problem);
     }
-    let displaced = match trash(&destination) {
+    let displaced = match self::trash(trash, &destination) {
         Ok(change) => change,
         Err(problem) => {
             discard()?;
@@ -1011,7 +1031,7 @@ fn replace_into(
         // The name was freed one line ago, so this is very close to impossible —
         // and "very close to" is why what was trashed is put back rather than
         // left in the Trash with nothing on the undo stack pointing at it.
-        let _ = revert(&displaced);
+        let _ = revert(trash, &displaced);
         discard()?;
         return Err(problem);
     }
@@ -1022,7 +1042,7 @@ fn replace_into(
 /// Undoes a change. Refuses rather than guessing.
 ///
 /// **Runs on a job.**
-pub fn revert(change: &Change) -> Result<(), Problem> {
+pub fn revert(trash: &Trash, change: &Change) -> Result<(), Problem> {
     match change {
         Change::Restored(entry) => crate::trash::put_back(entry),
         // **The note is the answer, not a remark beside one.** Whatever this
@@ -1034,11 +1054,11 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
             change.subject().display().to_string(),
             note.clone(),
         )),
-        Change::Noted { change, .. } => revert(change),
+        Change::Noted { change, .. } => revert(trash, change),
         // Backwards, and the first failure stops it: a batch half undone is a
         // state somebody can look at and act on, where carrying on past an
         // error would keep changing a filesystem that has already surprised us.
-        Change::Batch(changes) => changes.iter().rev().try_for_each(revert),
+        Change::Batch(changes) => changes.iter().rev().try_for_each(|change| revert(trash, change)),
         // **Never reached through the undo stack**, which does not hold these —
         // but `revert` is public and the compiler asks, and an answer that
         // pretended to succeed would be worse than one that says no.
@@ -1060,9 +1080,9 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
             }
         }
         // Trash preserves files added after the original operation.
-        Change::Copied { destination, .. } => trash(destination).map(|_| ()),
+        Change::Copied { destination, .. } => self::trash(trash, destination).map(|_| ()),
         // Extraction output gets the same recoverable inverse as a copy.
-        Change::Unpacked { root, .. } => trash(root).map(|_| ()),
+        Change::Unpacked { root, .. } => self::trash(trash, root).map(|_| ()),
         // Straight back to what it held, which is the only way to undo bytes.
         Change::Edited { path, before, after } => {
             if crate::read_text(path, crate::TEXT_LIMIT)? != *after {
@@ -1072,20 +1092,20 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
                     "contents changed after edit",
                 ));
             }
-            write_text(path, before)
+            write_text(trash, path, before)
         }
         // The bits it had, put back only if nothing else has moved them.
         Change::Permissions { path, before, after } => restore_mode(path, *after, *before),
-        Change::Trashed { .. } => revert_recorded(change).map(|_| ()),
+        Change::Trashed { .. } => revert_recorded(trash, change).map(|_| ()),
     }
 }
 
 /// Does a change again, after it was undone.
 ///
 /// **Runs on a job.**
-pub fn apply(change: &Change) -> Result<Change, Problem> {
+pub fn apply(trash: &Trash, change: &Change) -> Result<Change, Problem> {
     match change {
-        Change::Restored(entry) => restore(&entry.stored),
+        Change::Restored(entry) => restore(trash, &entry.stored),
         // The same refusal `revert` gives, and for the same reason: there is
         // nothing left to do again either.
         Change::Noted { change, note, stranded: true, .. } => Err(Problem::new(
@@ -1093,10 +1113,12 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             change.subject().display().to_string(),
             note.clone(),
         )),
-        Change::Noted { change, .. } => apply(change),
-        Change::Batch(changes) => {
-            changes.iter().map(apply).collect::<Result<_, _>>().map(Change::Batch)
-        }
+        Change::Noted { change, .. } => apply(trash, change),
+        Change::Batch(changes) => changes
+            .iter()
+            .map(|change| apply(trash, change))
+            .collect::<Result<_, _>>()
+            .map(Change::Batch),
         // The bytes it held after the edit, put back after an undo took them away.
         Change::Edited { path, before, after } => {
             if crate::read_text(path, crate::TEXT_LIMIT)? != *before {
@@ -1106,7 +1128,7 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
                     "contents changed after undo",
                 ));
             }
-            edit_text(path, after)
+            edit_text(trash, path, after)
         }
         // And the bits it had after the change, put back after an undo took them
         // away.
@@ -1135,9 +1157,9 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
                 ));
             };
             match made {
-                Made::Directory => create_directory(parent, name),
-                Made::File => create_file(parent, name),
-                Made::Link(target) => create_link(parent, name, target),
+                Made::Directory => create_directory(trash, parent, name),
+                Made::File => create_file(trash, parent, name),
+                Made::Link(target) => create_link(trash, parent, name, target),
             }
         }
         Change::Renamed { from, to } => {
@@ -1165,7 +1187,7 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
         // Re-trashed from scratch rather than by moving the same bytes back into
         // the same slot: the slot may have been taken, and `trash` is the thing
         // that knows how to claim one.
-        Change::Trashed { original, .. } => trash(original),
+        Change::Trashed { original, .. } => self::trash(trash, original),
         // Never reached: a permanent delete is not recorded, so there is nothing
         // to redo. The compiler asks, and an answer that deleted something again
         // would be an answer to a question nobody asked.
@@ -1188,16 +1210,16 @@ pub struct Replay {
 }
 
 /// Undoes one leaf and retains a warning if publication succeeded before sync failed.
-pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
+pub fn revert_recorded(trash: &Trash, change: &Change) -> Result<Change, Problem> {
     if let Change::Trashed { original, stored, .. } = change {
-        if crate::trash::read(stored)?.original != *original {
+        if trash.read(stored)?.original != *original {
             return Err(Problem::new(
                 ProblemKind::TrashUnavailable,
                 stored.display().to_string(),
                 "trash metadata changed after the operation",
             ));
         }
-        let restored = crate::trash::restore(stored)?;
+        let restored = trash.restore(stored)?;
         return Ok(match restored.warning {
             Some(note) => Change::Noted {
                 change: Box::new(change.clone()),
@@ -1217,7 +1239,7 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
                 "contents changed after edit",
             ));
         }
-        return match edit_text(path, before)? {
+        return match edit_text(trash, path, before)? {
             Change::Noted { note, .. } => Ok(Change::Noted {
                 change: Box::new(change.clone()),
                 note,
@@ -1231,7 +1253,7 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
         let left = crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})?;
         return Ok(with_left(change.clone(), left));
     }
-    revert(change)?;
+    revert(trash, change)?;
     Ok(change.clone())
 }
 
@@ -1401,20 +1423,14 @@ mod tests {
         empty_trash, encode_path, move_into, rename, revert, set_permissions, stranded_by_empty,
         trash,
     };
+    use crate::trash::Trash;
     use sk_model::ProblemKind;
     use std::path::{Path, PathBuf};
-
-    /// A private `$HOME` and `$XDG_DATA_HOME`, so a test's trash is its own.
-    ///
-    /// The variables are process-wide, so these tests must not run beside each
-    /// other — `TRASH` serialises the ones that touch them. Everything else uses
-    /// its own directory and runs in parallel.
-    static TRASH: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Undoing a copy removes what the copy made, and doing it again remakes it.
     #[test]
     fn a_copy_is_undone_by_removing_what_it_made() {
-        with_trash("copy-undo", |root| {
+        with_trash("copy-undo", |root, bin| {
             let from = root.join("from");
             let into = root.join("into");
             std::fs::create_dir_all(from.join("folder")).unwrap();
@@ -1422,6 +1438,7 @@ mod tests {
             std::fs::write(from.join("folder/inside.txt"), b"contents").unwrap();
 
             let change = copy_into(
+                bin,
                 &from.join("folder"),
                 &into,
                 Conflict::Refuse,
@@ -1433,11 +1450,11 @@ mod tests {
             assert_eq!(change.subject(), landed);
             assert!(landed.join("inside.txt").is_file());
 
-            revert(&change).expect("undone");
+            revert(bin, &change).expect("undone");
             assert!(!landed.exists(), "the copy survived its undo");
             assert!(from.join("folder/inside.txt").is_file(), "the source was touched");
 
-            let again = apply(&change).expect("redone");
+            let again = apply(bin, &change).expect("redone");
             assert_eq!(again.subject(), landed);
             assert_eq!(std::fs::read(landed.join("inside.txt")).unwrap(), b"contents");
         });
@@ -1448,12 +1465,13 @@ mod tests {
     #[test]
     fn undoing_a_copy_points_at_the_source() {
         let root = scratch("copy-origin");
+        let bin = &bin_in(&root);
         let from = root.join("one.txt");
         let into = root.join("into");
         std::fs::write(&from, b"x").unwrap();
         std::fs::create_dir(&into).unwrap();
         let change =
-            copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+            copy_into(bin, &from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
                 .expect("copied");
         assert_eq!(change.origin(), Some(from.as_path()));
     }
@@ -1462,18 +1480,19 @@ mod tests {
     #[test]
     fn a_move_is_undone_by_moving_it_back() {
         let root = scratch("move-undo");
+        let bin = &bin_in(&root);
         let from = root.join("one.txt");
         let into = root.join("into");
         std::fs::write(&from, b"contents").unwrap();
         std::fs::create_dir(&into).unwrap();
 
         let change =
-            move_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+            move_into(bin, &from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
                 .expect("moved");
         assert!(!from.exists());
         assert!(into.join("one.txt").is_file());
 
-        revert(&change).expect("undone");
+        revert(bin, &change).expect("undone");
         assert!(from.is_file(), "the file did not come back");
         assert!(!into.join("one.txt").exists());
     }
@@ -1483,6 +1502,7 @@ mod tests {
     #[test]
     fn a_copy_onto_an_existing_name_refuses_and_changes_nothing() {
         let root = scratch("copy-exists");
+        let bin = &bin_in(&root);
         let from = root.join("one.txt");
         let into = root.join("into");
         std::fs::write(&from, b"new").unwrap();
@@ -1490,7 +1510,7 @@ mod tests {
         std::fs::write(into.join("one.txt"), b"old").unwrap();
 
         let refused =
-            copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+            copy_into(bin, &from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
                 .expect_err("refused");
         assert_eq!(refused.kind(), ProblemKind::NameTaken);
         assert_eq!(std::fs::read(into.join("one.txt")).unwrap(), b"old");
@@ -1511,19 +1531,19 @@ mod tests {
     /// is an answer at all: a refusal the caller can show, not a silent no-op.
     #[test]
     fn emptying_the_trash_strands_what_it_erased_and_says_so() {
-        with_trash("empty-strands", |root| {
+        with_trash("empty-strands", |root, bin| {
             let file = root.join("receipt.pdf");
             std::fs::write(&file, b"%PDF-1.4").unwrap();
-            let change = trash(&file).expect("trashed");
+            let change = trash(bin, &file).expect("trashed");
             let Change::Trashed { stored, .. } = &change else { panic!("{change:?}") };
             let files = stored.parent().expect("files").to_path_buf();
 
-            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            empty_trash(bin, &files, &sk_util::Cancel::new()).expect("emptied");
             assert!(!stored.exists(), "the trashed file survived the empty");
 
             let marked =
                 stranded_by_empty(&change, &files, Next::Undo).expect("the entry was not marked");
-            let refused = revert(&marked).expect_err("an erased file came back");
+            let refused = revert(bin, &marked).expect_err("an erased file came back");
             assert_eq!(refused.kind(), ProblemKind::TrashEmptied);
             let said = refused.message();
             assert!(said.contains("receipt.pdf"), "{said:?} does not name the file");
@@ -1541,25 +1561,25 @@ mod tests {
     /// the directories: a restore stays undoable across one.
     #[test]
     fn a_restore_is_still_undoable_after_the_trash_is_emptied() {
-        with_trash("empty-restore", |root| {
+        with_trash("empty-restore", |root, bin| {
             let kept = root.join("kept.txt");
             let other = root.join("other.txt");
             std::fs::write(&kept, b"mine").unwrap();
             std::fs::write(&other, b"theirs").unwrap();
-            let Change::Trashed { stored, .. } = trash(&kept).expect("trashed") else {
+            let Change::Trashed { stored, .. } = trash(bin, &kept).expect("trashed") else {
                 panic!("trash")
             };
-            let _ = trash(&other).expect("trashed the second");
-            let restored = super::restore(&stored).expect("restored");
+            let _ = trash(bin, &other).expect("trashed the second");
+            let restored = super::restore(bin, &stored).expect("restored");
             let files = stored.parent().expect("files").to_path_buf();
 
-            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            empty_trash(bin, &files, &sk_util::Cancel::new()).expect("emptied");
             assert!(files.is_dir(), "the empty took the directory `put_back` writes into");
             assert!(
                 stranded_by_empty(&restored, &files, Next::Undo).is_none(),
                 "a restore that is still undoable was marked as stranded"
             );
-            revert(&restored).expect("the restore could not be undone");
+            revert(bin, &restored).expect("the restore could not be undone");
             assert!(!kept.exists(), "undoing the restore left the file where it was");
             assert_eq!(std::fs::read(&stored).unwrap(), b"mine");
         });
@@ -1570,21 +1590,21 @@ mod tests {
     /// a `Ctrl+Shift+Z` that works.
     #[test]
     fn an_undone_trash_is_still_redoable_after_the_trash_is_emptied() {
-        with_trash("empty-undone-trash", |root| {
+        with_trash("empty-undone-trash", |root, bin| {
             let file = root.join("draft.txt");
             std::fs::write(&file, b"draft").unwrap();
-            let change = trash(&file).expect("trashed");
+            let change = trash(bin, &file).expect("trashed");
             let Change::Trashed { stored, .. } = &change else { panic!("{change:?}") };
             let files = stored.parent().expect("files").to_path_buf();
-            revert(&change).expect("the trash could not be undone");
+            revert(bin, &change).expect("the trash could not be undone");
             assert!(file.exists(), "the undo did not put the file back");
 
-            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            empty_trash(bin, &files, &sk_util::Cancel::new()).expect("emptied");
             assert!(
                 stranded_by_empty(&change, &files, Next::Redo).is_none(),
                 "an undone trash was marked, and its redo refused, though it still works"
             );
-            apply(&change).expect("the redo of an undone trash failed after an empty");
+            apply(bin, &change).expect("the redo of an undone trash failed after an empty");
             assert!(!file.exists(), "the redo did not trash the file again");
         });
     }
@@ -1594,21 +1614,21 @@ mod tests {
     /// than a path inside the Trash.
     #[test]
     fn an_undone_restore_is_stranded_by_an_empty() {
-        with_trash("empty-undone-restore", |root| {
+        with_trash("empty-undone-restore", |root, bin| {
             let file = root.join("photo.jpg");
             std::fs::write(&file, b"jpeg").unwrap();
-            let Change::Trashed { stored, .. } = trash(&file).expect("trashed") else {
+            let Change::Trashed { stored, .. } = trash(bin, &file).expect("trashed") else {
                 panic!("trash")
             };
-            let restored = super::restore(&stored).expect("restored");
-            revert(&restored).expect("the restore could not be undone");
+            let restored = super::restore(bin, &stored).expect("restored");
+            revert(bin, &restored).expect("the restore could not be undone");
             assert!(stored.exists(), "undoing the restore did not put it back in the Trash");
             let files = stored.parent().expect("files").to_path_buf();
 
-            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            empty_trash(bin, &files, &sk_util::Cancel::new()).expect("emptied");
             let marked = stranded_by_empty(&restored, &files, Next::Redo)
                 .expect("an undone restore whose file was erased was not marked");
-            let refused = apply(&marked).expect_err("an erased file came back");
+            let refused = apply(bin, &marked).expect_err("an erased file came back");
             assert_eq!(refused.kind(), ProblemKind::TrashEmptied);
             assert!(refused.message().contains("photo.jpg"), "{:?}", refused.message());
             assert!(!refused.message().contains("Trash/files"), "{:?}", refused.message());
@@ -1618,7 +1638,7 @@ mod tests {
     /// A replace is a batch, and only the half the empty erased is marked.
     #[test]
     fn only_the_erased_half_of_a_batch_is_stranded() {
-        with_trash("empty-batch", |root| {
+        with_trash("empty-batch", |root, bin| {
             let from = root.join("from");
             let into = root.join("into");
             std::fs::create_dir_all(&from).unwrap();
@@ -1626,6 +1646,7 @@ mod tests {
             std::fs::write(from.join("report.pdf"), b"the new one").unwrap();
             std::fs::write(into.join("report.pdf"), b"the old one").unwrap();
             let change = copy_into(
+                bin,
                 &from.join("report.pdf"),
                 &into,
                 Conflict::Replace,
@@ -1635,7 +1656,7 @@ mod tests {
             .expect("replaced");
             let files = root.join("data/Trash/files");
 
-            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            empty_trash(bin, &files, &sk_util::Cancel::new()).expect("emptied");
             let Change::Batch(marked) =
                 stranded_by_empty(&change, &files, Next::Undo).expect("marked")
             else {
@@ -1650,15 +1671,15 @@ mod tests {
     /// desktop's tools read as a corrupt trash.
     #[test]
     fn emptying_takes_the_records_with_the_files() {
-        with_trash("empty-records", |root| {
+        with_trash("empty-records", |root, bin| {
             let file = root.join("note.txt");
             std::fs::write(&file, b"x").unwrap();
-            let Change::Trashed { stored, info, .. } = trash(&file).expect("trashed") else {
+            let Change::Trashed { stored, info, .. } = trash(bin, &file).expect("trashed") else {
                 panic!("trash")
             };
             let files = stored.parent().expect("files").to_path_buf();
 
-            empty_trash(&files, &sk_util::Cancel::new()).expect("emptied");
+            empty_trash(bin, &files, &sk_util::Cancel::new()).expect("emptied");
             assert!(!info.exists(), "a record with no file behind it: {info:?}");
             assert_eq!(crate::trash::held(&files, &sk_util::Cancel::new()).items, 0);
         });
@@ -1679,6 +1700,7 @@ mod tests {
         let device =
             |path: &Path| rustix::fs::stat(path).map(|stat| stat.st_dev).unwrap_or_default();
         let here = scratch("across-filesystems");
+        let bin = &bin_in(&here);
         let shm = Path::new("/dev/shm");
         if !shm.is_dir() || device(shm) == device(&here) {
             return;
@@ -1691,7 +1713,7 @@ mod tests {
 
         let mut armed = true;
         let change =
-            move_into(&source, &here, Conflict::Refuse, &sk_util::Cancel::new(), &mut |p| {
+            move_into(bin, &source, &here, Conflict::Refuse, &sk_util::Cancel::new(), &mut |p| {
                 if armed && p.done == 2 {
                     armed = false;
                     std::fs::write(source.join("arrived.txt"), b"new").unwrap();
@@ -1710,7 +1732,7 @@ mod tests {
         assert!(matches!(**inner, Change::Renamed { .. }), "{inner:?}");
         assert!(note.starts_with("2 items changed or appeared"), "{note}");
 
-        let undo = super::replay(&change, true, &mut |leaf| super::revert_recorded(leaf));
+        let undo = super::replay(&change, true, &mut |leaf| super::revert_recorded(bin, leaf));
         let Some(Change::Noted { note, .. }) = &undo.completed else {
             panic!("the undo did not complete: {:?}", undo.problem)
         };
@@ -1732,10 +1754,10 @@ mod tests {
     /// same name; through the descriptors, the real entry goes and nothing else.
     #[test]
     fn a_trash_swapped_for_a_symlink_once_opened_has_only_its_own_entries_removed() {
-        with_trash("empty-swap", |root| {
+        with_trash("empty-swap", |root, bin| {
             let file = root.join("report.txt");
             std::fs::write(&file, b"trashed").unwrap();
-            let Change::Trashed { stored, .. } = trash(&file).expect("trashed") else {
+            let Change::Trashed { stored, .. } = trash(bin, &file).expect("trashed") else {
                 panic!("trash")
             };
             let files = stored.parent().expect("files").to_path_buf();
@@ -1749,7 +1771,7 @@ mod tests {
                 std::fs::rename(trash_root, trash_root.with_file_name("held")).unwrap();
                 std::os::unix::fs::symlink(trash_root.with_file_name("decoy"), trash_root).unwrap();
             }));
-            let emptied = empty_trash(&files, &sk_util::Cancel::new());
+            let emptied = empty_trash(bin, &files, &sk_util::Cancel::new());
             assert_eq!(std::fs::read(decoy.join(name)).unwrap(), b"precious");
             let held = trash_root.with_file_name("held");
             assert!(!held.join("files").join(name).exists(), "the trashed entry survived");
@@ -1765,7 +1787,7 @@ mod tests {
         if rustix::process::geteuid().is_root() {
             return;
         }
-        with_trash("empty-partial", |root| {
+        with_trash("empty-partial", |root, bin| {
             let locked = root.join("locked");
             std::fs::create_dir_all(&locked).unwrap();
             std::fs::write(locked.join("inside.txt"), b"x").unwrap();
@@ -1773,7 +1795,7 @@ mod tests {
             let after = root.join("after.txt");
             std::fs::write(&before, b"b").unwrap();
             std::fs::write(&after, b"a").unwrap();
-            let trashed = [&before, &locked, &after].map(|path| match trash(path) {
+            let trashed = [&before, &locked, &after].map(|path| match trash(bin, path) {
                 Ok(Change::Trashed { stored, info, .. }) => (stored, info),
                 other => panic!("{other:?}"),
             });
@@ -1782,7 +1804,7 @@ mod tests {
                 .unwrap();
             let files = locked_stored.parent().expect("files").to_path_buf();
 
-            let refused = empty_trash(&files, &sk_util::Cancel::new());
+            let refused = empty_trash(bin, &files, &sk_util::Cancel::new());
             std::fs::set_permissions(locked_stored, std::fs::Permissions::from_mode(0o700))
                 .unwrap();
             refused.expect_err("an entry that could not be erased was not reported");
@@ -1797,12 +1819,12 @@ mod tests {
     /// A directory that is not a trash is not emptied, whatever it is called.
     #[test]
     fn a_directory_that_merely_looks_like_a_trash_is_refused() {
-        with_trash("empty-hostile", |root| {
+        with_trash("empty-hostile", |root, bin| {
             let pretend = root.join("Trash/files");
             std::fs::create_dir_all(&pretend).unwrap();
             std::fs::write(pretend.join("theirs.txt"), b"important").unwrap();
 
-            let refused = empty_trash(&pretend, &sk_util::Cancel::new()).expect_err("emptied");
+            let refused = empty_trash(bin, &pretend, &sk_util::Cancel::new()).expect_err("emptied");
             assert_eq!(refused.kind(), ProblemKind::TrashUnavailable);
             assert!(pretend.join("theirs.txt").is_file(), "somebody else's files were erased");
         });
@@ -1812,7 +1834,7 @@ mod tests {
     /// about: the things a person threw away, and the bytes under them.
     #[test]
     fn a_trash_says_how_many_things_are_in_it_and_how_big_they_are() {
-        with_trash("empty-held", |root| {
+        with_trash("empty-held", |root, bin| {
             let folder = root.join("pictures");
             std::fs::create_dir_all(folder.join("inner")).unwrap();
             std::fs::write(folder.join("inner/one.bin"), vec![0_u8; 300]).unwrap();
@@ -1820,10 +1842,10 @@ mod tests {
             let alone = root.join("alone.bin");
             std::fs::write(&alone, vec![0_u8; 24]).unwrap();
 
-            let Change::Trashed { stored, .. } = trash(&folder).expect("trashed") else {
+            let Change::Trashed { stored, .. } = trash(bin, &folder).expect("trashed") else {
                 panic!("trash")
             };
-            let _ = trash(&alone).expect("trashed");
+            let _ = trash(bin, &alone).expect("trashed");
             let files = stored.parent().expect("files");
             let held = crate::trash::held(files, &sk_util::Cancel::new());
             // Two things thrown away, not the four files under them.
@@ -1837,16 +1859,17 @@ mod tests {
     #[test]
     fn a_file_is_made_and_unmade_while_it_is_still_empty() {
         let root = scratch("mkfile");
-        let change = create_file(&root, "notes.txt").expect("made");
+        let bin = &bin_in(&root);
+        let change = create_file(bin, &root, "notes.txt").expect("made");
         assert_eq!(change, Change::Created { path: root.join("notes.txt"), made: Made::File });
         assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"");
 
-        revert(&change).expect("unmade");
+        revert(bin, &change).expect("unmade");
         assert!(!root.join("notes.txt").exists());
-        apply(&change).expect("made again");
+        apply(bin, &change).expect("made again");
 
         std::fs::write(root.join("notes.txt"), b"words somebody typed").unwrap();
-        let refused = revert(&change).expect_err("it must refuse");
+        let refused = revert(bin, &change).expect_err("it must refuse");
         assert_eq!(refused.kind(), ProblemKind::NotEmpty);
         assert_eq!(std::fs::read(root.join("notes.txt")).unwrap(), b"words somebody typed");
         let _ = std::fs::remove_dir_all(&root);
@@ -1857,21 +1880,22 @@ mod tests {
     #[test]
     fn a_link_is_made_and_unmade_without_touching_its_target() {
         let root = scratch("mklink");
+        let bin = &bin_in(&root);
         let target = root.join("report.pdf");
         std::fs::write(&target, b"%PDF-1.4").unwrap();
 
-        let change = create_link(&root, "report link", &target).expect("linked");
+        let change = create_link(bin, &root, "report link", &target).expect("linked");
         assert_eq!(
             change,
             Change::Created { path: root.join("report link"), made: Made::Link(target.clone()) }
         );
         assert_eq!(std::fs::read_link(root.join("report link")).unwrap(), target);
 
-        revert(&change).expect("unlinked");
+        revert(bin, &change).expect("unlinked");
         assert!(!root.join("report link").exists());
         assert_eq!(std::fs::read(&target).unwrap(), b"%PDF-1.4", "the undo followed the link");
 
-        apply(&change).expect("linked again");
+        apply(bin, &change).expect("linked again");
         assert_eq!(std::fs::read_link(root.join("report link")).unwrap(), target);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1880,24 +1904,30 @@ mod tests {
     #[test]
     fn a_creation_onto_a_taken_name_is_refused() {
         let root = scratch("create-taken");
+        let bin = &bin_in(&root);
         std::fs::write(root.join("keep.txt"), b"important").unwrap();
 
         assert_eq!(
-            create_file(&root, "keep.txt").expect_err("made").kind(),
+            create_file(bin, &root, "keep.txt").expect_err("made").kind(),
             ProblemKind::NameTaken
         );
         assert_eq!(
-            create_link(&root, "keep.txt", Path::new("/etc/passwd")).expect_err("linked").kind(),
+            create_link(bin, &root, "keep.txt", Path::new("/etc/passwd"))
+                .expect_err("linked")
+                .kind(),
             ProblemKind::NameTaken
         );
         assert_eq!(std::fs::read(root.join("keep.txt")).unwrap(), b"important");
         for name in ["", "sub/deeper", "../escape"] {
             assert_eq!(
-                create_file(&root, name).map(|_| ()).expect_err(name).kind(),
+                create_file(bin, &root, name).map(|_| ()).expect_err(name).kind(),
                 ProblemKind::BadName
             );
             assert_eq!(
-                create_link(&root, name, Path::new("/tmp")).map(|_| ()).expect_err(name).kind(),
+                create_link(bin, &root, name, Path::new("/tmp"))
+                    .map(|_| ())
+                    .expect_err(name)
+                    .kind(),
                 ProblemKind::BadName
             );
         }
@@ -1913,18 +1943,19 @@ mod tests {
     #[test]
     fn nine_bits_are_set_and_walked_back() {
         let root = scratch("chmod");
+        let bin = &bin_in(&root);
         let path = root.join("script.sh");
         std::fs::write(&path, b"#!/bin/sh\n").unwrap();
-        set_permissions(&path, 0o600).expect("set");
+        set_permissions(bin, &path, 0o600).expect("set");
 
-        let change = set_permissions(&path, 0o751).expect("set");
+        let change = set_permissions(bin, &path, 0o751).expect("set");
         assert_eq!(change, Change::Permissions { path: path.clone(), before: 0o600, after: 0o751 });
         assert_eq!(mode_of(&path), 0o751);
 
-        revert(&change).expect("undone");
+        revert(bin, &change).expect("undone");
         assert_eq!(mode_of(&path), 0o600, "the undo did not put the old bits back");
 
-        apply(&change).expect("redone");
+        apply(bin, &change).expect("redone");
         assert_eq!(mode_of(&path), 0o751);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1936,21 +1967,22 @@ mod tests {
     fn the_bits_above_the_nine_are_carried_through_untouched() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = scratch("chmod-high");
+        let bin = &bin_in(&root);
         let path = root.join("shared");
         std::fs::create_dir(&path).unwrap();
-        if set_permissions(&path, 0o755).is_err() {
+        if set_permissions(bin, &path, 0o755).is_err() {
             let _ = std::fs::remove_dir_all(&root);
             return;
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o1755)).unwrap();
 
-        let change = set_permissions(&path, 0o770).expect("set");
+        let change = set_permissions(bin, &path, 0o770).expect("set");
         assert_eq!(mode_of(&path), 0o1770, "the sticky bit went with the nine");
         assert_eq!(
             change,
             Change::Permissions { path: path.clone(), before: 0o1755, after: 0o1770 }
         );
-        revert(&change).expect("undone");
+        revert(bin, &change).expect("undone");
         assert_eq!(mode_of(&path), 0o1755);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1961,13 +1993,14 @@ mod tests {
     #[test]
     fn a_symlink_is_refused_rather_than_followed() {
         let root = scratch("chmod-link");
+        let bin = &bin_in(&root);
         let target = root.join("target.txt");
         let link = root.join("link");
         std::fs::write(&target, b"contents").unwrap();
-        set_permissions(&target, 0o644).expect("set");
+        set_permissions(bin, &target, 0o644).expect("set");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let refused = set_permissions(&link, 0o600).expect_err("a symlink was accepted");
+        let refused = set_permissions(bin, &link, 0o600).expect_err("a symlink was accepted");
         assert_eq!(refused.kind(), ProblemKind::Unreadable);
         assert_eq!(mode_of(&target), 0o644, "the target was changed through the link");
         let _ = std::fs::remove_dir_all(&root);
@@ -2011,6 +2044,7 @@ mod tests {
     fn a_filter_that_refuses_fchmodat2_with_eperm_still_gets_the_change() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = scratch("chmod-eperm");
+        let bin = bin_in(&root);
         let path = root.join("file");
         std::fs::write(&path, b"contents").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -2036,7 +2070,7 @@ mod tests {
                     ) == 0
             };
             assert!(installed, "the seccomp filter was refused");
-            set_permissions(&held, 0o640).map(|_| mode_of(&held))
+            set_permissions(&bin, &held, 0o640).map(|_| mode_of(&held))
         })
         .join()
         .unwrap();
@@ -2058,10 +2092,11 @@ mod tests {
     fn a_file_nobody_may_read_can_still_have_its_bits_set() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = scratch("chmod-unreadable");
+        let bin = &bin_in(&root);
         let path = root.join("locked");
         std::fs::write(&path, b"contents").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let change = set_permissions(&path, 0o600).expect("set");
+        let change = set_permissions(bin, &path, 0o600).expect("set");
         assert_eq!(change, Change::Permissions { path: path.clone(), before: 0, after: 0o600 });
         assert_eq!(mode_of(&path), 0o600);
         let _ = std::fs::remove_dir_all(&root);
@@ -2073,13 +2108,14 @@ mod tests {
     fn an_undo_refuses_when_somebody_else_has_changed_the_mode() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = scratch("chmod-raced");
+        let bin = &bin_in(&root);
         let path = root.join("notes.txt");
         std::fs::write(&path, b"contents").unwrap();
-        set_permissions(&path, 0o644).expect("set");
-        let change = set_permissions(&path, 0o600).expect("set");
+        set_permissions(bin, &path, 0o644).expect("set");
+        let change = set_permissions(bin, &path, 0o600).expect("set");
 
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
-        let refused = revert(&change).expect_err("an undo overwrote somebody else's change");
+        let refused = revert(bin, &change).expect_err("an undo overwrote somebody else's change");
         assert_eq!(refused.kind(), ProblemKind::ChangedSince);
         assert_eq!(mode_of(&path), 0o640);
         let _ = std::fs::remove_dir_all(&root);
@@ -2103,15 +2139,16 @@ mod tests {
     #[test]
     fn a_directory_is_made_and_unmade() {
         let root = scratch("mkdir");
-        let change = create_directory(&root, "notes").expect("made");
+        let bin = &bin_in(&root);
+        let change = create_directory(bin, &root, "notes").expect("made");
         assert_eq!(change, Change::Created { path: root.join("notes"), made: Made::Directory });
         assert!(root.join("notes").is_dir());
 
-        revert(&change).expect("unmade");
+        revert(bin, &change).expect("unmade");
         assert!(!root.join("notes").exists());
 
         // And again, which is what redo is.
-        apply(&change).expect("made again");
+        apply(bin, &change).expect("made again");
         assert!(root.join("notes").is_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2120,10 +2157,11 @@ mod tests {
     #[test]
     fn undoing_a_directory_refuses_once_something_is_in_it() {
         let root = scratch("not-empty");
-        let change = create_directory(&root, "notes").expect("made");
+        let bin = &bin_in(&root);
+        let change = create_directory(bin, &root, "notes").expect("made");
         std::fs::write(root.join("notes/theirs.txt"), b"mine now").unwrap();
 
-        let refused = revert(&change).expect_err("it must refuse");
+        let refused = revert(bin, &change).expect_err("it must refuse");
         assert_eq!(refused.kind(), ProblemKind::NotEmpty);
         assert!(root.join("notes/theirs.txt").is_file(), "the undo deleted somebody's file");
         let _ = std::fs::remove_dir_all(&root);
@@ -2132,15 +2170,16 @@ mod tests {
     #[test]
     fn a_name_that_is_taken_is_refused_rather_than_replaced() {
         let root = scratch("taken");
+        let bin = &bin_in(&root);
         std::fs::write(root.join("keep.txt"), b"important").unwrap();
         std::fs::write(root.join("other.txt"), b"other").unwrap();
 
-        let refused = rename(&root.join("other.txt"), "keep.txt").expect_err("must refuse");
+        let refused = rename(bin, &root.join("other.txt"), "keep.txt").expect_err("must refuse");
         assert_eq!(refused.kind(), ProblemKind::NameTaken);
         assert_eq!(std::fs::read(root.join("keep.txt")).unwrap(), b"important");
         assert!(root.join("other.txt").is_file(), "the source vanished into a refused rename");
 
-        let taken = create_directory(&root, "keep.txt").expect_err("must refuse");
+        let taken = create_directory(bin, &root, "keep.txt").expect_err("must refuse");
         assert_eq!(taken.kind(), ProblemKind::NameTaken);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2148,15 +2187,16 @@ mod tests {
     #[test]
     fn a_rename_goes_back_where_it_came_from() {
         let root = scratch("rename");
+        let bin = &bin_in(&root);
         std::fs::write(root.join("draft.md"), b"words").unwrap();
-        let change = rename(&root.join("draft.md"), "final.md").expect("renamed");
+        let change = rename(bin, &root.join("draft.md"), "final.md").expect("renamed");
         assert_eq!(
             change,
             Change::Renamed { from: root.join("draft.md"), to: root.join("final.md") }
         );
         assert!(root.join("final.md").is_file() && !root.join("draft.md").exists());
 
-        revert(&change).expect("renamed back");
+        revert(bin, &change).expect("renamed back");
         assert!(root.join("draft.md").is_file() && !root.join("final.md").exists());
         assert_eq!(std::fs::read(root.join("draft.md")).unwrap(), b"words");
         let _ = std::fs::remove_dir_all(&root);
@@ -2165,15 +2205,16 @@ mod tests {
     #[test]
     fn a_name_with_a_separator_or_no_name_at_all_is_refused() {
         let root = scratch("bad-name");
+        let bin = &bin_in(&root);
         std::fs::write(root.join("a.txt"), b"a").unwrap();
         for name in ["", "sub/deeper", "/etc/passwd", "../escape"] {
             assert_eq!(
-                create_directory(&root, name).map(|_| ()).expect_err(name).kind(),
+                create_directory(bin, &root, name).map(|_| ()).expect_err(name).kind(),
                 ProblemKind::BadName,
                 "{name:?} was accepted as a directory name"
             );
             assert_eq!(
-                rename(&root.join("a.txt"), name).map(|_| ()).expect_err(name).kind(),
+                rename(bin, &root.join("a.txt"), name).map(|_| ()).expect_err(name).kind(),
                 ProblemKind::BadName,
                 "{name:?} was accepted as a new name"
             );
@@ -2188,7 +2229,7 @@ mod tests {
     /// in the Trash — and `Ctrl+Z` undoes both, in that order.
     #[test]
     fn replacing_puts_what_was_there_in_the_trash_and_undo_brings_it_back() {
-        with_trash("replace", |root| {
+        with_trash("replace", |root, bin| {
             let from = root.join("from");
             let into = root.join("into");
             std::fs::create_dir_all(&from).unwrap();
@@ -2197,6 +2238,7 @@ mod tests {
             std::fs::write(into.join("report.pdf"), b"the old one").unwrap();
 
             let change = copy_into(
+                bin,
                 &from.join("report.pdf"),
                 &into,
                 Conflict::Replace,
@@ -2213,7 +2255,7 @@ mod tests {
             // replacement was copied in as.
             assert!(!into.join("report (copy).pdf").exists(), "the staging name was left behind");
 
-            revert(&change).expect("undone");
+            revert(bin, &change).expect("undone");
             assert_eq!(
                 std::fs::read(into.join("report.pdf")).unwrap(),
                 b"the old one",
@@ -2229,7 +2271,7 @@ mod tests {
     /// trashing first would do.
     #[test]
     fn a_replacement_that_cannot_be_copied_leaves_the_original_where_it_was() {
-        with_trash("replace-fails", |root| {
+        with_trash("replace-fails", |root, bin| {
             let into = root.join("into");
             std::fs::create_dir_all(&into).unwrap();
             std::fs::write(into.join("report.pdf"), b"the old one").unwrap();
@@ -2238,6 +2280,7 @@ mod tests {
             // replacing path is never entered — which is how the first version
             // of this test passed against the ordering it exists to forbid.
             let problem = copy_into(
+                bin,
                 &root.join("report.pdf"),
                 &into,
                 Conflict::Replace,
@@ -2257,7 +2300,7 @@ mod tests {
     /// A move over a taken name keeps the old one too, and is one batch.
     #[test]
     fn moving_over_a_name_trashes_what_was_there() {
-        with_trash("replace-move", |root| {
+        with_trash("replace-move", |root, bin| {
             let from = root.join("from");
             let into = root.join("into");
             std::fs::create_dir_all(&from).unwrap();
@@ -2266,6 +2309,7 @@ mod tests {
             std::fs::write(into.join("notes.txt"), b"displaced").unwrap();
 
             let change = move_into(
+                bin,
                 &from.join("notes.txt"),
                 &into,
                 Conflict::Replace,
@@ -2276,39 +2320,42 @@ mod tests {
             assert!(!from.join("notes.txt").exists(), "the move left the source behind");
             assert_eq!(std::fs::read(into.join("notes.txt")).unwrap(), b"arriving");
 
-            revert(&change).expect("undone");
+            revert(bin, &change).expect("undone");
             assert_eq!(std::fs::read(into.join("notes.txt")).unwrap(), b"displaced");
             assert_eq!(std::fs::read(from.join("notes.txt")).unwrap(), b"arriving");
         });
     }
 
-    fn with_trash<T>(label: &str, body: impl FnOnce(&Path) -> T) -> T {
-        let guard = TRASH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    /// A scratch directory with a home trash of its own inside it.
+    ///
+    /// **Handed to every operation, never put in `$XDG_DATA_HOME`.** The
+    /// variable is process-wide, so writing it serialised these tests behind a
+    /// mutex and still raced every C call that reads the environment — and the
+    /// scratch directory and its trash are on one filesystem, so everything
+    /// trashed under it stays under it. Afterwards, nothing may have reached a
+    /// trash anywhere else.
+    fn with_trash<T>(label: &str, body: impl FnOnce(&Path, &Trash) -> T) -> T {
         let root = scratch(label);
-        let before = std::env::var_os("XDG_DATA_HOME");
-        // SAFETY: the mutex above is what makes this the only thread in this
-        // process changing the environment for the length of the body.
-        unsafe { std::env::set_var("XDG_DATA_HOME", root.join("data")) };
-        let outcome = body(&root);
-        unsafe {
-            match before {
-                Some(value) => std::env::set_var("XDG_DATA_HOME", value),
-                None => std::env::remove_var("XDG_DATA_HOME"),
-            }
-        }
-        drop(guard);
+        let outcome = body(&root, &bin_in(&root));
+        let strays = crate::trash::strays(&root);
         let _ = std::fs::remove_dir_all(&root);
+        assert!(strays.is_empty(), "{label} trashed outside its scratch: {strays:?}");
         outcome
+    }
+
+    /// The home trash a test's scratch directory holds.
+    fn bin_in(root: &Path) -> Trash {
+        Trash::at(root.join("data/Trash"))
     }
 
     /// The two files the specification puts there, and both of them gone again.
     #[test]
     fn trashing_writes_a_record_beside_the_file_and_undo_takes_both_away() {
-        with_trash("trash", |root| {
+        with_trash("trash", |root, bin| {
             let file = root.join("receipt.pdf");
             std::fs::write(&file, b"%PDF-1.4").unwrap();
 
-            let change = trash(&file).expect("trashed");
+            let change = trash(bin, &file).expect("trashed");
             let Change::Trashed { original, stored, info } = &change else { panic!("{change:?}") };
             assert_eq!(original, &file);
             assert!(!file.exists(), "the original is still there");
@@ -2329,7 +2376,7 @@ mod tests {
             assert_eq!(date.as_bytes()[10], b'T', "{date:?}");
             assert!(date.starts_with("20"), "{date:?}");
 
-            revert(&change).expect("restored");
+            revert(bin, &change).expect("restored");
             assert_eq!(std::fs::read(&file).unwrap(), b"%PDF-1.4");
             assert!(!stored.exists(), "the trashed copy is still there");
             assert!(!info.exists(), "a record with no file behind it is a corrupt trash");
@@ -2340,14 +2387,14 @@ mod tests {
     /// overwrite the other, and each record must name its own file.
     #[test]
     fn the_same_name_twice_takes_two_slots() {
-        with_trash("trash-twice", |root| {
+        with_trash("trash-twice", |root, bin| {
             std::fs::create_dir_all(root.join("a")).unwrap();
             std::fs::create_dir_all(root.join("b")).unwrap();
             std::fs::write(root.join("a/notes.txt"), b"first").unwrap();
             std::fs::write(root.join("b/notes.txt"), b"second").unwrap();
 
-            let first = trash(&root.join("a/notes.txt")).expect("first");
-            let second = trash(&root.join("b/notes.txt")).expect("second");
+            let first = trash(bin, &root.join("a/notes.txt")).expect("first");
+            let second = trash(bin, &root.join("b/notes.txt")).expect("second");
             let (Change::Trashed { stored: one, .. }, Change::Trashed { stored: two, .. }) =
                 (&first, &second)
             else {
@@ -2358,8 +2405,8 @@ mod tests {
             assert_eq!(std::fs::read(two).unwrap(), b"second");
 
             // And each goes back to its own directory.
-            revert(&second).expect("second back");
-            revert(&first).expect("first back");
+            revert(bin, &second).expect("second back");
+            revert(bin, &first).expect("first back");
             assert_eq!(std::fs::read(root.join("a/notes.txt")).unwrap(), b"first");
             assert_eq!(std::fs::read(root.join("b/notes.txt")).unwrap(), b"second");
         });
@@ -2368,7 +2415,7 @@ mod tests {
     /// Trash remains on its source volume and its record supports recovery after restart.
     #[test]
     fn a_file_on_another_filesystem_uses_its_local_trash_and_restores() {
-        with_trash("trash-xdev", |root| {
+        with_trash("trash-xdev", |root, bin| {
             // `/dev/shm` is a tmpfs on every Linux system that has it, and the
             // scratch root is on whatever `/tmp` is. Where they are the same
             // filesystem there is nothing to test and the test says so.
@@ -2391,16 +2438,16 @@ mod tests {
                 return;
             }
 
-            let change = trash(&mine).expect("volume trash");
+            let change = trash(bin, &mine).expect("volume trash");
             let Change::Trashed { stored, info, .. } = &change else { panic!("trash expected") };
             assert!(stored.starts_with(elsewhere));
             assert!(!mine.exists());
             let record = std::fs::read_to_string(info).unwrap();
             assert!(record.contains(&format!("Path=skerry-xdev-{}.txt", std::process::id())));
-            let restored = super::restore(stored).expect("persistent restore");
+            let restored = super::restore(bin, stored).expect("persistent restore");
             assert_eq!(std::fs::read(&mine).unwrap(), b"elsewhere");
-            revert(&restored).expect("undo restore");
-            apply(&restored).expect("redo restore");
+            revert(bin, &restored).expect("undo restore");
+            apply(bin, &restored).expect("redo restore");
             // And no orphan record: the reservation is made before the move, so
             // a failed move that left it behind would be a trash the desktop's
             // own tools report as corrupt.
@@ -2414,32 +2461,32 @@ mod tests {
 
     #[test]
     fn persistent_restore_never_replaces_an_existing_original() {
-        with_trash("restore-collision", |root| {
+        with_trash("restore-collision", |root, bin| {
             let source = root.join("notes");
             std::fs::write(&source, b"old").unwrap();
-            let Change::Trashed { stored, info, .. } = trash(&source).unwrap() else {
+            let Change::Trashed { stored, info, .. } = trash(bin, &source).unwrap() else {
                 panic!("trash")
             };
             std::fs::write(&source, b"new").unwrap();
-            assert_eq!(super::restore(&stored).unwrap_err().kind(), ProblemKind::NameTaken);
+            assert_eq!(super::restore(bin, &stored).unwrap_err().kind(), ProblemKind::NameTaken);
             assert_eq!(std::fs::read(&source).unwrap(), b"new");
             assert_eq!(std::fs::read(&stored).unwrap(), b"old");
             assert!(info.exists());
             std::fs::remove_file(&source).unwrap();
-            let restored = super::restore(&stored).unwrap();
+            let restored = super::restore(bin, &stored).unwrap();
             assert_eq!(std::fs::read(&source).unwrap(), b"old");
-            revert(&restored).unwrap();
-            apply(&restored).unwrap();
+            revert(bin, &restored).unwrap();
+            apply(bin, &restored).unwrap();
             assert_eq!(std::fs::read(&source).unwrap(), b"old");
         });
     }
 
     #[test]
     fn recovery_rejects_malformed_paths_and_symlinked_records() {
-        with_trash("restore-hostile", |root| {
+        with_trash("restore-hostile", |root, bin| {
             let source = root.join("notes");
             std::fs::write(&source, b"kept").unwrap();
-            let Change::Trashed { stored, info, .. } = trash(&source).unwrap() else {
+            let Change::Trashed { stored, info, .. } = trash(bin, &source).unwrap() else {
                 panic!("trash")
             };
             for path in ["../escape", "%2e%2e/escape", "%00", "bad%ZZ", ""] {
@@ -2448,26 +2495,26 @@ mod tests {
                     format!("[Trash Info]\nPath={path}\nDeletionDate=2026-09-09T12:00:00\n"),
                 )
                 .unwrap();
-                assert!(super::restore(&stored).is_err(), "{path}");
+                assert!(super::restore(bin, &stored).is_err(), "{path}");
                 assert_eq!(std::fs::read(&stored).unwrap(), b"kept");
             }
             std::fs::remove_file(&info).unwrap();
             std::os::unix::fs::symlink(&stored, &info).unwrap();
-            assert!(super::restore(&stored).is_err());
+            assert!(super::restore(bin, &stored).is_err());
             assert_eq!(std::fs::read(&stored).unwrap(), b"kept");
         });
     }
 
     #[test]
     fn trash_refuses_symlinked_storage_without_disturbing_the_source() {
-        with_trash("trash-hostile", |root| {
+        with_trash("trash-hostile", |root, bin| {
             let outside = root.join("outside");
             std::fs::create_dir(&outside).unwrap();
             std::fs::create_dir_all(root.join("data")).unwrap();
             std::os::unix::fs::symlink(&outside, root.join("data/Trash")).unwrap();
             let source = root.join("notes");
             std::fs::write(&source, b"kept").unwrap();
-            assert_eq!(trash(&source).unwrap_err().kind(), ProblemKind::TrashUnavailable);
+            assert_eq!(trash(bin, &source).unwrap_err().kind(), ProblemKind::TrashUnavailable);
             assert_eq!(std::fs::read(&source).unwrap(), b"kept");
             // Nothing may have been written through the symlink, and counting is how
             // that is read.
@@ -2495,6 +2542,7 @@ mod tests {
     #[test]
     fn a_batch_is_reverted_in_the_reverse_order() {
         let home = scratch("batch-order");
+        let bin = &bin_in(&home);
         let folder = home.join("into");
         std::fs::create_dir(&folder).expect("the folder");
         std::fs::write(home.join("f"), b"one").expect("the file");
@@ -2504,7 +2552,7 @@ mod tests {
             Change::Created { path: folder.clone(), made: Made::Directory },
             Change::Renamed { from: home.join("f"), to: folder.join("f") },
         ]);
-        revert(&batch).expect("the batch undoes");
+        revert(bin, &batch).expect("the batch undoes");
         assert_eq!(std::fs::read(home.join("f")).expect("f is back"), b"one");
         assert!(!folder.exists(), "the folder the batch made is still there");
     }
@@ -2516,7 +2564,7 @@ mod tests {
     /// re-`apply`ed here, and says so rather than pretending.
     #[test]
     fn undoing_an_unpack_removes_what_it_unpacked() {
-        with_trash("unpacked", |home| {
+        with_trash("unpacked", |home, bin| {
             let root = home.join("reports");
             std::fs::create_dir_all(root.join("deep/inner")).expect("the tree");
             std::fs::write(root.join("notes.txt"), b"out of the archive").expect("a file");
@@ -2530,7 +2578,7 @@ mod tests {
             assert_eq!(change.origin(), Some(archive.as_path()), "and back to the archive");
             assert_eq!(change.summary().0, "history.unpacked");
 
-            revert(&change).expect("the unpack undoes");
+            revert(bin, &change).expect("the unpack undoes");
             assert!(!root.exists(), "undo left the folder behind");
             assert!(archive.is_file(), "undo took the archive as well");
 
@@ -2538,13 +2586,15 @@ mod tests {
             // A `Problem` here is the honest answer for a direct call; `Edits::redo`
             // never makes one, and a test that let this pass silently would be a
             // test that let the redo path disappear.
-            assert!(apply(&change).is_err(), "ops::apply pretended to redo an unpack");
+            assert!(apply(bin, &change).is_err(), "ops::apply pretended to redo an unpack");
         });
     }
 
     #[test]
     fn an_empty_batch_undoes_to_nothing_rather_than_failing() {
-        assert!(revert(&Change::Batch(Vec::new())).is_ok());
+        // No trash at all, so a batch of nothing that reached for one would fail.
+        let nowhere = Trash::from_variables(None, None);
+        assert!(revert(&nowhere, &Change::Batch(Vec::new())).is_ok());
     }
 
     /// The cursor lands on what the gesture finished with, and after an undo on
@@ -2570,6 +2620,7 @@ mod tests {
     #[test]
     fn a_resumed_copy_fills_in_what_is_missing_and_leaves_the_rest() {
         let root = scratch("resume");
+        let bin = &bin_in(&root);
         let from = root.join("from/folder");
         let into = root.join("into");
         std::fs::create_dir_all(from.join("deeper")).unwrap();
@@ -2585,7 +2636,7 @@ mod tests {
         std::fs::write(landed.join("first.txt"), b"ONE").unwrap();
 
         let change =
-            copy_into(&from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {})
+            copy_into(bin, &from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {})
                 .expect("the resume was refused");
         assert_eq!(change.subject(), landed);
         assert_eq!(std::fs::read(landed.join("first.txt")).unwrap(), b"ONE", "it was copied again");
@@ -2595,7 +2646,7 @@ mod tests {
 
         // And a second resume over a complete tree is a walk that writes nothing
         // and refuses nothing, which is what makes Resume safe to press twice.
-        copy_into(&from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {})
+        copy_into(bin, &from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {})
             .expect("a second resume was refused");
         assert_eq!(std::fs::read(landed.join("first.txt")).unwrap(), b"ONE");
 
@@ -2608,7 +2659,7 @@ mod tests {
         // answers.
         std::fs::write(landed.join("second.txt"), b"a longer thing").unwrap();
         let refused =
-            copy_into(&from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {});
+            copy_into(bin, &from, &into, Conflict::Resume, &sk_util::Cancel::new(), &mut |_| {});
         assert_eq!(
             refused.err().map(|problem| problem.kind()),
             Some(ProblemKind::NameTaken),
@@ -2626,6 +2677,7 @@ mod tests {
     #[test]
     fn a_copy_that_is_not_a_resume_still_refuses_what_is_there() {
         let root = scratch("resume-guard");
+        let bin = &bin_in(&root);
         let from = root.join("from/folder");
         let into = root.join("into");
         std::fs::create_dir_all(&from).unwrap();
@@ -2633,7 +2685,7 @@ mod tests {
         std::fs::create_dir_all(into.join("folder")).unwrap();
 
         let refused =
-            copy_into(&from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {});
+            copy_into(bin, &from, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {});
         assert!(refused.is_err(), "a copy over an existing folder merged without being asked");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2647,18 +2699,19 @@ mod tests {
     #[test]
     fn an_edit_is_undone_by_putting_the_old_bytes_back() {
         let root = scratch("edit");
+        let bin = &bin_in(&root);
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("notes.txt");
         std::fs::write(&file, b"before\n").unwrap();
 
-        let change = super::edit_text(&file, "after\n").expect("the edit was refused");
+        let change = super::edit_text(bin, &file, "after\n").expect("the edit was refused");
         assert_eq!(std::fs::read(&file).unwrap(), b"after\n");
         assert_eq!(change.subject(), file);
         assert_eq!(change.origin(), Some(file.as_path()));
 
-        revert(&change).expect("the undo was refused");
+        revert(bin, &change).expect("the undo was refused");
         assert_eq!(std::fs::read(&file).unwrap(), b"before\n");
-        let again = apply(&change).expect("the redo was refused");
+        let again = apply(bin, &change).expect("the redo was refused");
         assert_eq!(std::fs::read(&file).unwrap(), b"after\n");
         assert_eq!(again.subject(), file);
 
@@ -2673,16 +2726,17 @@ mod tests {
     #[test]
     fn editing_a_file_that_is_not_there_is_refused() {
         let root = scratch("edit-missing");
+        let bin = &bin_in(&root);
         std::fs::create_dir_all(&root).unwrap();
         let missing = root.join("nothing.txt");
-        assert!(super::edit_text(&missing, "x").is_err());
+        assert!(super::edit_text(bin, &missing, "x").is_err());
         assert!(!missing.exists(), "a refused edit created the file");
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn replacement_failure_returns_the_moved_source() {
-        with_trash("replace-failure", |root| {
+        with_trash("replace-failure", |root, bin| {
             let source = root.join("source");
             let into = root.join("into");
             std::fs::create_dir(&into).unwrap();
@@ -2690,8 +2744,15 @@ mod tests {
             std::fs::write(into.join("source"), "destination").unwrap();
             std::fs::write(root.join("data"), "blocked trash").unwrap();
             assert!(
-                move_into(&source, &into, Conflict::Replace, &sk_util::Cancel::new(), &mut |_| {})
-                    .is_err()
+                move_into(
+                    bin,
+                    &source,
+                    &into,
+                    Conflict::Replace,
+                    &sk_util::Cancel::new(),
+                    &mut |_| {}
+                )
+                .is_err()
             );
             assert_eq!(std::fs::read_to_string(source).unwrap(), "source");
             assert_eq!(std::fs::read_to_string(into.join("source")).unwrap(), "destination");
@@ -2701,16 +2762,17 @@ mod tests {
     #[test]
     fn move_redo_keeps_the_destination_directory() {
         let root = scratch("move-redo-parent");
+        let bin = &bin_in(&root);
         let source = root.join("tree");
         let into = root.join("into");
         std::fs::create_dir(&source).unwrap();
         std::fs::create_dir(&into).unwrap();
         std::fs::write(source.join("leaf"), "contents").unwrap();
         let change =
-            move_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+            move_into(bin, &source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
                 .unwrap();
-        revert(&change).unwrap();
-        apply(&change).unwrap();
+        revert(bin, &change).unwrap();
+        apply(bin, &change).unwrap();
         assert!(!source.exists());
         assert_eq!(std::fs::read_to_string(into.join("tree/leaf")).unwrap(), "contents");
         std::fs::remove_dir_all(root).unwrap();
@@ -2718,16 +2780,22 @@ mod tests {
 
     #[test]
     fn copy_undo_keeps_later_work_in_trash() {
-        with_trash("undo-preserves", |root| {
+        with_trash("undo-preserves", |root, bin| {
             let source = root.join("tree");
             let into = root.join("into");
             std::fs::create_dir(&source).unwrap();
             std::fs::create_dir(&into).unwrap();
-            let change =
-                copy_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
-                    .unwrap();
+            let change = copy_into(
+                bin,
+                &source,
+                &into,
+                Conflict::Refuse,
+                &sk_util::Cancel::new(),
+                &mut |_| {},
+            )
+            .unwrap();
             std::fs::write(into.join("tree/later"), "valuable").unwrap();
-            revert(&change).unwrap();
+            revert(bin, &change).unwrap();
             assert_eq!(
                 std::fs::read_to_string(root.join("data/Trash/files/tree/later")).unwrap(),
                 "valuable"
@@ -2738,6 +2806,7 @@ mod tests {
     #[test]
     fn replay_retains_both_sides_of_a_failed_batch() {
         let root = scratch("replay-boundary");
+        let bin = &bin_in(&root);
         let folder = root.join("folder");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("file"), "contents").unwrap();
@@ -2746,13 +2815,13 @@ mod tests {
         let moved = Change::Renamed { from: root.join("file"), to: folder.join("file") };
         let batch = Change::Batch(vec![created.clone(), Change::Batch(vec![moved.clone()])]);
         let first =
-            super::replay(&batch, true, &mut |change| revert(change).map(|()| change.clone()));
+            super::replay(&batch, true, &mut |change| revert(bin, change).map(|()| change.clone()));
         assert!(first.problem.is_some());
         assert_eq!(first.remaining, Some(created));
         assert_eq!(first.completed, Some(moved));
         std::fs::remove_file(folder.join("blocker")).unwrap();
         let second = super::replay(&first.remaining.unwrap(), true, &mut |change| {
-            revert(change).map(|()| change.clone())
+            revert(bin, change).map(|()| change.clone())
         });
         assert!(second.problem.is_none());
         assert!(!folder.exists());
@@ -2761,6 +2830,7 @@ mod tests {
     #[test]
     fn a_partial_tree_failure_returns_an_undoable_warning() {
         let root = scratch("partial-copy");
+        let bin = &bin_in(&root);
         let source = root.join("tree");
         let into = root.join("into");
         std::fs::create_dir(&source).unwrap();
@@ -2774,7 +2844,7 @@ mod tests {
         )
         .unwrap();
         let result =
-            copy_into(&source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
+            copy_into(bin, &source, &into, Conflict::Refuse, &sk_util::Cancel::new(), &mut |_| {})
                 .unwrap();
         let Change::Noted { change, note, .. } = result else {
             panic!("partial work was not reported")
