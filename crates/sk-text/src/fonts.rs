@@ -8,8 +8,11 @@
 //! resampled — which is why `sk-plat` reports a physical size and this crate
 //! takes a device size rather than a logical one.
 
+use std::io::Read as _;
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{FileType, Mode, OFlags};
 use sk_model::{Problem, ProblemKind};
 use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
@@ -108,30 +111,117 @@ pub struct Metrics {
     pub line_height: f32,
 }
 
-/// A read-only mapping of a font file.
+/// A face's bytes: mapped where only root can rewrite the file, read where
+/// anybody else can.
 ///
-/// Mapped rather than read. `NotoSansCJK-Regular.ttc` is 18 MiB and a UI session
+/// **Mapped by default.** `NotoSansCJK-Regular.ttc` is 18 MiB and a UI session
 /// touches a few kilobytes of it — the tables it needs and the outlines for the
 /// glyphs it draws. Reading the file copied all 18 MiB into the process before
 /// the first frame; mapping it costs one syscall and lets the kernel fault in
 /// what is actually used.
 ///
-/// A font file truncated while mapped would fault on access. That is accepted:
-/// the alternative is copying every font on the machine at start-up, and a
-/// package manager replacing a font file writes a new inode rather than
-/// truncating the old one.
+/// **Read when a truncation could reach it.** A page of a mapping past the end
+/// of a truncated file raises `SIGBUS` on access — `MAP_PRIVATE` included, since
+/// truncation unmaps private copies too — and that is the window dying in a
+/// shaper. `cp` over a font in `~/.local/share/fonts` truncates it in place.
+/// A package manager replacing a system font writes a new inode instead, which
+/// a mapping of the old one never sees, so only root's own `cp` could do it to
+/// a file root alone can write.
+///
+/// **What reading costs is the size of the faces read**, resident from start-up
+/// on, and the time to copy them before the first frame. A machine whose chain
+/// is all system fonts pays nothing; one with a CJK collection installed in the
+/// home directory pays its whole size.
+///
+/// The question is asked of the file, from the descriptor about to be mapped,
+/// rather than of the directory it was found in: a font somebody owns in
+/// `/usr/local/share/fonts` can be truncated by them, and a root-owned,
+/// read-only font behind a `~/.local/share/fonts` link into the Nix store cannot.
+enum Bytes {
+    Mapped(Mapping),
+    Read(Box<[u8]>),
+}
+
+impl Bytes {
+    fn open(path: &Path) -> Option<Self> {
+        // Non-blocking so a FIFO named like a font cannot hold start-up open,
+        // and refused below with everything else that is not a regular file.
+        let flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK;
+        let file = rustix::fs::open(path, flags, Mode::empty()).ok()?;
+        let stat = rustix::fs::fstat(&file).ok()?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return None;
+        }
+        let len = usize::try_from(stat.st_size).ok().filter(|&len| len > 0)?;
+        if only_root_can_rewrite(stat.st_uid, stat.st_mode, host_root_is_unmapped()) {
+            return Mapping::of(&file, len).map(Self::Mapped);
+        }
+        let mut bytes = Vec::with_capacity(len);
+        // `take`, so a file that grows while it is read is read as it was
+        // measured rather than for as long as somebody keeps writing.
+        std::fs::File::from(file).take(len as u64).read_to_end(&mut bytes).ok()?;
+        Some(Self::Read(bytes.into_boxed_slice()))
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Mapped(mapping) => mapping.bytes(),
+            Self::Read(bytes) => bytes,
+        }
+    }
+}
+
+/// Whether nobody but root can write a file with this owner and mode.
+///
+/// The owner counts even without a write bit, because an owner can `chmod` one
+/// back. An ACL that grants a named user write shows in the group bits, which
+/// are the ACL's mask when it has one.
+///
+/// **The overflow uid counts as root only where root is unmapped.** A user
+/// namespace shows every owner it does not map as the overflow uid, which inside
+/// a Flatpak is every file the host's root owns — `/run/host/fonts` included —
+/// and reading those would copy the whole chain into every sandboxed window. On
+/// the host the same number is `nobody`, and an NFS export with `root_squash`
+/// gives it to whatever a client wrote as root, so there it is anybody's.
+fn only_root_can_rewrite(owner: u32, mode: u32, host_root_unmapped: bool) -> bool {
+    let roots = owner == 0 || (owner == OVERFLOW_UID && host_root_unmapped);
+    roots && mode & 0o022 == 0
+}
+
+/// `/proc/sys/kernel/overflowuid` as the kernel ships it. A machine that changed
+/// it reads those fonts rather than mapping them, which is the safe direction.
+const OVERFLOW_UID: u32 = 65_534;
+
+/// Whether this process's user namespace leaves the uid outside it that is 0
+/// unmapped, read once from `/proc/self/uid_map`.
+///
+/// Unreadable is answered as mapped, which reads the overflow uid's fonts rather
+/// than trusting them. In a namespace nested inside another, the map names the
+/// parent's uids rather than the host's, and a parent's 0 that is a person's own
+/// uid on the host reads as mapped — the same safe direction.
+fn host_root_is_unmapped() -> bool {
+    static UNMAPPED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *UNMAPPED.get_or_init(|| {
+        std::fs::read_to_string("/proc/self/uid_map").is_ok_and(|map| root_unmapped_in(&map))
+    })
+}
+
+/// Whether a `uid_map` — lines of *inside outside count* — maps no range that
+/// starts at outside uid 0. A range covers 0 only by starting there.
+fn root_unmapped_in(map: &str) -> bool {
+    !map.lines().any(|line| {
+        line.split_whitespace().nth(1).and_then(|outside| outside.parse::<u32>().ok()) == Some(0)
+    })
+}
+
+/// A read-only mapping of a font file.
 struct Mapping {
     address: *mut std::ffi::c_void,
     len: usize,
 }
 
 impl Mapping {
-    fn open(path: &Path) -> Option<Self> {
-        let file = std::fs::File::open(path).ok()?;
-        let len = usize::try_from(file.metadata().ok()?.len()).ok()?;
-        if len == 0 {
-            return None;
-        }
+    fn of(file: &OwnedFd, len: usize) -> Option<Self> {
         // SAFETY: a private read-only mapping of `len` bytes of a file we just
         // measured. Nothing else in the process aliases it, and it is unmapped
         // exactly once, in `Drop`.
@@ -141,7 +231,7 @@ impl Mapping {
                 len,
                 rustix::mm::ProtFlags::READ,
                 rustix::mm::MapFlags::PRIVATE,
-                &file,
+                file,
                 0,
             )
         }
@@ -169,10 +259,10 @@ impl Drop for Mapping {
 unsafe impl Send for Mapping {}
 unsafe impl Sync for Mapping {}
 
-/// A font file mapped into memory. `swash` borrows from the bytes, so the
-/// mapping outlives every `FontRef` derived from it.
+/// A font file's bytes and what `swash` needs to read them. `swash` borrows from
+/// the bytes, so they outlive every `FontRef` derived from them.
 pub(crate) struct Face {
-    data: Mapping,
+    data: Bytes,
     offset: u32,
     key: CacheKey,
     name: String,
@@ -180,15 +270,23 @@ pub(crate) struct Face {
     /// machines can hold the same `NotoColorEmoji.ttf` from two font packages
     /// and shape the same string into different pixels.
     path: PathBuf,
+    /// Whether the face draws in colour — an emoji face — which is what a
+    /// presentation selector chooses between.
+    pub(crate) colour: bool,
 }
 
 impl Face {
     fn open(path: &Path) -> Option<Self> {
-        let data = Mapping::open(path)?;
+        let data = Bytes::open(path)?;
         let font = FontRef::from_index(data.bytes(), 0)?;
         let (offset, key) = (font.offset, font.key);
         let name = path.file_name()?.to_string_lossy().into_owned();
-        Some(Self { data, offset, key, name, path: path.to_path_buf() })
+        // The four ways a face carries colour glyphs: layered outlines, PNG
+        // strikes from Google and from Apple, and SVG.
+        let colour = [b"COLR", b"CBDT", b"sbix", b"SVG "]
+            .iter()
+            .any(|tag| font.table(swash::tag_from_bytes(tag)).is_some());
+        Some(Self { data, offset, key, name, path: path.to_path_buf(), colour })
     }
 
     pub(crate) fn as_ref(&self) -> FontRef<'_> {
@@ -301,6 +399,9 @@ pub struct Fonts {
     pub(crate) shape_context: ShapeContext,
     scale_context: ScaleContext,
     pub(crate) scratch: crate::shape::Scratch,
+    /// Whether a code point the text leaves undecided changes what its cluster
+    /// draws, by cluster, offset and weight — see `Fonts::what_shows`.
+    pub(crate) shows: std::collections::HashMap<(String, usize, u8), bool>,
     /// Names of the faces that were wanted and not found. Reported rather than
     /// swallowed, because it changes what the program can render.
     missing: Vec<&'static str>,
@@ -383,6 +484,7 @@ impl Fonts {
             shape_context: ShapeContext::new(),
             scale_context: ScaleContext::new(),
             scratch: crate::shape::Scratch::default(),
+            shows: std::collections::HashMap::new(),
             missing,
         })
     }
@@ -619,5 +721,122 @@ mod tests {
             let key = GlyphKey { face: 0, glyph: 1, quarter_px: 52, subpixel: bucket };
             assert!(seen.insert(key), "bucket {bucket} collided");
         }
+    }
+
+    fn scratch(label: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("skerry-faces-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// **The defect, as a unit: `cp` over a font the window has open.** `cp`
+    /// opens its destination with `O_TRUNC`, so a font in `~/.local/share/fonts`
+    /// replaced that way is truncated under whatever holds it. A mapping of it
+    /// faults on the next page it touches and the window dies with `SIGBUS`; with
+    /// the mapping forced on, this test does exactly that. A copy cannot fault,
+    /// so the face is still a face after its file is gone.
+    #[test]
+    fn a_font_somebody_can_truncate_is_still_drawn_after_they_do() {
+        let Some(fonts) = fonts() else { return };
+        let system = fonts.paths()[usize::from(fonts.primary(Weight::Regular))].to_path_buf();
+        let root = scratch("truncated");
+        let copy = root.join(system.file_name().unwrap());
+        std::fs::copy(&system, &copy).unwrap();
+        // The copy has to be an ordinary user's to be the case under test, and a
+        // suite run as root would otherwise make it root's own.
+        if rustix::process::geteuid().is_root() {
+            let somebody = Some(rustix::process::Uid::from_raw(4242));
+            if rustix::fs::chown(&copy, somebody, None).is_err() {
+                return;
+            }
+        }
+
+        let face = super::Face::open(&copy).expect("a copy of a face the chain opened");
+        assert!(matches!(face.data, super::Bytes::Read(_)), "a font somebody can rewrite");
+        std::fs::OpenOptions::new().write(true).truncate(true).open(&copy).unwrap();
+        assert_eq!(std::fs::metadata(&copy).unwrap().len(), 0);
+
+        let bytes = face.as_ref().data;
+        let touched = bytes.iter().step_by(4096).fold(0u8, |sum, byte| sum.wrapping_add(*byte));
+        std::hint::black_box(touched);
+        assert_ne!(face.as_ref().charmap().map('a'), 0, "the face lost its glyphs");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The other half: a font the distribution installed is still mapped, so the
+    /// 18 MiB of a CJK collection is not copied into every window that opens.
+    ///
+    /// The expectation is spelled out from the file's own `stat` — root's, and
+    /// writable by nobody else, which is what a package manager installs — rather
+    /// than asked of the predicate the code under test asks.
+    #[test]
+    fn a_font_the_distribution_installed_is_mapped() {
+        let Some(fonts) = fonts() else { return };
+        let mut checked = 0;
+        for path in fonts.paths() {
+            let stat = rustix::fs::stat(path).unwrap();
+            if stat.st_uid != 0 || stat.st_mode & 0o022 != 0 {
+                continue;
+            }
+            let face = super::Face::open(path).unwrap();
+            assert!(matches!(face.data, super::Bytes::Mapped(_)), "{} was read", path.display());
+            checked += 1;
+        }
+        // Inside a user namespace root's files show as the overflow uid and none
+        // of them is checked here; anywhere else a distribution's chain has one.
+        let distributed = fonts.paths().iter().any(|path| path.starts_with("/usr/share/fonts"));
+        if distributed && !super::host_root_is_unmapped() {
+            assert!(checked > 0, "no face in the chain was root's: {:?}", fonts.paths());
+        }
+    }
+
+    #[test]
+    fn only_a_file_root_owns_and_nobody_else_can_write_counts_as_roots() {
+        let roots = |owner, mode| super::only_root_can_rewrite(owner, mode, false);
+        assert!(roots(0, 0o100_644), "a distribution's font");
+        assert!(roots(0, 0o100_444), "a font in the Nix store");
+        assert!(!roots(0, 0o100_664), "group-writable, or an ACL granting somebody write");
+        assert!(!roots(0, 0o100_646), "world-writable");
+        assert!(!roots(1000, 0o100_644), "a font somebody installed for themselves");
+        assert!(!roots(1000, 0o100_444), "read-only to its owner, who can chmod it back");
+        assert!(!roots(65_534, 0o100_644), "nobody's, or root_squash's, on the host");
+    }
+
+    #[test]
+    fn the_overflow_uid_is_roots_only_where_root_is_unmapped() {
+        let inside = |owner| super::only_root_can_rewrite(owner, 0o100_644, true);
+        assert!(inside(65_534), "the host's font, seen from inside a Flatpak");
+        assert!(inside(0));
+        assert!(!inside(1000));
+
+        let unmapped = super::root_unmapped_in;
+        assert!(!unmapped("         0          0 4294967295\n"), "the initial namespace");
+        assert!(unmapped("      1000       1000          1\n"), "a Flatpak's");
+        assert!(unmapped("         0       1000          1\n"), "unshare -r");
+        assert!(!unmapped("      1000          0          1\n"), "the parent's root mapped in");
+        assert!(!unmapped("         0     100000      65536\n         1          0          1\n"));
+        assert!(unmapped(""), "a namespace nobody has written a map for yet");
+    }
+
+    /// A FIFO named like a font would hold start-up open forever: opening one
+    /// for reading blocks until something writes. Without `O_NONBLOCK` this test
+    /// hangs rather than fails.
+    #[test]
+    fn a_fifo_named_like_a_font_is_refused_without_blocking() {
+        let root = scratch("fifo");
+        let path = root.join("Inter-Regular.ttf");
+        let made = rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &path,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        );
+        if made.is_ok() {
+            assert!(super::Bytes::open(&path).is_none());
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

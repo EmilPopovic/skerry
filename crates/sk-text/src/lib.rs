@@ -19,11 +19,13 @@
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
 pub mod discover;
+pub mod escape;
 pub mod fonts;
 pub mod layout;
 pub mod shape;
 pub mod symbols;
 
+pub use escape::Hidden;
 pub use fonts::{Fonts, GlyphImage, GlyphKey, Metrics, SUBPIXEL_BUCKETS, Weight};
 pub use layout::{LayoutCache, RunKey};
 pub use shape::{ShapedGlyph, ShapedRun};

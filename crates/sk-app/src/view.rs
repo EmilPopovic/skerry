@@ -877,6 +877,19 @@ fn text_width(painter: &mut Painter<'_>, text: &str, size: f32, bold: bool) -> f
     sk_ui::advance_of(painter.cache, painter.fonts, text, weight, px_size) / painter.scale
 }
 
+/// How wide the first `end` bytes of a field's text are, in logical pixels.
+///
+/// **Measured against the whole text, not the prefix alone**, because whether a
+/// joiner that ends the prefix draws as an escape depends on what follows it —
+/// see `sk_text::escape::shown_until`.
+fn part_width(painter: &mut Painter<'_>, text: &str, end: usize, size: f32) -> f32 {
+    let px_size = painter.px(size);
+    let (cache, fonts) = (&mut *painter.cache, &mut *painter.fonts);
+    let hidden = sk_text::Hidden::Escaped;
+    sk_ui::advance_of_part(cache, fonts, (text, end), Weight::Regular, px_size, hidden)
+        / painter.scale
+}
+
 /// How far a field's text is shifted left so the caret stays inside its box.
 ///
 /// **Derived from the caret, not remembered.** A field here is a filename or a
@@ -1659,7 +1672,7 @@ fn quick_look_rendered(
                 Ink::Faint => theme.palette.dim,
             };
             let style =
-                TextStyle { weight: run.weight, size: run.size, color: colour, align: Align::Left };
+                TextStyle { weight: run.weight, ..TextStyle::new(run.size, colour) }.verbatim();
             let baseline = painter.baseline(top, line.height, run.size);
             // **The box runs to the edge of the column, not to the run's own
             // width.** `label` ellipsizes what will not fit the rectangle it is
@@ -1818,7 +1831,7 @@ pub(crate) fn text_spot(
         row.and_then(|row| text.lines.get(row.line)?.get(row.from..row.to)).unwrap_or_default();
     // The colour is not part of a measurement; the weight is, and it has to be
     // the face the text was drawn in or the answer is a different font's.
-    let style = mono(TextStyle::new(size, sk_gpu::Color::rgba(0, 0, 0, 0)));
+    let style = body_style(size);
     let want = (at.0 - placed.text_x).max(0.0) * scale;
     let byte = sk_ui::caret_offset(fonts, body, style, size * scale, want);
     let cell = body.get(..byte).map_or(0, |slice| slice.chars().count());
@@ -1898,7 +1911,7 @@ fn quick_look_text(
                 crate::quicklook::Tone::Literal => code.literal,
                 crate::quicklook::Tone::Number => code.number,
             };
-            let style = mono(TextStyle::new(metrics.text_size, colour));
+            let style = mono(TextStyle::new(metrics.text_size, colour)).verbatim();
             let room = (inner.right() - TEXT_PAD - x).max(1.0);
             let drawn = line(painter, run, style, x, room, baseline);
             x += painter.logical(drawn);
@@ -2206,6 +2219,13 @@ pub(crate) fn page_word_at(
     text.covers(point)
 }
 
+/// What a text preview's body is measured in: the face and the treatment of
+/// hidden code points it is drawn with, and no colour, which a measurement does
+/// not read.
+fn body_style(size: f32) -> TextStyle {
+    mono(TextStyle::new(size, sk_gpu::Color::rgba(0, 0, 0, 0))).verbatim()
+}
+
 /// The same style in the mono face.
 fn mono(style: TextStyle) -> TextStyle {
     TextStyle { weight: sk_text::Weight::Mono, ..style }
@@ -2253,15 +2273,15 @@ fn text_selection(
     let (left, right) = {
         let Painter { fonts, scale, .. } = painter;
         let px = size * *scale;
-        let weight = sk_text::Weight::Mono;
+        let style = body_style(size);
         // Measured across the row's own slice, since that is what is drawn at
         // `text_x`: an advance counted from the line's start puts the highlight
         // off the right edge of every row but the first.
         let drawn = body.get(row.from..row.to).unwrap_or_default();
         let (head, tail) = (start - row.from, end - row.from);
         (
-            sk_ui::advance_to(fonts, drawn, weight, px, head) / scale.max(0.01),
-            sk_ui::advance_to(fonts, drawn, weight, px, tail) / scale.max(0.01),
+            sk_ui::advance_to(fonts, drawn, style, px, head) / scale.max(0.01),
+            sk_ui::advance_to(fonts, drawn, style, px, tail) / scale.max(0.01),
         )
     };
     // Past the end of a line that continues into the next one, so the region has
@@ -2308,7 +2328,7 @@ fn text_caret(
         let byte = at.byte.clamp(row.from, row.to) - row.from;
         let Painter { fonts, scale, .. } = painter;
         let px = size * *scale;
-        sk_ui::advance_to(fonts, drawn, sk_text::Weight::Mono, px, byte) / scale.max(0.01)
+        sk_ui::advance_to(fonts, drawn, body_style(size), px, byte) / scale.max(0.01)
     };
     let x = (placed.text_x + left).min(inner.right() - TEXT_PAD);
     let bar = painter.rect(x, top + 2.0, painter.logical(2.0), placed.step - 4.0);
@@ -3778,7 +3798,7 @@ fn field_text(
     let room = area.width - inset * 2.0;
     // Shaping what is before the caret is the only measurement that survives a
     // ligature or a combining mark.
-    let before = text_width(painter, text.get(..caret).unwrap_or(text), style.size, false);
+    let before = part_width(painter, text, caret, style.size);
     let scroll = field_scroll(before, room);
     let full = text_width(painter, text, style.size, false);
 
@@ -3790,8 +3810,8 @@ fn field_text(
     // Behind the text, and only as tall as the text: a selection block the height
     // of the box is the same defect the caret had.
     if let Some((start, end)) = field.selection {
-        let from = text_width(painter, text.get(..start).unwrap_or(""), style.size, false);
-        let to = text_width(painter, text.get(..end).unwrap_or(text), style.size, false);
+        let from = part_width(painter, text, start, style.size);
+        let to = part_width(painter, text, end, style.size);
         let block = painter.caret(area.x + inset - scroll + from, baseline, style.size);
         let width = painter.snap(to - from).max(1.0);
         let block = sk_gpu::Rect::new(block.x, block.y, width, block.height);
@@ -3803,8 +3823,8 @@ fn field_text(
     // uses for text that is not typed yet, and without it a preedit is
     // indistinguishable from the text it will replace.
     if let Some((start, end)) = composing {
-        let from = text_width(painter, text.get(..start).unwrap_or(""), style.size, false);
-        let to = text_width(painter, text.get(..end).unwrap_or(text), style.size, false);
+        let from = part_width(painter, text, start, style.size);
+        let to = part_width(painter, text, end, style.size);
         let x = painter.snap(area.x + inset - scroll + from);
         let width = painter.snap(to - from).max(1.0);
         let thickness = painter.px(1.0).round().max(1.0);
@@ -4612,7 +4632,7 @@ fn header(painter: &mut Painter<'_>, pane: &Pane, layout: &PaneLayout) {
         }
         let active = pane.sort.column == column;
         let color = if active { theme.palette.accent } else { theme.palette.dim };
-        let style = TextStyle { weight: Weight::Bold, size: metrics.header_size, color, align };
+        let style = TextStyle { align, ..TextStyle::new(metrics.header_size, color).bold() };
         let (x, width) = match align {
             Align::Left => (area.x + inset, area.width - inset),
             Align::Right | Align::Center => (area.x, area.width - inset),
@@ -5093,12 +5113,7 @@ fn heading_at(
     let metrics = theme.metrics;
     let at = heading.at;
     let baseline = painter.baseline(at.y, at.height, metrics.header_size);
-    let style = TextStyle {
-        weight: Weight::Bold,
-        size: metrics.header_size,
-        color: theme.palette.heading,
-        align: Align::Left,
-    };
+    let style = TextStyle::new(metrics.header_size, theme.palette.heading).bold();
 
     // Right when it is shut and down when it is open, which is what a tree's
     // disclosure has always done — see `sk_gpu::Direction`, which exists because
@@ -5646,12 +5661,7 @@ fn history_at(
     );
     let text_x = strip.x + metrics.gutter + DISCLOSE + 6.0;
     let baseline = painter.baseline(parts.header.y, parts.header.height, metrics.header_size);
-    let bold = TextStyle {
-        weight: Weight::Bold,
-        size: metrics.header_size,
-        color: theme.palette.heading,
-        align: Align::Left,
-    };
+    let bold = TextStyle::new(metrics.header_size, theme.palette.heading).bold();
     let room = (strip.right() - metrics.gutter - text_x).max(1.0);
     let drawn = line(painter, i18n::lookup("history.title"), bold, text_x, room, baseline);
     let counted = i18n::plural(

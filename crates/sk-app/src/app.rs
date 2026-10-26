@@ -744,7 +744,9 @@ struct Shaper<'a> {
 
 impl crate::mdlayout::Measure for Shaper<'_> {
     fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
-        sk_ui::advance_of(self.cache, self.fonts, text, weight, size * self.scale) / self.scale
+        let (part, hidden) = ((text, text.len()), sk_text::Hidden::Verbatim);
+        sk_ui::advance_of_part(self.cache, self.fonts, part, weight, size * self.scale, hidden)
+            / self.scale
     }
 }
 
@@ -3540,9 +3542,10 @@ impl App {
             (field.text.clone(), field.caret)
         };
         let Self { cache, fonts, .. } = self;
+        let part = (text.as_str(), caret.min(text.len()));
+        let hidden = sk_text::Hidden::Escaped;
         let before =
-            sk_ui::advance_of(cache, fonts, &text[..caret.min(text.len())], style.weight, px_size)
-                / scale;
+            sk_ui::advance_of_part(cache, fonts, part, style.weight, px_size, hidden) / scale;
         let scroll = crate::view::field_scroll(before, area.width - inset * 2.0);
         Some(sk_ui::caret_offset(
             fonts,
@@ -3584,8 +3587,10 @@ impl App {
         let style = sk_ui::TextStyle::new(size, self.theme.palette.text);
         let px_size = size * scale;
         let Self { cache, fonts, .. } = self;
+        let part = (field.text.as_str(), field.caret.min(field.text.len()));
+        let hidden = sk_text::Hidden::Escaped;
         let before =
-            sk_ui::advance_of(cache, fonts, field.before_caret(), style.weight, px_size) / scale;
+            sk_ui::advance_of_part(cache, fonts, part, style.weight, px_size, hidden) / scale;
         let scroll = crate::view::field_scroll(before, area.width - inset * 2.0);
         field.deselect();
         field.caret = sk_ui::caret_offset(
