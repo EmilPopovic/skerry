@@ -845,6 +845,13 @@ enum Unlinked {
 /// took, it goes back. The `ctime` in [`Version`] cannot be compared after the
 /// rename, which moves it, so the caller has compared it already and this
 /// compares the inode, the size and the modification time again.
+///
+/// **It costs one `renameat2` per entry**, counted with `strace -c`: 20,102
+/// against 10,001 for a move of 10,000 × 4 KiB files in 100 folders from
+/// `/dev/shm` to `/tmp`, every other call equal. That move took 219.2 ms
+/// against 203.1 ms removing by name — +8%, the fastest of 42 moves each, run
+/// interleaved at load 10–12 — and the review measured about +3% on the same
+/// size of move.
 fn unlink_unchanged(
     dir: BorrowedFd<'_>,
     name: &OsStr,
