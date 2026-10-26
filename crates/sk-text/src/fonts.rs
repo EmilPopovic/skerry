@@ -391,6 +391,9 @@ pub struct Fonts {
     pub(crate) shape_context: ShapeContext,
     scale_context: ScaleContext,
     pub(crate) scratch: crate::shape::Scratch,
+    /// Whether a code point the text leaves undecided changes what its cluster
+    /// draws, by cluster, offset and weight — see `Fonts::what_shows`.
+    pub(crate) shows: std::collections::HashMap<(String, usize, u8), bool>,
     /// Names of the faces that were wanted and not found. Reported rather than
     /// swallowed, because it changes what the program can render.
     missing: Vec<&'static str>,
@@ -473,6 +476,7 @@ impl Fonts {
             shape_context: ShapeContext::new(),
             scale_context: ScaleContext::new(),
             scratch: crate::shape::Scratch::default(),
+            shows: std::collections::HashMap::new(),
             missing,
         })
     }

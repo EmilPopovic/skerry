@@ -3823,8 +3823,8 @@ fn field_text(
     // uses for text that is not typed yet, and without it a preedit is
     // indistinguishable from the text it will replace.
     if let Some((start, end)) = composing {
-        let from = text_width(painter, text.get(..start).unwrap_or(""), style.size, false);
-        let to = text_width(painter, text.get(..end).unwrap_or(text), style.size, false);
+        let from = part_width(painter, text, start, style.size);
+        let to = part_width(painter, text, end, style.size);
         let x = painter.snap(area.x + inset - scroll + from);
         let width = painter.snap(to - from).max(1.0);
         let thickness = painter.px(1.0).round().max(1.0);

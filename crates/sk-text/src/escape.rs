@@ -56,63 +56,114 @@ pub enum Hidden {
     Verbatim,
 }
 
-/// Whether the code point that starts at byte `at` of `text` is drawn as an
-/// escape, judged against all of `text` around it.
+/// What a hidden code point is drawn as, as far as the text alone can say.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verdict {
+    /// Not hidden, or doing work the writing system needs: drawn as it is.
+    Drawn,
+    /// Drawn as its escape.
+    Escaped,
+    /// Drawn as it is only if taking it out changes the glyphs, which only
+    /// shaping can say — [`crate::Fonts::shape`] asks, and escapes it otherwise.
+    Undecided,
+}
+
+/// What the code point that starts at byte `at` of `text` is drawn as, judged
+/// against all of `text` around it.
 ///
 /// The set is every code point whose General Category is Cc, Cf, Zl or Zp, and
 /// every `Default_Ignorable_Code_Point` — the tables in `escape_data.rs`, derived
 /// from the Unicode Character Database. Between two Latin letters each of them
-/// draws as nothing, or reorders what follows. Four kinds are left alone where
-/// the text around them gives them work to do:
+/// draws as nothing, or reorders what follows.
 ///
-/// * **The joiners U+200C and U+200D**, between two letters of a script the
-///   shaper treats as complex or cursive, or after a pictograph and before
-///   another. [`joins`] says what that buys and what it does not.
-/// * **A variation selector**, directly after a base it can select: one of
-///   `StandardizedVariants.txt`'s or `emoji-variation-sequences.txt`'s bases, or
-///   any Han ideograph — the Ideographic Variation Database registers sequences on
-///   tens of thousands of them and is not part of the Character Database.
-/// * **The Mongolian selectors U+180B–U+180F**, directly after a Mongolian
-///   letter, whose form they choose.
-/// * **Tag characters**, inside an emoji tag sequence: a pictograph, tag letters,
-///   and the U+E007F that ends them, which is how a subdivision flag is spelled.
+/// **A selector is kept only where it changes what is drawn,** and that is a
+/// question about the faces rather than about the text. Unicode registers
+/// hundreds of variation sequences — `Brand™\u{FE0F}` asks for an emoji — and
+/// this shaper honours almost none of them: 718 of the 742 emoji variation
+/// sequences and 237 standardized variants drew the same pixels as the bare base.
+/// So these are [`Verdict::Undecided`], and kept only where the shaped glyphs
+/// with the code point differ from those without it:
+///
+/// * a variation selector after a base `StandardizedVariants.txt` or
+///   `emoji-variation-sequences.txt` lists, or after any Han ideograph — the
+///   Ideographic Variation Database is not part of the Character Database;
+/// * a Mongolian selector or vowel separator after a Mongolian letter;
+/// * a tag character inside an emoji tag sequence, which is how a subdivision
+///   flag is spelled;
+/// * a joiner between two emoji, which the emoji face ligates or does not.
+///
+/// **Joiners between letters are [`Verdict::Drawn`]**, by script rather than by
+/// glyph — [`joins`] says why, and what that leaves open.
 #[must_use]
-pub fn is_hidden(text: &str, at: usize) -> bool {
+pub fn verdict(text: &str, at: usize) -> Verdict {
     let Some(character) = text.get(at..).and_then(|rest| rest.chars().next()) else {
-        return false;
+        return Verdict::Drawn;
     };
     if !in_ranges(data::HIDDEN, character) {
-        return false;
+        return Verdict::Drawn;
     }
     let before = text[..at].chars().next_back();
     let after = text[at + character.len_utf8()..].chars().next();
+    let undecided_if =
+        |condition: bool| if condition { Verdict::Undecided } else { Verdict::Escaped };
     match character {
-        '\u{200C}' | '\u{200D}' => !joins(base_before(text, at), after),
+        '\u{200C}' | '\u{200D}' => joins(base_before(text, at), after),
         '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}' => {
-            !before.is_some_and(|base| selects(base, character))
+            undecided_if(before.is_some_and(|base| selects(base, character)))
         }
-        '\u{180B}'..='\u{180F}' => before.is_none_or(|base| base.script() != Script::Mongolian),
-        '\u{E0020}'..='\u{E007F}' => !in_tag_sequence(text, at, character),
-        _ => true,
+        '\u{180B}'..='\u{180F}' => {
+            undecided_if(before.is_some_and(|base| base.script() == Script::Mongolian))
+        }
+        '\u{E0020}'..='\u{E007F}' => undecided_if(in_tag_sequence(text, at, character)),
+        _ => Verdict::Escaped,
     }
 }
 
-/// Whether a joiner between `before` and `after` is left as it is.
+/// Whether the code point at `at` is drawn as an escape when nothing has shaped
+/// it — an [`Verdict::Undecided`] one counts, since only shaping can keep it.
+#[must_use]
+pub fn is_hidden(text: &str, at: usize) -> bool {
+    verdict(text, at) != Verdict::Drawn
+}
+
+/// The byte offset of every [`Verdict::Undecided`] code point in `text`.
 ///
-/// **Kept so that writing which uses them still reads as itself, not because
-/// every one is visible here.** A ZWNJ is how Persian spells a word in two
+/// Nearly every name has none, and finding that out costs a `match` a character.
+pub fn undecided(text: &str) -> impl Iterator<Item = usize> + '_ {
+    text.char_indices()
+        .filter(|&(_, character)| {
+            matches!(
+                character,
+                '\u{200C}'
+                    | '\u{200D}'
+                    | '\u{180B}'..='\u{180F}'
+                    | '\u{FE00}'..='\u{FE0F}'
+                    | '\u{E0020}'..='\u{E007F}'
+                    | '\u{E0100}'..='\u{E01EF}'
+            )
+        })
+        .filter(move |&(at, _)| verdict(text, at) == Verdict::Undecided)
+        .map(|(at, _)| at)
+}
+
+/// What a joiner between `before` and `after` is drawn as.
+///
+/// **Between two letters of a script that writes with them, it is kept by rule,
+/// not because it is visible here.** A ZWNJ is how Persian spells a word in two
 /// parts and a ZWJ after a virama is how Devanagari asks for a half form, and
 /// escaping them would put `<U+200C>` in the middle of ordinary words. What this
 /// shaper does with them is narrower: it shapes a cluster at a time and does not
 /// join Arabic at all, so a ZWNJ in a Persian name changes nothing drawn, and two
-/// Persian names that differ only by one look the same. A ZWJ after a virama
-/// does draw a half form, and one between two emoji draws the sequence's own
-/// glyph where the emoji face has one.
+/// Persian names that differ only by one look the same — a gap a test records.
+/// A ZWJ after a virama does draw a half form.
+///
+/// **Between two emoji it is undecided**: a family is one glyph where the emoji
+/// face ligates the sequence, and two people side by side where it does not.
 ///
 /// Between two Latin letters, at either end, or beside a space a joiner is
 /// invisible everywhere, and that is the spoof this exists for.
-fn joins(before: Option<char>, after: Option<char>) -> bool {
-    let (Some(before), Some(after)) = (before, after) else { return false };
+fn joins(before: Option<char>, after: Option<char>) -> Verdict {
+    let (Some(before), Some(after)) = (before, after) else { return Verdict::Escaped };
     // `swash` keeps the cursive scripts out of `is_complex` — Arabic is shaped
     // by its joining rules rather than by the cluster machine — so both are asked.
     let shaped = |character: char| {
@@ -127,10 +178,16 @@ fn joins(before: Option<char>, after: Option<char>) -> bool {
     let ends_emoji = |character: char| {
         pictograph(character) || matches!(character, '\u{1F3FB}'..='\u{1F3FF}' | '\u{E007F}')
     };
-    (shaped(before) && shaped(after)) || (ends_emoji(before) && pictograph(after))
+    if shaped(before) && shaped(after) {
+        Verdict::Drawn
+    } else if ends_emoji(before) && pictograph(after) {
+        Verdict::Undecided
+    } else {
+        Verdict::Escaped
+    }
 }
 
-/// Whether `selector` selects a variant of `base`.
+/// Whether `selector` is registered for `base`.
 fn selects(base: char, selector: char) -> bool {
     match selector {
         '\u{FE0E}' | '\u{FE0F}' => in_ranges(data::EMOJI_VARIATION_BASES, base),
@@ -193,12 +250,15 @@ fn in_ranges(ranges: &[(u32, u32)], character: char) -> bool {
         .is_ok()
 }
 
-/// What `text` is drawn as — [`shown_until`] over all of it.
+/// What `text` is drawn as with nothing shaped — [`shown_until`] over all of it,
+/// keeping no [`Verdict::Undecided`] code point.
 pub fn shown<'a>(text: &'a str, escapes: &mut Vec<Range<usize>>) -> Cow<'a, str> {
-    shown_until(text, text.len(), escapes)
+    shown_until(text, text.len(), &[], escapes)
 }
 
-/// What the first `end` bytes of `text` are drawn as, judged against all of it.
+/// What the first `end` bytes of `text` are drawn as, judged against all of it,
+/// keeping the [`Verdict::Undecided`] code points at the byte offsets in `kept`
+/// and escaping every other one.
 ///
 /// **The rest of `text` is context, not decoration.** A caret is placed by
 /// shaping what is before it, and a joiner that ends that prefix has nothing
@@ -210,14 +270,26 @@ pub fn shown<'a>(text: &'a str, escapes: &mut Vec<Range<usize>>) -> Cow<'a, str>
 /// `<U+XXXX>`, and `escapes` is filled with the byte range each replacement
 /// occupies in the returned string, in order. `escapes` is cleared first either
 /// way, so a caller can keep one buffer for every call.
-pub fn shown_until<'a>(text: &'a str, end: usize, escapes: &mut Vec<Range<usize>>) -> Cow<'a, str> {
+pub fn shown_until<'a>(
+    text: &'a str,
+    end: usize,
+    kept: &[usize],
+    escapes: &mut Vec<Range<usize>>,
+) -> Cow<'a, str> {
     escapes.clear();
     let end = floor_boundary(text, end);
     let head = &text[..end];
     // Printable ASCII is never hidden, and it is most of every name.
     let mut hidden = head
         .char_indices()
-        .filter(|&(at, character)| !(' '..='~').contains(&character) && is_hidden(text, at))
+        .filter(|&(at, character)| {
+            !(' '..='~').contains(&character)
+                && match verdict(text, at) {
+                    Verdict::Drawn => false,
+                    Verdict::Escaped => true,
+                    Verdict::Undecided => !kept.contains(&at),
+                }
+        })
         .peekable();
     if hidden.peek().is_none() {
         return Cow::Borrowed(head);
@@ -252,7 +324,7 @@ fn floor_boundary(text: &str, end: usize) -> usize {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{data, is_hidden, shown, shown_until};
+    use super::{Verdict, data, is_hidden, shown, shown_until, undecided, verdict};
 
     fn drawn(text: &str) -> String {
         shown(text, &mut Vec::new()).into_owned()
@@ -335,18 +407,12 @@ mod tests {
     #[test]
     fn a_name_with_nothing_hidden_is_returned_as_it_is() {
         let mut escapes = vec![0..1, 4..9];
-        for name in [
-            "report.pdf",
-            "étude.txt",
-            "שלום-עולם.md",
-            "holiday 🏖\u{FE0F}.jpeg",
-            "日本語のファイル.txt",
-            "...",
-            "",
-        ] {
+        for name in ["report.pdf", "étude.txt", "שלום-עולם.md", "日本語のファイル.txt", "...", ""]
+        {
             let drawn = shown(name, &mut escapes);
             assert!(matches!(drawn, std::borrow::Cow::Borrowed(_)), "{name:?} was copied");
             assert!(escapes.is_empty(), "{name:?} reported escapes");
+            assert_eq!(undecided(name).count(), 0, "{name:?} has nothing to shape twice");
         }
     }
 
@@ -366,17 +432,22 @@ mod tests {
         }
     }
 
-    /// The joiners are judged by what they join: kept where writing uses them,
-    /// escaped where they are only invisible.
+    /// The verdict on the first code point in `text` that is hidden.
+    fn verdict_on(text: &str) -> Verdict {
+        let at = text
+            .char_indices()
+            .find(|&(at, _)| is_hidden(text, at))
+            .map(|(at, _)| at)
+            .expect("nothing hidden");
+        verdict(text, at)
+    }
+
+    /// The joiners are judged by what they join: drawn where writing uses them,
+    /// left to the glyphs between two emoji, escaped where they are only
+    /// invisible.
     #[test]
-    fn a_joiner_is_kept_only_between_what_it_can_join() {
-        for kept in [
-            // A family: man, joiner, woman, joiner, girl.
-            "family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}.jpg",
-            // A rainbow flag: the joiner follows a variation selector.
-            "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
-            // A woman technologist with a skin tone before the joiner.
-            "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}",
+    fn a_joiner_is_judged_by_what_it_joins() {
+        for drawn_by_rule in [
             // Persian: a ZWNJ between ی and خ, as the language writes it.
             "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}.txt",
             // An Arabic letter with a vowel sign between it and the joiner.
@@ -384,7 +455,15 @@ mod tests {
             // Devanagari: a half form, made with a joiner after the virama.
             "\u{915}\u{94D}\u{200D}\u{937}",
         ] {
-            assert_eq!(drawn(kept), kept, "{kept:?}");
+            assert_eq!(drawn(drawn_by_rule), drawn_by_rule, "{drawn_by_rule:?}");
+        }
+        for for_the_glyphs in [
+            "family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}.jpg",
+            "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
+            "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}",
+        ] {
+            let joiner = for_the_glyphs.find('\u{200D}').unwrap();
+            assert_eq!(verdict(for_the_glyphs, joiner), Verdict::Undecided, "{for_the_glyphs:?}");
         }
         for (hidden, expected) in [
             ("pay\u{200D}pal", "pay<U+200D>pal"),
@@ -408,12 +487,13 @@ mod tests {
         }
     }
 
-    /// A selector is kept after a base it can select, and nowhere else.
+    /// A selector after a base it is registered for is left to the glyphs, and
+    /// one anywhere else is escaped without asking them.
     #[test]
-    fn a_variation_selector_is_kept_only_after_a_base_it_selects() {
-        for kept in [
-            "holiday \u{1F3D6}\u{FE0F}.jpeg",
-            "\u{2764}\u{FE0F}",
+    fn a_variation_selector_is_undecided_only_after_a_base_it_is_registered_for() {
+        for registered in [
+            "\u{1F3D6}\u{FE0F}",
+            "\u{2122}\u{FE0F}",
             "\u{2764}\u{FE0E}",
             "1\u{FE0F}\u{20E3}",
             // A standardized variant: ≩ with a vertical stroke.
@@ -423,11 +503,12 @@ mod tests {
             // A Han ideograph, with a compatibility selector and an IVS.
             "\u{8279}\u{FE00}",
             "\u{845B}\u{E0100}",
-            // A Mongolian letter and its free variation selector.
+            // A Mongolian letter, its free variation selector and its separator.
             "\u{1820}\u{180B}",
             "\u{1820}\u{180E}\u{1820}",
         ] {
-            assert_eq!(drawn(kept), kept, "{kept:?}");
+            assert_eq!(verdict_on(registered), Verdict::Undecided, "{registered:?}");
+            assert_ne!(drawn(registered), registered, "{registered:?} kept with nothing shaped");
         }
         for (hidden, expected) in [
             ("pay\u{FE00}pal", "pay<U+FE00>pal"),
@@ -439,16 +520,17 @@ mod tests {
             ("a\u{E0100}", "a<U+E0100>"),
             ("a\u{180B}", "a<U+180B>"),
         ] {
+            assert_eq!(verdict_on(hidden), Verdict::Escaped, "{hidden:?}");
             assert_eq!(drawn(hidden), expected, "{hidden:?}");
         }
     }
 
-    /// Scotland's flag is a black flag, five tag letters and a cancel tag; the
-    /// same tag letters anywhere else spell nothing visible.
+    /// Scotland's flag is a black flag, five tag letters and a cancel tag, and
+    /// is left to the glyphs; the same tag letters anywhere else are escaped.
     #[test]
-    fn a_tag_is_kept_only_inside_an_emoji_tag_sequence() {
+    fn a_tag_is_undecided_only_inside_an_emoji_tag_sequence() {
         let scotland = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}";
-        assert_eq!(drawn(scotland), scotland);
+        assert_eq!(undecided(scotland).count(), 6);
         for (hidden, expected) in [
             ("pay\u{E0070}pal", "pay<U+E0070>pal"),
             ("a\u{E0067}\u{E007F}", "a<U+E0067><U+E007F>"),
@@ -458,6 +540,7 @@ mod tests {
             ("\u{1F3F4}\u{E007F}", "\u{1F3F4}<U+E007F>"),
             ("\u{1F3F4}\u{E0001}\u{E007F}", "\u{1F3F4}<U+E0001><U+E007F>"),
         ] {
+            assert_eq!(undecided(hidden).count(), 0, "{hidden:?}");
             assert_eq!(drawn(hidden), expected, "{hidden:?}");
         }
     }
@@ -465,56 +548,65 @@ mod tests {
     /// **A prefix is judged against the whole text.** The caret after a joiner
     /// is placed by shaping what is before it, and the joiner ends that prefix.
     #[test]
-    fn a_prefix_that_ends_in_a_kept_joiner_keeps_it() {
+    fn a_prefix_that_ends_in_a_kept_code_point_keeps_it() {
         for text in [
             "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}",
             "\u{915}\u{94D}\u{200D}\u{937}",
             "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
             "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
         ] {
+            // What a shaper that found every undecided one visible would keep.
+            let kept: Vec<usize> = undecided(text).collect();
             for (at, character) in text.char_indices() {
                 let end = at + character.len_utf8();
-                let head = shown_until(text, end, &mut Vec::new());
+                let head = shown_until(text, end, &kept, &mut Vec::new());
                 assert_eq!(head, &text[..end], "{text:?} up to {end}");
             }
         }
         // And a hidden one stays hidden however the prefix ends.
         let spoof = "pay\u{200D}pal";
-        assert_eq!(shown_until(spoof, 6, &mut Vec::new()), "pay<U+200D>");
+        assert_eq!(shown_until(spoof, 6, &[], &mut Vec::new()), "pay<U+200D>");
         // An end inside a character falls back to the boundary below it.
-        assert_eq!(shown_until("é", 1, &mut Vec::new()), "");
+        assert_eq!(shown_until("é", 1, &[], &mut Vec::new()), "");
     }
 
     /// **The tables are what the Character Database they cite derives,** and
-    /// this is the derivation. Where `/usr/share/unicode` holds the version the
-    /// tables name — Debian's and Ubuntu's `unicode-data` — the file is derived
-    /// again and compared byte for byte; set `SKERRY_UNICODE_OUT` to a path to
-    /// have the derived file written there. Elsewhere there is nothing to derive
-    /// it from, and the test says so and passes.
+    /// this is the derivation.
+    ///
+    /// It needs the Character Database's own files, which Debian's and Ubuntu's
+    /// `unicode-data` package installs under `/usr/share/unicode`. Where they are
+    /// missing, or are another version than the tables name, it prints why and
+    /// checks nothing — which is every CI runner, since none installs the package,
+    /// so the check is a person's to run.
+    ///
+    /// To regenerate after a Unicode release: install `unicode-data` at that
+    /// version, run `SKERRY_UNICODE_OUT=crates/sk-text/src/escape_data.rs cargo
+    /// test -p sk-text the_tables_are_what`, which writes the derived file with
+    /// its version in it, and run the test again to see the file compare equal.
     #[test]
     fn the_tables_are_what_the_unicode_data_derives() {
         let root = std::path::Path::new("/usr/share/unicode");
-        let Ok(header) = std::fs::read_to_string(root.join("DerivedCoreProperties.txt")) else {
-            eprintln!("skerry: no Unicode Character Database under {}", root.display());
+        if let Some(missing) = derive::FILES.iter().find(|name| !root.join(name).is_file()) {
+            eprintln!("skerry: no {missing} under {}, so nothing to derive from", root.display());
             return;
-        };
-        let version = header
+        }
+        let version = std::fs::read_to_string(root.join("DerivedCoreProperties.txt"))
+            .unwrap_or_default()
             .lines()
             .next()
             .and_then(|line| line.strip_prefix("# DerivedCoreProperties-"))
             .and_then(|rest| rest.strip_suffix(".txt"))
             .unwrap_or_default()
             .to_owned();
-        let derived = derive::file(root, &version);
         if let Some(out) = std::env::var_os("SKERRY_UNICODE_OUT") {
-            std::fs::write(out, &derived).unwrap();
+            std::fs::write(out, derive::file(root, &version)).unwrap();
         }
         if version != data::UNICODE {
-            eprintln!("skerry: Unicode {version} here, and the tables are {}", data::UNICODE);
+            eprintln!("skerry: Unicode {version:?} here, and the tables are {}", data::UNICODE);
             return;
         }
         assert!(
-            derived == include_str!("escape_data.rs"),
+            derive::file(root, &version) == include_str!("escape_data.rs"),
             "escape_data.rs is not what Unicode {version} derives; \
              run with SKERRY_UNICODE_OUT=<path> to write the derived file"
         );
@@ -525,6 +617,15 @@ mod tests {
         use std::collections::{BTreeMap, BTreeSet};
         use std::fmt::Write as _;
         use std::path::Path;
+
+        /// Every file the derivation reads, relative to the database's root.
+        pub(super) const FILES: &[&str] = &[
+            "UnicodeData.txt",
+            "DerivedCoreProperties.txt",
+            "Scripts.txt",
+            "StandardizedVariants.txt",
+            "emoji/emoji-variation-sequences.txt",
+        ];
 
         fn lines(root: &Path, name: &str) -> Vec<Vec<String>> {
             std::fs::read_to_string(root.join(name))

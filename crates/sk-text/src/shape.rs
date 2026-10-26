@@ -7,7 +7,7 @@ use swash::text::cluster::{CharCluster, Parser, Status, Token};
 use swash::text::{Codepoint, Script};
 
 use crate::escape::Hidden;
-use crate::fonts::{Fonts, Weight};
+use crate::fonts::{Fonts, GlyphKey, Weight};
 
 /// One shaped glyph, positioned relative to the run origin in device pixels.
 #[derive(Clone, Copy, Debug)]
@@ -87,10 +87,14 @@ impl Fonts {
         weight: Weight,
         hidden: Hidden,
     ) -> ShapedRun {
+        let kept = match hidden {
+            Hidden::Escaped => self.what_shows(text, px_size, weight),
+            Hidden::Verbatim => Vec::new(),
+        };
         let primary = self.primary(weight) as usize;
         let Self { faces, shape_context, scratch, .. } = self;
         let shown = match hidden {
-            Hidden::Escaped => crate::escape::shown_until(text, end, &mut scratch.escapes),
+            Hidden::Escaped => crate::escape::shown_until(text, end, &kept, &mut scratch.escapes),
             Hidden::Verbatim => {
                 scratch.escapes.clear();
                 std::borrow::Cow::Borrowed(text.get(..end).unwrap_or(text))
@@ -193,6 +197,175 @@ impl Fonts {
 
         ShapedRun { advance: pen, glyphs, source_len }
     }
+
+    /// The byte offsets of the [`crate::escape::Verdict::Undecided`] code points
+    /// in `text` that change what is drawn, and so are drawn as themselves.
+    ///
+    /// **Asked of the glyphs**, as the face draws them, because whether a face
+    /// honours a variation sequence or ligates an emoji sequence is the face's
+    /// business: `Brand™\u{FE0F}` and `Brand™` were the same pixels. One is kept
+    /// when taking it out changes the inked glyphs of the cluster it is in — a
+    /// variant, a family — or when cutting the cluster at it would, because the
+    /// face draws one glyph across the place it is in, as the FE0F inside a
+    /// rainbow flag. This shaper shapes a cluster at a time, so nothing outside
+    /// the cluster can depend on it.
+    ///
+    /// Only a name holding such a code point pays, and only on a layout-cache miss:
+    /// four shapings of its cluster and a raster of the glyphs that differ, once
+    /// per cluster — the answer is kept, and a folder of names ending in the same
+    /// emoji asks once.
+    fn what_shows(&mut self, text: &str, px_size: f32, weight: Weight) -> Vec<usize> {
+        let mut undecided = crate::escape::undecided(text).peekable();
+        if undecided.peek().is_none() {
+            return Vec::new();
+        }
+        let undecided: Vec<usize> = undecided.collect();
+        let mut kept = Vec::new();
+        for at in undecided {
+            let Some(character) = text[at..].chars().next() else { continue };
+            let cluster = cluster_around(text, at);
+            let key = (text[cluster.clone()].to_owned(), at - cluster.start, weight as u8);
+            let shows = if let Some(&shows) = self.shows.get(&key) {
+                shows
+            } else {
+                let shows = self.decide(&key.0, key.1, character, (px_size, weight));
+                // Bounded the way the label cache is, and for its reason.
+                if self.shows.len() >= SHOWS_CAP {
+                    self.shows.clear();
+                }
+                self.shows.insert(key, shows);
+                shows
+            };
+            if shows {
+                kept.push(at);
+            }
+        }
+        kept
+    }
+
+    /// Whether `character`, at `at` in `cluster`, changes what the cluster draws.
+    fn decide(&mut self, cluster: &str, at: usize, character: char, size: (f32, Weight)) -> bool {
+        let (head, tail) = (&cluster[..at], &cluster[at + character.len_utf8()..]);
+        let bare = self.glyphs(&[head, tail].concat(), size);
+        let with = self.glyphs(cluster, size);
+        let mut cut = self.glyphs(head, size);
+        cut.extend(self.glyphs(tail, size));
+        let mut ink = std::collections::HashMap::new();
+        let px_size = size.0;
+        if self.differs((&with, &bare), px_size, &mut ink) {
+            return true;
+        }
+        // A selector at the end of its cluster cuts nothing, and asking whether
+        // the cluster has ink would rasterize an emoji to learn it.
+        if cut == bare {
+            return false;
+        }
+        // A cluster no face can draw — a subdivision flag here is one
+        // missing-glyph box — has no glyph across the code point to split.
+        let drawn = with.iter().any(|&glyph| self.has_ink(glyph, px_size, &mut ink));
+        drawn && self.differs((&cut, &bare), px_size, &mut ink)
+    }
+
+    /// The glyphs `text` shapes to as the font has it, in order.
+    fn glyphs(&mut self, text: &str, size: (f32, Weight)) -> Vec<(u16, u16)> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let (px_size, weight) = size;
+        let run = self.shape_part(text, text.len(), px_size, weight, Hidden::Verbatim);
+        run.glyphs.iter().map(|glyph| (glyph.face, glyph.glyph)).collect()
+    }
+
+    /// Whether two runs put different ink on the screen.
+    ///
+    /// Only the glyphs one run has and the other does not are rasterized, which
+    /// is usually the one a selector maps to: a face that maps it to an empty
+    /// glyph, or not at all, draws nothing there, and the missing-glyph box is a
+    /// box, not a variant.
+    fn differs(
+        &mut self,
+        runs: (&Glyphs, &Glyphs),
+        px_size: f32,
+        ink: &mut std::collections::HashMap<(u16, u16), bool>,
+    ) -> bool {
+        let (first, second) = runs;
+        if first == second {
+            return false;
+        }
+        let mut count = std::collections::HashMap::new();
+        for &glyph in first {
+            *count.entry(glyph).or_insert(0i32) += 1;
+        }
+        for &glyph in second {
+            *count.entry(glyph).or_insert(0) -= 1;
+        }
+        let odd: Vec<(u16, u16)> =
+            count.into_iter().filter(|&(_, n)| n != 0).map(|(glyph, _)| glyph).collect();
+        let mut keep =
+            |glyph: &(u16, u16)| !odd.contains(glyph) || self.has_ink(*glyph, px_size, ink);
+        let first: Vec<_> = first.iter().filter(|glyph| keep(glyph)).collect();
+        let second: Vec<_> = second.iter().filter(|glyph| keep(glyph)).collect();
+        first != second
+    }
+
+    /// Whether a glyph puts any ink down; the missing-glyph box never counts.
+    fn has_ink(
+        &mut self,
+        glyph: (u16, u16),
+        px_size: f32,
+        ink: &mut std::collections::HashMap<(u16, u16), bool>,
+    ) -> bool {
+        let (face, id) = glyph;
+        if id == 0 {
+            return false;
+        }
+        if let Some(&inked) = ink.get(&glyph) {
+            return inked;
+        }
+        let quarter_px = (px_size * 4.0).round().clamp(0.0, f32::from(u16::MAX)) as u16;
+        let key = GlyphKey { face, glyph: id, quarter_px, subpixel: 0 };
+        let inked = self.rasterize(key).is_some_and(|image| image.data.iter().any(|&a| a != 0));
+        ink.insert(glyph, inked);
+        inked
+    }
+}
+
+/// A run's glyphs as face and glyph id, which is what two runs are compared by.
+type Glyphs = [(u16, u16)];
+
+/// Decisions [`Fonts::what_shows`] keeps before clearing them all.
+pub(crate) const SHOWS_CAP: usize = 1024;
+
+/// The byte range of the cluster `swash` would shape the code point at `at` in.
+///
+/// Parsed under the script of the nearest letter before it, because a cluster's
+/// extent is script-dependent only for the scripts that have syllables, and
+/// those are the letters this is judged after.
+fn cluster_around(text: &str, at: usize) -> std::ops::Range<usize> {
+    let script = text[..at]
+        .chars()
+        .rev()
+        .map(Codepoint::script)
+        .find(|script| !matches!(script, Script::Common | Script::Inherited | Script::Unknown))
+        .unwrap_or(Script::Latin);
+    let mut cluster = CharCluster::new();
+    let mut parser = Parser::new(
+        script,
+        text.char_indices().map(|(offset, character)| Token {
+            ch: character,
+            offset: offset as u32,
+            len: character.len_utf8() as u8,
+            info: character.properties().into(),
+            data: 0,
+        }),
+    );
+    while parser.next(&mut cluster) {
+        let range = cluster.range().to_range();
+        if range.contains(&at) {
+            return range;
+        }
+    }
+    at..at + text[at..].chars().next().map_or(0, char::len_utf8)
 }
 
 /// Reusable buffers for segmentation.
@@ -313,7 +486,7 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{Scratch, segment};
-    use crate::fonts::{Fonts, Weight};
+    use crate::fonts::{Fonts, GlyphKey, Weight};
 
     fn runs(text: &str) -> Vec<(String, bool)> {
         let mut scratch = Scratch::default();
@@ -396,12 +569,101 @@ mod tests {
         let Ok(mut fonts) = Fonts::discover() else { return };
         for text in [
             "report.pdf",
-            "family \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}.jpg",
             "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}.txt",
             "קובץ.webp",
         ] {
             let run = fonts.shape(text, 13.0, Weight::Regular);
             assert!(run.glyphs.iter().all(|glyph| !glyph.escape), "{text:?}");
         }
+    }
+
+    /// What a run puts on the screen: each inked glyph, where it is, and how far
+    /// the run reaches — the pixels a person compares two rows by.
+    fn pixels(fonts: &mut Fonts, text: &str) -> (Vec<(u16, u16, i32)>, i32) {
+        let run = fonts.shape(text, 13.0, Weight::Regular);
+        let inked = run
+            .glyphs
+            .iter()
+            .filter(|glyph| {
+                let key =
+                    GlyphKey { face: glyph.face, glyph: glyph.glyph, quarter_px: 52, subpixel: 0 };
+                fonts.rasterize(key).is_some_and(|image| image.data.iter().any(|&a| a != 0))
+            })
+            .map(|glyph| (glyph.face, glyph.glyph, glyph.x.round() as i32))
+            .collect();
+        (inked, run.advance.round() as i32)
+    }
+
+    /// **The second-round defect, as a unit: three names, one picture.** This
+    /// shaper honours neither presentation selector on ™, so `Brand™.png` and the
+    /// same name with U+FE0E or U+FE0F drew the same pixels. Whatever the faces
+    /// do with a selector, two names that differ by one must not.
+    #[test]
+    fn names_that_differ_by_a_selector_never_draw_alike() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        for names in [
+            ["Brand\u{2122}.png", "Brand\u{2122}\u{FE0E}.png", "Brand\u{2122}\u{FE0F}.png"],
+            ["\u{2764}.txt", "\u{2764}\u{FE0E}.txt", "\u{2764}\u{FE0F}.txt"],
+            ["\u{A9}.txt", "\u{A9}\u{FE0E}.txt", "\u{A9}\u{FE0F}.txt"],
+            ["\u{1F3D6}.jpeg", "\u{1F3D6}\u{FE0E}.jpeg", "\u{1F3D6}\u{FE0F}.jpeg"],
+            ["\u{2192}.txt", "\u{2192}\u{FE0E}.txt", "\u{2192}\u{FE0F}.txt"],
+            ["\u{8279}.txt", "\u{8279}\u{FE00}.txt", "\u{8279}\u{E0100}.txt"],
+            ["\u{1820}.txt", "\u{1820}\u{180B}.txt", "\u{1820}\u{180C}.txt"],
+            ["\u{1F468}\u{1F469}", "\u{1F468}\u{200D}\u{1F469}", "\u{1F468}\u{FE0F}\u{1F469}"],
+        ] {
+            let drawn: Vec<_> = names.iter().map(|name| pixels(&mut fonts, name)).collect();
+            for first in 0..names.len() {
+                for second in first + 1..names.len() {
+                    assert_ne!(
+                        drawn[first], drawn[second],
+                        "{:?} and {:?} draw alike",
+                        names[first], names[second]
+                    );
+                }
+            }
+        }
+    }
+
+    /// And a sequence the emoji face draws as one glyph stays one glyph: a
+    /// family's joiners and a rainbow flag's FE0F are what the glyph is spelled
+    /// with, so cutting the sequence for an escape would draw three people and a
+    /// white flag. Asked only where this machine's emoji face ligates them.
+    #[test]
+    fn a_sequence_the_emoji_face_draws_as_one_glyph_is_not_escaped() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        for sequence in [
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}",
+            "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
+            "\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}",
+        ] {
+            let verbatim = fonts.shape_part(
+                sequence,
+                sequence.len(),
+                13.0,
+                Weight::Regular,
+                crate::escape::Hidden::Verbatim,
+            );
+            if verbatim.glyphs.len() != 1 {
+                continue;
+            }
+            let run = fonts.shape(sequence, 13.0, Weight::Regular);
+            assert!(run.glyphs.iter().all(|glyph| !glyph.escape), "{sequence:?} was cut");
+        }
+    }
+
+    /// **A gap, recorded rather than promised.** A ZWNJ in a Persian word is kept
+    /// by rule — escaping it would mark ordinary words — but this shaper does not
+    /// join Arabic, so here it changes nothing drawn and two Persian names that
+    /// differ only by one draw alike. When the shaper joins Arabic the second
+    /// assertion fails, and the gap is closed: delete it then.
+    #[test]
+    fn a_persian_zwnj_is_kept_by_rule_and_draws_nothing_here_yet() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let (with, without) = (
+            "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}.txt",
+            "\u{645}\u{6CC}\u{62E}\u{648}\u{627}\u{647}\u{645}.txt",
+        );
+        assert!(fonts.shape(with, 13.0, Weight::Regular).glyphs.iter().all(|g| !g.escape));
+        assert_eq!(pixels(&mut fonts, with), pixels(&mut fonts, without));
     }
 }
