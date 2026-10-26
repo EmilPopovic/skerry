@@ -1277,7 +1277,11 @@ pub fn replay(
         match step(&change) {
             Ok(fresh) => {
                 if let Change::Noted { note, .. } = &fresh {
-                    problem = Some(Problem::plain(ProblemKind::Unreadable, note.clone()));
+                    problem = Some(Problem::new(
+                        ProblemKind::Note,
+                        note.clone(),
+                        "completed with a note",
+                    ));
                 }
                 completed.push(fresh);
                 if problem.is_some() {
@@ -1711,6 +1715,8 @@ mod tests {
             panic!("the undo did not complete: {:?}", undo.problem)
         };
         assert!(note.contains("written.txt") && note.contains("already has its name"), "{note}");
+        let reported = undo.problem.expect("the note is reported");
+        assert_eq!((reported.kind(), reported.message()), (ProblemKind::Note, note.clone()));
         assert_eq!(std::fs::read(source.join("copied.txt")).unwrap(), b"moved");
         assert_eq!(std::fs::read(source.join("written.txt")).unwrap(), b"written after");
         assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");

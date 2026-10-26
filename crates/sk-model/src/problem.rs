@@ -80,6 +80,25 @@ pub enum ProblemKind {
     /// a person's call. [`Self::NameTaken`]'s advice — choose another name —
     /// was what this said before it existed. Counted.
     NameHeld,
+    /// A move back went into a folder that was already there — recreated, or
+    /// another of the same name — beside whatever it held, replacing nothing.
+    ///
+    /// Its own kind because nothing went wrong and nothing was left, but the
+    /// folder now holds two things' contents, and that is worth saying.
+    MergedInto,
+    /// A folder a copy had just made was not the folder it then opened:
+    /// somebody replaced it in between.
+    ///
+    /// Its own kind because [`Self::Gone`] — "no longer there" — was what this
+    /// said, about a folder that was there and was the wrong one; the advice is
+    /// about who else can write where the copy was going.
+    FolderSwapped,
+    /// A note a finished step carried, reported as itself.
+    ///
+    /// What `ops::replay` raises when an undo or redo completed with a note:
+    /// the note is already the sentence, and dressing it as
+    /// [`Self::Unreadable`] rendered "Cannot read ." with no subject.
+    Note,
     /// A mode could not be changed on the descriptor that was checked: the
     /// kernel has no `fchmodat2` and `/proc` is not mounted.
     ///
@@ -193,6 +212,9 @@ impl ProblemKind {
             Self::LeftBehind => "error.left_behind",
             Self::NameHeld => "error.name_held",
             Self::ModeUnchangeable => "error.mode_unchangeable",
+            Self::MergedInto => "error.merged_into",
+            Self::FolderSwapped => "error.folder_swapped",
+            Self::Note => "error.note",
             Self::ChangedSince => "error.changed_since",
             Self::TooLarge => "error.too_large",
             Self::Full => "error.full",

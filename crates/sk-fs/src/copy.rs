@@ -623,16 +623,25 @@ fn across(
         options,
         merge,
         held: Left::default(),
+        merged: None,
         cancel,
         progress,
         watch,
         taken: Some(&mut taken),
     };
     walk.copy(source, destination)?;
-    let held = std::mem::take(&mut walk.held);
+    let (held, merged) = (std::mem::take(&mut walk.held), walk.merged.take());
     // Only now, and only because the copy above returned `Ok`.
     let left = remove_taken(source, &taken, cancel)?;
-    Ok(left.problem(source, &held))
+    Ok(left.problem(source, &held).or_else(|| {
+        merged.map(|folder| {
+            Problem::new(
+                ProblemKind::MergedInto,
+                folder.display().to_string(),
+                "merged into a folder already there",
+            )
+        })
+    }))
 }
 
 fn finish_move(source: &Path, placement: Placement) -> Result<(), Problem> {
@@ -1065,6 +1074,9 @@ struct Walk<'a> {
     /// leave in the source whatever finds its name taken there, in `held`.
     merge: bool,
     held: Left,
+    /// The first folder a merge entered rather than made, which a move back
+    /// reports even where nothing clashed in it.
+    merged: Option<PathBuf>,
 }
 
 impl<'a> Walk<'a> {
@@ -1074,7 +1086,16 @@ impl<'a> Walk<'a> {
         progress: &'a mut Progress,
         watch: &'a mut dyn FnMut(Progress),
     ) -> Self {
-        Self { options, cancel, progress, watch, taken: None, merge: false, held: Left::default() }
+        Self {
+            options,
+            cancel,
+            progress,
+            watch,
+            taken: None,
+            merge: false,
+            held: Left::default(),
+            merged: None,
+        }
     }
 
     /// Copies `source` to `destination`, which must not exist unless the options
@@ -1220,6 +1241,8 @@ impl<'a> Walk<'a> {
         };
         if made {
             made_here(&into, to)?;
+        } else if self.merge && self.merged.is_none() {
+            self.merged = Some(to.path.to_path_buf());
         }
         // Keep the first warning bounded in memory, but finish every child. A
         // preservation warning describes published data; other errors stop the walk.
@@ -1331,20 +1354,53 @@ fn fill(file: &OwnedFd, buffer: &mut [u8]) -> Result<usize, Errno> {
 /// **Between `mkdirat` and `openat` is a window**, and somebody who can write
 /// the folder above could rename the new folder away and put one of their own
 /// in its place, so that what follows is copied into a folder they hold — the
-/// review measured it. A folder made a moment ago is empty and belongs to
-/// whoever made it, so the one opened has to be both. Where a filesystem shows
-/// one owner for everything — FAT, CIFS, sshfs without `idmap` — the new folder
-/// has its parent's owner rather than ours, and that is accepted too, or every
-/// copy of a folder onto a USB stick would be refused. What it leaves open is
-/// a swap by the parent's own owner, who can rename the finished copy anyway.
+/// review measured it. A folder made a moment ago is empty, and on a filesystem
+/// that keeps real ownership it is ours, so the one opened has to be both.
+///
+/// **Ownership is asked only where the filesystem answers it.** NFS with
+/// `all_squash`, sshfs without `idmap` and CIFS with Unix extensions all give
+/// a new folder an owner the server chose, which is neither the copier nor
+/// reliably the parent's — so asking there refused ordinary copies onto them.
+/// Which filesystem it is comes from `fstatfs` on the destination's parent,
+/// against the local ones listed in [`OWNED`]; anywhere else the emptiness
+/// test stands alone.
 fn made_here(into: &OwnedFd, to: At<'_>) -> Result<(), Problem> {
     let made = fstat(into).map_err(|error| at(error, to.path, "stat"))?;
-    let parent = fstat(to.dir).map_or(u32::MAX, |parent| parent.st_uid);
-    let ours = made.st_uid == rustix::process::geteuid().as_raw() || made.st_uid == parent;
+    let ours = !owners_are_real(to.dir) || made.st_uid == rustix::process::geteuid().as_raw();
     if !ours || !names(into, to.path)?.is_empty() {
-        return Err(changed(to.path));
+        return Err(Problem::new(
+            ProblemKind::FolderSwapped,
+            to.path.display().to_string(),
+            "not the folder just made",
+        ));
     }
     Ok(())
+}
+
+/// Local filesystems whose owners are the ones the kernel wrote, by `f_type`
+/// (`include/uapi/linux/magic.h`): ext2/3/4, xfs, btrfs, tmpfs, f2fs, ramfs,
+/// bcachefs, jfs, nilfs2 and ZFS.
+const OWNED: [u64; 10] = [
+    0xEF53,
+    0x5846_5342,
+    0x9123_683E,
+    0x0102_1994,
+    0xF2F5_2010,
+    0x8584_58F6,
+    0xCA45_1A4E,
+    0x3153_464A,
+    0x3434,
+    0x2FC1_2FC1,
+];
+
+/// Whether the filesystem holding `dir` keeps real ownership — see [`OWNED`].
+///
+/// A refused `fstatfs` answers no, which leaves the emptiness test.
+fn owners_are_real(dir: BorrowedFd<'_>) -> bool {
+    fs::fstatfs(dir).is_ok_and(|stat| {
+        let kind: u64 = stat.f_type as _;
+        OWNED.contains(&(kind & 0xFFFF_FFFF))
+    })
 }
 
 /// Every name in a directory this walk holds open, except `.` and `..`.
@@ -2372,7 +2428,47 @@ mod tests {
         std::fs::create_dir(root.join("theirs")).unwrap();
         std::fs::write(root.join("theirs/ATTACKER"), b"x").unwrap();
         let theirs = std::fs::File::open(root.join("theirs")).unwrap().into();
-        assert!(super::made_here(&theirs, at("theirs", Path::new("theirs"))).is_err());
+        let refused = super::made_here(&theirs, at("theirs", Path::new("theirs"))).unwrap_err();
+        assert_eq!(refused.kind(), sk_model::ProblemKind::FolderSwapped, "{refused}");
+    }
+
+    /// Ownership is asked only of a filesystem that keeps it: tmpfs does, and
+    /// procfs — standing in for NFS, sshfs and FAT, whose owners a server or a
+    /// mount option chose — does not, so there emptiness is the whole test.
+    #[test]
+    fn owners_are_asked_only_where_the_filesystem_keeps_them() {
+        let open = |path: &str| std::fs::File::open(path).unwrap();
+        let tmp = open("/dev/shm");
+        assert!(super::owners_are_real(tmp.as_fd()), "tmpfs keeps real owners");
+        let proc = open("/proc");
+        assert!(!super::owners_are_real(proc.as_fd()), "procfs was asked for an owner");
+    }
+
+    /// A move back into a folder that was already there says so, even where
+    /// nothing in it clashed: it now holds two things' contents.
+    #[test]
+    fn a_move_back_into_a_folder_already_there_says_so() {
+        let root = scratch("merged-into");
+        three(&root.join("tree"), "moved");
+        three(&root.join("back"), "there");
+        std::fs::rename(root.join("back/a"), root.join("back/kept")).unwrap();
+        std::fs::remove_file(root.join("back/b")).unwrap();
+        std::fs::remove_file(root.join("back/c")).unwrap();
+        let noted = super::across(
+            &root.join("tree"),
+            &root.join("back"),
+            Options::default(),
+            true,
+            &sk_util::Cancel::new(),
+            &mut super::Progress::default(),
+            &mut |_| {},
+        )
+        .expect("moved back")
+        .expect("a note");
+        assert_eq!(noted.kind(), sk_model::ProblemKind::MergedInto, "{noted}");
+        assert_eq!(std::fs::read(root.join("back/kept")).unwrap(), b"there");
+        assert_eq!(std::fs::read(root.join("back/a")).unwrap(), b"moved");
+        assert!(!root.join("tree").exists());
     }
 
     #[test]
