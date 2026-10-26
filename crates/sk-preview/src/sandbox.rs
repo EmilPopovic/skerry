@@ -222,10 +222,65 @@ impl Report {
 /// makes of a `--probe` run by hand — and never what the host makes of a helper.
 #[must_use]
 pub fn confine(role: Role, readable: &[&Path], executable: &[&Path], writable: &[&Path]) -> Report {
+    apply(role, role.limits(), i32::MAX, readable, executable, writable)
+}
+
+/// As [`confine`], for a probe a person runs, whose report goes wherever they
+/// sent it.
+///
+/// **Everything but the file ceiling.** `RLIMIT_FSIZE` counts a redirect into a
+/// file like any other write, so a probe with a ceiling of zero dies on its first
+/// line of output — `--probe … > probe.txt`, which is how a probe reaches a bug
+/// report. The ceiling bounds what a decoder talked into writing puts in the
+/// shared cache; a probe writes where Landlock lets it, which is its own output
+/// and, for `--write`, the one folder named.
+#[must_use]
+pub fn confine_by_hand(
+    role: Role,
+    readable: &[&Path],
+    executable: &[&Path],
+    writable: &[&Path],
+) -> Report {
+    let limits = Limits { file_size: libc::RLIM_INFINITY, ..role.limits() };
+    apply(role, limits, i32::MAX, readable, executable, writable)
+}
+
+/// As [`confine`], as if this kernel's Landlock were no newer than `abi` — zero
+/// for none at all.
+///
+/// **For tests, and no helper calls it.** It is how a machine with ABI 8 shows
+/// what a helper does on a kernel from 5.13 to 6.1, or without Landlock, without
+/// a shim between the helper and the kernel. It can only take Landlock rights
+/// away, and what Landlock no longer covers the filter covers instead.
+#[doc(hidden)]
+#[must_use]
+pub fn confine_below(
+    abi: i32,
+    role: Role,
+    readable: &[&Path],
+    executable: &[&Path],
+    writable: &[&Path],
+) -> Report {
+    apply(role, role.limits(), abi, readable, executable, writable)
+}
+
+/// One of [`confine`], [`confine_by_hand`] or a [`confine_below`], for a helper
+/// whose served mode and probe share the code that grants its paths.
+pub type Confine = fn(Role, &[&Path], &[&Path], &[&Path]) -> Report;
+
+/// The five layers, with `limits` and with Landlock no newer than `ceiling`.
+fn apply(
+    role: Role,
+    limits: Limits,
+    ceiling: i32,
+    readable: &[&Path],
+    executable: &[&Path],
+    writable: &[&Path],
+) -> Report {
     let mut report = Report {
         session: own_session(),
         no_new_privs: no_new_privs(),
-        limits: caps(role.limits()),
+        limits: caps(limits),
         landlock: None,
         unconfined: std::env::var_os(WITHOUT_LANDLOCK).is_some_and(|value| value == "allow"),
         seccomp: false,
@@ -240,7 +295,7 @@ pub fn confine(role: Role, readable: &[&Path], executable: &[&Path], writable: &
                 && !outputs.iter().any(|output| path.starts_with(output))
         })
         .collect();
-    report.landlock = landlock(readable, &executable, writable);
+    report.landlock = landlock_at(ceiling, readable, &executable, writable);
     report.seccomp = crate::seccomp::install(role.policy(report.landlock));
     if !report.no_new_privs || !report.limits || !report.seccomp {
         eprintln!("skerry: mandatory helper confinement failed: {}", report.line());
@@ -374,19 +429,34 @@ fn abi() -> Option<i32> {
     i32::try_from(version).ok().filter(|abi| *abi > 0)
 }
 
+/// [`landlock_at`] with every right this kernel has, for the tests that apply
+/// Landlock alone.
+#[cfg(test)]
+fn landlock(readable: &[&Path], executable: &[&Path], writable: &[&Path]) -> Option<i32> {
+    landlock_at(i32::MAX, readable, executable, writable)
+}
+
 /// Restricts the filesystem to `readable` and `writable`, or reports no Landlock.
 ///
-/// Handles filesystem rights known by this build and supported by the kernel.
-/// ABI 3 adds truncation independently of writes; below it, seccomp denies
-/// truncation instead. Executable paths receive a separate grant from writable
-/// output directories.
+/// Handles filesystem rights known by this build and supported by the kernel,
+/// and none newer than ABI `ceiling`. ABI 3 adds truncation independently of
+/// writes; below it, seccomp denies truncation instead. Executable paths receive
+/// a separate grant from writable output directories.
 ///
 /// **From ABI 6 the domain is scoped**: a signal or an abstract Unix socket
 /// reaches only processes inside it, which is the helper and what it started. A
 /// kernel older than the 24-byte attribute reads the first eight and checks the
 /// rest are zero, which they are wherever `scoped` is not set.
-fn landlock(readable: &[&Path], executable: &[&Path], writable: &[&Path]) -> Option<i32> {
-    let abi = landlock_abi()?;
+fn landlock_at(
+    ceiling: i32,
+    readable: &[&Path],
+    executable: &[&Path],
+    writable: &[&Path],
+) -> Option<i32> {
+    let abi = landlock_abi()?.min(ceiling);
+    if abi < 1 {
+        return None;
+    }
     let rights =
         ABI_1_RIGHTS | if abi >= 2 { 1 << 13 } else { 0 } | if abi >= 3 { 1 << 14 } else { 0 };
     let attribute = RulesetAttribute {
@@ -525,6 +595,13 @@ mod tests {
         std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap()
     }
 
+    /// Writes `bytes` into a new file, the way a helper may below Landlock ABI 3:
+    /// `O_EXCL` and never `O_TRUNC`, which `std::fs::write` asks for.
+    fn created(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(bytes)
+    }
+
     /// The line names what is missing as loudly as what is present, which is the
     /// difference between a log and a reassurance.
     #[test]
@@ -623,9 +700,9 @@ mod tests {
             // SAFETY: neither call takes a pointer.
             assert_eq!(unsafe { libc::getsid(0) }, unsafe { libc::getpid() });
             assert!(std::fs::File::open("/dev/tty").is_err(), "a terminal is still reachable");
-            let big = std::fs::write(root.join("big"), vec![0u8; 2 * 1024 * 1024]);
+            let big = created(&root.join("big"), &vec![0u8; 2 * 1024 * 1024]);
             assert_eq!(big.err().and_then(|it| it.raw_os_error()), Some(libc::EFBIG));
-            assert!(std::fs::write(root.join("small"), [0u8; 4096]).is_ok());
+            assert!(created(&root.join("small"), &[0u8; 4096]).is_ok());
             return;
         }
         let root = scratch("session");
@@ -1054,5 +1131,145 @@ mod tests {
                 .unwrap()
                 .success()
         );
+    }
+
+    /// **No descriptor may name an owner to signal**: `F_SETOWN` and a pipe the
+    /// helper writes is `kill` by another route, and below Landlock ABI 6 nothing
+    /// else stops it — reproduced there killing a `sleep` outside the domain.
+    #[test]
+    fn a_descriptor_may_name_no_owner_to_signal() {
+        const MARKER: &str = "SKERRY_SECCOMP_OWNER";
+        const NAME: &str = "sandbox::tests::a_descriptor_may_name_no_owner_to_signal";
+        if std::env::var_os(MARKER).is_some() {
+            use std::os::fd::AsRawFd as _;
+            let (read, _write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
+            let fd = read.as_raw_fd();
+            let parent = libc::c_long::from(std::os::unix::process::parent_id());
+            let f_owner_ex = [1i32, i32::try_from(parent).unwrap()];
+            assert!(super::no_new_privs());
+            assert!(crate::seccomp::install(Role::Listing.policy(Some(5))));
+            // SAFETY: a descriptor this test owns, a pid as an integer, a live
+            // `f_owner_ex`, and a pointer to the pid. Nothing is signalled: no
+            // descriptor here has `O_ASYNC`.
+            unsafe {
+                let by_pid = libc::syscall(libc::SYS_fcntl, fd, 8, parent);
+                assert_eq!(failed(by_pid), Some(libc::EPERM), "F_SETOWN");
+                let extended = libc::syscall(libc::SYS_fcntl, fd, 15, f_owner_ex.as_ptr());
+                assert_eq!(failed(extended), Some(libc::EPERM), "F_SETOWN_EX");
+                let signalled = libc::syscall(libc::SYS_fcntl, fd, 10, libc::SIGTERM);
+                assert_eq!(failed(signalled), Some(libc::EPERM), "F_SETSIG");
+                let pid = &raw const parent;
+                assert_eq!(
+                    failed(libc::syscall(libc::SYS_ioctl, fd, 0x8901, pid)),
+                    Some(libc::EPERM)
+                );
+                assert!(libc::syscall(libc::SYS_fcntl, fd, libc::F_GETFL) >= 0, "F_GETFL");
+            }
+            return;
+        }
+        let output = again(NAME, &[(MARKER, OsStr::new("1"))]);
+        assert!(passed(&output), "{}", said(&output));
+    }
+
+    /// **An inode is not changed through a descriptor opened to read it.** Flags,
+    /// attributes, verity, an encryption policy and a version all need only that,
+    /// and Landlock's read right gives it on every file the user owns — reproduced
+    /// setting `FS_NOATIME_FL` outside every root at ABI 8.
+    #[test]
+    fn an_inode_is_not_changed_through_a_descriptor_opened_to_read_it() {
+        const MARKER: &str = "SKERRY_SECCOMP_IOCTL";
+        const NAME: &str =
+            "sandbox::tests::an_inode_is_not_changed_through_a_descriptor_opened_to_read_it";
+        if let Some(root) = std::env::var_os(MARKER) {
+            use std::os::fd::AsRawFd as _;
+            let opened = std::fs::File::open(PathBuf::from(root).join("owned")).unwrap();
+            let fd = opened.as_raw_fd();
+            assert!(super::no_new_privs());
+            assert!(crate::seccomp::install(Role::Thumbnails.policy(Some(8))));
+            let null = std::ptr::null::<u8>();
+            for request in crate::seccomp::INODE_IOCTLS {
+                // SAFETY: a descriptor this test owns and a null argument, which
+                // the kernel would refuse with EFAULT if the filter did not.
+                let changed = unsafe { libc::syscall(libc::SYS_ioctl, fd, request, null) };
+                assert_eq!(failed(changed), Some(libc::EPERM), "{request:#x}");
+            }
+            let mut waiting: libc::c_int = -1;
+            // SAFETY: a live out-pointer for the count.
+            let counted = unsafe { libc::ioctl(fd, libc::FIONREAD, &raw mut waiting) };
+            assert_eq!((counted, waiting), (0, 3), "an ioctl that changes nothing was refused");
+            return;
+        }
+        let root = scratch("ioctl");
+        std::fs::write(root.join("owned"), "key").unwrap();
+        let output = again(NAME, &[(MARKER, root.as_os_str())]);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(passed(&output), "{}", said(&output));
+    }
+
+    /// **Nothing a helper starts may leave the group the host kills.** The
+    /// helper's own `setsid` is behind it by the time the filter is in, so after
+    /// that `setsid`, `setpgid` and `CLONE_PARENT` are only ways out — and a
+    /// renderer, which needs none of them, still starts.
+    #[test]
+    fn nothing_a_helper_starts_may_leave_its_group() {
+        const MARKER: &str = "SKERRY_SECCOMP_GROUP";
+        const NAME: &str = "sandbox::tests::nothing_a_helper_starts_may_leave_its_group";
+        if std::env::var_os(MARKER).is_some() {
+            assert!(super::no_new_privs());
+            assert!(crate::seccomp::install(Role::Pages.policy(Some(8))));
+            // SAFETY: neither takes a pointer. A `clone` a broken filter let
+            // through returns 0 in the copy, which leaves at once.
+            unsafe {
+                assert_eq!(failed(libc::syscall(libc::SYS_setsid)), Some(libc::EPERM));
+                assert_eq!(failed(libc::syscall(libc::SYS_setpgid, 0, 0)), Some(libc::EPERM));
+                let flags = libc::c_long::from(libc::CLONE_PARENT | libc::SIGCHLD);
+                let cloned = libc::syscall(libc::SYS_clone, flags, 0, 0, 0, 0);
+                if cloned == 0 {
+                    libc::_exit(0);
+                }
+                assert_eq!(failed(cloned), Some(libc::EPERM), "CLONE_PARENT");
+            }
+            assert!(Command::new("true").status().unwrap().success());
+            return;
+        }
+        let output = again(NAME, &[(MARKER, OsStr::new("1"))]);
+        assert!(passed(&output), "{}", said(&output));
+    }
+
+    /// **A probe's report reaches the file somebody sent it to**, and the
+    /// served confinement's ceiling of zero is what would stop it: `println!`
+    /// into a file with no room panics, and the probe exited 101.
+    #[test]
+    fn a_probe_writes_its_report_into_a_file_and_a_served_helper_cannot() {
+        const MARKER: &str = "SKERRY_PROBE_OUTPUT";
+        const NAME: &str =
+            "sandbox::tests::a_probe_writes_its_report_into_a_file_and_a_served_helper_cannot";
+        if let Some(how) = std::env::var_os(MARKER) {
+            let readable = [Path::new("/")];
+            let report = if how == "probe" {
+                super::confine_by_hand(Role::Pages, &readable, &[], &[])
+            } else {
+                super::confine(Role::Pages, &readable, &[], &[])
+            };
+            println!("skerry: probe: {}", report.line());
+            return;
+        }
+        let root = scratch("probe");
+        let mut status = Vec::new();
+        for how in ["probe", "served"] {
+            let out = std::fs::File::create(root.join(how)).unwrap();
+            let ran = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env(MARKER, how)
+                .env(WITHOUT_LANDLOCK, "allow")
+                .stdout(out)
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            status.push((ran.success(), std::fs::read_to_string(root.join(how)).unwrap()));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(status[0].0 && status[0].1.contains("skerry: probe:"), "{:?}", status[0]);
+        assert!(!status[1].0, "a served helper wrote past a ceiling of zero: {:?}", status[1]);
     }
 }

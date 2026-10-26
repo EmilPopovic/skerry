@@ -51,7 +51,7 @@ fn main() {
                 // ADR 0006 is about.
                 let out = into.parent().filter(|it| !it.as_os_str().is_empty());
                 let writable: Vec<&Path> = out.into_iter().collect();
-                let report = sk_preview::sandbox::confine(
+                let report = sk_preview::sandbox::confine_by_hand(
                     sk_preview::sandbox::Role::Thumbnails,
                     &[Path::new("/")],
                     &[],
@@ -68,7 +68,9 @@ fn main() {
         probe(arguments.get(at + 1).map(PathBuf::from).as_deref());
         return;
     }
-    confine();
+    let report = confine(sk_preview::sandbox::confine);
+    // Rule 7's shape: say what is in force, including what is not.
+    let _ = writeln!(std::io::stderr(), "skerry-thumbnailer: {}", report.line());
     serve();
 }
 
@@ -79,7 +81,7 @@ fn main() {
 /// like no restriction and is not: it is *read* only, so a decoder that is talked
 /// into writing has nowhere to write but the thumbnail directory, and Landlock's
 /// filesystem rights are the whole of what a decoder could reach.
-fn confine() {
+fn confine(how: sk_preview::sandbox::Confine) -> sk_preview::sandbox::Report {
     let cache = cache::place(Path::new("/")).and_then(|it| it.parent().map(Path::to_path_buf));
     let writable: Vec<&Path> = cache.as_deref().into_iter().collect();
     // The cache has to exist before it can be granted, because a rule is a
@@ -90,14 +92,7 @@ fn confine() {
     // **Nothing executable.** A thumbnailer decodes in-process and has no
     // reason to start a program, so it is granted no execute right anywhere —
     // which means a decoder talked into spawning something cannot.
-    let report = sk_preview::sandbox::confine(
-        sk_preview::sandbox::Role::Thumbnails,
-        &[Path::new("/")],
-        &[],
-        &writable,
-    );
-    // Rule 7's shape: say what is in force, including what is not.
-    let _ = writeln!(std::io::stderr(), "skerry-thumbnailer: {}", report.line());
+    how(sk_preview::sandbox::Role::Thumbnails, &[Path::new("/")], &[], &writable)
 }
 
 /// Answers requests until the host closes the pipe.
@@ -189,7 +184,7 @@ fn modified(path: &Path) -> i64 {
 
 /// Decodes one file and says what happened, for a person at a terminal.
 fn probe(path: Option<&Path>) {
-    let report = sk_preview::sandbox::confine(
+    let report = sk_preview::sandbox::confine_by_hand(
         sk_preview::sandbox::Role::Thumbnails,
         &[Path::new("/")],
         &[],
@@ -253,5 +248,83 @@ fn write_out(path: &Path, into: &Path, side: u32) {
             };
             println!("skerry-thumbnailer: {said}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use sk_preview::sandbox::{Confine, confine_below};
+    use sk_preview::wire::{Ask, Refusal, Request};
+    use std::path::{Path, PathBuf};
+
+    /// **A thumbnail is cached where Landlock cannot restrict truncation, and
+    /// where there is no Landlock and the setting allows decoding** — ADR 0046.
+    /// The filter takes truncation over below ABI 3, so a cache writer that asked
+    /// for `O_TRUNC` cached nothing on kernels 5.13 to 6.1. This is served mode
+    /// short of the pipe: the confinement `main` applies, at the ABI asked for,
+    /// then [`super::answer`] on a thumbnail request and the cache read back.
+    #[test]
+    fn a_thumbnail_is_cached_below_landlock_abi_3_and_without_landlock() {
+        const MARKER: &str = "SKERRY_THUMBNAIL_CEILING";
+        const NAME: &str = "tests::a_thumbnail_is_cached_below_landlock_abi_3_and_without_landlock";
+        const ALLOW: &str = sk_preview::sandbox::WITHOUT_LANDLOCK;
+        if let Some(picture) = std::env::var_os(MARKER) {
+            let picture = PathBuf::from(picture);
+            let below: Confine = if std::env::var_os(ALLOW).is_some() {
+                |role, readable, run, write| confine_below(0, role, readable, run, write)
+            } else {
+                |role, readable, run, write| confine_below(2, role, readable, run, write)
+            };
+            let report = super::confine(below);
+            assert!(report.landlock.is_none_or(|abi| abi == 2), "{}", report.line());
+            let mtime = super::modified(&picture);
+            let request = Request {
+                ask: Ask::Thumbnail,
+                within: (128, 128),
+                page: 0,
+                path: picture.as_os_str().as_encoded_bytes().to_vec(),
+            };
+            assert_eq!(super::answer(&request).refusal, Refusal::None);
+            assert!(super::cache::read(&picture, mtime).is_some(), "nothing was cached");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("skerry-ceiling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let picture = root.join("picture.png");
+        picture_at(&picture);
+        let mut cases = vec![("none", true)];
+        if sk_preview::sandbox::landlock_abi().is_some_and(|abi| abi >= 2) {
+            cases.push(("abi2", false));
+        } else {
+            eprintln!("skerry: skip: no Landlock ABI 2 here to cap at");
+        }
+        for (label, allow) in cases {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", NAME, "--nocapture"])
+                .env(MARKER, &picture)
+                .env("XDG_CACHE_HOME", root.join(label))
+                .env_remove(ALLOW);
+            if allow {
+                command.env(ALLOW, "allow");
+            }
+            let output = command.output().unwrap();
+            let said = String::from_utf8_lossy(&output.stdout).into_owned()
+                + &String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success() && said.contains(" 1 passed"), "{label}: {said}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An eight-pixel PNG, written unconfined by the test runner.
+    fn picture_at(path: &Path) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 8, 8);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&[200u8; 8 * 8 * 4]).unwrap();
     }
 }

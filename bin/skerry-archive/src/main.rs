@@ -109,7 +109,7 @@ fn probe() {
     let root = [Path::new("/")];
     let tools = sandbox::executables(&["xz", "zstd", "bzip2"]);
     let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
-    let report = sandbox::confine(Role::Listing, &root, &executable, &[]);
+    let report = sandbox::confine_by_hand(Role::Listing, &root, &executable, &[]);
     println!("skerry-archive: {}", report.line());
     for filter in [
         sk_preview::archive::Filter::Xz,

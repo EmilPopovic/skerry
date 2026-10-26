@@ -57,6 +57,15 @@ const SETXATTRAT: c_long = 463;
 const REMOVEXATTRAT: c_long = 466;
 
 const CLONE_THREAD: u32 = 0x0001_0000;
+const CLONE_PARENT: u32 = 0x0000_8000;
+// `asm-generic/fcntl.h`, `asm-generic/ioctls.h` and `asm-generic/sockios.h`, which
+// x86-64 and aarch64 both use; a 64-bit kernel has no `fcntl64` to cover too.
+// The `libc` crate does not name the second and third on every target.
+const F_SETOWN: u32 = 8;
+const F_SETSIG: u32 = 10;
+const F_SETOWN_EX: u32 = 15;
+const FIOSETOWN: u32 = 0x8901;
+const SIOCSPGRP: u32 = 0x8902;
 /// Every `CLONE_NEW*` flag `clone` itself accepts.
 const CLONE_NEW: u32 = 0x7e02_0000;
 const O_TRUNC: u32 = 0o1000;
@@ -219,7 +228,11 @@ fn build(policy: Policy) -> Program {
     for syscall in BY_PID {
         program.deny_where(syscall, 0, Test::Except(0));
     }
+    for request in INODE_IOCTLS {
+        program.deny_where(libc::SYS_ioctl, 1, Test::Is(request));
+    }
     signals(&mut program, policy);
+    stays_in_its_group(&mut program);
     if !policy.stamps {
         no_times(&mut program);
     }
@@ -291,6 +304,12 @@ fn no_truncation(program: &mut Program) {
 /// to `kill` its decompressor when a listing stops early, and that pid is not
 /// known when the filter is built — so below Landlock ABI 6, whose signal scope
 /// is what closes this, it may signal a positive pid and never a group.
+///
+/// **And no descriptor may name an owner to signal.** `F_SETOWN` or
+/// `F_SETOWN_EX` with a pid, `F_SETSIG` and `O_ASYNC` on a pipe the helper holds
+/// is a signal to that pid whenever the pipe is written — `kill` by another
+/// route, which below ABI 6 nothing else stops. `FIOSETOWN` and `SIOCSPGRP` are
+/// the same thing spelled for a socket.
 fn signals(program: &mut Program, policy: Policy) {
     program.deny_where(libc::SYS_tgkill, 0, Test::Except(policy.pid));
     if policy.reaps {
@@ -301,7 +320,44 @@ fn signals(program: &mut Program, policy: Policy) {
     } else {
         program.deny_where(libc::SYS_kill, 0, Test::Except(policy.pid));
     }
+    for command in [F_SETOWN, F_SETOWN_EX, F_SETSIG] {
+        program.deny_where(libc::SYS_fcntl, 1, Test::Is(command));
+    }
+    for request in [FIOSETOWN, SIOCSPGRP] {
+        program.deny_where(libc::SYS_ioctl, 1, Test::Is(request));
+    }
 }
+
+/// No process the helper starts may leave the group [`crate::host::terminate`]
+/// signals.
+///
+/// **`setsid` has already run** — it is the first step of confinement — so
+/// after it, `setsid` and `setpgid` are only a way out of the group, and
+/// `CLONE_PARENT` makes a child the window's rather than the helper's.
+fn stays_in_its_group(program: &mut Program) {
+    program.deny_all(&[libc::SYS_setsid, libc::SYS_setpgid]);
+    program.deny_where(libc::SYS_clone, 0, Test::Any(CLONE_PARENT));
+}
+
+/// What changes a file's inode through a descriptor opened only to read it, so
+/// Landlock's read right is all it needs.
+///
+/// **By the low 32 bits**, which is all of the `unsigned int` the kernel reads.
+/// Flags are `chattr`'s `noatime`, `nodump` and `append`; the attributes are
+/// XFS's project and extent hints on every filesystem; verity makes a file
+/// permanently read-only; an encryption policy claims an empty folder for a key
+/// the helper chose; a version is the inode's generation.
+pub(crate) const INODE_IOCTLS: [u32; 9] = [
+    0x4008_6602, // FS_IOC_SETFLAGS
+    0x4004_6602, // FS_IOC32_SETFLAGS
+    0x401c_5820, // FS_IOC_FSSETXATTR
+    0x4080_6685, // FS_IOC_ENABLE_VERITY
+    0x800c_6613, // FS_IOC_SET_ENCRYPTION_POLICY
+    0x4008_7602, // FS_IOC_SETVERSION
+    0x4004_7602, // FS_IOC32_SETVERSION
+    0x4008_6604, // EXT4_IOC_SETVERSION
+    0x4004_6604, // EXT4_IOC32_SETVERSION
+];
 
 /// Makes Landlock look absent: its three syscalls answer `ENOSYS`, which is what
 /// a kernel without it says.
