@@ -91,8 +91,11 @@ pub(crate) enum Kind {
         cells: Vec<Vec<Run>>,
         /// Whether this is the header row, which is drawn bold with a rule under.
         header: bool,
-        /// How each column is set.
-        align: Vec<Align>,
+        /// How each column is set — one list for the whole table.
+        ///
+        /// **Shared, because it is the table's and not the row's.** A copy per
+        /// row made a 256 KiB table of 43,690 columns peak at 1.30 GB.
+        align: std::sync::Arc<[Align]>,
     },
     /// A blank line inside a quote or between blocks, which is drawn as space.
     Gap,
@@ -456,7 +459,7 @@ fn table_at(lines: &[&str], at: usize, quoted: u8, out: &mut Vec<Block>) -> Opti
     if !header.contains('|') {
         return None;
     }
-    let align = alignment(lines.get(at + 1)?)?;
+    let align: std::sync::Arc<[Align]> = alignment(lines.get(at + 1)?)?.into();
     let cells = row_cells(header);
     if cells.len() < 2 {
         return None;
@@ -467,7 +470,7 @@ fn table_at(lines: &[&str], at: usize, quoted: u8, out: &mut Vec<Block>) -> Opti
         kind: Kind::Row {
             cells: cells.iter().map(|it| inline(it)).collect(),
             header: true,
-            align: align.clone(),
+            align: std::sync::Arc::clone(&align),
         },
     });
     let mut next = at + 2;
@@ -479,7 +482,7 @@ fn table_at(lines: &[&str], at: usize, quoted: u8, out: &mut Vec<Block>) -> Opti
             kind: Kind::Row {
                 cells: cells.iter().map(|it| inline(it)).collect(),
                 header: false,
-                align: align.clone(),
+                align: std::sync::Arc::clone(&align),
             },
         });
         next += 1;
@@ -554,7 +557,8 @@ pub(crate) fn inline(text: &str) -> Vec<Run> {
 /// is its own — are answered from [`Found`], which is one pass over the text.
 /// They used to be answered by scanning ahead from the opener, and an opener
 /// with nothing to close it scanned to the end of the paragraph before the
-/// parser moved on by one character: 10.5 seconds over 256 KiB of `[`.
+/// parser moved on by one character: 10.5 seconds over 256 KiB of `[` (median
+/// of three, release build, load 7 to 20).
 fn spans(letters: &[char], depth: u8) -> Vec<Run> {
     if depth >= DEEPEST {
         return vec![Run::plain(letters.iter().collect::<String>())];
@@ -572,51 +576,24 @@ fn spans(letters: &[char], depth: u8) -> Vec<Run> {
 
     while at < letters.len() {
         let letter = letters[at];
-        match letter {
-            '\\' if at + 1 < letters.len() && letters[at + 1].is_ascii_punctuation() => {
-                held.push(letters[at + 1]);
-                at += 2;
-            }
-            '`' => {
-                let ticks = found.run(at);
-                if let Some(end) = found.closing(at + ticks, '`', ticks) {
-                    flush(&mut held, &mut out);
-                    let body: String = letters[at + ticks..end].iter().collect();
-                    out.push(Run {
-                        text: body.trim().to_owned(),
-                        style: Style { code: true, ..Style::default() },
-                        href: None,
-                    });
-                    at = end + ticks;
-                } else {
-                    held.push(letter);
-                    at += 1;
-                }
-            }
-            '*' | '_' | '~' => {
-                if let Some((end, runs)) = emphasis(&mut found, at, letter, depth) {
-                    flush(&mut held, &mut out);
-                    out.extend(runs);
-                    at = end;
-                } else {
-                    held.push(letter);
-                    at += 1;
-                }
-            }
-            '<' | '!' | '[' => {
-                if let Some((end, runs)) = linked(&mut found, at, depth) {
-                    flush(&mut held, &mut out);
-                    out.extend(runs);
-                    at = end;
-                } else {
-                    held.push(letter);
-                    at += 1;
-                }
-            }
-            other => {
-                held.push(other);
-                at += 1;
-            }
+        if letter == '\\' && letters.get(at + 1).is_some_and(char::is_ascii_punctuation) {
+            held.push(letters[at + 1]);
+            at += 2;
+            continue;
+        }
+        let taken = match (letter, Mark::of(letter)) {
+            (_, Some(Mark::Tick)) => code(&mut found, at),
+            (_, Some(mark)) => emphasis(&mut found, at, mark, depth),
+            ('<' | '!' | '[', None) => linked(&mut found, at, depth),
+            _ => None,
+        };
+        if let Some((end, runs)) = taken {
+            flush(&mut held, &mut out);
+            out.extend(runs);
+            at = end;
+        } else {
+            held.push(letter);
+            at += 1;
         }
     }
     flush(&mut held, &mut out);
@@ -626,15 +603,24 @@ fn spans(letters: &[char], depth: u8) -> Vec<Run> {
     out
 }
 
+/// A code span: where it ends, and the one run it is.
+fn code(found: &mut Found<'_>, at: usize) -> Option<(usize, Vec<Run>)> {
+    let ticks = found.run(at, Mark::Tick);
+    let end = found.closing(at + ticks, Mark::Tick, ticks)?;
+    let body: String = found.letters[at + ticks..end].iter().collect();
+    let style = Style { code: true, ..Style::default() };
+    Some((end + ticks, vec![Run { text: body.trim().to_owned(), style, href: None }]))
+}
+
 /// An emphasis, strong, or strikethrough span: where it ends and what is in it.
 ///
 /// **One, two or three of `*` or `_`** — emphasis, strong and both. `***this***`
 /// is the third and is common enough in a README that treating it as two openers
 /// loses the text between them. `~~` is the fourth mark and behaves the same way.
-fn emphasis(found: &mut Found<'_>, at: usize, mark: char, depth: u8) -> Option<(usize, Vec<Run>)> {
+fn emphasis(found: &mut Found<'_>, at: usize, mark: Mark, depth: u8) -> Option<(usize, Vec<Run>)> {
     let letters = found.letters;
-    let count = found.run(at);
-    let run = if mark == '~' {
+    let count = found.run(at, mark);
+    let run = if mark == Mark::Tilde {
         if count < 2 {
             return None;
         }
@@ -645,7 +631,7 @@ fn emphasis(found: &mut Found<'_>, at: usize, mark: char, depth: u8) -> Option<(
     // `snake_case` is not emphasis: an underscore between two word characters
     // opens nothing, which is the rule every renderer has and the reason `a_b_c`
     // reads as itself.
-    if mark == '_'
+    if mark == Mark::Under
         && at > 0
         && letters[at - 1].is_alphanumeric()
         && letters.get(at + run).is_some_and(|it| it.is_alphanumeric())
@@ -658,14 +644,15 @@ fn emphasis(found: &mut Found<'_>, at: usize, mark: char, depth: u8) -> Option<(
     if end == at + run {
         return None;
     }
-    let strong = mark != '~' && run >= 2;
-    let slanted = mark != '~' && run % 2 == 1;
+    let struck = mark == Mark::Tilde;
+    let strong = !struck && run >= 2;
+    let slanted = !struck && run % 2 == 1;
     let runs = spans(&letters[at + run..end], depth + 1)
         .into_iter()
         .map(|mut nested| {
             nested.style.strong |= strong;
             nested.style.emphasis |= slanted;
-            nested.style.struck |= mark == '~';
+            nested.style.struck |= struck;
             nested
         })
         .collect();
@@ -739,8 +726,36 @@ fn link_at(found: &mut Found<'_>, at: usize) -> Option<(usize, usize)> {
     Some((close, end))
 }
 
-/// The four marks that come in runs, in the order of [`Found::runs`].
-const MARKS: [char; 4] = ['`', '*', '_', '~'];
+/// The four marks that come in runs, each its own slot in [`Found::runs`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mark {
+    Tick,
+    Star,
+    Under,
+    Tilde,
+}
+
+impl Mark {
+    /// The mark `letter` is, if it is one.
+    fn of(letter: char) -> Option<Self> {
+        match letter {
+            '`' => Some(Self::Tick),
+            '*' => Some(Self::Star),
+            '_' => Some(Self::Under),
+            '~' => Some(Self::Tilde),
+            _ => None,
+        }
+    }
+
+    fn letter(self) -> char {
+        match self {
+            Self::Tick => '`',
+            Self::Star => '*',
+            Self::Under => '_',
+            Self::Tilde => '~',
+        }
+    }
+}
 
 /// One maximal run of a mark.
 #[derive(Clone, Copy)]
@@ -767,7 +782,7 @@ impl Stretch {
 /// inside one emphasis, with one mark in them or none.
 struct Found<'a> {
     letters: &'a [char],
-    /// The runs of each of [`MARKS`], in order.
+    /// The runs of each [`Mark`], by its discriminant.
     runs: [Option<Marked>; 4],
     /// Every `[` in order, and the `]` that closes it if one does.
     brackets: Option<Vec<(usize, Option<usize>)>>,
@@ -797,15 +812,15 @@ impl<'a> Found<'a> {
 
     /// Every run of `mark` in order, and the index of the first that ends past
     /// `at`.
-    fn locate(&mut self, mark: char, at: usize) -> (&[Stretch], usize) {
+    fn locate(&mut self, mark: Mark, at: usize) -> (&[Stretch], usize) {
         let letters = self.letters;
-        let slot = MARKS.iter().position(|it| *it == mark).unwrap_or(MARKS.len() - 1);
-        let marked = self.runs[slot].get_or_insert_with(|| {
+        let letter = mark.letter();
+        let marked = self.runs[mark as usize].get_or_insert_with(|| {
             let mut each = Vec::new();
             let mut at = 0;
             while at < letters.len() {
-                if letters[at] == mark {
-                    let length = letters[at..].iter().take_while(|it| **it == mark).count();
+                if letters[at] == letter {
+                    let length = letters[at..].iter().take_while(|it| **it == letter).count();
                     each.push(Stretch { start: at, length, longest: length });
                     at += length;
                 } else {
@@ -831,9 +846,14 @@ impl<'a> Found<'a> {
         (&marked.each, index)
     }
 
-    /// How many of the mark at `at` there are from `at` to the end of its run.
-    fn run(&mut self, at: usize) -> usize {
-        let (runs, index) = self.locate(self.letters[at], at);
+    /// How many `mark`s there are from `at`, which is one, to the end of its run.
+    fn run(&mut self, at: usize, mark: Mark) -> usize {
+        debug_assert_eq!(
+            Mark::of(self.letters[at]),
+            Some(mark),
+            "asked at a letter that is not it"
+        );
+        let (runs, index) = self.locate(mark, at);
         runs.get(index).map_or(1, |it| it.end() - at)
     }
 
@@ -841,7 +861,7 @@ impl<'a> Found<'a> {
     ///
     /// **The part of a run `from` lands inside counts as a run**, which is what
     /// the scan this replaces did and what `****bold****` is parsed by.
-    fn closing(&mut self, from: usize, mark: char, count: usize) -> Option<usize> {
+    fn closing(&mut self, from: usize, mark: Mark, count: usize) -> Option<usize> {
         let (runs, mut index) = self.locate(mark, from);
         if let Some(inside) = runs.get(index)
             && inside.start <= from
@@ -1031,10 +1051,14 @@ mod tests {
         let blocks = parse(text);
         let Kind::Row { header, align, cells } = &blocks[0].kind else { panic!("{blocks:?}") };
         assert!(header);
-        assert_eq!(align, &[Align::Left, Align::Right]);
+        assert_eq!(&**align, &[Align::Left, Align::Right]);
         assert_eq!(cells.len(), 2);
         assert_eq!(words(&blocks[2]), "b.txt|3");
         assert_eq!(blocks.len(), 3, "a header and two rows");
+        // **One alignment for the table, shared by its rows** — a copy per row
+        // of a table 43,690 columns wide was 1.3 GB.
+        let Kind::Row { align: last, .. } = &blocks[2].kind else { panic!("{blocks:?}") };
+        assert!(std::sync::Arc::ptr_eq(align, last), "each row has its own copy");
     }
 
     /// **One dash is a column**, which is what GFM says and what people write.
@@ -1369,9 +1393,10 @@ mod tests {
     }
 
     /// **No paragraph costs more than time linear in its length.** Each of these
-    /// took seconds over 256 KiB in a release build — 2.6 s for the asterisks,
-    /// 10.5 s for the brackets — because every opener without a closer scanned
-    /// to the end of its paragraph and the parser then moved on by one character.
+    /// took seconds over 256 KiB in a release build — 2.9 s for the asterisks,
+    /// 10.5 s for the brackets, medians of three at a load average of 7 to 20 —
+    /// because every opener without a closer scanned to the end of its paragraph
+    /// and the parser then moved on by one character.
     #[test]
     fn a_paragraph_of_openers_is_parsed_in_linear_time() {
         for case in ["stars", "ticks", "brackets", "angles"] {
