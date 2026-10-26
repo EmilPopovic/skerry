@@ -55,6 +55,13 @@ impl Server {
     /// Waits on the socket and the eventfd, for as long as the bus is there.
     fn run(&mut self) {
         loop {
+            // Answered before the wait: `poll` sees the socket, not what an
+            // earlier read already took off it — the registry's first question
+            // can arrive with the answer to `Embed`.
+            let Some(held) = self.bus.received() else { return };
+            for message in &held {
+                self.answer(message);
+            }
             // The borrow of the socket ends with the block, because answering a
             // call needs the connection back.
             let Some((readable, woken)) = self.wait() else { return };
@@ -64,11 +71,13 @@ impl Server {
                 self.emit_pending();
             }
             if readable {
-                // One message per readable socket: `receive` blocks, and this
-                // thread must come back to the eventfd rather than sit on a
+                // One read per readable socket, and every message it completed:
+                // this thread must come back to the eventfd rather than sit on a
                 // second read that may never arrive.
-                let Some(message) = self.bus.receive() else { return };
-                self.answer(&message);
+                let Some(messages) = self.bus.receive_ready() else { return };
+                for message in &messages {
+                    self.answer(message);
+                }
             }
         }
     }

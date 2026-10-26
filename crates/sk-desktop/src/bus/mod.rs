@@ -142,6 +142,9 @@ pub struct Bus {
     unique: String,
     /// Bytes read but not yet parsed, because a read can land mid-message.
     held: Vec<u8>,
+    /// How much of a message larger than [`LARGEST`] is still to arrive, and
+    /// is dropped as it does rather than held.
+    discard: usize,
     /// The well-known names this connection owns, in the order they were taken.
     names: Vec<String>,
 }
@@ -176,8 +179,14 @@ impl Bus {
     #[must_use]
     pub fn connect(address: &str) -> Option<Self> {
         let socket = address.split(';').find_map(open)?;
-        let mut bus =
-            Self { socket, serial: 0, unique: String::new(), held: Vec::new(), names: Vec::new() };
+        let mut bus = Self {
+            socket,
+            serial: 0,
+            unique: String::new(),
+            held: Vec::new(),
+            discard: 0,
+            names: Vec::new(),
+        };
         bus.authenticate()?;
         let hello = bus.call(Message::call(BUS.0, BUS.1, BUS.2, "Hello", Vec::new()))?;
         hello.text()?.clone_into(&mut bus.unique);
@@ -293,19 +302,118 @@ impl Bus {
 
     /// Reads the next whole message, blocking until one arrives.
     ///
-    /// `None` when the connection has gone, which is the bus going away.
+    /// `None` when the connection has gone, which is the bus going away — or
+    /// when the stream stopped making sense, which nothing after it can recover.
+    ///
+    /// **A message this cannot read is passed over, never waited on.** Its header
+    /// still says how long it is, so the next one is found where it starts; a
+    /// call is told so by name, and a reply that cannot be read arrives as the
+    /// error it amounts to — see [`Bus::account_for`].
     pub fn receive(&mut self) -> Option<Message> {
         loop {
-            if let Some((message, used)) = unmarshal(&self.held) {
-                self.held.drain(..used);
+            if let Some(message) = self.buffered().ok()? {
                 return Some(message);
             }
-            let mut chunk = [0u8; 4096];
-            let read = self.socket.read(&mut chunk).ok()?;
-            if read == 0 {
-                return None;
+            self.fill()?;
+        }
+    }
+
+    /// Every whole message already read or, where there is none, every whole
+    /// message one read brings. `None` when the connection has gone.
+    ///
+    /// **For a thread that waits on the socket beside something else**, once
+    /// `poll` has said a read will not block. [`Bus::receive`] reads again until
+    /// it has a message, which after passing over one it could not read is a
+    /// wait for a message that may not be coming — while the other descriptor
+    /// goes unanswered.
+    ///
+    /// **What is held comes first**, and the socket is read only when nothing
+    /// whole is held: a read lands where the kernel had bytes, so a call can
+    /// arrive in the same read as the reply before it.
+    pub fn receive_ready(&mut self) -> Option<Vec<Message>> {
+        let held = self.held.len();
+        let messages = self.received()?;
+        if self.held.len() < held {
+            return Some(messages);
+        }
+        self.fill()?;
+        self.received()
+    }
+
+    /// Every whole message among the bytes already read, without reading.
+    ///
+    /// `None` for a stream out of step. **For a thread about to `poll`**, which cannot see bytes that are already
+    /// off the socket: the registry's first question can arrive in the read that
+    /// brought the answer to `Embed`, and then nothing more arrives to wake it.
+    pub fn received(&mut self) -> Option<Vec<Message>> {
+        let mut messages = Vec::new();
+        while let Some(message) = self.buffered().ok()? {
+            messages.push(message);
+        }
+        Some(messages)
+    }
+
+    /// The next whole message among the bytes already read, if there is one.
+    ///
+    /// `Err` for a stream out of step.
+    fn buffered(&mut self) -> Result<Option<Message>, OutOfStep> {
+        loop {
+            match unmarshal(&self.held) {
+                Front::Whole(message, used) => {
+                    self.held.drain(..used);
+                    return Ok(Some(message));
+                }
+                Front::Partial => return Ok(None),
+                Front::Unread(unread) => {
+                    let here = unread.size.min(self.held.len());
+                    self.held.drain(..here);
+                    self.discard = unread.size - here;
+                    if let Some(message) = self.account_for(unread) {
+                        return Ok(Some(message));
+                    }
+                }
+                Front::Lost => return Err(OutOfStep),
             }
-            self.held.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// One read from the socket into what is held. `None` when it has closed.
+    fn fill(&mut self) -> Option<()> {
+        let mut chunk = [0u8; 4096];
+        let read = self.socket.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        let dropped = read.min(self.discard);
+        self.discard -= dropped;
+        self.held.extend_from_slice(&chunk[dropped..read]);
+        Some(())
+    }
+
+    /// What a message this did not read is owed.
+    ///
+    /// **A call is refused**, because its sender is otherwise waiting out its
+    /// own timeout for an answer that will never come — unless it said it wants
+    /// none. **A reply or an error becomes an error answering the same serial**,
+    /// because [`Bus::call_for`] is waiting on that serial, and a reply it cannot
+    /// read is the call failing, not the call still running — named
+    /// [`UNREADABLE`], which is ours. A signal is owed nothing.
+    fn account_for(&mut self, unread: Unread) -> Option<Message> {
+        let header = unread.header?;
+        match header.kind {
+            Kind::Call => {
+                if !unread.quiet && header.peer.is_some() {
+                    let _ = self.refuse(&header, unread.error, unread.why);
+                }
+                None
+            }
+            Kind::Reply | Kind::Error => Some(Message {
+                kind: Kind::Error,
+                error: Some(UNREADABLE.to_owned()),
+                body: vec![Value::Str(unread.why.to_owned())],
+                ..header
+            }),
+            Kind::Signal => None,
         }
     }
 
@@ -491,30 +599,155 @@ fn header_bytes(message: &Message, fields: &[(u8, Value)], body: usize) -> Vec<u
     out
 }
 
-/// One message out of a buffer, and how many bytes it took.
+/// The header flag a sender sets when it wants no answer.
+const NO_REPLY_EXPECTED: u8 = 1;
+
+/// The standard error for a call whose arguments are not what was expected.
+const INVALID_ARGS: &str = "org.freedesktop.DBus.Error.InvalidArgs";
+
+/// The standard error for a request past what a resource allows.
+const LIMITS_EXCEEDED: &str = "org.freedesktop.DBus.Error.LimitsExceeded";
+
+/// The error a reply this end could not read is handed to its caller as.
 ///
-/// `None` where the buffer does not hold a whole one yet, which is every read
-/// that lands mid-message.
-pub(crate) fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
-    if bytes.len() < 16 {
-        return None;
+/// **Ours rather than a standard one**: `InvalidArgs` would put a log line on
+/// the service that answered, for a reply this end did not read.
+const UNREADABLE: &str = "dev.skerry.Error.Unreadable";
+
+/// The largest message this reads, header and body together.
+///
+/// **256 KiB, against a largest honest message of about 12 KiB.** What arrives
+/// is `FileManager1` calls, whose argument is a list of URIs of which the window
+/// opens the first, or one tab each; a second `skerry` handing over one path;
+/// and replies to this program's own calls. The largest reply is
+/// `ListActivatableNames`, 3,585 bytes of body for 112 names — measured against a
+/// private `dbus-daemon` reading this machine's service directories. The
+/// largest URI is 12,292 bytes — `file://` and a `PATH_MAX` path with every
+/// byte percent-encoded — and the ceiling holds twenty of those.
+///
+/// **What a body costs decoded is why there is a ceiling at all.** The session
+/// bus here forwards messages of up to 1,000,000,000 bytes, and an `ay` decoded
+/// at 48 bytes of memory per byte on the wire, measured with a counting
+/// allocator. With `ay` read as bytes and the reader's budget of values, the
+/// costliest of eight shapes measured — `ag` of empty signatures — peaked at
+/// 3.0 MiB for a message of this size.
+const LARGEST: usize = 256 * 1024;
+
+/// What the front of a receive buffer holds.
+pub(crate) enum Front {
+    /// Not all of the next message has arrived.
+    Partial,
+    /// A message, and how many bytes it took.
+    Whole(Message, usize),
+    /// A message its header frames and this will not read.
+    Unread(Unread),
+    /// Bytes that are not a message header, after which no message can be
+    /// found again.
+    Lost,
+}
+
+/// A message passed over, with what is needed to answer for it.
+pub(crate) struct Unread {
+    /// Its whole length on the stream.
+    size: usize,
+    /// Its header with an empty body, where the header itself read.
+    header: Option<Message>,
+    /// Whether its sender said it wants no answer.
+    quiet: bool,
+    /// The standard error that says why.
+    error: &'static str,
+    /// And the sentence under it, for whoever reads the error.
+    why: &'static str,
+}
+
+/// A stream whose next bytes are not a message header.
+struct OutOfStep;
+
+#[cfg(test)]
+impl Bus {
+    /// A connection over a socket whose other end is a test, with no daemon,
+    /// no authentication and no `Hello` — for a test that plays the peer.
+    pub(crate) const fn over(socket: UnixStream) -> Self {
+        let unique = String::new();
+        Self { socket, serial: 0, unique, held: Vec::new(), discard: 0, names: Vec::new() }
     }
-    let little = bytes[0] == b'l';
-    let kind = Kind::of(bytes[1])?;
+}
+
+#[cfg(test)]
+impl Front {
+    /// The message, where there is a whole one.
+    pub(crate) fn whole(self) -> Option<(Message, usize)> {
+        match self {
+            Self::Whole(message, used) => Some((message, used)),
+            _ => None,
+        }
+    }
+}
+
+/// The message at the front of a buffer.
+///
+/// **Not arrived and not readable are two answers.** They were one, `None`, and
+/// the reader went on waiting for the rest of a message that had all arrived
+/// and only failed to decode — so it never left the buffer and nothing behind it
+/// was read again. The fixed sixteen bytes say how long the whole message is,
+/// which is all it takes to pass over one whatever is inside it.
+pub(crate) fn unmarshal(bytes: &[u8]) -> Front {
+    let Some(fixed) = bytes.get(..16) else { return Front::Partial };
+    let little = match fixed[0] {
+        b'l' => true,
+        b'B' => false,
+        _ => return Front::Lost,
+    };
+    // "If the major protocol version of the receiving application does not
+    // match … the D-Bus connection must be disconnected" — the specification's
+    // header table.
+    if fixed[3] != 1 {
+        return Front::Lost;
+    }
     let number = |at: usize| -> u32 {
-        let raw: [u8; 4] = bytes[at..at + 4].try_into().unwrap_or([0; 4]);
+        let raw: [u8; 4] = fixed[at..at + 4].try_into().unwrap_or([0; 4]);
         if little { u32::from_le_bytes(raw) } else { u32::from_be_bytes(raw) }
     };
-    let body_length = number(4) as usize;
-    let serial = number(8);
-    let fields_length = number(12) as usize;
-    let fields_end = 16usize.checked_add(fields_length)?;
-    let body_at = fields_end + (8 - fields_end % 8) % 8;
-    let end = body_at.checked_add(body_length)?;
-    if bytes.len() < end {
-        return None;
+    let Some(fields_end) = 16usize.checked_add(number(12) as usize) else { return Front::Lost };
+    let Some(body_at) = fields_end.checked_next_multiple_of(8) else { return Front::Lost };
+    let Some(end) = body_at.checked_add(number(4) as usize) else { return Front::Lost };
+    let oversized = end > LARGEST;
+    let (error, why) = if oversized {
+        (LIMITS_EXCEEDED, "the message is larger than this program reads")
+    } else {
+        (INVALID_ARGS, "the message's arguments could not be read")
+    };
+    let quiet = fixed[2] & NO_REPLY_EXPECTED != 0;
+    let pass_over = |header| Front::Unread(Unread { size: end, header, quiet, error, why });
+    // **Held only as far as its header**, for a message larger than this reads:
+    // the header names whom to refuse, and the body is dropped as it arrives.
+    let needed = if oversized { fields_end } else { end };
+    if needed > LARGEST {
+        return pass_over(None);
     }
+    if bytes.len() < needed {
+        return Front::Partial;
+    }
+    // "Unknown types must be ignored", in the same table.
+    let Some(kind) = Kind::of(fixed[1]) else { return pass_over(None) };
+    let Some((mut message, signature)) = header(kind, number(8), &bytes[..fields_end], little)
+    else {
+        return pass_over(None);
+    };
+    if oversized {
+        return pass_over(Some(message));
+    }
+    match body(&bytes[..end], body_at, &signature, little) {
+        Some(body) => {
+            message.body = body;
+            Front::Whole(message, end)
+        }
+        None => pass_over(Some(message)),
+    }
+}
 
+/// A message's header fields, and the signature of the body after them.
+fn header(kind: Kind, serial: u32, fields: &[u8], little: bool) -> Option<(Message, String)> {
     let mut message = Message {
         kind,
         serial,
@@ -527,7 +760,7 @@ pub(crate) fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
         body: Vec::new(),
     };
     let mut signature = String::new();
-    let mut reader = wire::Reader::new(&bytes[..fields_end], 16, little);
+    let mut reader = wire::Reader::new(fields, 16, little);
     while !reader.done() {
         // Each field is a struct, aligned to eight.
         let padding = (8 - reader.at() % 8) % 8;
@@ -555,25 +788,36 @@ pub(crate) fn unmarshal(bytes: &[u8]) -> Option<(Message, usize)> {
             _ => {}
         }
     }
+    Some((message, signature))
+}
 
-    if !wire::valid_signature(&signature, false) {
+/// The values a body from `at` to the end of `bytes` holds, which must be
+/// exactly what `signature` names.
+fn body(bytes: &[u8], at: usize, signature: &str, little: bool) -> Option<Vec<Value>> {
+    if !wire::valid_signature(signature, false) {
         return None;
     }
-    let mut reader = wire::Reader::new(&bytes[..end], body_at, little);
-    for kind in wire::split(&signature) {
-        message.body.push(reader.read(&kind)?);
-    }
-    if reader.at() != end {
+    let mut reader = wire::Reader::new(bytes, at, little);
+    let values: Option<Vec<Value>> =
+        wire::split(signature).iter().map(|kind| reader.read(kind)).collect();
+    if reader.at() != bytes.len() {
         return None;
     }
-    Some((message, end))
+    values
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Kind, Message, Value, marshal, unmarshal};
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    use super::{
+        Bus, DESTINATION, Front, INVALID_ARGS, Kind, LARGEST, LIMITS_EXCEEDED, Message, SENDER,
+        SIGNATURE, UNREADABLE, Value, marshal, unmarshal,
+    };
 
     /// A call goes out and comes back as itself.
     ///
@@ -603,7 +847,7 @@ mod tests {
         // test got wrong.
         assert_eq!(bytes.len() % 8, 5, "the body's own length is not a multiple of eight");
 
-        let (read, used) = unmarshal(&bytes).expect("it would not read back");
+        let (read, used) = unmarshal(&bytes).whole().expect("it would not read back");
         assert_eq!(used, bytes.len());
         assert_eq!(read.member.as_deref(), Some("ShowItems"));
         assert_eq!(read.interface.as_deref(), Some("org.freedesktop.FileManager1"));
@@ -626,7 +870,7 @@ mod tests {
             error: None,
             body: vec![Value::Str(":1.7".to_owned())],
         };
-        let (read, _) = unmarshal(&marshal(&reply)).expect("it would not read back");
+        let (read, _) = unmarshal(&marshal(&reply)).whole().expect("it would not read back");
         assert_eq!(read.kind, Kind::Reply);
         assert_eq!(read.answers, Some(9));
         assert_eq!(read.text(), Some(":1.7"));
@@ -644,27 +888,295 @@ mod tests {
         call.serial = 1;
         let bytes = marshal(&call);
         for cut in 1..bytes.len() {
-            assert!(unmarshal(&bytes[..cut]).is_none(), "{cut} bytes parsed as a whole message");
+            assert!(
+                matches!(unmarshal(&bytes[..cut]), Front::Partial),
+                "{cut} bytes were not a message still arriving"
+            );
         }
-        assert!(unmarshal(&bytes).is_some());
+        assert!(unmarshal(&bytes).whole().is_some());
 
         // And two messages in one buffer are two messages.
         let mut both = bytes.clone();
         both.extend_from_slice(&bytes);
-        let (_, used) = unmarshal(&both).expect("the first");
+        let (_, used) = unmarshal(&both).whole().expect("the first");
         assert_eq!(used, bytes.len());
-        assert!(unmarshal(&both[used..]).is_some(), "the second");
+        assert!(unmarshal(&both[used..]).whole().is_some(), "the second");
     }
 
     /// Rubbish is rubbish, not a panic.
     #[test]
     fn a_message_that_makes_no_sense_is_refused() {
-        assert!(unmarshal(&[0; 16]).is_none(), "message type zero");
+        assert!(unmarshal(&[0; 16]).whole().is_none(), "message type zero");
         let mut bytes = vec![b'l', 1, 0, 1];
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(unmarshal(&bytes).is_none(), "lengths that overflow the buffer");
+        assert!(unmarshal(&bytes).whole().is_none(), "lengths that overflow the buffer");
+    }
+
+    /// A connection whose other end is the test, with no daemon between.
+    ///
+    /// **A read gives up after five seconds**, so a reader that waits on a
+    /// message that has all arrived fails here instead of hanging the suite.
+    fn pair() -> (Bus, UnixStream) {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        for socket in [&ours, &theirs] {
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        }
+        let bus = Bus {
+            socket: ours,
+            serial: 0,
+            unique: ":1.1".to_owned(),
+            held: Vec::new(),
+            discard: 0,
+            names: Vec::new(),
+        };
+        (bus, theirs)
+    }
+
+    /// `message` as a bus daemon delivers it, from the peer it names.
+    ///
+    /// The marshaller writes the peer as the destination, and a daemon fills in
+    /// the sender; both are an `s` in a `(yv)`, so the swap is one byte.
+    fn delivered(mut message: Message, serial: u32) -> Vec<u8> {
+        message.serial = serial;
+        let mut bytes = marshal(&message);
+        let at = bytes.windows(4).position(|it| it == [DESTINATION, 1, b's', 0]).unwrap();
+        bytes[at] = SENDER;
+        bytes
+    }
+
+    /// A message whose one `u` argument is relabelled `b` — and holds a two,
+    /// which is neither boolean, so no reader may take it.
+    fn mistyped(mut bytes: Vec<u8>) -> Vec<u8> {
+        let at = bytes.windows(6).position(|it| it == [SIGNATURE, 1, b'g', 0, 1, b'u']).unwrap();
+        bytes[at + 5] = b'b';
+        bytes
+    }
+
+    fn show_folders(body: Vec<Value>) -> Message {
+        let object = "/org/freedesktop/FileManager1";
+        Message::call(":1.9", object, "org.freedesktop.FileManager1", "ShowFolders", body)
+    }
+
+    /// **A message that does not read is passed over, and its caller told.**
+    ///
+    /// The defect: the reader answered "not all here yet" for a message that had
+    /// all arrived and only failed to decode, so it was never dropped and the
+    /// call behind it was never read — one bad `ShowFolders` and the file
+    /// manager stopped answering for good.
+    #[test]
+    fn a_call_that_does_not_read_is_refused_and_the_next_one_is_read() {
+        let (mut bus, mut peer) = pair();
+        let bad = mistyped(delivered(show_folders(vec![Value::U32(2)]), 5));
+        let good = delivered(show_folders(vec![Value::Str("file:///tmp".to_owned())]), 6);
+        peer.write_all(&[bad, good].concat()).unwrap();
+
+        let next = bus.receive().expect("the call behind the bad one was never read");
+        assert_eq!((next.serial, next.text()), (6, Some("file:///tmp")));
+        assert!(bus.held.is_empty(), "{} bytes left over", bus.held.len());
+
+        let mut answer = [0u8; 4096];
+        let read = peer.read(&mut answer).unwrap();
+        let (refusal, _) = unmarshal(&answer[..read]).whole().expect("a whole refusal");
+        assert_eq!(refusal.kind, Kind::Error);
+        assert_eq!(refusal.answers, Some(5), "it answers the call that did not read");
+        assert_eq!(refusal.error.as_deref(), Some(INVALID_ARGS));
+    }
+
+    /// The finding's own reproduction: `ShowFolders` with a `double` in it,
+    /// which nothing here reads — so it is refused, and the call behind it read.
+    #[test]
+    fn a_call_with_a_double_in_it_is_refused_and_passed_over() {
+        let (mut bus, mut peer) = pair();
+        // An `x` relabelled `d`: the same eight bytes, which is what a double is.
+        let mut double = delivered(show_folders(vec![Value::I64(1)]), 2);
+        let at = double.windows(6).position(|it| it == [SIGNATURE, 1, b'g', 0, 1, b'x']).unwrap();
+        double[at + 5] = b'd';
+        let good = delivered(show_folders(Vec::new()), 3);
+        peer.write_all(&[double, good].concat()).unwrap();
+        assert_eq!(bus.receive().map(|it| it.serial), Some(3), "a double stopped the reader");
+
+        let mut answer = [0u8; 4096];
+        let read = peer.read(&mut answer).unwrap();
+        let (refusal, _) = unmarshal(&answer[..read]).whole().expect("a whole refusal");
+        assert_eq!((refusal.answers, refusal.error.as_deref()), (Some(2), Some(INVALID_ARGS)));
+    }
+
+    /// A message from a big-endian peer, whole: the header's lengths, its
+    /// serial and a `u` in the body all turn round.
+    ///
+    /// By hand: the fixed sixteen bytes, `MEMBER` "C" padded to eight,
+    /// `SIGNATURE` "u", one byte to the body's eight, and 0x01020304.
+    #[test]
+    fn a_whole_message_from_a_big_endian_peer_reads() {
+        let bytes: &[u8] = b"B\x01\x00\x01\x00\x00\x00\x04\x00\x00\x00\x09\x00\x00\x00\x17\
+            \x03\x01s\x00\x00\x00\x00\x01C\x00\x00\x00\x00\x00\x00\x00\
+            \x08\x01g\x00\x01u\x00\x00\
+            \x01\x02\x03\x04";
+        let (message, used) = unmarshal(bytes).whole().expect("a big-endian message");
+        assert_eq!(used, bytes.len());
+        assert_eq!((message.kind, message.serial), (Kind::Call, 9));
+        assert_eq!(message.member.as_deref(), Some("C"));
+        assert_eq!(message.body, [Value::U32(0x0102_0304)]);
+    }
+
+    /// **A call that arrives in the same read as a reply is not left waiting.**
+    ///
+    /// `call_for` takes the reply and leaves the call held; the socket then has
+    /// nothing more to say, so a reader that went to it first would wait for a
+    /// message that already arrived.
+    #[test]
+    fn a_call_in_the_same_read_as_a_reply_is_answered_without_a_read() {
+        let (mut bus, mut peer) = pair();
+        let reply = Message {
+            kind: Kind::Reply,
+            serial: 0,
+            answers: Some(1),
+            peer: Some(":1.9".to_owned()),
+            path: None,
+            interface: None,
+            member: None,
+            error: None,
+            body: Vec::new(),
+        };
+        let call = delivered(show_folders(Vec::new()), 7);
+        peer.write_all(&[delivered(reply, 6), call].concat()).unwrap();
+        assert!(bus.call_for(show_folders(Vec::new())).is_ok(), "the reply");
+
+        let at = std::time::Instant::now();
+        let held = bus.receive_ready().expect("the connection is open");
+        assert!(at.elapsed() < Duration::from_secs(1), "it read before answering what it held");
+        assert_eq!(held.iter().map(|it| it.serial).collect::<Vec<_>>(), [7]);
+    }
+
+    /// A sender that asked for no reply gets none, even a refusal.
+    #[test]
+    fn a_call_that_wants_no_answer_is_passed_over_quietly() {
+        let (mut bus, mut peer) = pair();
+        let mut bad = mistyped(delivered(show_folders(vec![Value::U32(2)]), 5));
+        bad[2] |= super::NO_REPLY_EXPECTED;
+        let good = delivered(show_folders(Vec::new()), 6);
+        peer.write_all(&[bad, good].concat()).unwrap();
+        assert_eq!(bus.receive().map(|it| it.serial), Some(6));
+        peer.set_nonblocking(true).unwrap();
+        let mut answer = [0u8; 64];
+        assert!(peer.read(&mut answer).is_err(), "something was sent back");
+    }
+
+    /// "Unknown types must be ignored" — and ignoring one is passing over it.
+    #[test]
+    fn a_message_of_an_unknown_type_is_ignored() {
+        let (mut bus, mut peer) = pair();
+        let mut unknown = delivered(show_folders(Vec::new()), 5);
+        unknown[1] = 9;
+        let good = delivered(show_folders(Vec::new()), 6);
+        peer.write_all(&[unknown, good].concat()).unwrap();
+        assert_eq!(bus.receive().map(|it| it.serial), Some(6));
+    }
+
+    /// A reply that does not read fails its call instead of leaving it waiting.
+    #[test]
+    fn a_reply_that_does_not_read_fails_the_call() {
+        let (mut bus, mut peer) = pair();
+        let reply = Message {
+            kind: Kind::Reply,
+            serial: 0,
+            answers: Some(1),
+            peer: Some(":1.9".to_owned()),
+            path: None,
+            interface: None,
+            member: None,
+            error: None,
+            body: vec![Value::U32(2)],
+        };
+        peer.write_all(&mistyped(delivered(reply, 3))).unwrap();
+        let failed = bus.call_for(show_folders(Vec::new())).expect_err("an unreadable reply");
+        // Named as ours: the service answered, and this end could not read it.
+        assert!(failed.starts_with(UNREADABLE), "{failed}");
+    }
+
+    /// Bytes that are no header are a connection to give up on, not to wait on.
+    #[test]
+    fn a_stream_out_of_step_is_a_closed_connection() {
+        let mut bytes = delivered(show_folders(Vec::new()), 1);
+        bytes[0] = b'x';
+        assert!(matches!(unmarshal(&bytes), Front::Lost), "an endianness that is neither");
+        bytes[0] = b'l';
+        bytes[3] = 2;
+        assert!(matches!(unmarshal(&bytes), Front::Lost), "a major version that is not ours");
+
+        let (mut bus, mut peer) = pair();
+        peer.write_all(&bytes).unwrap();
+        assert!(bus.receive().is_none());
+    }
+
+    /// One read, every message it completed, and no second read.
+    ///
+    /// **The AT-SPI thread's shape**: it waits on this socket and on an eventfd,
+    /// and a second read after passing over a message that did not read would
+    /// sit there while the eventfd's signals went unsent.
+    #[test]
+    fn a_ready_socket_is_read_once() {
+        let (mut bus, mut peer) = pair();
+        let first = delivered(show_folders(Vec::new()), 1);
+        let second = delivered(show_folders(Vec::new()), 2);
+        peer.write_all(&[first, second].concat()).unwrap();
+        let read = bus.receive_ready().expect("the connection is open");
+        assert_eq!(read.iter().map(|it| it.serial).collect::<Vec<_>>(), [1, 2]);
+
+        peer.write_all(&mistyped(delivered(show_folders(vec![Value::U32(2)]), 3))).unwrap();
+        let at = std::time::Instant::now();
+        assert_eq!(bus.receive_ready().map(|it| it.len()), Some(0));
+        assert!(at.elapsed() < Duration::from_secs(1), "it read a second time");
+    }
+
+    /// A call whose body takes it past [`LARGEST`], as it would arrive.
+    fn too_large(serial: u32) -> Vec<u8> {
+        let body = vec![Value::Bytes(vec![7; LARGEST + 64 * 1024])];
+        delivered(show_folders(body), serial)
+    }
+
+    /// **Refused from its header**, before a byte of its body has arrived.
+    ///
+    /// The header's lengths are the message's size; a reader that waited for
+    /// the body before looking at them had already buffered all of it.
+    #[test]
+    fn a_message_past_the_ceiling_is_refused_from_its_header() {
+        let bytes = too_large(5);
+        let header = bytes.len() - (4 + LARGEST + 64 * 1024);
+        let Front::Unread(unread) = unmarshal(&bytes[..header]) else {
+            panic!("the header alone did not say it was too large");
+        };
+        assert_eq!(unread.size, bytes.len());
+        assert_eq!(unread.error, LIMITS_EXCEEDED);
+        assert_eq!(unread.header.map(|it| it.serial), Some(5), "nobody to refuse");
+    }
+
+    /// **Dropped as it arrives, never held**, and the call behind it is read.
+    #[test]
+    fn a_message_too_large_to_hold_is_dropped_as_it_arrives() {
+        let (mut bus, peer) = pair();
+        let mut writer = peer.try_clone().unwrap();
+        let sending = std::thread::spawn(move || {
+            let good = delivered(show_folders(Vec::new()), 6);
+            writer.write_all(&[too_large(5), good].concat()).unwrap();
+        });
+        let next = bus.receive().expect("the call behind the large one was never read");
+        sending.join().unwrap();
+        assert_eq!(next.serial, 6);
+        assert!(
+            bus.held.capacity() < LARGEST,
+            "{} bytes were buffered for a message that was refused",
+            bus.held.capacity()
+        );
+
+        let mut peer = peer;
+        let mut answer = [0u8; 4096];
+        let read = peer.read(&mut answer).unwrap();
+        let (refusal, _) = unmarshal(&answer[..read]).whole().expect("a whole refusal");
+        assert_eq!(refusal.answers, Some(5));
+        assert_eq!(refusal.error.as_deref(), Some(LIMITS_EXCEEDED));
     }
 
     /// A real connection to whatever bus this machine has.

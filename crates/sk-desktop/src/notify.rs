@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Telling the desktop that something finished, when the window cannot.
 //!
-//! **One method call on the session bus this program already speaks** —
-//! `org.freedesktop.Notifications.Notify`, the Desktop Notifications
-//! specification's only mandatory method. [ADR
+//! **Two method calls on the session bus this program already speaks** —
+//! `org.freedesktop.Notifications.Notify`, and `GetCapabilities` before it,
+//! because whether the body is read as markup is the daemon's to say. [ADR
 //! 0023](../../../docs/adr/0023-d-bus-is-a-socket-we-speak-ourselves.md)'s
 //! short-lived connection per call is the right shape for it and its revisit
 //! trigger — a feature that needs to *receive* signals — is not fired, which is
@@ -109,8 +109,8 @@ fn activatable(bus: &mut Bus) -> bool {
 
 /// Tells the desktop that `summary` happened, with `body` under it.
 ///
-/// **Runs on a job**: a connection, an authentication and a round trip, and the
-/// daemon at the other end may be doing anything at all.
+/// **Runs on a job**: a connection, an authentication and two round trips, and
+/// the daemon at the other end may be doing anything at all.
 ///
 /// `icon` is a themed icon name — ours is the desktop entry's `Icon=` — and the
 /// `desktop-entry` hint is what lets a daemon that ignores the icon still find
@@ -133,6 +133,19 @@ pub fn send(
         return Err(Refused::NoDaemon);
     }
     let mut bus = Bus::session().ok_or(Refused::NoBus)?;
+    tell(&mut bus, application, desktop_id, icon, summary, body)
+}
+
+/// [`send`], on a connection that is already open.
+fn tell(
+    bus: &mut Bus,
+    application: &str,
+    desktop_id: &str,
+    icon: &str,
+    summary: &str,
+    body: &str,
+) -> Result<(), Refused> {
+    let body = if reads_markup(bus) { escaped(body) } else { body.to_owned() };
     let call = Message::call(
         SERVICE,
         OBJECT,
@@ -146,7 +159,7 @@ pub fn send(
             Value::U32(0),
             Value::Str(icon.to_owned()),
             Value::Str(summary.to_owned()),
-            Value::Str(body.to_owned()),
+            Value::Str(body),
             Value::Empty("s".to_owned()),
             Value::Dict(vec![(
                 "desktop-entry".to_owned(),
@@ -164,13 +177,50 @@ pub fn send(
     }
 }
 
+/// Whether the daemon reads markup in a body.
+///
+/// **Asked, because escaping is right only where markup is read.** The
+/// Desktop Notifications specification, 1.3, on the `body-markup` capability:
+/// "If marked up text is sent to a server that does not give this cap, the
+/// markup will show through as regular text" — and so would an escape, as a
+/// literal `&amp;` in the middle of a folder's name.
+///
+/// **A daemon that does not answer is taken to read it**: an escape shown
+/// literally in a rare case is a smaller fault than a name read as markup.
+fn reads_markup(bus: &mut Bus) -> bool {
+    let asked = Message::call(SERVICE, OBJECT, SERVICE, "GetCapabilities", Vec::new());
+    bus.call(asked).is_none_or(|reply| {
+        let capabilities = reply.body.first().map(Value::items).unwrap_or_default();
+        capabilities.iter().any(|it| it.text() == Some("body-markup"))
+    })
+}
+
+/// `text`, with what markup would read as markup spelled as entities.
+///
+/// **`&`, `<` and `>`, and not the quotes.** The specification calls its markup
+/// XML-based and names no escaping of its own; in XML text `&` and `<` must be
+/// escaped and `>` may be, while a quote means something only inside an
+/// attribute, which a body written here never has.
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(character),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Refused, SERVICE};
+    use super::{Refused, SERVICE, tell};
     use crate::bus::wire::Value;
-    use crate::bus::{Message, marshal, unmarshal};
+    use crate::bus::{Bus, Message, marshal, unmarshal};
 
     /// The argument list the specification spells `susssasa{sv}i`, checked
     /// against what the marshaller would put in the header — because a body that
@@ -204,7 +254,7 @@ mod tests {
         // dictionary are the two arguments a signature is easiest to be wrong
         // about — an empty array reads back as an array of nothing, which is the
         // same eight characters and a different `Value`.
-        let (read, _) = unmarshal(&marshal(&call)).expect("a whole message");
+        let (read, _) = unmarshal(&marshal(&call)).whole().expect("a whole message");
         let back: String = read.body.iter().map(Value::signature).collect();
         assert_eq!(back, signature, "the body did not survive its own encoding");
         assert_eq!(
@@ -215,6 +265,70 @@ mod tests {
             )])),
             "the hint the daemon finds our icon by did not arrive"
         );
+    }
+
+    /// A daemon on the other end of a socket that says it can do `capabilities`
+    /// — or refuses to say, for `None` — and hands back the `Notify` it was sent.
+    fn daemon(
+        capabilities: Option<&'static [&'static str]>,
+    ) -> (Bus, std::thread::JoinHandle<Message>) {
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        for socket in [&ours, &theirs] {
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        }
+        let serving = std::thread::spawn(move || {
+            let mut daemon = Bus::over(theirs);
+            let asked = daemon.receive().expect("no GetCapabilities");
+            assert_eq!(asked.member.as_deref(), Some("GetCapabilities"));
+            if let Some(named) = capabilities {
+                let named = named.iter().map(|it| Value::Str((*it).to_owned())).collect();
+                daemon.reply(&asked, vec![Value::Array(named)]).unwrap();
+            } else {
+                let refused = "org.freedesktop.DBus.Error.UnknownMethod";
+                daemon.refuse(&asked, refused, "no such method").unwrap();
+            }
+            let notify = daemon.receive().expect("no Notify");
+            daemon.reply(&notify, vec![Value::U32(1)]).unwrap();
+            notify
+        });
+        (Bus::over(ours), serving)
+    }
+
+    const FOLDER: &str = "/home/tester/<b>Tom & Jerry</b> <img src=\"x\"/>";
+    const ESCAPED: &str = "/home/tester/&lt;b&gt;Tom &amp; Jerry&lt;/b&gt; &lt;img src=\"x\"/&gt;";
+
+    /// **A path is text, so a daemon that reads markup gets it escaped.**
+    ///
+    /// The body is the folder an operation went to, and a folder can be named
+    /// anything: under a daemon with `body-markup` an unescaped `<img src>` in a
+    /// name is an image fetched and an `<a href>` a link, out of a sentence that
+    /// was only meant to say where.
+    #[test]
+    fn a_daemon_that_reads_markup_is_sent_the_path_escaped() {
+        let (mut bus, serving) = daemon(Some(&["body", "body-markup", "actions"]));
+        tell(&mut bus, "Skerry", "dev.skerry.Skerry", "dev.skerry.Skerry", "Copied", FOLDER)
+            .unwrap();
+        assert_eq!(serving.join().unwrap().body.get(4).and_then(Value::text), Some(ESCAPED));
+    }
+
+    /// One that will not say is sent it escaped too: a literal `&amp;` in a
+    /// rare case is a smaller fault than a name read as markup.
+    #[test]
+    fn a_daemon_that_will_not_say_is_sent_the_path_escaped() {
+        let (mut bus, serving) = daemon(None);
+        tell(&mut bus, "Skerry", "dev.skerry.Skerry", "dev.skerry.Skerry", "Copied", FOLDER)
+            .unwrap();
+        assert_eq!(serving.join().unwrap().body.get(4).and_then(Value::text), Some(ESCAPED));
+    }
+
+    /// And one that does not is sent it as it is, because it would show an
+    /// escape as the escape.
+    #[test]
+    fn a_daemon_that_does_not_read_markup_is_sent_the_path_as_it_is() {
+        let (mut bus, serving) = daemon(Some(&["body", "actions"]));
+        tell(&mut bus, "Skerry", "dev.skerry.Skerry", "dev.skerry.Skerry", "Copied", FOLDER)
+            .unwrap();
+        assert_eq!(serving.join().unwrap().body.get(4).and_then(Value::text), Some(FOLDER));
     }
 
     /// No daemon is a sentence for the log and nothing for the window.

@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 //! D-Bus's type system, as much of it as this program sends and receives.
 //!
-//! **Four rules and six types.** Everything in a D-Bus body is aligned to its own
-//! width from the start of the body; an array is a `u32` of *bytes* followed by
-//! its elements, padded to the element's alignment before the first one; a struct
-//! aligns to eight; and a variant is a signature followed by a value. That is the
-//! whole of what is implemented here, because it is the whole of what
+//! **Four rules.** Everything in a D-Bus body is aligned to its own width from
+//! the start of the body; an array is a `u32` of *bytes* followed by its
+//! elements, padded to the element's alignment before the first one; a struct
+//! aligns to eight; and a variant is a signature followed by a value.
+//!
+//! **What we send and receive and nothing else**, as
 //! [ADR 0023](../../../../docs/adr/0023-d-bus-is-a-socket-we-speak-ourselves.md)
-//! says we speak.
+//! settles: `y b u s o g v`, arrays of them, `a{sv}` and structs — with `i` from
+//! [ADR 0026](../../../../docs/adr/0026-at-spi-is-a-tree-we-publish-on-the-bus-we-already-speak.md),
+//! `x` and `t`, and the `a{ss}` inside AT-SPI's `Collection.GetMatches`. The
+//! signature check accepts exactly the types the reader decodes, so a message
+//! holding any other is refused whole and passed over by its length: a check
+//! that accepted `double` while the reader could not read one left a
+//! `ShowFolders` with one in it in the buffer forever, and nothing behind it was
+//! read again.
 //!
 //! **Little-endian only, on the wire we write.** The header carries the byte
 //! order, so a peer may send either — and this reads both, because the bus daemon
@@ -24,8 +32,14 @@ pub enum Value {
     U32(u32),
     /// `i`, which AT-SPI's coordinates and indices are.
     I32(i32),
-    /// `x`, which udisks2 uses for sizes.
+    /// `x`, which udisks2 uses for sizes, and `t`, read into the same bits.
     I64(i64),
+    /// `ay`, held as the bytes themselves.
+    ///
+    /// **Not an [`Value::Array`] of [`Value::Byte`]**, which cost forty-eight
+    /// bytes of memory for every byte on the wire, measured — a value is
+    /// thirty-two and the array doubles as it grows.
+    Bytes(Vec<u8>),
     /// `s`
     Str(String),
     /// `o`, a string with a different signature and the same encoding.
@@ -44,6 +58,9 @@ pub enum Value {
     /// was inside two variants, which reads as a bad device path and was a bad
     /// encoding.
     Dict(Vec<(String, Value)>),
+    /// `a{ss}`, which is how AT-SPI names attributes — a screen reader's
+    /// `Collection.GetMatches` sends one inside its match rule.
+    Map(Vec<(String, String)>),
     /// `v`
     Variant(Box<Value>),
     /// An array with nothing in it, of the element type named.
@@ -78,6 +95,7 @@ impl Value {
             Self::U32(_) => "u".to_owned(),
             Self::I32(_) => "i".to_owned(),
             Self::I64(_) => "x".to_owned(),
+            Self::Bytes(_) => "ay".to_owned(),
             Self::Str(_) => "s".to_owned(),
             Self::Path(_) => "o".to_owned(),
             Self::Signature(_) => "g".to_owned(),
@@ -85,6 +103,7 @@ impl Value {
                 format!("a{}", items.first().map_or_else(|| "s".to_owned(), Self::signature))
             }
             Self::Dict(_) => "a{sv}".to_owned(),
+            Self::Map(_) => "a{ss}".to_owned(),
             Self::Variant(_) => "v".to_owned(),
             Self::Empty(element) => format!("a{element}"),
             Self::Struct(fields) => {
@@ -160,10 +179,9 @@ const fn padding(at: usize, to: usize) -> usize {
 fn alignment_of(signature: &str) -> usize {
     match signature.as_bytes().first() {
         Some(b'y' | b'g' | b'v') => 1,
-        Some(b'n' | b'q') => 2,
         // `a` falls to the four below for the same reason: the length comes
         // first, and the elements pad after it.
-        Some(b'x' | b't' | b'd' | b'(' | b'{') => 8,
+        Some(b'x' | b't' | b'(' | b'{') => 8,
         _ => 4,
     }
 }
@@ -221,6 +239,9 @@ impl Writer {
             Value::U32(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
             Value::I32(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
             Value::I64(number) => self.bytes.extend_from_slice(&number.to_le_bytes()),
+            Value::Bytes(bytes) => {
+                self.write_array(1, |writer| writer.bytes.extend_from_slice(bytes));
+            }
             Value::Str(text) | Value::Path(text) => self.write_string(text),
             Value::Signature(text) => {
                 let length = u8::try_from(text.len()).unwrap_or(0);
@@ -242,6 +263,16 @@ impl Writer {
                         writer.pad(8);
                         writer.write(&Value::Str(key.clone()));
                         writer.write(&Value::Variant(Box::new(value.clone())));
+                    }
+                });
+            }
+            Value::Map(pairs) => {
+                self.write_array(8, |writer| {
+                    for (key, value) in pairs {
+                        writer.pad(8);
+                        writer.write_string(key);
+                        writer.pad(4);
+                        writer.write_string(value);
                     }
                 });
             }
@@ -285,19 +316,32 @@ impl Writer {
     }
 }
 
+/// The most values one reader produces before it refuses the rest.
+///
+/// **One for every four bytes of the largest message read** — four being the
+/// narrowest value the messages this program receives carry, now that an `ay`
+/// is one value. The wire size alone does not bound what a body costs decoded:
+/// a struct pads to eight and a struct inside it adds nothing, so thirty-two of
+/// them nested around one byte measured at 516 bytes of memory per byte on the
+/// wire. The most values an honest message here holds is 113, in
+/// `ListActivatableNames`'s reply.
+const VALUES: usize = super::LARGEST / 4;
+
 /// Reads values out of a message.
 pub struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
     little: bool,
     depth: usize,
+    /// How many more values it may produce — see [`VALUES`].
+    left: usize,
 }
 
 impl<'a> Reader<'a> {
     /// A reader over a whole message, in the byte order the header declared.
     #[must_use]
     pub const fn new(bytes: &'a [u8], at: usize, little: bool) -> Self {
-        Self { bytes, at, little, depth: 0 }
+        Self { bytes, at, little, depth: 0, left: VALUES }
     }
 
     /// How far in it has got.
@@ -322,10 +366,18 @@ impl<'a> Reader<'a> {
         Some(slice)
     }
 
+    /// `N` bytes aligned to `N`, turned little-endian whatever the peer sent.
+    fn word<const N: usize>(&mut self) -> Option<[u8; N]> {
+        self.pad(N);
+        let mut bytes: [u8; N] = self.take(N)?.try_into().ok()?;
+        if !self.little {
+            bytes.reverse();
+        }
+        Some(bytes)
+    }
+
     fn u32(&mut self) -> Option<u32> {
-        self.pad(4);
-        let bytes: [u8; 4] = self.take(4)?.try_into().ok()?;
-        Some(if self.little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) })
+        self.word().map(u32::from_le_bytes)
     }
 
     /// Reads one value of the type `signature` starts with.
@@ -333,9 +385,10 @@ impl<'a> Reader<'a> {
     /// `None` for a type this build does not know, which is a message it did not
     /// understand — see the module header.
     pub fn read(&mut self, signature: &str) -> Option<Value> {
-        if self.depth > 64 || !valid_signature(signature, true) {
+        if self.depth > 64 || self.left == 0 || !valid_signature(signature, true) {
             return None;
         }
+        self.left -= 1;
         self.depth += 1;
         let result = self.read_value(signature);
         self.depth -= 1;
@@ -357,13 +410,7 @@ impl<'a> Reader<'a> {
             },
             'u' => Some(Value::U32(self.u32()?)),
             'i' => Some(Value::I32(self.u32()?.cast_signed())),
-            'x' | 't' => {
-                self.pad(8);
-                let bytes: [u8; 8] = self.take(8)?.try_into().ok()?;
-                let number =
-                    if self.little { i64::from_le_bytes(bytes) } else { i64::from_be_bytes(bytes) };
-                Some(Value::I64(number))
-            }
+            'x' | 't' => Some(Value::I64(i64::from_le_bytes(self.word()?))),
             's' | 'o' => {
                 let length = self.u32()? as usize;
                 let text = std::str::from_utf8(self.take(length)?).ok()?.to_owned();
@@ -375,10 +422,14 @@ impl<'a> Reader<'a> {
             'g' => {
                 let length = *self.take(1)?.first()? as usize;
                 let text = std::str::from_utf8(self.take(length)?).ok()?.to_owned();
-                if text.contains('\0') || self.take(1)? != [0] {
+                // **Not held to the types read here.** A header's signature names
+                // the body's types whatever they are, and reading it is how a body
+                // this cannot read is found and refused by name; what reads *by*
+                // a signature — a variant, a body — checks it again first.
+                if !text.is_ascii() || text.contains('\0') || self.take(1)? != [0] {
                     return None;
                 }
-                valid_signature(&text, false).then_some(Value::Signature(text))
+                Some(Value::Signature(text))
             }
             'v' => {
                 let Value::Signature(inner) = self.read("g")? else { return None };
@@ -388,8 +439,12 @@ impl<'a> Reader<'a> {
             '(' => {
                 self.pad(8);
                 let inner = signature.get(1..signature.len().saturating_sub(1))?;
-                let mut fields = Vec::new();
-                for kind in split(inner) {
+                let kinds = split(inner);
+                // Exactly as many as named: a vector left to grow holds four
+                // values for a struct of one, which made a struct nested around
+                // a single byte cost four times what its fields do.
+                let mut fields = Vec::with_capacity(kinds.len());
+                for kind in kinds {
                     fields.push(self.read(&kind)?);
                 }
                 Some(Value::Struct(fields))
@@ -401,11 +456,7 @@ impl<'a> Reader<'a> {
     /// An array, whose elements are all of `element`.
     fn read_array(&mut self, element: &str) -> Option<Value> {
         let length = self.u32()? as usize;
-        let dict = element == "{sv}";
-        if element.starts_with('{') && !dict {
-            return None;
-        }
-        self.pad(if dict { 8 } else { alignment_of(element) });
+        self.pad(alignment_of(element));
         let end = self.at.checked_add(length)?;
         if end > self.bytes.len() {
             return None;
@@ -415,52 +466,76 @@ impl<'a> Reader<'a> {
             at: self.at,
             little: self.little,
             depth: self.depth,
+            left: self.left,
         };
-        if dict {
-            // `a{sv}` and nothing else: the key is a string in every dictionary
-            // this program reads, and a message with another one is a message it
-            // did not understand.
-            let mut pairs = Vec::new();
-            while bounded.at < end {
-                bounded.pad(8);
-                let key = bounded.read("s")?.text()?.to_owned();
-                // **Unwrapped.** A dictionary's values are variants by
-                // construction, so holding the wrapper as well would make the
-                // same dictionary two different `Value`s depending on which end
-                // of the wire it came from.
-                let value = match bounded.read("v")? {
-                    Value::Variant(inner) => *inner,
-                    other => other,
-                };
-                pairs.push((key, value));
-            }
-            if bounded.at != end {
-                return None;
-            }
-            self.at = end;
-            return Some(Value::Dict(pairs));
-        }
+        let value = if element == "y" {
+            Value::Bytes(bounded.take(length)?.to_vec())
+        } else if let Some(entry) = element.strip_prefix('{').and_then(|it| it.strip_suffix('}')) {
+            bounded.read_entries(entry, end)?
+        } else {
+            bounded.read_items(element, end)?
+        };
+        self.at = end;
+        self.left = bounded.left;
+        Some(value)
+    }
+
+    /// An array's elements up to `end`, all of `element`.
+    fn read_items(&mut self, element: &str, end: usize) -> Option<Value> {
         let mut items = Vec::new();
-        while bounded.at < end {
-            items.push(bounded.read(element)?);
+        while self.at < end {
+            items.push(self.read(element)?);
         }
-        if bounded.at != end {
+        (self.at == end).then_some(Value::Array(items))
+    }
+
+    /// A dictionary's entries up to `end`, `{sv}` or `{ss}` — the two the
+    /// signature check lets through.
+    fn read_entries(&mut self, entry: &str, end: usize) -> Option<Value> {
+        let (key, value) = entry.split_at_checked(1)?;
+        let mut pairs = Vec::new();
+        while self.at < end {
+            self.pad(8);
+            pairs.push((self.read(key)?, self.read(value)?));
+        }
+        if self.at != end {
             return None;
         }
-        self.at = end;
-        Some(Value::Array(items))
+        let pairs = pairs.into_iter();
+        match entry {
+            // **Unwrapped.** A dictionary's values are variants by construction,
+            // so holding the wrapper as well would make the same dictionary two
+            // different `Value`s depending on which end of the wire it came from.
+            "sv" => pairs
+                .map(|pair| match pair {
+                    (Value::Str(key), Value::Variant(inner)) => Some((key, *inner)),
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+                .map(Value::Dict),
+            "ss" => pairs
+                .map(|pair| match pair {
+                    (Value::Str(key), Value::Str(value)) => Some((key, value)),
+                    _ => None,
+                })
+                .collect::<Option<_>>()
+                .map(Value::Map),
+            _ => None,
+        }
     }
 }
 
 /// Validates signature framing before recursive decoding or byte-indexed splitting.
+///
+/// **Accepts exactly what [`Reader`] decodes** — see the module header. A
+/// signature naming anything else is a message passed over unread.
 #[must_use]
 pub fn valid_signature(signature: &str, single: bool) -> bool {
     fn one(bytes: &[u8], at: &mut usize, arrays: u8, structs: u8, dict: bool) -> bool {
         let Some(kind) = bytes.get(*at).copied() else { return false };
         *at += 1;
         match kind {
-            b'y' | b'b' | b'n' | b'q' | b'i' | b'u' | b'x' | b't' | b'd' | b's' | b'o' | b'g'
-            | b'h' | b'v' => true,
+            b'y' | b'b' | b'i' | b'u' | b'x' | b't' | b's' | b'o' | b'g' | b'v' => true,
             b'a' if arrays < 32 => one(bytes, at, arrays + 1, structs, true),
             b'(' if structs < 32 => {
                 let first = *at;
@@ -475,15 +550,12 @@ pub fn valid_signature(signature: &str, single: bool) -> bool {
                 *at += 1;
                 true
             }
-            b'{' if dict && structs < 32 => {
-                if !bytes.get(*at).is_some_and(|byte| b"ybnqiuxtdsogh".contains(byte)) {
+            b'{' if dict => {
+                let entry = bytes.get(*at..*at + 3);
+                if entry != Some(b"sv}".as_slice()) && entry != Some(b"ss}".as_slice()) {
                     return false;
                 }
-                *at += 1;
-                if !one(bytes, at, arrays, structs + 1, false) || bytes.get(*at) != Some(&b'}') {
-                    return false;
-                }
-                *at += 1;
+                *at += 3;
                 true
             }
             _ => false,
@@ -549,13 +621,26 @@ pub fn split(signature: &str) -> Vec<String> {
 
 #[test]
 fn parser_campaign_dbus() {
+    // A whole call by hand, so mutations reach a header and a body: the fixed
+    // sixteen bytes, `MEMBER` "C" padded to eight, `SIGNATURE` "s", one byte to
+    // the body's eight, and the string "x".
+    let call: &[u8] = b"l\x01\x00\x01\x06\x00\x00\x00\x01\x00\x00\x00\x17\x00\x00\x00\
+        \x03\x01s\x00\x01\x00\x00\x00C\x00\x00\x00\x00\x00\x00\x00\
+        \x08\x01g\x00\x01s\x00\x00\
+        \x01\x00\x00\x00x\x00";
+    assert!(matches!(super::unmarshal(call), super::Front::Whole(..)), "the seed is a message");
     let seeds: &[&[u8]] =
-        &[b"\x01\x00\x00\x00a\x00", b"\x01s\x00\x00\x03\x00\x00\x00abc\x00", &[0; 64]];
+        &[b"\x01\x00\x00\x00a\x00", b"\x01s\x00\x00\x03\x00\x00\x00abc\x00", &[0; 64], call];
     crate::fuzz_support::campaign("dbus", seeds, |bytes| {
-        for signature in ["s", "v", "as", "a{sv}", "(ua{sv})", "a(so)", "aay"] {
+        for signature in ["s", "v", "as", "a{sv}", "(ua{sv})", "a(so)", "aay", "a{ss}", "(ybixt)"] {
             for little in [true, false] {
                 let _ = Reader::new(bytes, 0, little).read(signature);
             }
+        }
+        match super::unmarshal(bytes) {
+            super::Front::Whole(_, used) => assert!(used <= bytes.len()),
+            super::Front::Unread(unread) => assert!(unread.size >= 16),
+            super::Front::Partial | super::Front::Lost => {}
         }
         if let Ok(signature) = std::str::from_utf8(bytes) {
             let _ = valid_signature(signature, false);
@@ -568,7 +653,170 @@ fn parser_campaign_dbus() {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{Reader, Value, Writer, split};
+    use super::{Reader, Value, Writer, split, valid_signature};
+
+    /// One hand-written encoding of every basic type and of a variant.
+    fn every_single_type() -> Vec<(char, Vec<u8>, Value)> {
+        let mut variant = vec![1, b'x', 0, 0, 0, 0, 0, 0];
+        variant.extend_from_slice(&(-3i64).to_le_bytes());
+        vec![
+            ('y', vec![7], Value::Byte(7)),
+            ('b', vec![1, 0, 0, 0], Value::Bool(true)),
+            ('i', vec![0xfe, 0xff, 0xff, 0xff], Value::I32(-2)),
+            ('u', vec![2, 0, 0, 0], Value::U32(2)),
+            ('x', (-2i64).to_le_bytes().to_vec(), Value::I64(-2)),
+            ('t', 2u64.to_le_bytes().to_vec(), Value::I64(2)),
+            ('s', vec![1, 0, 0, 0, b'a', 0], Value::Str("a".to_owned())),
+            ('o', vec![2, 0, 0, 0, b'/', b'a', 0], Value::Path("/a".to_owned())),
+            ('g', vec![1, b's', 0], Value::Signature("s".to_owned())),
+            ('v', variant, Value::Variant(Box::new(Value::I64(-3)))),
+        ]
+    }
+
+    /// **No type the signature check accepts fails to read.**
+    ///
+    /// The check accepted `n q d h` and every dictionary while the reader knew
+    /// none of them, so a message carrying one passed validation and then sat
+    /// in the buffer unread forever — `ShowFolders` with a `double` in it was
+    /// enough to stop the file manager answering. Walks the whole of ASCII so a
+    /// type added to one side and not the other fails here.
+    ///
+    /// The fix narrowed the check rather than widening the reader: ADR 0023 has
+    /// the wire speak what this program receives and nothing else.
+    #[test]
+    fn every_type_the_signature_check_accepts_reads() {
+        let table = every_single_type();
+        for code in (0u8..128).map(char::from) {
+            if !valid_signature(&code.to_string(), true) {
+                continue;
+            }
+            let (_, bytes, value) = table
+                .iter()
+                .find(|(kind, ..)| *kind == code)
+                .unwrap_or_else(|| panic!("`{code}` validates and nothing here reads one"));
+            let mut reader = Reader::new(bytes, 0, true);
+            assert_eq!(reader.read(&code.to_string()).as_ref(), Some(value), "`{code}`");
+            assert!(reader.done(), "`{code}` left bytes behind");
+        }
+    }
+
+    /// The same types written out and read back, so the writer agrees too.
+    #[test]
+    fn every_single_type_writes_as_it_reads() {
+        for (code, bytes, value) in every_single_type() {
+            let mut writer = Writer::at(0);
+            writer.write(&value);
+            assert_eq!(writer.into_bytes(), bytes, "`{code}`");
+            // `t` reads into the same bits as `x`, and so writes as one.
+            let named = if code == 't' { 'x' } else { code };
+            assert_eq!(value.signature(), named.to_string());
+        }
+    }
+
+    /// What this program never receives is refused by the check, so a message
+    /// carrying it is passed over unread rather than decoded.
+    #[test]
+    fn a_type_nothing_here_receives_does_not_validate() {
+        for refused in ["n", "q", "d", "h", "a{uv}", "a{oa{sv}}", "a{sy}", "a{vs}"] {
+            assert!(!valid_signature(refused, true), "{refused}");
+        }
+        for accepted in ["a{sv}", "a{ss}", "aa{ss}", "(aiia{ss}iaiiasib)"] {
+            assert!(valid_signature(accepted, true), "{accepted}");
+        }
+    }
+
+    /// `ay` is its bytes, and `aay` a list of them — by hand: the outer length,
+    /// one byte behind its own length, three bytes of padding to the next
+    /// length, and an empty one.
+    #[test]
+    fn a_byte_array_reads_as_its_bytes_and_not_a_value_each() {
+        let bytes = [3, 0, 0, 0, 1, 2, 3];
+        assert_eq!(Reader::new(&bytes, 0, true).read("ay"), Some(Value::Bytes(vec![1, 2, 3])));
+        let mut writer = Writer::at(0);
+        writer.write(&Value::Bytes(vec![1, 2, 3]));
+        assert_eq!(writer.into_bytes(), bytes);
+
+        let nested = [12, 0, 0, 0, 1, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0];
+        let read = Reader::new(&nested, 0, true).read("aay").expect("aay");
+        assert_eq!(read, Value::Array(vec![Value::Bytes(vec![9]), Value::Bytes(Vec::new())]));
+        assert_eq!(read.signature(), "aay");
+    }
+
+    /// **A body that decodes into more values than the budget is refused.**
+    ///
+    /// The wire size does not bound the decoded size on its own: a struct nested
+    /// in a struct costs no bytes, and thirty-two of them around one byte
+    /// measured at 516 bytes of memory per byte on the wire.
+    #[test]
+    fn a_body_of_more_values_than_the_budget_is_refused() {
+        let numbers = |count: usize| {
+            let mut bytes = u32::try_from(count * 4).unwrap().to_le_bytes().to_vec();
+            bytes.resize(4 + count * 4, 0);
+            bytes
+        };
+        // The array is a value too, so it and VALUES - 1 numbers are the budget.
+        let fits = numbers(super::VALUES - 1);
+        assert!(Reader::new(&fits, 0, true).read("au").is_some(), "exactly the budget");
+        let over = numbers(super::VALUES);
+        assert!(Reader::new(&over, 0, true).read("au").is_none(), "one value past it");
+
+        // Thirty-three values an element: thirty-two structs and the byte. Each
+        // element is padded to eight, but not after the last.
+        let deep = format!("a{}y{}", "(".repeat(32), ")".repeat(32));
+        let structs = |count: usize| {
+            let length = (count - 1) * 8 + 1;
+            let mut bytes = u32::try_from(length).unwrap().to_le_bytes().to_vec();
+            bytes.resize(8 + length, 0);
+            bytes
+        };
+        assert!(Reader::new(&structs(1_000), 0, true).read(&deep).is_some(), "33,001 values");
+        assert!(Reader::new(&structs(2_000), 0, true).read(&deep).is_none(), "66,001 values");
+    }
+
+    /// `a{ss}` reads — the one dictionary besides options that arrives here.
+    ///
+    /// By hand: the length, padding to eight before the first entry, then `s`
+    /// "k" at 8 and `s` "v" at 16 after two bytes of padding — fourteen bytes
+    /// counted from the first entry.
+    #[test]
+    fn a_dictionary_of_strings_reads() {
+        let bytes = [14, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, b'k', 0, 0, 0, 1, 0, 0, 0, b'v', 0];
+        let read = Reader::new(&bytes, 0, true).read("a{ss}").expect("a{ss}");
+        assert_eq!(read, Value::Map(vec![("k".to_owned(), "v".to_owned())]));
+        assert_eq!(read.signature(), "a{ss}");
+        let mut writer = Writer::at(0);
+        writer.write(&read);
+        assert_eq!(writer.into_bytes(), bytes, "and writes as it reads");
+
+        // Empty, it still pads to its entry's eight.
+        let read = Reader::new(&[0; 8], 0, true).read("a{ss}").expect("empty a{ss}");
+        assert_eq!(read, Value::Map(Vec::new()));
+    }
+
+    /// **`Collection.GetMatches`, which used to wedge the accessibility
+    /// connection**: its match rule carries an `a{ss}`, and a reader that
+    /// refused every dictionary but options never read past it.
+    #[test]
+    fn a_screen_readers_match_rule_reads() {
+        let rule = Value::Struct(vec![
+            Value::Array(vec![Value::I32(1)]),
+            Value::I32(0),
+            Value::Map(vec![("toolkit".to_owned(), "skerry".to_owned())]),
+            Value::I32(0),
+            Value::Array(vec![Value::I32(2)]),
+            Value::I32(0),
+            Value::Array(vec![Value::Str("org.a11y.atspi.Text".to_owned())]),
+            Value::I32(0),
+            Value::Bool(false),
+        ]);
+        assert_eq!(rule.signature(), "(aiia{ss}iaiiasib)");
+        let mut writer = Writer::at(0);
+        writer.write(&rule);
+        let bytes = writer.into_bytes();
+        let mut reader = Reader::new(&bytes, 0, true);
+        assert_eq!(reader.read("(aiia{ss}iaiiasib)"), Some(rule));
+        assert!(reader.done());
+    }
 
     /// **An array after an odd number of words is aligned to four, not eight.**
     ///
