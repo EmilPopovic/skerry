@@ -56,6 +56,56 @@ pub enum ProblemKind {
     AcrossFilesystems,
     /// A directory that has to be empty is not.
     NotEmpty,
+    /// Another filesystem is mounted inside what was being removed, so that
+    /// part was left standing with everything on it.
+    ///
+    /// Its own kind because the advice — unmount it first — is one no other
+    /// kind gives, and because the alternative was deleting the contents of a
+    /// bind mount, a FUSE mount or a disk that happened to be mounted below a
+    /// folder somebody deleted for good.
+    MountedInside,
+    /// A move across filesystems left part of its source where it was, because
+    /// it changed or appeared after the copy had read what was there.
+    ///
+    /// Its own kind because the move happened and this is about what it did not
+    /// take: the copy holds the source as it was, so removing what came later
+    /// would delete the only copy of it. Counted — see [`Problem::counted`].
+    LeftBehind,
+    /// A move back — the undo of a move between filesystems — found something
+    /// already holding a name it was bringing back, and left its own entry where
+    /// it was.
+    ///
+    /// Its own kind because nothing is wrong with either file and there is no
+    /// name to choose: the two are versions of one thing, and which to keep is
+    /// a person's call. [`Self::NameTaken`]'s advice — choose another name —
+    /// was what this said before it existed. Counted.
+    NameHeld,
+    /// A move back went into a folder that was already there — recreated, or
+    /// another of the same name — beside whatever it held, replacing nothing.
+    ///
+    /// Its own kind because nothing went wrong and nothing was left, but the
+    /// folder now holds two things' contents, and that is worth saying.
+    MergedInto,
+    /// A folder a copy had just made was not the folder it then opened:
+    /// somebody replaced it in between.
+    ///
+    /// Its own kind because [`Self::Gone`] — "no longer there" — was what this
+    /// said, about a folder that was there and was the wrong one; the advice is
+    /// about who else can write where the copy was going.
+    FolderSwapped,
+    /// A note a finished step carried, reported as itself.
+    ///
+    /// What `ops::replay` raises when an undo or redo completed with a note:
+    /// the note is already the sentence, and dressing it as
+    /// [`Self::Unreadable`] rendered "Cannot read ." with no subject.
+    Note,
+    /// A mode could not be changed on the descriptor that was checked: the
+    /// kernel has no `fchmodat2` and `/proc` is not mounted.
+    ///
+    /// Its own kind because the file is there and permitted, and the advice is
+    /// about the system: [`Self::Gone`], which `ENOENT` from `/proc` used to
+    /// raise, sent somebody looking for a file that had not moved.
+    ModeUnchangeable,
     /// What an undo or a redo would put back is not what it would be replacing:
     /// somebody changed the file's bytes, or its mode, after this program did.
     ///
@@ -158,6 +208,13 @@ impl ProblemKind {
             Self::NameTaken => "error.name_taken",
             Self::AcrossFilesystems => "error.across_filesystems",
             Self::NotEmpty => "error.not_empty",
+            Self::MountedInside => "error.mounted_inside",
+            Self::LeftBehind => "error.left_behind",
+            Self::NameHeld => "error.name_held",
+            Self::ModeUnchangeable => "error.mode_unchangeable",
+            Self::MergedInto => "error.merged_into",
+            Self::FolderSwapped => "error.folder_swapped",
+            Self::Note => "error.note",
             Self::ChangedSince => "error.changed_since",
             Self::TooLarge => "error.too_large",
             Self::Full => "error.full",
@@ -182,12 +239,30 @@ pub struct Problem {
     kind: ProblemKind,
     subject: String,
     detail: String,
+    /// How many things this is about, for a kind whose message has plural
+    /// forms; `subject` is then the first of them.
+    count: Option<u64>,
 }
 
 impl Problem {
     /// A problem about `subject`, with `detail` for the log.
     pub fn new(kind: ProblemKind, subject: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self { kind, subject: subject.into(), detail: detail.into() }
+        Self { kind, subject: subject.into(), detail: detail.into(), count: None }
+    }
+
+    /// A problem about `count` things, `subject` the first of them.
+    ///
+    /// **The message agrees with the count** through the catalogue's plural
+    /// forms ([ADR 0016](../../../docs/adr/0016-plural-forms-are-bracketed-keys-in-the-catalogue.md)),
+    /// as `{0}` the count and `{1}` the subject. A sentence that named one of
+    /// three hundred things left behind read as though one thing had been.
+    pub fn counted(
+        kind: ProblemKind,
+        subject: impl Into<String>,
+        count: u64,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self { count: Some(count), ..Self::new(kind, subject, detail) }
     }
 
     /// A problem with no particular subject.
@@ -204,7 +279,10 @@ impl Problem {
     /// What happened and what to do, resolved through the catalogue.
     #[must_use]
     pub fn message(&self) -> String {
-        i18n::format(self.kind.catalogue_key(), &[&self.subject])
+        match self.count {
+            Some(count) => i18n::plural(self.kind.catalogue_key(), count, &[&count, &self.subject]),
+            None => i18n::format(self.kind.catalogue_key(), &[&self.subject]),
+        }
     }
 
     /// The chain for the log. Never shown as the primary message.
@@ -263,5 +341,20 @@ mod tests {
             let message = Problem::plain(kind, "detail").message();
             assert!(!message.starts_with("error."), "`{kind:?}` has no catalogue entry");
         }
+    }
+
+    /// A counted problem agrees with its count, and names the first subject
+    /// either way — the plural line has no bare form to fall back on.
+    #[test]
+    fn a_counted_problem_agrees_with_its_count() {
+        for kind in [ProblemKind::LeftBehind, ProblemKind::NameHeld] {
+            let one = Problem::counted(kind, "/a/report.pdf", 1, "detail").message();
+            let many = Problem::counted(kind, "/a/report.pdf", 300, "detail").message();
+            assert!(!one.starts_with("error.") && !many.starts_with("error."), "{kind:?}");
+            assert!(one.contains("/a/report.pdf") && many.contains("/a/report.pdf"), "{many}");
+            assert!(many.contains("300 items") && !one.contains("items"), "{one} / {many}");
+        }
+        let mode = Problem::new(ProblemKind::ModeUnchangeable, "/a/f", "detail").message();
+        assert!(mode.contains("/proc") && mode.contains("/a/f"), "{mode}");
     }
 }

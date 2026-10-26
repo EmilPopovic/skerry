@@ -183,19 +183,47 @@ fn uevents() -> Option<OwnedFd> {
 /// would spin the thread that polls it. `Err` where the socket itself failed,
 /// which is the caller's cue to stop polling it.
 fn heard_about_a_disk(socket: std::os::fd::BorrowedFd<'_>) -> Result<bool, ()> {
+    drain(socket, from_udev)
+}
+
+/// [`heard_about_a_disk`], counting only the messages whose sender `believed`.
+fn drain(
+    socket: std::os::fd::BorrowedFd<'_>,
+    believed: fn(Option<rustix::net::SocketAddrAny>) -> bool,
+) -> Result<bool, ()> {
     let mut about_a_disk = false;
     loop {
         let mut buffer = [0u8; UEVENT];
-        match rustix::io::read(socket, &mut buffer) {
+        match rustix::net::recvfrom(socket, &mut buffer[..], rustix::net::RecvFlags::empty()) {
             // A zero-length read and `EAGAIN` are the same answer here: there is
             // nothing more waiting, so stop rather than spin.
-            Ok(0) | Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
+            Ok((0, ..)) | Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {
                 return Ok(about_a_disk);
             }
-            Ok(count) => about_a_disk |= about_a_block_device(&buffer[..count]),
+            Ok((count, _, sender)) => {
+                about_a_disk |= believed(sender) && about_a_block_device(&buffer[..count]);
+            }
             Err(_) => return Err(()),
         }
     }
+}
+
+/// Whether a uevent arrived the way udev sends one: multicast to its group.
+///
+/// **The group and not the port id.** The kernel's own uevents come from port 0
+/// on group 1, but this socket listens on group 2, udev's rebroadcast, whose
+/// sender is `systemd-udevd`'s own port — so "`nl_pid` is zero" would refuse
+/// every message it subscribes to. What a forged message lacks is the group:
+/// `netlink_recvmsg` reports the group a datagram was multicast to, and 0 for
+/// one sent straight to this socket's port. Sending either needs
+/// `CAP_NET_ADMIN`, because the uevent family is created with
+/// `NL_CFG_F_NONROOT_RECV` and not `NL_CFG_F_NONROOT_SEND` — measured here as
+/// `EPERM` for an ordinary user — so this is hardening for the day that stops
+/// being true, not a hole it closes today.
+fn from_udev(sender: Option<rustix::net::SocketAddrAny>) -> bool {
+    sender
+        .and_then(|sender| rustix::net::netlink::SocketAddrNetlink::try_from(sender).ok())
+        .is_some_and(|sender| sender.groups() == UDEV_GROUP)
 }
 
 /// Whether a uevent's properties say it is about a block device.
@@ -705,7 +733,8 @@ mod tests {
     /// what this program owns is reading every message that is waiting, deciding
     /// from all of them together, and coming back rather than spinning. A
     /// datagram pair is the same read shape as netlink — one message per read —
-    /// and it needs no capability.
+    /// and it needs no capability. Its sender is not netlink, so every one is
+    /// believed here; which senders are is the next two tests' question.
     #[test]
     fn every_waiting_message_is_read_and_one_disk_among_them_is_enough() {
         use rustix::net::{AddressFamily, SocketFlags, SocketType};
@@ -727,7 +756,7 @@ mod tests {
         };
 
         // Nothing waiting is not a disk, and it must not block.
-        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(false));
+        assert_eq!(super::drain(ours.as_fd(), |_| true), Ok(false));
 
         // Three messages, one of which is a disk, in one burst.
         for message in [
@@ -737,14 +766,89 @@ mod tests {
         ] {
             rustix::io::write(&theirs, &message).expect("written");
         }
-        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(true));
+        assert_eq!(super::drain(ours.as_fd(), |_| true), Ok(true));
         // And the burst is *drained*: a message left waiting is a descriptor
         // that stays ready, which is a thread that spins.
-        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(false));
+        assert_eq!(super::drain(ours.as_fd(), |_| true), Ok(false));
 
         // A socket that has gone says so, so the caller can stop polling it.
         drop(theirs);
         drop(ours);
+    }
+
+    /// Who is believed: a datagram multicast to udev's group, and nothing sent
+    /// to this socket's own port — whichever port it came from, the kernel's
+    /// port 0 included — and nothing that is not netlink at all.
+    #[test]
+    fn only_a_message_multicast_to_udevs_group_is_believed() {
+        use rustix::net::netlink::SocketAddrNetlink;
+        let from = |pid, groups| Some(SocketAddrNetlink::new(pid, groups).into());
+        assert!(super::from_udev(from(4242, super::UDEV_GROUP)));
+        assert!(!super::from_udev(from(4242, 0)), "sent straight to this port");
+        assert!(!super::from_udev(from(0, 0)), "port 0, but not multicast");
+        assert!(!super::from_udev(from(0, 1)), "the kernel's group, not udev's");
+        assert!(!super::from_udev(None));
+    }
+
+    /// The same, end to end over a real uevent socket. Sending to one needs
+    /// `CAP_NET_ADMIN`, which an ordinary user has only in a network namespace
+    /// of their own — so this re-runs the test binary inside `unshare -Urn`,
+    /// and returns where user namespaces are unavailable.
+    #[test]
+    fn a_uevent_forged_to_this_socket_is_not_believed() {
+        let can_unshare = std::process::Command::new("unshare")
+            .args(["-Urn", "true"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !can_unshare {
+            return;
+        }
+        let out = std::process::Command::new("unshare")
+            .arg("-Urn")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "watch::tests::inside_a_namespace_only_udevs_group_is_heard"])
+            .arg("--ignored")
+            .env("SKERRY_NETLINK_TEST", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "run inside a network namespace by the test above"]
+    fn inside_a_namespace_only_udevs_group_is_heard() {
+        use rustix::net::netlink::{self, SocketAddrNetlink};
+        use rustix::net::{AddressFamily, SendFlags, SocketFlags, SocketType};
+        use std::os::fd::AsFd as _;
+        if std::env::var_os("SKERRY_NETLINK_TEST").is_none() {
+            return;
+        }
+        let ours = super::uevents().expect("bound");
+        let port =
+            SocketAddrNetlink::try_from(rustix::net::getsockname(&ours).unwrap()).unwrap().pid();
+        let forger = rustix::net::socket_with(
+            AddressFamily::NETLINK,
+            SocketType::DGRAM,
+            SocketFlags::CLOEXEC,
+            Some(netlink::KOBJECT_UEVENT),
+        )
+        .unwrap();
+        let message = b"libudev\0ACTION=add\0SUBSYSTEM=block\0DEVNAME=/dev/sdz1\0";
+
+        let straight = SocketAddrNetlink::new(port, 0);
+        rustix::net::sendto(&forger, message, SendFlags::empty(), &straight).expect("sent");
+        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(false), "a forgery was believed");
+
+        // `ECONNREFUSED` after a multicast is the unicast half of the same send
+        // finding no listener at port 0; the multicast went out regardless.
+        let group = SocketAddrNetlink::new(0, super::UDEV_GROUP);
+        match rustix::net::sendto(&forger, message, SendFlags::empty(), &group) {
+            Ok(_) | Err(rustix::io::Errno::CONNREFUSED) => {}
+            Err(error) => panic!("multicast: {error}"),
+        }
+        assert_eq!(super::heard_about_a_disk(ours.as_fd()), Ok(true), "udev's group was refused");
     }
 
     /// **The socket, on this machine.** ADR 0030 rests on it binding without a

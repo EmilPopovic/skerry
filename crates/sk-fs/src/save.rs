@@ -86,7 +86,9 @@ pub fn write(file: &Path, text: &str) -> std::io::Result<()> {
             }
             handle.set_permissions(meta.permissions())?;
             let mut missing = Vec::new();
-            crate::copy::copy_xattrs(source, &handle, &mut missing);
+            // ACLs included: this is the same file rewritten, and the `fchown`
+            // above has already refused unless its owner can own the new one.
+            crate::copy::copy_xattrs(source, &handle, &mut missing, true);
             if !missing.is_empty() {
                 return Err(std::io::Error::other(format!(
                     "metadata could not be preserved: {}",

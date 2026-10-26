@@ -22,9 +22,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags};
+use rustix::fs::{AtFlags, Mode, OFlags};
 use sk_model::{Problem, ProblemKind};
 
 /// What a [`Change::Created`] made.
@@ -709,6 +710,11 @@ pub fn stranded_by_empty(change: &Change, files: &Path, next: Next) -> Option<Ch
 /// Recorded as a rename, because that is what it is when the filesystems match
 /// and what its undo has to do either way.
 ///
+/// **What a move across filesystems leaves in the source is a note, not a
+/// failure.** It moved everything it copied, so the change goes on the stack
+/// and its undo brings that back — which then refuses while the leftovers
+/// still hold the original name, rather than merging into them.
+///
 /// **Runs on a job.**
 pub fn move_into(
     source: &Path,
@@ -728,11 +734,13 @@ pub fn move_into(
         && taken(&into.join(name))
     {
         let destination = into.join(name);
+        let mut left = None;
         let displaced = replace_into(name, into, Some(source), &mut |staging| {
-            crate::copy::move_to(source, staging, cancel, watch)
+            left = crate::copy::move_to(source, staging, cancel, watch)?;
+            Ok(())
         })?;
         let moved = Change::Renamed { from: source.to_path_buf(), to: destination };
-        return Ok(Change::Batch(vec![displaced, moved]));
+        return Ok(with_left(Change::Batch(vec![displaced, moved]), left));
     }
     let mut progress = crate::copy::Progress::default();
     // A move across filesystems is a copy and then a removal, so a resumed one
@@ -742,8 +750,22 @@ pub fn move_into(
         resume: conflict == Conflict::Resume,
         ..crate::copy::Options::default()
     };
-    let destination = crate::copy::move_into(source, into, options, cancel, &mut progress, watch)?;
-    Ok(Change::Renamed { from: source.to_path_buf(), to: destination })
+    let (destination, left) =
+        crate::copy::move_into(source, into, options, cancel, &mut progress, watch)?;
+    Ok(with_left(Change::Renamed { from: source.to_path_buf(), to: destination }, left))
+}
+
+/// `change`, carrying what a move across filesystems left behind, if it did.
+fn with_left(change: Change, left: Option<Problem>) -> Change {
+    match left {
+        Some(left) => Change::Noted {
+            change: Box::new(change),
+            note: left.message(),
+            retry: false,
+            stranded: false,
+        },
+        None => change,
+    }
 }
 
 /// Replaces a text file's contents, and records what it held.
@@ -806,39 +828,103 @@ pub fn edit_text(path: &Path, after: &str) -> Result<Change, Problem> {
 /// **Runs on a job.**
 pub fn set_permissions(path: &Path, nine: u16) -> Result<Change, Problem> {
     crate::trash::writable(path)?;
-    let before = mode_now(path)?;
+    let (held, before) = hold(path)?;
     let after = (before & 0o7000) | (nine & 0o777);
-    chmod(path, after)?;
+    chmod(&held, path, after)?;
     Ok(Change::Permissions { path: path.to_path_buf(), before, after })
 }
 
-/// The whole mode a path has right now, refusing a symlink.
-fn mode_now(path: &Path) -> Result<u16, Problem> {
-    let stat = rustix::fs::statx(
+/// The file `path` names, held, and the whole mode it has — refusing a symlink.
+///
+/// **One descriptor for the look and the change.** A `statx` of the path and a
+/// `chmod` of the path are two lookups, and between them somebody who can write
+/// the folder could swap the file for a symlink: the check saw a file, and the
+/// change followed the link to whatever it named. `O_PATH | O_NOFOLLOW` opens a
+/// symlink as itself, so the `fstat` that refuses it and the [`chmod`] that
+/// follows are about one inode. `O_PATH` and not `O_RDONLY`, because changing a
+/// mode needs ownership and not permission to read — the person restoring
+/// access to their own `000` file is exactly who this is for.
+fn hold(path: &Path) -> Result<(OwnedFd, u16), Problem> {
+    let fd = rustix::fs::openat(
         rustix::fs::CWD,
         path,
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-        StatxFlags::TYPE | StatxFlags::MODE,
+        OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
     )
     .map_err(|error| problem(error, path))?;
-    if u32::from(stat.stx_mode) & libc::S_IFMT == libc::S_IFLNK {
+    let stat = rustix::fs::fstat(&fd).map_err(|error| problem(error, path))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Symlink {
         return Err(Problem::new(
             ProblemKind::Unreadable,
             path.display().to_string(),
             "a symlink has no permissions of its own",
         ));
     }
-    Ok(stat.stx_mode & 0o7777)
+    Ok((fd, (stat.st_mode & 0o7777) as u16))
 }
 
-fn chmod(path: &Path, mode: u16) -> Result<(), Problem> {
+/// `__NR_fchmodat2`: 452 in the table every architecture has shared since Linux
+/// 5.1 (`include/uapi/asm-generic/unistd.h`), and not in the `libc` crate for
+/// aarch64 as of 0.2.189. Where the number means nothing the kernel answers
+/// `ENOSYS`, which is the fallback's cue anyway.
+const FCHMODAT2: libc::c_long = 452;
+
+/// Sets the mode of the file `held` refers to, never by name.
+///
+/// `fchmodat2` with `AT_EMPTY_PATH` acts on the descriptor itself, and is Linux
+/// 6.6 — above the 5.10 floor, so it is tried rather than assumed. Without it,
+/// `/proc/self/fd/N` is the descriptor's own magic link and `chmod` through it
+/// reaches the same inode; plain `fchmod` refuses an `O_PATH` descriptor with
+/// `EBADF`.
+///
+/// **`EPERM` falls back too.** A seccomp filter that predates the syscall —
+/// a snap's, a container runtime's — answers `EPERM` rather than `ENOSYS`,
+/// and a real `EPERM` costs one more refused `chmod` saying the same thing.
+fn chmod(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
+    let flags = libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW;
+    // SAFETY: the descriptor is open for the whole call, the path is a valid
+    // NUL-terminated empty string, and the mode and flags are plain integers.
+    let answer = unsafe {
+        libc::syscall(FCHMODAT2, held.as_raw_fd(), c"".as_ptr(), libc::c_uint::from(mode), flags)
+    };
+    if answer == 0 {
+        return Ok(());
+    }
+    match rustix::io::Errno::from_io_error(&std::io::Error::last_os_error()) {
+        Some(rustix::io::Errno::NOSYS | rustix::io::Errno::PERM) => {
+            chmod_through_proc(held, path, mode)
+        }
+        Some(error) => Err(problem(error, path)),
+        None => Err(problem(rustix::io::Errno::IO, path)),
+    }
+}
+
+/// [`chmod`] for a kernel without `fchmodat2`, through the descriptor's own link
+/// in `/proc`.
+///
+/// `ENOENT` here means `/proc` is not mounted — the descriptor is open, so its
+/// link exists wherever `/proc` does — and says that, rather than that a file
+/// it is holding has gone.
+fn chmod_through_proc(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
+    let link = format!("/proc/self/fd/{}", held.as_raw_fd());
     rustix::fs::chmodat(
         rustix::fs::CWD,
-        path,
+        link.as_str(),
         Mode::from_bits_truncate(u32::from(mode)),
-        rustix::fs::AtFlags::empty(),
+        AtFlags::empty(),
     )
-    .map_err(|error| problem(error, path))
+    .map_err(|error| proc_failure(error, path))
+}
+
+fn proc_failure(error: rustix::io::Errno, path: &Path) -> Problem {
+    match error {
+        rustix::io::Errno::NOENT => Problem::new(
+            ProblemKind::ModeUnchangeable,
+            path.display().to_string(),
+            "no fchmodat2, and /proc/self/fd is not there",
+        ),
+        error => problem(error, path),
+    }
 }
 
 /// Puts a recorded mode back, refusing if the file has moved on since.
@@ -847,7 +933,7 @@ fn chmod(path: &Path, mode: u16) -> Result<(), Problem> {
 /// mode somebody else changed in between is not one this undo has an inverse
 /// for, and writing over it would lose their change without saying so.
 fn restore_mode(path: &Path, expected: u16, wanted: u16) -> Result<(), Problem> {
-    let now = mode_now(path)?;
+    let (held, now) = hold(path)?;
     if now != expected {
         return Err(Problem::new(
             ProblemKind::ChangedSince,
@@ -855,7 +941,7 @@ fn restore_mode(path: &Path, expected: u16, wanted: u16) -> Result<(), Problem> 
             "permissions changed since",
         ));
     }
-    chmod(path, wanted)
+    chmod(&held, path, wanted)
 }
 
 /// Whether something is already called that.
@@ -898,8 +984,11 @@ fn replace_into(
     let staging = holding.join(name);
     let discard = || {
         if let Some(source) = original {
-            if taken(&staging) {
-                crate::copy::move_to(&staging, source, &sk_util::Cancel::new(), &mut |_| {})?;
+            if taken(&staging)
+                && let Some(left) =
+                    crate::copy::move_to(&staging, source, &sk_util::Cancel::new(), &mut |_| {})?
+            {
+                return Err(left);
             }
             return rustix::fs::rmdir(&holding).map_err(|error| problem(error, &holding));
         }
@@ -962,8 +1051,13 @@ pub fn revert(change: &Change) -> Result<(), Problem> {
         // Through the copy engine rather than `move_no_replace`: a rename inside
         // one directory can never cross a filesystem, but a *move* between two
         // can, and its undo has to be able to come back the same way it went.
+        // What that leaves behind is an error here, where nothing can carry a
+        // note; [`revert_recorded`], which the undo stack uses, carries it.
         Change::Renamed { from, to } => {
-            crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})
+            match crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})? {
+                Some(left) => Err(left),
+                None => Ok(()),
+            }
         }
         // Trash preserves files added after the original operation.
         Change::Copied { destination, .. } => trash(destination).map(|_| ()),
@@ -1047,8 +1141,8 @@ pub fn apply(change: &Change) -> Result<Change, Problem> {
             }
         }
         Change::Renamed { from, to } => {
-            crate::copy::move_to(from, to, &sk_util::Cancel::new(), &mut |_| {})?;
-            Ok(change.clone())
+            let left = crate::copy::move_to(from, to, &sk_util::Cancel::new(), &mut |_| {})?;
+            Ok(with_left(change.clone(), left))
         }
         // **To the recorded destination, not to one derived from the source.**
         // A copy into the folder its original is in lands under a free name, and
@@ -1133,6 +1227,10 @@ pub fn revert_recorded(change: &Change) -> Result<Change, Problem> {
             _ => Ok(change.clone()),
         };
     }
+    if let Change::Renamed { from, to } = change {
+        let left = crate::copy::move_to(to, from, &sk_util::Cancel::new(), &mut |_| {})?;
+        return Ok(with_left(change.clone(), left));
+    }
     revert(change)?;
     Ok(change.clone())
 }
@@ -1179,7 +1277,11 @@ pub fn replay(
         match step(&change) {
             Ok(fresh) => {
                 if let Change::Noted { note, .. } = &fresh {
-                    problem = Some(Problem::plain(ProblemKind::Unreadable, note.clone()));
+                    problem = Some(Problem::new(
+                        ProblemKind::Note,
+                        note.clone(),
+                        "completed with a note",
+                    ));
                 }
                 completed.push(fresh);
                 if problem.is_some() {
@@ -1562,6 +1664,99 @@ mod tests {
         });
     }
 
+    /// A move between two real filesystems — `/dev/shm` and the temporary
+    /// directory, which are two mounts on any Linux this runs on, and where they
+    /// are not it returns.
+    ///
+    /// A file written after the copy read it, and one that arrived meanwhile,
+    /// both stay, and the note counts them. The undo used to refuse at the
+    /// folder's name — "Something is already called …; choose another name",
+    /// with no name to choose and the history entry stuck. It merges back now:
+    /// what can come back does, the stale copy of the written file stays where
+    /// it landed beside the newer one, and the note says to compare them.
+    #[test]
+    fn a_move_between_filesystems_notes_what_it_left_and_its_undo_merges_back_around_it() {
+        let device =
+            |path: &Path| rustix::fs::stat(path).map(|stat| stat.st_dev).unwrap_or_default();
+        let here = scratch("across-filesystems");
+        let shm = Path::new("/dev/shm");
+        if !shm.is_dir() || device(shm) == device(&here) {
+            return;
+        }
+        let source = shm.join(format!("skerry-ops-{}-across", std::process::id()));
+        let _ = std::fs::remove_dir_all(&source);
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("copied.txt"), b"moved").unwrap();
+        std::fs::write(source.join("written.txt"), b"as copied").unwrap();
+
+        let mut armed = true;
+        let change =
+            move_into(&source, &here, Conflict::Refuse, &sk_util::Cancel::new(), &mut |p| {
+                if armed && p.done == 2 {
+                    armed = false;
+                    std::fs::write(source.join("arrived.txt"), b"new").unwrap();
+                    std::fs::write(source.join("written.txt"), b"written after").unwrap();
+                }
+            })
+            .expect("moved");
+        let landed = here.join(source.file_name().unwrap());
+        assert_eq!(std::fs::read(landed.join("copied.txt")).unwrap(), b"moved");
+        assert!(!source.join("copied.txt").exists());
+        assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(source.join("written.txt")).unwrap(), b"written after");
+        let Change::Noted { change: inner, note, retry: false, stranded: false } = &change else {
+            panic!("{change:?}")
+        };
+        assert!(matches!(**inner, Change::Renamed { .. }), "{inner:?}");
+        assert!(note.starts_with("2 items changed or appeared"), "{note}");
+
+        let undo = super::replay(&change, true, &mut |leaf| super::revert_recorded(leaf));
+        let Some(Change::Noted { note, .. }) = &undo.completed else {
+            panic!("the undo did not complete: {:?}", undo.problem)
+        };
+        assert!(note.contains("written.txt") && note.contains("already has its name"), "{note}");
+        let reported = undo.problem.expect("the note is reported");
+        assert_eq!((reported.kind(), reported.message()), (ProblemKind::Note, note.clone()));
+        assert_eq!(std::fs::read(source.join("copied.txt")).unwrap(), b"moved");
+        assert_eq!(std::fs::read(source.join("written.txt")).unwrap(), b"written after");
+        assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(landed.join("written.txt")).unwrap(), b"as copied");
+        assert!(!landed.join("copied.txt").exists(), "what came back is still in both places");
+        std::fs::remove_dir_all(&source).unwrap();
+        std::fs::remove_dir_all(&here).unwrap();
+    }
+
+    /// Somebody who can write the folder above a `.Trash-$uid` renames it away
+    /// once Empty Trash has opened it, and plants a symlink to a folder shaped
+    /// like a trash. Removing by name again deleted that folder's file of the
+    /// same name; through the descriptors, the real entry goes and nothing else.
+    #[test]
+    fn a_trash_swapped_for_a_symlink_once_opened_has_only_its_own_entries_removed() {
+        with_trash("empty-swap", |root| {
+            let file = root.join("report.txt");
+            std::fs::write(&file, b"trashed").unwrap();
+            let Change::Trashed { stored, .. } = trash(&file).expect("trashed") else {
+                panic!("trash")
+            };
+            let files = stored.parent().expect("files").to_path_buf();
+            let trash_root = files.parent().expect("root").to_path_buf();
+            let decoy = trash_root.with_file_name("decoy").join("files");
+            std::fs::create_dir_all(&decoy).unwrap();
+            let name = stored.file_name().expect("name");
+            std::fs::write(decoy.join(name), b"precious").unwrap();
+
+            crate::trash::AFTER_OPEN.set(Some(|trash_root| {
+                std::fs::rename(trash_root, trash_root.with_file_name("held")).unwrap();
+                std::os::unix::fs::symlink(trash_root.with_file_name("decoy"), trash_root).unwrap();
+            }));
+            let emptied = empty_trash(&files, &sk_util::Cancel::new());
+            assert_eq!(std::fs::read(decoy.join(name)).unwrap(), b"precious");
+            let held = trash_root.with_file_name("held");
+            assert!(!held.join("files").join(name).exists(), "the trashed entry survived");
+            emptied.expect("emptied");
+        });
+    }
+
     /// An entry the empty cannot take keeps itself and its record, and nothing
     /// else: stopping at it once left a trash that looked untouched.
     #[test]
@@ -1775,6 +1970,100 @@ mod tests {
         let refused = set_permissions(&link, 0o600).expect_err("a symlink was accepted");
         assert_eq!(refused.kind(), ProblemKind::Unreadable);
         assert_eq!(mode_of(&target), 0o644, "the target was changed through the link");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The check and the change used to be two lookups of one path, and a file
+    /// swapped for a symlink between them had the link's target changed. Both
+    /// ways of changing a held mode — `fchmodat2` and, for a kernel before 6.6,
+    /// `/proc/self/fd` — act on the file that was held and nothing else.
+    #[test]
+    fn a_file_swapped_for_a_symlink_once_held_is_the_only_one_changed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        type Change = fn(&std::os::fd::OwnedFd, &Path, u16) -> Result<(), sk_model::Problem>;
+        let ways: [(&str, Change); 2] =
+            [("fchmodat2", super::chmod), ("proc", super::chmod_through_proc)];
+        for (way, change) in ways {
+            let root = scratch(&format!("chmod-swap-{way}"));
+            let file = root.join("file");
+            let victim = root.join("victim");
+            for path in [&file, &victim] {
+                std::fs::write(path, b"contents").unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            let (held, before) = super::hold(&file).expect("held");
+            assert_eq!(before, 0o600);
+            std::fs::rename(&file, root.join("moved")).unwrap();
+            std::os::unix::fs::symlink(&victim, &file).unwrap();
+
+            change(&held, &file, 0o640).expect("changed");
+            assert_eq!(mode_of(&victim), 0o600, "{way} changed the symlink's target");
+            assert_eq!(mode_of(&root.join("moved")), 0o640, "{way} missed the held file");
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A seccomp filter older than `fchmodat2` — a snap's, a container runtime's
+    /// — answers `EPERM` for it, not `ENOSYS`, and the change was refused with
+    /// a permission error about a file its owner may change. Installed here on
+    /// a thread of the test's own, which a filter does not outlive.
+    #[test]
+    fn a_filter_that_refuses_fchmodat2_with_eperm_still_gets_the_change() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("chmod-eperm");
+        let path = root.join("file");
+        std::fs::write(&path, b"contents").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let held = path.clone();
+        let changed = std::thread::spawn(move || {
+            let k = |code: u32, jt, jf, k| libc::sock_filter { code: code as u16, jt, jf, k };
+            let filter = [
+                k(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+                k(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 1, super::FCHMODAT2 as u32),
+                k(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+                k(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+            ];
+            let program = libc::sock_fprog { len: 4, filter: filter.as_ptr().cast_mut() };
+            // SAFETY: both calls take plain integers and, for the second, a
+            // pointer to a program that outlives the call; the filter binds only
+            // this thread, which ends with the test.
+            let installed = unsafe {
+                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+                    && libc::prctl(
+                        libc::PR_SET_SECCOMP,
+                        libc::SECCOMP_MODE_FILTER,
+                        &raw const program,
+                    ) == 0
+            };
+            assert!(installed, "the seccomp filter was refused");
+            set_permissions(&held, 0o640).map(|_| mode_of(&held))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(changed.expect("changed through /proc"), 0o640);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fallback's `ENOENT` is `/proc` missing, not the file: it is held open.
+    #[test]
+    fn a_missing_proc_is_named_rather_than_the_file_called_gone() {
+        let refused = super::proc_failure(rustix::io::Errno::NOENT, Path::new("/a/f"));
+        assert_eq!(refused.kind(), ProblemKind::ModeUnchangeable);
+        assert!(refused.message().contains("/proc"), "{}", refused.message());
+    }
+
+    /// Why the descriptor is `O_PATH`: a mode is changed by its owner, who need
+    /// not be able to read the file — and a `000` file is the one most in need.
+    #[test]
+    fn a_file_nobody_may_read_can_still_have_its_bits_set() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("chmod-unreadable");
+        let path = root.join("locked");
+        std::fs::write(&path, b"contents").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let change = set_permissions(&path, 0o600).expect("set");
+        assert_eq!(change, Change::Permissions { path: path.clone(), before: 0, after: 0o600 });
+        assert_eq!(mode_of(&path), 0o600);
         let _ = std::fs::remove_dir_all(&root);
     }
 
