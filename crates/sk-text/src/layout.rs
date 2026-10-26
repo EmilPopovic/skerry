@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::escape::Hidden;
 use crate::fonts::{Fonts, Weight};
 use crate::shape::ShapedRun;
 
@@ -83,6 +84,8 @@ pub struct LayoutCache {
 
 struct Label {
     text: String,
+    end: usize,
+    hidden: Hidden,
     weight: u8,
     quarter_px: u16,
     run: ShapedRun,
@@ -144,11 +147,33 @@ impl LayoutCache {
         px_size: f32,
         fonts: &mut Fonts,
     ) -> &ShapedRun {
+        self.get_or_shape_part(text, text.len(), weight, px_size, Hidden::Escaped, fonts)
+    }
+
+    /// The shaped run for the first `end` bytes of `text`, drawn as `hidden`
+    /// says — [`Fonts::shape_part`], kept like a label.
+    ///
+    /// **Keyed by the whole of `text` and by `end`, not by the prefix.** Two
+    /// prefixes with the same bytes are different runs when what follows them
+    /// decides whether their last joiner is escaped.
+    pub fn get_or_shape_part(
+        &mut self,
+        text: &str,
+        end: usize,
+        weight: Weight,
+        px_size: f32,
+        hidden: Hidden,
+        fonts: &mut Fonts,
+    ) -> &ShapedRun {
         let quarter_px = (px_size * 4.0).round().clamp(0.0, f32::from(u16::MAX)) as u16;
         let weight_bits = weight as u8;
-        let key = label_hash(text, weight_bits, quarter_px);
+        let key = label_hash(text, (end, hidden), weight_bits, quarter_px);
         let stale = self.labels.get(&key).is_none_or(|label| {
-            label.text != text || label.weight != weight_bits || label.quarter_px != quarter_px
+            label.text != text
+                || label.end != end
+                || label.hidden != hidden
+                || label.weight != weight_bits
+                || label.quarter_px != quarter_px
         });
         if stale {
             self.misses += 1;
@@ -160,9 +185,10 @@ impl LayoutCache {
                 self.labels.clear();
                 self.generations += 1;
             }
-            let run = fonts.shape(text, px_size, weight);
+            let run = fonts.shape_part(text, end, px_size, weight, hidden);
+            let text = text.to_owned();
             self.labels
-                .insert(key, Label { text: text.to_owned(), weight: weight_bits, quarter_px, run });
+                .insert(key, Label { text, end, hidden, weight: weight_bits, quarter_px, run });
         } else {
             self.hits += 1;
         }
@@ -226,14 +252,22 @@ static EMPTY: std::sync::OnceLock<ShapedRun> = std::sync::OnceLock::new();
 /// Chrome labels held before the map is cleared.
 const LABEL_CAP: usize = 256;
 
-/// FNV-1a over the string and the two key fields.
+/// FNV-1a over the string and the other key fields.
 ///
 /// Not for security and not for distribution quality — the hit is verified
 /// against the stored string, so this only has to be fast and to spread a few
 /// hundred short strings.
-fn label_hash(text: &str, weight: u8, quarter_px: u16) -> u64 {
+fn label_hash(text: &str, part: (usize, Hidden), weight: u8, quarter_px: u16) -> u64 {
+    let (end, hidden) = part;
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in text.as_bytes().iter().chain(&[weight]).chain(&quarter_px.to_le_bytes()) {
+    let fields = [weight, hidden as u8];
+    for byte in text
+        .as_bytes()
+        .iter()
+        .chain(&fields)
+        .chain(&quarter_px.to_le_bytes())
+        .chain(&(end as u64).to_le_bytes())
+    {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100_0000_01b3);
     }

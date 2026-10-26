@@ -11,7 +11,7 @@ use sk_gpu::{Color, Direction, DrawList, Rect};
 /// screenshots this was restyled from: their arms subtend about fifty degrees,
 /// which this reproduces at the 1:2 box the sidebar gives it.
 const REACH: f32 = 0.2;
-use sk_text::{Fonts, GlyphKey, LayoutCache, RunKey, SUBPIXEL_BUCKETS, ShapedRun, Weight};
+use sk_text::{Fonts, GlyphKey, Hidden, LayoutCache, RunKey, SUBPIXEL_BUCKETS, ShapedRun, Weight};
 
 /// Which end of a box a string is anchored to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -29,8 +29,8 @@ pub enum Align {
 
 /// How a string is drawn.
 ///
-/// A struct rather than four more parameters: a text call has seven independent
-/// inputs and the four that describe *appearance* belong together — they are
+/// A struct rather than five more parameters: a text call has eight independent
+/// inputs and the five that describe *appearance* belong together — they are
 /// what a theme would set, and they are what a caller reads back at a glance.
 #[derive(Clone, Copy, Debug)]
 pub struct TextStyle {
@@ -42,13 +42,23 @@ pub struct TextStyle {
     pub color: Color,
     /// Which edge of the box the string is anchored to.
     pub align: Align,
+    /// Whether a hidden code point is drawn as its escape, which every string
+    /// is unless it is a file's own text — see [`sk_text::escape`].
+    pub hidden: Hidden,
 }
 
 impl TextStyle {
     /// Regular weight, left aligned.
     #[must_use]
     pub const fn new(size: f32, color: Color) -> Self {
-        Self { weight: Weight::Regular, size, color, align: Align::Left }
+        Self { weight: Weight::Regular, size, color, align: Align::Left, hidden: Hidden::Escaped }
+    }
+
+    /// The same style drawing hidden code points as the font does, for a
+    /// preview's or an editor's body. A name is never drawn this way.
+    #[must_use]
+    pub const fn verbatim(self) -> Self {
+        Self { hidden: Hidden::Verbatim, ..self }
     }
 
     /// The same style in the bold face.
@@ -82,10 +92,29 @@ pub fn advance_of(
     weight: Weight,
     px_size: f32,
 ) -> f32 {
-    if text.is_empty() {
+    advance_of_part(cache, fonts, (text, text.len()), weight, px_size, Hidden::Escaped)
+}
+
+/// How wide the first `end` bytes of `text` are when shaped, in device pixels,
+/// for a caret or a selection drawn every frame.
+///
+/// **Measured against all of `text`**, through [`LayoutCache::get_or_shape_part`]:
+/// a joiner that ends the prefix is escaped or not by what follows it, and a
+/// prefix measured alone put the caret after a ZWNJ eight glyphs past the name.
+#[must_use]
+pub fn advance_of_part(
+    cache: &mut LayoutCache,
+    fonts: &mut Fonts,
+    part: (&str, usize),
+    weight: Weight,
+    px_size: f32,
+    hidden: Hidden,
+) -> f32 {
+    let (text, end) = part;
+    if end == 0 || text.is_empty() {
         return 0.0;
     }
-    cache.get_or_shape_label(text, weight, px_size, fonts).advance
+    cache.get_or_shape_part(text, end, weight, px_size, hidden, fonts).advance
 }
 
 /// Which byte offset in `text` is nearest `want` device pixels from its start.
@@ -125,8 +154,15 @@ pub fn caret_offset(
     if want <= 0.0 || text.is_empty() {
         return 0;
     }
+    // Every prefix is shaped against the whole text, so the advances rise with
+    // the offset: a prefix judged alone escaped the joiner it ended on, was wider
+    // than the prefix after it, and the search stopped being a search.
     let advance = |fonts: &mut Fonts, offset: usize| {
-        if offset == 0 { 0.0 } else { fonts.shape(&text[..offset], px_size, style.weight).advance }
+        if offset == 0 {
+            0.0
+        } else {
+            fonts.shape_part(text, offset, px_size, style.weight, style.hidden).advance
+        }
     };
     // Both ends are always character boundaries, and the midpoint is walked back
     // to one — a caret that lands inside `é` panics on the next slice.
@@ -165,7 +201,7 @@ pub fn caret_offset(
 pub fn advance_to(
     fonts: &mut Fonts,
     text: &str,
-    weight: Weight,
+    style: TextStyle,
     px_size: f32,
     bytes: usize,
 ) -> f32 {
@@ -173,7 +209,7 @@ pub fn advance_to(
     if bytes == 0 || !text.is_char_boundary(bytes) {
         return 0.0;
     }
-    fonts.shape(&text[..bytes], px_size, weight).advance
+    fonts.shape_part(text, bytes, px_size, style.weight, style.hidden).advance
 }
 
 /// Everything one frame's drawing needs, borrowed for the length of the frame.
@@ -299,7 +335,7 @@ impl Painter<'_> {
     pub fn label(&mut self, text: &str, style: TextStyle, box_rect: Rect, baseline: f32) -> f32 {
         let px_size = self.px(style.size);
         self.draw(
-            Source::Label { weight: style.weight, px_size },
+            Source::Label { weight: style.weight, px_size, hidden: style.hidden },
             text,
             box_rect,
             baseline,
@@ -585,7 +621,7 @@ pub enum Icon {
 #[derive(Clone, Copy)]
 enum Source {
     Cell(RunKey),
-    Label { weight: Weight, px_size: f32 },
+    Label { weight: Weight, px_size: f32, hidden: Hidden },
 }
 
 impl Source {
@@ -604,8 +640,8 @@ impl Source {
     ) -> &'c ShapedRun {
         match self {
             Self::Cell(key) => cache.get_or_shape(key, text, fonts),
-            Self::Label { weight, px_size } => {
-                cache.get_or_shape_label(text, weight, px_size, fonts)
+            Self::Label { weight, px_size, hidden } => {
+                cache.get_or_shape_part(text, text.len(), weight, px_size, hidden, fonts)
             }
         }
     }
@@ -704,7 +740,7 @@ mod tests {
                 if offset == 0 {
                     0.0
                 } else {
-                    fonts.shape(&text[..offset], px_size, style.weight).advance
+                    fonts.shape_part(text, offset, px_size, style.weight, style.hidden).advance
                 }
             };
             for want_at in &boundaries {
@@ -748,12 +784,50 @@ mod tests {
         let text = "invoice\u{202E}fdp.desktop";
         let before = "invoice".len();
         let after = before + '\u{202E}'.len_utf8();
-        let left = super::advance_to(&mut fonts, text, style.weight, 13.0, before);
-        let right = super::advance_to(&mut fonts, text, style.weight, 13.0, after);
-        let one_letter = super::advance_to(&mut fonts, "x", style.weight, 13.0, 1);
+        let left = super::advance_to(&mut fonts, text, style, 13.0, before);
+        let right = super::advance_to(&mut fonts, text, style, 13.0, after);
+        let one_letter = super::advance_to(&mut fonts, "x", style, 13.0, 1);
         assert!(right - left > one_letter * 4.0, "the escape is {} px wide", right - left);
         let middle = caret_offset(&mut fonts, text, style, 13.0, f32::midpoint(left, right));
         assert!(middle == before || middle == after, "a click inside the escape gave {middle}");
+    }
+
+    /// **The caret after a joiner the name keeps is inside the name.** Measured
+    /// as a prefix on its own, the ZWNJ that ended it had nothing after it and
+    /// was escaped: the caret after a ZWNJ typed into a Persian name was drawn
+    /// eight glyphs past the end of the name, and the advances stopped rising
+    /// with the offset, which is what `caret_offset`'s search assumes.
+    #[test]
+    fn a_caret_after_a_kept_joiner_is_inside_the_name() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let style = TextStyle::new(13.0, Color::hex(0xffffff));
+        let text = "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}";
+        let full = super::advance_to(&mut fonts, text, style, 13.0, text.len());
+        let mut previous = 0.0f32;
+        for (at, character) in text.char_indices() {
+            let end = at + character.len_utf8();
+            let here = super::advance_to(&mut fonts, text, style, 13.0, end);
+            assert!(here <= full + 0.5, "the caret after byte {end} is {here}, past {full}");
+            assert!(here + 0.5 >= previous, "the caret after byte {end} went back to {here}");
+            let found = caret_offset(&mut fonts, text, style, 13.0, here);
+            let back = super::advance_to(&mut fonts, text, style, 13.0, found);
+            assert!((back - here).abs() < 0.5, "a click at {here} landed at {back}");
+            previous = here;
+        }
+    }
+
+    /// A file's own text is measured as it is drawn: verbatim, so a byte-order
+    /// mark or a soft hyphen is no wider than the font makes it.
+    #[test]
+    fn a_verbatim_style_measures_what_it_draws() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let style = TextStyle::new(13.0, Color::hex(0xffffff));
+        let text = "\u{FEFF}start";
+        let escaped = super::advance_to(&mut fonts, text, style, 13.0, text.len());
+        let verbatim = super::advance_to(&mut fonts, text, style.verbatim(), 13.0, text.len());
+        let plain = super::advance_to(&mut fonts, "start", style, 13.0, "start".len());
+        assert!(escaped > plain, "the escaped mark has no width");
+        assert!((verbatim - plain).abs() < 0.5, "{verbatim} against {plain}");
     }
 
     #[test]

@@ -114,7 +114,9 @@ struct Measurer<'a> {
 
 impl crate::mdlayout::Measure for Measurer<'_> {
     fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
-        sk_ui::advance_of(self.cache, self.fonts, text, weight, size * self.scale) / self.scale
+        let (part, hidden) = ((text, text.len()), sk_text::Hidden::Verbatim);
+        sk_ui::advance_of_part(self.cache, self.fonts, part, weight, size * self.scale, hidden)
+            / self.scale
     }
 }
 

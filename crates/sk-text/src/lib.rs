@@ -25,6 +25,7 @@ pub mod layout;
 pub mod shape;
 pub mod symbols;
 
+pub use escape::Hidden;
 pub use fonts::{Fonts, GlyphImage, GlyphKey, Metrics, SUBPIXEL_BUCKETS, Weight};
 pub use layout::{LayoutCache, RunKey};
 pub use shape::{ShapedGlyph, ShapedRun};

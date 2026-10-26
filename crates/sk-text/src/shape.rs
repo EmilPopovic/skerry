@@ -6,6 +6,7 @@ use swash::shape::Direction;
 use swash::text::cluster::{CharCluster, Parser, Status, Token};
 use swash::text::{Codepoint, Script};
 
+use crate::escape::Hidden;
 use crate::fonts::{Fonts, Weight};
 
 /// One shaped glyph, positioned relative to the run origin in device pixels.
@@ -69,10 +70,33 @@ impl Fonts {
     /// draws. `source_len` stays the length of `text` itself, because that is the
     /// string the layout cache is asked about.
     pub fn shape(&mut self, text: &str, px_size: f32, weight: Weight) -> ShapedRun {
-        let source_len = text.len();
+        self.shape_part(text, text.len(), px_size, weight, Hidden::Escaped)
+    }
+
+    /// Shapes the first `end` bytes of `text`, with its hidden code points drawn
+    /// as `hidden` says.
+    ///
+    /// **The rest of `text` is read and not drawn**, because whether a joiner
+    /// that ends a prefix is escaped depends on what follows it — see
+    /// [`crate::escape::shown_until`]. This is what a caret is measured with.
+    pub fn shape_part(
+        &mut self,
+        text: &str,
+        end: usize,
+        px_size: f32,
+        weight: Weight,
+        hidden: Hidden,
+    ) -> ShapedRun {
         let primary = self.primary(weight) as usize;
         let Self { faces, shape_context, scratch, .. } = self;
-        let shown = crate::escape::shown(text, &mut scratch.escapes);
+        let shown = match hidden {
+            Hidden::Escaped => crate::escape::shown_until(text, end, &mut scratch.escapes),
+            Hidden::Verbatim => {
+                scratch.escapes.clear();
+                std::borrow::Cow::Borrowed(text.get(..end).unwrap_or(text))
+            }
+        };
+        let source_len = end.min(text.len());
         let text = shown.as_ref();
         segment(text, scratch);
 
