@@ -115,6 +115,10 @@ rust_2018_idioms = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# An `unsafe` block is a claim the compiler stopped checking, and the claim is
+# only reviewable if it is written down beside the block. A crate with no
+# `unsafe` at all says `#![forbid(unsafe_code)]` in its root instead.
+undocumented_unsafe_blocks = "warn"
 # Device-pixel arithmetic converts between u32, i32 and f32 on nearly every
 # line of the renderer and the layout code, and every value is bounded by a
 # surface dimension. Denying these would mean a `try_into().unwrap_or()` per

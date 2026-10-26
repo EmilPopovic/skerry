@@ -1349,9 +1349,13 @@ pub(crate) fn deletion_date() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
+    // SAFETY: `tm` is integers and one pointer, for which all zeroes is a valid
+    // value; `localtime_r` overwrites it anyway.
     let mut out: libc::tm = unsafe { std::mem::zeroed() };
     let seconds: libc::time_t = now.cast_signed();
-    // SAFETY: `localtime_r` writes into `out` and reads only `seconds`.
+    // SAFETY: both pointers are to locals that outlive the call. It also reads
+    // `TZ`, which is sound because nothing in this program writes the
+    // environment once it is running — `sk_ui::format::local` says the same.
     if unsafe { libc::localtime_r(&raw const seconds, &raw mut out) }.is_null() {
         return "1970-01-01T00:00:00".to_owned();
     }

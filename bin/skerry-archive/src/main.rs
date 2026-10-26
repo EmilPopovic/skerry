@@ -17,6 +17,8 @@
 //! except gzip, which is `flate2`, already in this workspace's helper trees
 //! through `png`.
 
+#![forbid(unsafe_code)]
+
 mod detect;
 mod place;
 mod tar;

@@ -211,10 +211,14 @@ struct Parts {
 /// `/etc/localtime`, and a file manager that shows a timestamp an hour out twice
 /// a year is a file manager nobody trusts about anything else either.
 fn local(epoch_seconds: i64) -> Option<Parts> {
+    // SAFETY: `tm` is integers and one pointer, for which all zeroes is a valid
+    // value; `localtime_r` overwrites it anyway.
     let mut out: libc::tm = unsafe { std::mem::zeroed() };
     let time = epoch_seconds as libc::time_t;
-    // SAFETY: `localtime_r` writes into `out` and reads only `time`. It is the
-    // reentrant form precisely so that it touches no shared state.
+    // SAFETY: both pointers are to locals that outlive the call. The reentrant
+    // form shares no result buffer; it does read `TZ`, and that is sound only
+    // because nothing in this program writes the environment once it is
+    // running — the tests that did now hand their locations down instead.
     let result = unsafe { libc::localtime_r(&raw const time, &raw mut out) };
     if result.is_null() {
         return None;

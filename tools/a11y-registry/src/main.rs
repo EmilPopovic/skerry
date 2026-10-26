@@ -16,6 +16,8 @@
 //! a11y-registry --address unix:path=/tmp/bus --for 30
 //! ```
 
+#![forbid(unsafe_code)]
+
 use std::time::{Duration, Instant};
 
 use sk_desktop::bus::{Bus, Kind, Value};

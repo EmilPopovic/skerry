@@ -195,10 +195,13 @@ const NAME_BUFFER_LIMIT: usize = 1 << 20;
 
 fn owner_name(uid: u32) -> Option<String> {
     with_buffer(|buffer, buffer_len| {
+        // SAFETY: `passwd` is integers and pointers, for which all zeroes is a
+        // valid value; the lookup overwrites it anyway.
         let mut record: libc::passwd = unsafe { std::mem::zeroed() };
         let mut found: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: `getpwuid_r` writes `record` and the buffer it is handed, and
-        // sets `found` to `record` or to null. Nothing else is read.
+        // SAFETY: `getpwuid_r` writes `record` and the buffer it is handed —
+        // `buffer_len` writable bytes, as `with_buffer` allocates them — and
+        // sets `found` to `record` or to null. No other memory of ours is read.
         let code =
             unsafe { libc::getpwuid_r(uid, &raw mut record, buffer, buffer_len, &raw mut found) };
         (code, (!found.is_null()).then_some(record.pw_name))
@@ -207,6 +210,7 @@ fn owner_name(uid: u32) -> Option<String> {
 
 fn group_name(gid: u32) -> Option<String> {
     with_buffer(|buffer, buffer_len| {
+        // SAFETY: as above — `group` is integers and pointers.
         let mut record: libc::group = unsafe { std::mem::zeroed() };
         let mut found: *mut libc::group = std::ptr::null_mut();
         // SAFETY: as above, for the group file's record.

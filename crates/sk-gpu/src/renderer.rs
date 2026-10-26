@@ -623,8 +623,10 @@ impl Renderer {
             ICON_SIDE as f32,
             ICON_SIDE as f32,
         ];
-        self.queue.write_buffer(&self.uniforms, 0, as_bytes(&uniforms));
-        self.queue.write_buffer(&self.instances, 0, as_bytes(&self.quads));
+        // SAFETY: `[f32; 10]` and `Quad`, neither with padding — see `as_bytes`.
+        let (uniforms, quads) = unsafe { (as_bytes(&uniforms), as_bytes(&self.quads)) };
+        self.queue.write_buffer(&self.uniforms, 0, uniforms);
+        self.queue.write_buffer(&self.instances, 0, quads);
 
         let mut encoder = self
             .device
@@ -1356,9 +1358,19 @@ fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
 ///
 /// Four lines instead of `bytemuck`, which is a derive macro and four crates
 /// against a budget of twenty-five for one cast in one file.
-fn as_bytes<T: Copy>(slice: &[T]) -> &[u8] {
-    // SAFETY: every `T` used here is `#[repr(C)]` and made only of `f32` and
-    // `u32`, so it has no padding, no niche and no invalid bit pattern.
+///
+/// # Safety
+///
+/// Every byte of every `T` must be initialised: no padding, and no field that
+/// may hold uninitialised memory (`MaybeUninit`, a union). Padding would hand
+/// the GPU bytes nobody wrote, and reading those is undefined behaviour. `f32`,
+/// `u32`, arrays of them, and a `#[repr(C)]` struct of them whose size is the
+/// sum of its fields' all qualify — `Quad` asserts that last part where it is
+/// declared.
+unsafe fn as_bytes<T: Copy>(slice: &[T]) -> &[u8] {
+    // SAFETY: the pointer and length describe exactly the memory `slice`
+    // borrows, `u8` has no alignment to violate, and the caller's contract makes
+    // every one of those bytes initialised.
     unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<u8>(), std::mem::size_of_val(slice)) }
 }
 
@@ -1438,8 +1450,10 @@ mod tests {
     #[test]
     fn as_bytes_covers_the_whole_slice_and_nothing_more() {
         let values = [1.0f32, 2.0, 3.0];
-        assert_eq!(as_bytes(&values).len(), 12);
-        assert_eq!(as_bytes(&values)[0..4], 1.0f32.to_ne_bytes());
+        // SAFETY: `f32` has no padding.
+        let bytes = unsafe { as_bytes(&values) };
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(bytes[0..4], 1.0f32.to_ne_bytes());
     }
 
     #[test]

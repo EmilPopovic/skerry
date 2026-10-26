@@ -37,8 +37,7 @@ fn failure(path: &Path, detail: impl std::fmt::Display) -> Problem {
 }
 
 fn uid() -> u32 {
-    // SAFETY: geteuid has no pointer arguments or side effects.
-    unsafe { libc::geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 /// Where this user's home trash is, decided once and handed down.

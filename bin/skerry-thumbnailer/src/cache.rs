@@ -279,6 +279,7 @@ mod tests {
     use super::{
         SIDE, folder_from, place, prepare, read_from, seal, stage, to_rgba, uri, write_to,
     };
+    use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
 
@@ -440,8 +441,7 @@ mod tests {
         assert_eq!(uri(Path::new("/a/my file.png")), "file:///a/my%20file.png");
         assert_eq!(uri(Path::new("/a/ä.png")), "file:///a/%C3%A4.png");
         // A path that is not UTF-8 still has one answer rather than a lossy one.
-        let messy =
-            Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(b"/a/\xff.png") });
+        let messy = Path::new(std::ffi::OsStr::from_bytes(b"/a/\xff.png"));
         assert_eq!(uri(messy), "file:///a/%FF.png");
     }
 

@@ -18,6 +18,7 @@
 //! ```
 
 #![deny(clippy::unwrap_used, clippy::expect_used)]
+#![forbid(unsafe_code)]
 
 mod cache;
 mod decode;
@@ -27,6 +28,7 @@ mod gif;
 mod md5;
 
 use std::io::{BufReader, BufWriter, Write};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use sk_preview::wire::{Ask, Refusal, Reply, Request};
@@ -114,12 +116,10 @@ fn serve(cache: Option<&Path>) {
 /// window size for a picture somebody is looking at once — see
 /// [ADR 0018](../../../docs/adr/0018-thumbnails-are-slots-in-one-atlas-previews-are-not.md).
 fn answer(request: &Request, cache: Option<&Path>) -> Reply {
-    let path = PathBuf::from(std::ffi::OsString::from(unsafe {
-        // SAFETY: the bytes came from `OsStr::as_encoded_bytes` in the host, which
-        // is exactly the contract this function documents — the same process
-        // family, the same encoding, no round trip through text.
-        std::ffi::OsStr::from_encoded_bytes_unchecked(&request.path)
-    }));
+    // **Any bytes are a path on Linux**, so what the host sent comes back through
+    // the conversion that has no contract to keep rather than one whose contract
+    // is about the build at the other end of a pipe.
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(&request.path));
     let mtime = modified(&path);
     if request.ask == Ask::Thumbnail
         && let Some(cache) = cache

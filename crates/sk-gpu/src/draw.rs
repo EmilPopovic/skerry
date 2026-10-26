@@ -209,6 +209,11 @@ pub(crate) struct Quad {
     pub border: f32,
 }
 
+// **No padding, by arithmetic rather than by comment.** The renderer hands these
+// to the GPU as raw bytes, and a field added with a different alignment would
+// put uninitialised padding in that upload; this stops the build instead.
+const _: () = assert!(std::mem::size_of::<Quad>() == 12 * std::mem::size_of::<f32>());
+
 /// One thing to draw, in the order the caller wrote it.
 ///
 /// A glyph carries its key rather than an atlas rectangle because rasterization

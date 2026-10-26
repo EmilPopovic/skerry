@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Checks panic recovery using the actual release profile, outside the test harness.
+
+#![forbid(unsafe_code)]
+
 use sk_util::{Cancel, Lane, Pool};
 use std::sync::mpsc;
 use std::time::Duration;

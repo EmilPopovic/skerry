@@ -71,6 +71,34 @@ def lint_header_check(report: Report) -> None:
         missing = [lint for lint in REQUIRED_LINTS if lint not in text]
         if missing:
             report.fail(rel(entry), f"missing crate lints: {', '.join(missing)}")
+    unsafe_check(report)
+
+
+# Code, not a comment or a string: `"unsafe"` is a keyword the highlighter knows
+# and "unsafe or oversized" is a sentence in a trash error.
+UNSAFE_CODE = re.compile(r"\bunsafe\s*(?:\{|\(|fn\b|impl\b|trait\b|extern\b)")
+FORBID = "#![forbid(unsafe_code)]"
+CRATE_ROOTS = ("src/lib.rs", "src/main.rs", "src/bin/*.rs", "tests/*.rs", "examples/*.rs", "benches/*.rs")
+
+
+def unsafe_check(report: Report) -> None:
+    """A package with no `unsafe` in it forbids it in every crate root.
+
+    **A ratchet, finding F32.** `clippy::undocumented_unsafe_blocks` makes every
+    `unsafe` block say what it relies on; this keeps a package that needs none
+    from growing one without anybody deciding to. A package whose last `unsafe`
+    goes away fails here until it says so.
+    """
+    for manifest in manifests(torture=False):
+        package = manifest.parent
+        sources = sorted(p for p in package.rglob("*.rs") if "target" not in p.parts)
+        code = (line.split("//")[0] for p in sources for line in p.read_text().splitlines())
+        if any(UNSAFE_CODE.search(line) for line in code):
+            continue
+        for pattern in CRATE_ROOTS:
+            for root in sorted(package.glob(pattern)):
+                if FORBID not in root.read_text():
+                    report.fail(rel(root), f"no `unsafe` in {rel(package)}, so the root says {FORBID}")
 
 
 def source_check(report: Report) -> None:
@@ -318,7 +346,7 @@ def run() -> int:
     spdx_check(report)
     if not report.failures:
         report.note(
-            "banned crates, capability flags, crate lints, GPU and backend seams, log "
+            "banned crates, capability flags, crate lints, forbidden unsafe, GPU and backend seams, log "
             "prefixes, doc comments, "
             "catalogue keys, ADR immutability, SPDX headers"
         )
