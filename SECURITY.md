@@ -27,10 +27,17 @@ short allowlist, writes diagnostics to a pipe Skerry forwards with control
 characters replaced, and requires resource limits (address space, CPU time and
 file size), no-new-privileges and a seccomp filter. The filter denies
 networking, signals and resource or scheduling changes aimed at other
-processes, changes to any file's mode, owner, extended attributes and times
-(an archive unpack may set the times of what it writes), the kernel keyrings,
-and selected kernel interfaces; the thumbnailer may not start processes at all.
-This is a targeted deny filter, not a complete syscall allowlist.
+processes and descriptor owners that would signal them, changes to any file's
+mode, owner, extended attributes, inode flags and times, the kernel keyrings,
+leaving the helper's process group, and selected kernel interfaces; the
+thumbnailer may not start processes at all. This is a targeted deny filter, not
+a complete syscall allowlist.
+
+**One exception reaches past an unpack's destination.** To give extracted files
+the archive's dates, the archive helper may call `utimensat` while unpacking, and
+because file times are not a Landlock right and its read access is the whole
+filesystem, a compromised unpacker can set the access and modification times of
+any file you own. It cannot change their contents, modes or owners.
 
 Landlock restricts which files a helper may read, write and execute, with exact
 executable/loader grants and writable output roots, and from Landlock ABI 6 it

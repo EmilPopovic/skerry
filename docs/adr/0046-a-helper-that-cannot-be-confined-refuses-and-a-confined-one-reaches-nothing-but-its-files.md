@@ -95,12 +95,20 @@ says it once per run; and the `F2` capability line carries `sandbox=landlock-N`,
 
 - change any file's mode, owner or extended attributes — the `chmod`, `chown` and
   `setxattr`/`removexattr` families, `fchmodat2` and the `*xattrat` calls included;
+- change an inode through a descriptor opened only to read it: the `ioctl`s that
+  set `chattr` flags, XFS-style attributes, a version or an encryption policy, and
+  the one that enables verity, which makes a file permanently read-only;
 - set any file's times, except the archive helper unpacking, which stamps what it
-  wrote with the archive's dates through `utimensat`;
+  wrote with the archive's dates through `utimensat` — and which can therefore set
+  the times of any file the user owns, because times are not a Landlock right and
+  its read access is the whole filesystem;
 - signal another process: `tkill`, `rt_sigqueueinfo`, `rt_tgsigqueueinfo` and
   `pidfd_send_signal` are denied, `tgkill` reaches only the helper itself, and
   `kill` reaches only the helper itself — except in the archive helper, which kills
-  the decompressor it started and so may signal a positive pid, never a group;
+  the decompressor it started and so may signal a positive pid, never a group. No
+  descriptor may name an owner to signal: `fcntl`'s `F_SETOWN`, `F_SETOWN_EX` and
+  `F_SETSIG`, and their socket spellings `FIOSETOWN` and `SIOCSPGRP`, are denied,
+  because an owned pipe with `O_ASYNC` is `kill` by another route;
 - act on another process: `prlimit64`, `sched_setaffinity`, `sched_setparam`,
   `sched_setscheduler`, `sched_setattr`, `migrate_pages` and `move_pages` with a
   nonzero pid, and `setpriority`, `ioprio_set`, `process_madvise` and
@@ -121,13 +129,19 @@ decompressor killable and the window not.
 write is a 128-pixel PNG under 80 KB; zero for the document helper and an archive
 listing, which write nothing; unlimited for an unpack, whose entries are as large as
 the archive says and whose disk is guarded by its free-space check. `SIGXFSZ` is
-ignored, so a write past the ceiling is `EFBIG` rather than a dead renderer.
+ignored, so a write past the ceiling is `EFBIG` rather than a dead renderer. A
+`--probe` run by hand gets everything but the ceiling — `confine_by_hand` — because
+its report goes wherever a person redirected it, and a ceiling of zero ended it at
+its first line.
 
-**A helper is its own session, with no terminal.** `confine` calls `setsid` first,
-so the helper has no controlling terminal and its process group is its own pid — the
-group the host's `kill(-pid)` already targets. The host no longer puts it in a group
-of its own, because `setsid` refuses a group leader. Doing it in the child, not in a
-`pre_exec` hook, is 0017's reason for every other step of confinement.
+**A helper is its own session, with no terminal, and stays in it.** `confine` calls
+`setsid` first, so the helper has no controlling terminal and its process group is
+its own pid — the group the host's `kill(-pid)` targets. After that the filter
+denies `setsid`, `setpgid` and `clone` with `CLONE_PARENT`, so nothing the helper
+starts can leave the group or become the window's child. The host no longer puts
+the helper in a group of its own, because `setsid` refuses a group leader. Doing it
+in the child, not in a `pre_exec` hook, is 0017's reason for every other step of
+confinement.
 
 **`stderr` is a pipe the host drains** on the job that already holds the child —
 after each preview batch, after an archive answer — and forwards to Skerry's own
@@ -156,18 +170,27 @@ not a reason to run a different binary.
 - Below ABI 6, the archive helper can still signal another of the user's processes
   by pid. That is the price of killing its own decompressor without a scope, and the
   preview helpers, which reap rather than kill, do not pay it.
+- An unpacking archive helper can set the times of any file the user owns. Stamping
+  the archive's dates needs `utimensat`, and a path rule cannot tell its own output
+  from anything else under a read root of `/`.
+- `sk_preview::sandbox::confine_below` confines as if the kernel's Landlock were
+  older, so a test on a new kernel can show what a helper does on an old one. No
+  helper calls it, and it can only take Landlock rights away.
 - A renderer that needs a variable off the list — `LD_LIBRARY_PATH` for a tool
   installed under a private prefix — does not get it, and fails as a missing tool.
-- The filter grows from 75 instructions to between 239 and 285 on x86-64,
-  depending on the helper and the ABI. A call it never inspects by
-  argument — `read`, `mmap`, `write`, everything a decoder does in a loop — is
-  answered from the kernel's per-syscall action cache without running it:
-  `getppid` measured 47–53 ns a call against 48–51 ns under 0034's filter and
-  41–42 ns unfiltered. A call it does inspect runs all of it: `kill` to the
-  caller measured 167–322 ns against 147–242 ns and 128–238 ns. Median of seven
-  runs of a million calls, three interleaved rounds, on the 24-thread
-  development machine at a load average of 10 to 15 from other builds — so the
-  spread is the machine's, and the order of the three is the finding.
+- The filter grows from 75 instructions to between 320 and 366 on x86-64,
+  depending on the helper and the ABI. Measured with the longest a call can walk —
+  the thumbnailer's below ABI 3 — against 0034's filter and none: each figure the
+  median of nine interleaved rounds, each round the median of seven runs of a
+  million calls, on the 24-thread development machine at a one-minute load
+  average of 3.8 rising to 5.6 from other builds. A call the filter never inspects
+  by argument — `read`, `mmap`, `write`, what a decoder does in a loop — is
+  answered from the kernel's per-syscall action cache: `getppid` took 47.2 ns
+  (interquartile 46.5–48.1) against 47.5 ns (46.9–50.7) under 0034's filter, a
+  difference this measurement cannot resolve, and 38.0 ns unfiltered. A call it
+  inspects runs it to its rule: `kill` to the caller took 126.6 ns (123.0–127.2)
+  against 95.9 ns (95.6–97.8) and 87.1 ns (86.7–91.7) — about 31 ns more for each
+  of the few such calls a helper makes.
 - Every denial is asserted by a test that confines a disposable child and tries it,
   in the shape 0034 set.
 
