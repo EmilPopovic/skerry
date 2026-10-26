@@ -1384,20 +1384,22 @@ fn made_here(into: &OwnedFd, to: At<'_>) -> Result<(), Problem> {
     Ok(())
 }
 
-/// Local filesystems whose owners are the ones the kernel wrote, by `f_type`
-/// (`include/uapi/linux/magic.h`): ext2/3/4, xfs, btrfs, tmpfs, f2fs, ramfs,
-/// bcachefs, jfs, nilfs2 and ZFS.
-const OWNED: [u64; 10] = [
-    0xEF53,
-    0x5846_5342,
-    0x9123_683E,
-    0x0102_1994,
-    0xF2F5_2010,
-    0x8584_58F6,
-    0xCA45_1A4E,
-    0x3153_464A,
-    0x3434,
-    0x2FC1_2FC1,
+/// Local filesystems whose owners are the ones the kernel wrote, by `f_type`.
+///
+/// Each from `include/uapi/linux/magic.h` unless it says otherwise.
+const OWNED: [u64; 12] = [
+    0xEF53,      // EXT4_SUPER_MAGIC, which ext2 and ext3 share
+    0x5846_5342, // XFS_SUPER_MAGIC
+    0x9123_683E, // BTRFS_SUPER_MAGIC
+    0x0102_1994, // TMPFS_MAGIC
+    0xF2F5_2010, // F2FS_SUPER_MAGIC
+    0x8584_58F6, // RAMFS_MAGIC
+    0xCA45_1A4E, // BCACHEFS_SUPER_MAGIC
+    0x3153_464A, // JFS_SUPER_MAGIC, from fs/jfs/jfs_superblock.h
+    0x3434,      // NILFS_SUPER_MAGIC
+    0x2FC1_2FC1, // ZFS_SUPER_MAGIC, from OpenZFS
+    0x794C_7630, // OVERLAYFS_SUPER_MAGIC: owners are its layers' own
+    0xF15F,      // ECRYPTFS_SUPER_MAGIC: owners are the lower filesystem's
 ];
 
 /// Whether the filesystem holding `dir` keeps real ownership — see [`OWNED`].
@@ -2436,6 +2438,62 @@ mod tests {
         std::fs::write(root.join("theirs/ATTACKER"), b"x").unwrap();
         let theirs = std::fs::File::open(root.join("theirs")).unwrap().into();
         let refused = super::made_here(&theirs, at("theirs", Path::new("theirs"))).unwrap_err();
+        assert_eq!(refused.kind(), sk_model::ProblemKind::FolderSwapped, "{refused}");
+    }
+
+    /// An empty folder somebody else owns, swapped in after `mkdirat`, passes
+    /// the emptiness test and only its owner gives it away.
+    ///
+    /// A folder of another uid needs ids to give it, so this re-runs the test
+    /// binary inside `unshare --map-auto -Ur`, where the subordinate range from
+    /// `/etc/subuid` is mapped and uid 5 is somebody. Without one it says so.
+    #[test]
+    fn an_empty_folder_of_another_owner_swapped_in_is_refused() {
+        let can_unshare = std::process::Command::new("unshare")
+            .args(["--map-auto", "-Ur", "true"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !can_unshare {
+            eprintln!("skerry: skipped — `unshare --map-auto -Ur` is unavailable, so no other uid");
+            return;
+        }
+        let out = std::process::Command::new("unshare")
+            .args(["--map-auto", "-Ur"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "copy::tests::inside_a_namespace_another_owners_folder_is_refused"])
+            .arg("--ignored")
+            .env("SKERRY_OWNER_TEST", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && said.contains("1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "run inside a user namespace by the test above"]
+    fn inside_a_namespace_another_owners_folder_is_refused() {
+        use std::os::unix::fs::chown;
+        if std::env::var_os("SKERRY_OWNER_TEST").is_none() {
+            return;
+        }
+        let root = scratch("another-owner");
+        let parent = std::fs::File::open(&root).unwrap();
+        assert!(super::owners_are_real(parent.as_fd()), "the scratch is not on tmpfs or ext4");
+        for name in ["ours", "theirs"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        chown(root.join("theirs"), Some(5), Some(5)).unwrap();
+        let check = |name: &'static str| {
+            let opened = std::fs::File::open(root.join(name)).unwrap().into();
+            let path = root.join(name);
+            super::made_here(
+                &opened,
+                super::At { dir: parent.as_fd(), name: name.as_ref(), path: &path },
+            )
+        };
+        assert!(check("ours").is_ok());
+        let refused = check("theirs").expect_err("another owner's empty folder passed");
         assert_eq!(refused.kind(), sk_model::ProblemKind::FolderSwapped, "{refused}");
     }
 
