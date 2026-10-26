@@ -87,19 +87,13 @@ impl Fonts {
         weight: Weight,
         hidden: Hidden,
     ) -> ShapedRun {
-        let kept = match hidden {
-            Hidden::Escaped => self.what_shows(text, px_size, weight),
-            Hidden::Verbatim => Vec::new(),
-        };
+        // Nothing below U+231A — the first `Emoji_Presentation` character, and
+        // three bytes from 0xE2 up in UTF-8, as U+FE0F is — can ask for a colour
+        // face, so most names never ask a cluster which kind of face it wants.
+        let presentational = text.bytes().any(|byte| byte >= 0xE2);
+        let shown = self.drawn_as(text, end, (px_size, weight), hidden);
         let primary = self.primary(weight) as usize;
         let Self { faces, shape_context, scratch, .. } = self;
-        let shown = match hidden {
-            Hidden::Escaped => crate::escape::shown_until(text, end, &kept, &mut scratch.escapes),
-            Hidden::Verbatim => {
-                scratch.escapes.clear();
-                std::borrow::Cow::Borrowed(text.get(..end).unwrap_or(text))
-            }
-        };
         let source_len = end.min(text.len());
         let text = shown.as_ref();
         segment(text, scratch);
@@ -146,7 +140,8 @@ impl Fonts {
                 // the cluster asks for, then the others. So `™` alone comes from
                 // the text face and `™` with U+FE0F from the emoji face, and a
                 // pictograph only one kind of face has comes from that one.
-                let colour = wants_colour(segment_text.get(cluster.range().to_range()));
+                let colour =
+                    presentational && wants_colour(segment_text.get(cluster.range().to_range()));
                 let mut chosen = primary;
                 'search: for pass in [colour, !colour] {
                     for candidate in std::iter::once(primary).chain(0..faces.len()) {
@@ -208,6 +203,27 @@ impl Fonts {
         ShapedRun { advance: pen, glyphs, source_len }
     }
 
+    /// What the first `end` bytes of `text` are drawn as, with the scratch's
+    /// escapes set to where each escape is in it.
+    ///
+    /// **Printable ASCII hides nothing**, and it is most names, so one pass over
+    /// the bytes buys the rest of the questions off.
+    fn drawn_as<'a>(
+        &mut self,
+        text: &'a str,
+        end: usize,
+        size: (f32, Weight),
+        hidden: Hidden,
+    ) -> std::borrow::Cow<'a, str> {
+        let printable = text.bytes().all(|byte| (0x20..0x7F).contains(&byte));
+        if hidden == Hidden::Verbatim || printable {
+            self.scratch.escapes.clear();
+            return std::borrow::Cow::Borrowed(text.get(..end).unwrap_or(text));
+        }
+        let kept = self.what_shows(text, size.0, size.1);
+        crate::escape::shown_until(text, end, &kept, &mut self.scratch.escapes)
+    }
+
     /// The byte offsets of the [`crate::escape::Verdict::Undecided`] code points
     /// in `text` that change what is drawn, and so are drawn as themselves.
     ///
@@ -218,9 +234,11 @@ impl Fonts {
     /// variant, a family, a subdivision flag. This shaper shapes a cluster at a
     /// time, so nothing outside the cluster can depend on it.
     ///
-    /// Only a name holding such a code point pays, and only on a layout-cache miss:
-    /// two shapings of its cluster and a raster of the glyphs that differ, once
-    /// per cluster — the answer is kept, and a folder of names ending in the same
+    /// What it costs, on a layout-cache miss: a name of printable ASCII is not
+    /// asked at all, any other name pays one `match` a character to learn it has
+    /// nothing undecided, and only a name holding such a code point pays two
+    /// shapings of its cluster and a raster of the glyphs that differ — once per
+    /// cluster, since the answer is kept and a folder of names ending in the same
     /// emoji asks once.
     fn what_shows(&mut self, text: &str, px_size: f32, weight: Weight) -> Vec<usize> {
         let mut undecided = crate::escape::undecided(text).peekable();
@@ -332,6 +350,13 @@ pub(crate) const SHOWS_CAP: usize = 1024;
 /// Whether a cluster asks for a colour face: U+FE0F asks for one and U+FE0E for
 /// a text face, and a cluster that asks neither is drawn as its first
 /// character's `Emoji_Presentation` says.
+///
+/// **That last clause is a visible change, and the Unicode emoji specification's
+/// own rule.** 226 characters with `Emoji_Presentation=Yes` that a text face on
+/// this chain also maps — ⌚ ☕ ⚡ ⚽ ✋ ⭐ ❗, the CJK and squared letters of the
+/// 🆗 block, and more — were drawn from the text face before, because the chain
+/// tried text faces first; they are now drawn as colour emoji without a
+/// selector, which is how UTS #51 says they are displayed by default.
 fn wants_colour(cluster: Option<&str>) -> bool {
     let Some(cluster) = cluster else { return false };
     if cluster.contains('\u{FE0F}') {
@@ -676,6 +701,15 @@ mod tests {
             return;
         }
         assert_eq!(face_of(&mut fonts, "\u{2122}"), Some(false));
+        // ☕ is an emoji by its own property, though a text face has it too.
+        let emoji_face_has_it = fonts
+            .faces
+            .iter()
+            .any(|face| face.colour && face.as_ref().charmap().map('\u{2615}') != 0);
+        if emoji_face_has_it {
+            assert_eq!(face_of(&mut fonts, "\u{2615}"), Some(true));
+            assert_eq!(face_of(&mut fonts, "\u{2615}\u{FE0E}"), Some(false));
+        }
         assert_eq!(face_of(&mut fonts, "\u{2122}\u{FE0F}"), Some(true));
         assert_eq!(face_of(&mut fonts, "\u{2122}\u{FE0E}"), Some(false));
         let text = fonts.shape("\u{2122}\u{FE0E}", 13.0, Weight::Regular);
