@@ -97,29 +97,6 @@ fn warm_and_draw(
     stats
 }
 
-/// The text half of a sample: the wrap, the selection and edit mode.
-///
-/// **Its own function because `sample_quick_look` is at the hundred-line limit**,
-/// and this is the half that has nothing to do with a child: a text file is read
-/// in this process, and everything below the early return is a round trip.
-/// Measures text with the capture's own faces, for the markdown layout.
-///
-/// The window has one of these too — one measurer per owner of a font stack, and
-/// both convert logical to device in the same place.
-struct Measurer<'a> {
-    cache: &'a mut LayoutCache,
-    fonts: &'a mut sk_text::Fonts,
-    scale: f32,
-}
-
-impl crate::mdlayout::Measure for Measurer<'_> {
-    fn width_of(&mut self, text: &str, weight: sk_text::Weight, size: f32) -> f32 {
-        let (part, hidden) = ((text, text.len()), sk_text::Hidden::Verbatim);
-        sk_ui::advance_of_part(self.cache, self.fonts, part, weight, size * self.scale, hidden)
-            / self.scale
-    }
-}
-
 /// Which row `--look` names, and what it can be shown as.
 fn looked_at(
     request: &Capture,
@@ -135,28 +112,33 @@ fn looked_at(
     Some((shows, pane.path_of(row), pane.listing.mtime(row)))
 }
 
-/// The layout the window does before it draws — `App::lay_the_markdown_out`.
+/// The layout the window asks for before it draws — `App::lay_the_markdown_out`
+/// — and the wait for the job that does it, which a window spends frames on.
 ///
-/// **Repeated here on purpose.** A capture builds its own sample and never runs
-/// the frame loop, so a step that lives there has to be done here as well or the
-/// frame is of a state the program never has — the trap `12-measurement.md`
-/// records against the text preview's own wrap.
+/// **Repeated here on purpose, through the same job.** A capture builds its own
+/// sample and never runs the frame loop, so a step that lives there has to be
+/// done here as well or the frame is of a state the program never has — the
+/// trap `12-measurement.md` records against the text preview's own wrap.
 fn lay_the_markdown_out(
     look: &mut crate::quicklook::QuickLook,
-    where_: (crate::layout::Area, &Theme, &mut LayoutCache),
-    fonts: &mut sk_text::Fonts,
+    where_: (crate::layout::Area, &Theme),
+    jobs: &crate::pane::Jobs,
     scale: f32,
 ) {
-    let (inner, theme, cache) = where_;
-    if !look.rendered || look.blocks.is_empty() {
-        return;
+    let (inner, theme) = where_;
+    look.lay_out_for(crate::view::markdown_column(inner, theme.metrics.text_size, scale), jobs);
+    let deadline = std::time::Instant::now() + READ_DEADLINE;
+    while look.laying() && std::time::Instant::now() < deadline {
+        look.drain();
+        std::thread::yield_now();
     }
-    let size = theme.metrics.text_size;
-    let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size);
-    let mut shaper = Measurer { cache, fonts, scale };
-    look.laid = Some(crate::mdlayout::lay_out(&look.blocks, room, size, scale, &mut shaper));
 }
 
+/// The text half of a sample: the wrap, the selection and edit mode.
+///
+/// **Its own function because `sample_quick_look` is at the hundred-line limit**,
+/// and this is the half that has nothing to do with a child: a text file is read
+/// in this process, and everything below the early return is a round trip.
 fn sample_text(
     request: &Capture,
     session: &mut Session,
@@ -177,7 +159,7 @@ fn sample_text(
         );
         text.wrap(cells);
     }
-    lay_the_markdown_out(look, (inner, theme, cache), &mut session.fonts, scale);
+    lay_the_markdown_out(look, (inner, theme), &session.jobs, scale);
     if request.look_selected {
         look.select_all();
     }
@@ -234,14 +216,16 @@ fn sample_quick_look(
 ) -> Option<crate::quicklook::QuickLook> {
     let (layout, theme, cache) = where_;
     let (shows, path, mtime) = looked_at(request, pane)?;
-    let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &session.jobs);
-
     // The same box the panel will be drawn into, in device pixels — the one
     // number that crosses the logical/device line on purpose, because a page
     // rendered at logical pixels on a 200% screen is a page at half the
     // resolution of the screen showing it.
     let inner = crate::view::quick_look_area(layout);
     let scale = f32::from(u16::try_from(request.scale_120).unwrap_or(120)) / 120.0;
+    let column = crate::view::markdown_column(inner, theme.metrics.text_size, scale);
+    let mut look =
+        crate::quicklook::QuickLook::open(path.clone(), mtime, shows, column, &session.jobs);
+
     let within = ((inner.width * scale) as u32, (inner.height * scale) as u32);
     let deadline = std::time::Instant::now() + READ_DEADLINE;
     if shows == crate::previews::Shows::Archive {

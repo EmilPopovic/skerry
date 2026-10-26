@@ -417,16 +417,17 @@ fn sort_token(sort: Sort) -> String {
 }
 
 fn read_sort(token: &str) -> Option<Sort> {
-    let (column, direction) = token.split_at(token.len().checked_sub(1)?);
+    // **The direction is the last character, which is not the last byte** of
+    // a file somebody has edited: cutting `nameé` one byte from the end landed
+    // inside the `é` and panicked before the first frame.
+    let (column, descending) = match token.strip_suffix('+') {
+        Some(column) => (column, false),
+        None => (token.strip_suffix('-')?, true),
+    };
     let column = match column {
         "name" => SortColumn::Name,
         "size" => SortColumn::Size,
         "modified" => SortColumn::Modified,
-        _ => return None,
-    };
-    let descending = match direction {
-        "+" => false,
-        "-" => true,
         _ => return None,
     };
     Some(Sort { column, descending, dirs_first: true, ..Sort::default() })
@@ -638,7 +639,7 @@ fn read_tab(rest: &str) -> Option<Tab> {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{MOST_PAGES, Node, Session, Tab, parse, render};
+    use super::{MOST_PAGES, Node, Session, Tab, parse, read_sort, render};
     use crate::panes::Axis;
     use sk_model::{Sort, SortColumn};
     use std::path::PathBuf;
@@ -933,5 +934,25 @@ mod tests {
         writer.start_with("new".into(), &pool, &wake.handle(), |_| true);
         assert!(writer.ready(true));
         assert_eq!(writer.acknowledged(), "new");
+    }
+
+    /// **A sort token is cut at its last character, not its last byte.** A
+    /// session file edited by hand to say `nameé` panicked before the first
+    /// frame, because the cut landed inside the `é`.
+    #[test]
+    fn a_sort_token_ending_in_a_wide_character_is_refused_rather_than_a_panic() {
+        for token in ["nameé", "é", "名前", "name+é", "", "+", "-", "name"] {
+            assert_eq!(read_sort(token), None, "{token:?}");
+        }
+        let read = read_sort("modified-").expect("a token this build writes");
+        assert_eq!((read.column, read.descending), (SortColumn::Modified, true));
+
+        // And through the whole file: the tab is dropped and its neighbour,
+        // and everything else, still reads.
+        let text = "skerry 1\nleaf 0\ntab nameé 0 /home/tester/one\ntab size- 0 /home/tester/two\n";
+        let session = parse(text).expect("one bad token is not a bad file");
+        let Node::Leaf { tabs, .. } = &session.tree else { panic!("{:?}", session.tree) };
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0].path, PathBuf::from("/home/tester/two"));
     }
 }

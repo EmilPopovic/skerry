@@ -1436,8 +1436,9 @@ fn quick_look_controls(
     // is the one that must be visible because leaving edit mode *writes*.
     let mut right = strip.right() - 8.0;
     let source = look.has_markdown().then(|| {
-        let key = if look.rendered { "action.look_source" } else { "action.look_rendered" };
-        let ink = if look.rendered { theme.palette.dim } else { theme.palette.accent };
+        let shown = look.showing_rendered();
+        let key = if shown { "action.look_source" } else { "action.look_rendered" };
+        let ink = if shown { theme.palette.dim } else { theme.palette.accent };
         (LookControl::Source, i18n::lookup(key), ink)
     });
     let extract = look
@@ -1625,6 +1626,16 @@ const TEXT_PAD: f32 = 14.0;
 /// characters and a panel is wider than that; the margin is what stops a
 /// paragraph running the whole width of a maximised window.
 pub(crate) const MARKDOWN_PAD: f32 = 28.0;
+
+/// The width, body size and scale a rendered markdown document in a panel
+/// `inner` wide is laid out against.
+///
+/// **One function**, for the window, the read job that lays a document out
+/// before its first frame and the capture: a second copy of this arithmetic is
+/// a first layout at a width the frame then disagrees with.
+pub(crate) fn markdown_column(inner: Area, size: f32, scale: f32) -> (f32, f32, f32) {
+    ((inner.width - MARKDOWN_PAD * 2.0).max(size * 4.0), size, scale)
+}
 
 /// Draws a rendered markdown document, the lines that are on screen.
 ///
@@ -1894,7 +1905,8 @@ fn quick_look_text(
             painter.label(&number, mono(numbers), column, baseline);
         }
         let mut x = placed.text_x;
-        for span in text.spans.get(row.line).map_or(&[][..], Vec::as_slice) {
+        let spans = text.spans.get(row.line).map_or(&[][..], Vec::as_slice);
+        for span in crate::quicklook::on_row(spans, *row) {
             // The part of this run that is on this row, which is the whole of
             // what wrapping costs the highlighter: a span is still a slice of a
             // line, and a row is a window onto it.

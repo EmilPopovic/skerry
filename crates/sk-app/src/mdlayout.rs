@@ -7,11 +7,11 @@
 //! the second layout pass in the preview panel — the first lays out a character
 //! grid — and the two never run at once.
 //!
-//! **Once per width, not once per frame.** Measuring a thousand words costs more
-//! than a frame has, so the result is cached against the width, the scale and the
-//! body size, and a frame draws the window of lines it can see. That is the same
-//! bargain [`crate::quicklook::Text::wrap`] already makes against a character
-//! count.
+//! **Once per width, on a job, never in a frame.** Measuring a thousand words
+//! costs more than a frame has, so the result is cached against the width, the
+//! scale and the body size, made by
+//! [`crate::quicklook::QuickLook::lay_out_for`]'s job, and a frame draws the
+//! window of lines it can see.
 //!
 //! **A line owns its text**, which is what makes selection possible: a place in
 //! the rendered view is a line and a byte of that line, exactly as a place in the
@@ -187,7 +187,7 @@ pub(crate) fn byte_at(line: &Line, x: f32) -> usize {
 }
 
 /// The cache key: everything a layout depends on, in whole units.
-fn key(width: f32, size: f32, scale: f32) -> (u32, u32, u32) {
+pub(crate) fn key(width: f32, size: f32, scale: f32) -> (u32, u32, u32) {
     (
         width.max(0.0).round() as u32,
         (size * 4.0).max(0.0).round() as u32,
@@ -214,6 +214,24 @@ const QUOTE: f32 = 1.1;
 pub(crate) trait Measure {
     /// How wide `text` is in logical pixels, in that face at that size.
     fn width_of(&mut self, text: &str, weight: Weight, size: f32) -> f32;
+
+    /// How wide each character of `word` is, in order, in logical pixels.
+    ///
+    /// **What a word too wide for its column is cut by**, so that cutting it is
+    /// one shaping rather than one per prefix — which, through a label cache
+    /// that empties at 256 entries, reshaped every prefix of a 256 KiB word: 11.4
+    /// seconds at a 2,500-pixel column (one run, release build, load 4.5). This
+    /// default measures each character alone, which is exact wherever every
+    /// character is the same width.
+    fn advances(&mut self, word: &str, weight: Weight, size: f32) -> Vec<f32> {
+        let mut letter = [0; 4];
+        word.chars().map(|it| self.width_of(it.encode_utf8(&mut letter), weight, size)).collect()
+    }
+
+    /// Whether whoever asked has stopped wanting the layout, so it can end early.
+    fn stopped(&self) -> bool {
+        false
+    }
 }
 
 /// Lays a parsed document out for a column of `width` logical pixels.
@@ -227,7 +245,7 @@ pub(crate) fn lay_out(
     let mut out = Laid { lines: Vec::new(), height: 0.0, against: key(width, size, scale) };
     let mut y = 0.0f32;
     let mut at = 0;
-    while at < blocks.len() {
+    while at < blocks.len() && !measure.stopped() {
         let block = &blocks[at];
         at += 1;
         let left = f32::from(block.indent) * STEP * size + f32::from(block.quoted) * QUOTE * size;
@@ -267,15 +285,17 @@ pub(crate) fn lay_out(
             }
             Kind::Code { lines, .. } => {
                 y += GAP * size * 0.6;
+                let cell = measure.width_of("0", Weight::Mono, size);
                 for source in lines {
-                    let width_of = measure.width_of(source, Weight::Mono, size);
+                    let shown = seen(source, room, cell);
+                    let width_of = measure.width_of(shown, Weight::Mono, size);
                     let height = size * 1.45;
                     out.lines.push(Line {
                         top: y,
                         height,
                         baseline: size * 1.1,
                         runs: vec![Placed {
-                            text: source.clone(),
+                            text: shown.to_owned(),
                             x: left + size * 0.6,
                             width: width_of,
                             weight: Weight::Mono,
@@ -369,6 +389,21 @@ fn item(
     y
 }
 
+/// The part of a code line a column `room` wide can show, in a face whose
+/// characters are `cell` wide.
+///
+/// **What is drawn, while the line's text stays whole** for a selection and a
+/// copy. A code line is never wrapped — ADR 0029 — so the panel's edge cuts it,
+/// and a run of the whole of it was a label the frame shaped: a 200 KiB line
+/// among 1,400 words, which push it out of a label cache of 256, was reshaped
+/// every frame, 41.6 ms of each (median of nine, release build, load 3.8).
+/// Twice what fits, and then some, because a tab and a combining mark take no
+/// room and the panel's edge is past the column's.
+fn seen(source: &str, room: f32, cell: f32) -> &str {
+    let fits = (room / cell.max(1.0)).ceil() as usize;
+    source.char_indices().nth(fits * 2 + 8).map_or(source, |(at, _)| &source[..at])
+}
+
 /// Everything the flow of one block needs that is not the runs themselves.
 #[derive(Clone, Copy)]
 struct Wants<'a> {
@@ -405,6 +440,11 @@ fn flow(
         // and keeping the separator is what lets a wrap fall between two words
         // without losing the space between them when they end up on one line.
         for piece in pieces(&run.text) {
+            // A single paragraph can be the whole document, so a layout nobody
+            // wants any more ends here as well as between blocks.
+            if measure.stopped() {
+                break;
+            }
             if piece == "\n" {
                 out.lines
                     .push(std::mem::replace(&mut line, fresh(y + height, height, size, block)));
@@ -428,8 +468,7 @@ fn flow(
             // dashes: without this it runs past the panel's edge and is clipped,
             // which reads as text that has gone missing.
             if !blank && advance > room {
-                for part in cut(&piece, room, (weight, size), measure) {
-                    let advance = measure.width_of(&part, weight, size);
+                for (part, advance) in cut(&piece, room, (weight, size), measure) {
                     if x > left {
                         out.lines.push(std::mem::replace(
                             &mut line,
@@ -702,8 +741,7 @@ fn wrap_cell(
         // A single word wider than the column is cut rather than left to run into
         // the next one — a column of hashes or a URL is where this happens.
         if !blank && advance > width && width > 0.0 {
-            for part in cut(&piece, width, (weight, size), measure) {
-                let advance = measure.width_of(&part, weight, size);
+            for (part, advance) in cut(&piece, width, (weight, size), measure) {
                 if x > 0.0 {
                     lines.push(Vec::new());
                 }
@@ -724,21 +762,33 @@ fn wrap_cell(
     lines
 }
 
-/// A word too wide for `width`, cut into pieces that are not.
-fn cut(word: &str, width: f32, face: (Weight, f32), measure: &mut impl Measure) -> Vec<String> {
+/// A word too wide for `width`, cut into pieces that are not, each with its width.
+///
+/// **From one measurement of the word**, a width per character, summed — never
+/// by measuring a piece and then the piece with one more character on it.
+fn cut(
+    word: &str,
+    width: f32,
+    face: (Weight, f32),
+    measure: &mut impl Measure,
+) -> Vec<(String, f32)> {
     let (weight, size) = face;
+    let advances = measure.advances(word, weight, size);
     let mut out = Vec::new();
     let mut held = String::new();
-    for letter in word.chars() {
-        held.push(letter);
-        if measure.width_of(&held, weight, size) > width && held.chars().count() > 1 {
-            held.pop();
-            out.push(std::mem::take(&mut held));
-            held.push(letter);
+    let mut across = 0.0f32;
+    for (letter, advance) in
+        word.chars().zip(advances.iter().copied().chain(std::iter::repeat(0.0)))
+    {
+        if !held.is_empty() && across + advance > width {
+            out.push((std::mem::take(&mut held), across));
+            across = 0.0;
         }
+        held.push(letter);
+        across += advance;
     }
     if !held.is_empty() {
-        out.push(held);
+        out.push((held, across));
     }
     out
 }
@@ -920,6 +970,22 @@ mod tests {
         }
     }
 
+    /// **A code line longer than the column is drawn as what the column shows**,
+    /// and is still the whole line to a selection and a copy: a run is a label
+    /// the frame shapes, and the whole of a 200 KiB line was one.
+    #[test]
+    fn a_long_code_line_draws_what_fits_and_keeps_its_text() {
+        let long = "y".repeat(200 * 1024);
+        let out = laid(&format!("```\n{long}\nshort\n```\n"), 400.0);
+        let code: Vec<&super::Line> = out.lines.iter().filter(|line| line.code).collect();
+        assert_eq!(code.len(), 2, "a code line was wrapped");
+        assert_eq!(code[0].text, long, "the line lost its text");
+        let drawn: usize = code[0].runs.iter().map(|run| run.text.chars().count()).sum();
+        // Grid's characters are eight pixels wide, so fifty fit in 400.
+        assert!((50..=2 * 50 + 8).contains(&drawn), "{drawn} characters drawn of 200 KiB");
+        assert_eq!(code[1].runs[0].text, "short", "a line that fits is drawn whole");
+    }
+
     /// A word wider than the column is cut rather than left to overrun it.
     #[test]
     fn a_word_too_long_for_the_line_is_cut() {
@@ -959,6 +1025,58 @@ mod tests {
         assert_eq!(line.text, "item");
         // The far left is the start of the text, not of the bullet.
         assert_eq!(super::byte_at(line, 0.0), 0);
+    }
+
+    /// A measurer that counts the characters it was asked about.
+    struct Counting {
+        measured: usize,
+        allowed: usize,
+    }
+
+    impl Measure for Counting {
+        fn width_of(&mut self, text: &str, _weight: Weight, size: f32) -> f32 {
+            self.measured += text.chars().count();
+            text.chars().count() as f32 * size * 0.5
+        }
+
+        fn stopped(&self) -> bool {
+            self.measured > self.allowed
+        }
+    }
+
+    /// **A word wider than the column is measured once, not once per prefix.**
+    /// Cutting by measuring the piece with one more character on it measured
+    /// each character as many times as its piece was long, which through a real
+    /// shaper and a label cache that empties at 256 entries was eleven seconds.
+    #[test]
+    fn a_word_wider_than_the_column_is_measured_in_proportion_to_its_length() {
+        let word = "y".repeat(64 * 1024);
+        let mut counting = Counting { measured: 0, allowed: usize::MAX };
+        let out = lay_out(&parse(&word), 1100.0, 16.0, 1.0, &mut counting);
+        let all: String = out.lines.iter().map(|it| it.text.clone()).collect();
+        assert_eq!(all, word, "a character went missing in the cut");
+        assert!(
+            counting.measured <= 3 * word.len(),
+            "{} characters measured for a word of {}",
+            counting.measured,
+            word.len()
+        );
+        for line in &out.lines {
+            for run in &line.runs {
+                assert!(run.x + run.width <= 1100.5, "a piece runs to {}", run.x + run.width);
+            }
+        }
+    }
+
+    /// **A layout nobody wants any more ends early** — between blocks, and inside
+    /// a paragraph, because one paragraph can be the whole document.
+    #[test]
+    fn a_layout_that_is_stopped_ends_early() {
+        let text = "word ".repeat(20_000);
+        let whole = lay_out(&parse(&text), 400.0, 16.0, 1.0, &mut Grid);
+        let mut counting = Counting { measured: 0, allowed: 1_000 };
+        let cut_short = lay_out(&parse(&text), 400.0, 16.0, 1.0, &mut counting);
+        assert!(cut_short.lines.len() * 10 < whole.lines.len(), "it carried on to the end");
     }
 
     /// Words and the spaces between them are separate pieces, so a wrap can fall
