@@ -7659,8 +7659,9 @@ impl App {
     /// sides for.
     pub(crate) fn stop_editing_the_look(&mut self) {
         self.save_the_look();
+        let column = self.markdown_column();
         if let Some(look) = self.quick_look.as_mut() {
-            look.stop_editing(&self.jobs);
+            look.stop_editing(column, &self.jobs);
         }
         self.dirty = true;
     }
@@ -8892,7 +8893,9 @@ scope_aim={scope_aim:?}",
         let pane = self.panes.focused();
         let Some(id) = pane.listing.at(row) else { return false };
         let (path, mtime) = (pane.path_of(id), pane.listing.mtime(id));
-        let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &self.jobs);
+        let column = self.markdown_column();
+        let mut look =
+            crate::quicklook::QuickLook::open(path.clone(), mtime, shows, column, &self.jobs);
         // **Where this document was left.** Reopening a four-hundred-page manual
         // at page one is losing somebody's place, and the page is as much a part
         // of how the window was left as which folder it is in.
@@ -8914,6 +8917,13 @@ scope_aim={scope_aim:?}",
         true
     }
 
+    /// The width, body size and scale a rendered markdown preview is laid out
+    /// against — [`crate::view::markdown_column`] of the panel as it stands.
+    fn markdown_column(&self) -> (f32, f32, f32) {
+        let inner = crate::view::quick_look_area(&self.layout);
+        crate::view::markdown_column(inner, self.theme.metrics.text_size, self.window.scale())
+    }
+
     /// Asks for the rendered markdown laid out at the panel's width, and scrolls
     /// over whichever layout is on screen.
     ///
@@ -8923,11 +8933,9 @@ scope_aim={scope_aim:?}",
     /// screen, which during a resize is the one at the old width.
     fn lay_the_markdown_out(&mut self) {
         let inner = crate::view::quick_look_area(&self.layout);
-        let size = self.theme.metrics.text_size;
-        let scale = self.window.scale();
-        let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size * 4.0);
+        let column = self.markdown_column();
         let Some(look) = self.quick_look.as_mut() else { return };
-        look.lay_out_for((room, size, scale), &self.jobs);
+        look.lay_out_for(column, &self.jobs);
         if let Some(laid) = look.laid.as_ref().filter(|_| look.rendered) {
             look.scroll.set_extent(laid.height, inner.height);
         }

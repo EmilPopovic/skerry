@@ -1614,6 +1614,16 @@ const TEXT_PAD: f32 = 14.0;
 /// paragraph running the whole width of a maximised window.
 pub(crate) const MARKDOWN_PAD: f32 = 28.0;
 
+/// The width, body size and scale a rendered markdown document in a panel
+/// `inner` wide is laid out against.
+///
+/// **One function**, for the window, the read job that lays a document out
+/// before its first frame and the capture: a second copy of this arithmetic is
+/// a first layout at a width the frame then disagrees with.
+pub(crate) fn markdown_column(inner: Area, size: f32, scale: f32) -> (f32, f32, f32) {
+    ((inner.width - MARKDOWN_PAD * 2.0).max(size * 4.0), size, scale)
+}
+
 /// Draws a rendered markdown document, the lines that are on screen.
 ///
 /// **[ADR 0029](../../../docs/adr/0029-markdown-renders-from-our-own-parser-and-unknown-syntax-is-its-own-text.md).**

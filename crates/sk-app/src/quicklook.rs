@@ -539,6 +539,25 @@ const WORDS_KEPT: usize = 4;
 struct Read {
     text: Text,
     blocks: std::sync::Arc<[crate::markdown::Block]>,
+    /// The blocks laid out at the width the panel had when it opened.
+    ///
+    /// **So the first frame with the document is its rendering**, as it was
+    /// when the layout was the frame loop's. Without it every markdown file
+    /// opened on its source and the rendering replaced it when a layout job
+    /// came back — 40.5 ms, five frames, for `docs/12-measurement.md` (one run,
+    /// release build, load 3.8).
+    laid: Option<crate::mdlayout::Laid>,
+}
+
+/// A document's blocks and their layout against `column`, made on a job.
+fn rendered(
+    body: &str,
+    column: (f32, f32, f32),
+    stop: &sk_util::Cancel,
+) -> (std::sync::Arc<[crate::markdown::Block]>, Option<crate::mdlayout::Laid>) {
+    let blocks: std::sync::Arc<[crate::markdown::Block]> = crate::markdown::parse(body).into();
+    let laid = if blocks.is_empty() { None } else { typeset(&blocks, column, stop) };
+    (blocks, laid)
 }
 
 /// A layout of the rendered document on its way from a job, and what it was
@@ -582,13 +601,22 @@ struct Typesetter {
 static TYPESETTER: std::sync::Mutex<Option<Typesetter>> = std::sync::Mutex::new(None);
 
 /// Lays `blocks` out against `(width, size, scale)` with [`TYPESETTER`]'s faces,
-/// or answers nothing where no faces can be found.
+/// or answers nothing where no faces can be found or nobody wants it any more.
+///
+/// **Stopped before the lock as well as after it**, so a resize's superseded
+/// layouts do not queue on the faces only to find out there.
 fn typeset(
     blocks: &[crate::markdown::Block],
     against: (f32, f32, f32),
     stop: &sk_util::Cancel,
 ) -> Option<crate::mdlayout::Laid> {
+    if stop.is_cancelled() {
+        return None;
+    }
     let mut held = TYPESETTER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stop.is_cancelled() {
+        return None;
+    }
     if held.is_none() {
         *held = sk_text::Fonts::discover()
             .ok()
@@ -835,7 +863,10 @@ pub(crate) struct QuickLook {
     failed: bool,
     /// The edited text's blocks, while a job parses it — see
     /// [`Self::stop_editing`].
-    parsing: Option<mpsc::Receiver<std::sync::Arc<[crate::markdown::Block]>>>,
+    #[allow(clippy::type_complexity, reason = "a channel of what `rendered` answers")]
+    parsing: Option<
+        mpsc::Receiver<(std::sync::Arc<[crate::markdown::Block]>, Option<crate::mdlayout::Laid>)>,
+    >,
     /// What is inside the archive, once the child has said.
     pub(crate) inside: Option<crate::archive::Inside>,
     listed: Option<mpsc::Receiver<sk_preview::archive::Listing>>,
@@ -869,7 +900,16 @@ impl Drop for QuickLook {
 
 impl QuickLook {
     /// Opens a look at `path`, starting whatever has to be started.
-    pub(crate) fn open(path: PathBuf, mtime: i64, shows: Shows, jobs: &crate::pane::Jobs) -> Self {
+    ///
+    /// `column` is the width, body size and scale a rendered markdown file is
+    /// laid out against — [`Self::lay_out_for`]'s — so it can arrive laid out.
+    pub(crate) fn open(
+        path: PathBuf,
+        mtime: i64,
+        shows: Shows,
+        column: (f32, f32, f32),
+        jobs: &crate::pane::Jobs,
+    ) -> Self {
         let mut look = Self {
             path,
             mtime,
@@ -917,7 +957,7 @@ impl QuickLook {
             stop: None,
         };
         match shows {
-            Shows::Text => look.start_reading(jobs),
+            Shows::Text => look.start_reading(column, jobs),
             Shows::Archive => look.start_listing(jobs),
             Shows::Picture | Shows::Page => {}
         }
@@ -925,8 +965,9 @@ impl QuickLook {
     }
 
     /// Reads the file on a job, because reading a file is a syscall — rule 1 —
-    /// and cuts and parses it there, because that is not the frame's work either.
-    fn start_reading(&mut self, jobs: &crate::pane::Jobs) {
+    /// and cuts, parses and lays it out there, because that is not the frame's
+    /// work either.
+    fn start_reading(&mut self, column: (f32, f32, f32), jobs: &crate::pane::Jobs) {
         let (done, waiting) = mpsc::channel();
         self.reading = Some(waiting);
         let path = self.path.clone();
@@ -948,16 +989,18 @@ impl QuickLook {
             if cancel.is_cancelled() {
                 return;
             }
-            let blocks = if markdown { crate::markdown::parse(&body).into() } else { [].into() };
+            let (blocks, laid) =
+                if markdown { rendered(&body, column, cancel) } else { ([].into(), None) };
             if cancel.is_cancelled() {
                 return;
             }
-            let _ = done.send(Some(Read { text: Text::of(&body, language), blocks }));
+            let _ = done.send(Some(Read { text: Text::of(&body, language), blocks, laid }));
         });
     }
 
-    /// Parses the text again on a job, because the editor has changed it.
-    fn start_parsing(&mut self, jobs: &crate::pane::Jobs) {
+    /// Parses and lays out the text again on a job, because the editor has
+    /// changed it.
+    fn start_parsing(&mut self, column: (f32, f32, f32), jobs: &crate::pane::Jobs) {
         let Some(text) = self.text.as_ref() else { return };
         let body = text.body();
         // A layout of the blocks from before the edit, landing after this, would
@@ -972,7 +1015,7 @@ impl QuickLook {
             let _wake = wake;
             let done = done;
             if !cancel.is_cancelled() {
-                let _ = done.send(crate::markdown::parse(&body).into());
+                let _ = done.send(rendered(&body, column, cancel));
             }
         });
     }
@@ -1085,12 +1128,13 @@ impl QuickLook {
         };
         self.reading = None;
         match read {
-            Some(Read { text, blocks }) => {
-                // **Parsed once, when the bytes land.** What a resize costs is
-                // the layout, which is cached separately — see
-                // [`crate::mdlayout`].
+            Some(Read { text, blocks, laid }) => {
+                // **Parsed once, when the bytes land**, and laid out for the
+                // width the panel had then. What a resize costs is a layout,
+                // which is cached separately — see [`crate::mdlayout`].
                 if is_markdown(&self.title()) {
                     self.blocks = blocks;
+                    self.laid = laid;
                     self.rendered = true;
                 }
                 self.text = Some(text);
@@ -1104,9 +1148,9 @@ impl QuickLook {
     fn drain_parse(&mut self) -> bool {
         let Some(waiting) = &self.parsing else { return false };
         match waiting.try_recv() {
-            Ok(blocks) => {
+            Ok((blocks, laid)) => {
                 let before = std::mem::replace(&mut self.blocks, blocks);
-                let gone = (before, self.laid.take());
+                let gone = (before, std::mem::replace(&mut self.laid, laid));
                 self.let_go(gone);
                 self.picked = None;
             }
@@ -1762,15 +1806,17 @@ impl QuickLook {
     ///
     /// **Re-parsed, because the document is not the one that was parsed** —
     /// coming back to the rendering after an edit and seeing the text from before
-    /// it is the same defect as a listing that goes stale — and on a job, because
-    /// the parse is no more the frame's work after an edit than before one.
-    pub(crate) fn stop_editing(&mut self, jobs: &crate::pane::Jobs) {
+    /// it is the same defect as a listing that goes stale — and laid out at
+    /// `column` on the same job, because neither is the frame's work after an
+    /// edit any more than before one. Until it lands the source is drawn, which
+    /// is the text the editor was just showing.
+    pub(crate) fn stop_editing(&mut self, column: (f32, f32, f32), jobs: &crate::pane::Jobs) {
         self.editing = false;
         self.rendered = std::mem::take(&mut self.was_rendered);
         if self.rendered {
             let gone = self.laid.take();
             self.let_go(gone);
-            self.start_parsing(jobs);
+            self.start_parsing(column, jobs);
         }
     }
 
@@ -2765,6 +2811,9 @@ two
         assert_eq!(look.text.as_ref().expect("text").body(), after);
     }
 
+    /// The column a test's look is laid out against: width, body size, scale.
+    const COLUMN: (f32, f32, f32) = (400.0, 13.0, 1.0);
+
     /// **A row's spans are the ones it reaches**, found by a search: exactly
     /// the spans a walk from the start of the line finds overlapping the row, at
     /// every row of a line cut in tones of several lengths.
@@ -2830,7 +2879,7 @@ two
         let path = root.join("hostile.md");
         std::fs::write(&path, "x".to_owned() + &"[".repeat(64 * 1024)).expect("a fixture");
         let before = parsed_here();
-        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        let mut look = QuickLook::open(path, 0, Shows::Text, COLUMN, &jobs);
         delivered(&mut look);
         assert_eq!(parsed_here(), before, "the thread taking delivery parsed the document");
         assert!(look.has_markdown() && look.rendered, "it arrived rendered");
@@ -2845,7 +2894,7 @@ two
         let (jobs, _waker, root) = harness("edit-parsed");
         let path = root.join("notes.md");
         std::fs::write(&path, "# Title\n\nA paragraph.\n").expect("a fixture");
-        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        let mut look = QuickLook::open(path, 0, Shows::Text, COLUMN, &jobs);
         delivered(&mut look);
         assert!(look.rendered);
 
@@ -2853,7 +2902,7 @@ two
         look.put_caret(Spot { line: 2, byte: 0 });
         assert!(look.type_in("Edited. "));
         let before = parsed_here();
-        look.stop_editing(&jobs);
+        look.stop_editing(COLUMN, &jobs);
         assert!(look.rendered && !look.editing);
         assert!(look.parsing() && look.laid.is_none(), "the old blocks are not laid out");
 
@@ -2884,12 +2933,13 @@ two
         }
     }
 
-    /// **The layout is asked for here and made on a job**, and while a new width
-    /// is on its way the old layout is what is on screen — rule 1, and the
-    /// difference between a resize that shows the document at the old width for
-    /// a frame and one that shows nothing.
+    /// **A markdown file arrives laid out**, at the width the panel had when it
+    /// opened, so the first frame with the document is its rendering; a new
+    /// width is laid out on a job, and until it lands the old layout is what is
+    /// on screen — rule 1, and the difference between a resize that shows the
+    /// document at the old width for a frame and one that shows its source.
     #[test]
-    fn a_layout_is_made_on_a_job_and_the_last_one_shows_until_it_lands() {
+    fn a_file_arrives_laid_out_and_the_last_layout_shows_until_the_next_lands() {
         // A machine with no faces has nothing to lay out with, and says so by
         // falling back to the source — which is a different test.
         if sk_text::Fonts::discover().is_err() {
@@ -2898,21 +2948,17 @@ two
         let (jobs, _waker, root) = harness("laid-on-a-job");
         let path = root.join("notes.md");
         std::fs::write(&path, "# Title\n\nA paragraph of a few words.\n").expect("a fixture");
-        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        let mut look = QuickLook::open(path, 0, Shows::Text, COLUMN, &jobs);
         delivered(&mut look);
-
-        look.lay_out_for((400.0, 13.0, 1.0), &jobs);
-        assert!(look.laid.is_none() && look.laying(), "it was laid out here, not asked for");
-        assert!(!look.showing_rendered(), "the source is what is on screen until it lands");
-        until(&mut look, |look| !look.laying());
+        assert!(look.showing_rendered(), "the first delivery drew the source");
         let first = look.laid.clone().expect("a layout");
-        assert!(first.fits(400.0, 13.0, 1.0));
-        assert!(look.showing_rendered());
+        let (width, size, scale) = COLUMN;
+        assert!(first.fits(width, size, scale));
 
-        look.lay_out_for((300.0, 13.0, 1.0), &jobs);
+        look.lay_out_for((300.0, size, scale), &jobs);
         assert_eq!(look.laid.as_ref(), Some(&first), "the old width is on screen meanwhile");
         until(&mut look, |look| !look.laying());
-        assert!(look.laid.as_ref().is_some_and(|laid| laid.fits(300.0, 13.0, 1.0)));
+        assert!(look.laid.as_ref().is_some_and(|laid| laid.fits(300.0, size, scale)));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2923,14 +2969,14 @@ two
         let (jobs, _waker, root) = harness("stops-its-jobs");
         let path = root.join("notes.md");
         std::fs::write(&path, "# Title\n").expect("a fixture");
-        let mut look = QuickLook::open(path, 0, Shows::Text, &jobs);
+        let mut look = QuickLook::open(path, 0, Shows::Text, COLUMN, &jobs);
         delivered(&mut look);
-        look.lay_out_for((400.0, 13.0, 1.0), &jobs);
+        look.lay_out_for((300.0, 13.0, 1.0), &jobs);
         let work = look.work.clone();
-        let layout = look.laying.as_ref().map(|it| it.stop.clone());
+        let layout = look.laying.as_ref().map(|it| it.stop.clone()).expect("a layout on its way");
         drop(look);
         assert!(work.is_cancelled(), "the read and the parse were left running");
-        assert!(layout.is_none_or(|it| it.is_cancelled()), "the layout was left running");
+        assert!(layout.is_cancelled(), "the layout was left running");
         let _ = std::fs::remove_dir_all(&root);
     }
 

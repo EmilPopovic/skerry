@@ -126,9 +126,7 @@ fn lay_the_markdown_out(
     scale: f32,
 ) {
     let (inner, theme) = where_;
-    let size = theme.metrics.text_size;
-    let room = (inner.width - crate::view::MARKDOWN_PAD * 2.0).max(size);
-    look.lay_out_for((room, size, scale), jobs);
+    look.lay_out_for(crate::view::markdown_column(inner, theme.metrics.text_size, scale), jobs);
     let deadline = std::time::Instant::now() + READ_DEADLINE;
     while look.laying() && std::time::Instant::now() < deadline {
         look.drain();
@@ -218,14 +216,16 @@ fn sample_quick_look(
 ) -> Option<crate::quicklook::QuickLook> {
     let (layout, theme, cache) = where_;
     let (shows, path, mtime) = looked_at(request, pane)?;
-    let mut look = crate::quicklook::QuickLook::open(path.clone(), mtime, shows, &session.jobs);
-
     // The same box the panel will be drawn into, in device pixels — the one
     // number that crosses the logical/device line on purpose, because a page
     // rendered at logical pixels on a 200% screen is a page at half the
     // resolution of the screen showing it.
     let inner = crate::view::quick_look_area(layout);
     let scale = f32::from(u16::try_from(request.scale_120).unwrap_or(120)) / 120.0;
+    let column = crate::view::markdown_column(inner, theme.metrics.text_size, scale);
+    let mut look =
+        crate::quicklook::QuickLook::open(path.clone(), mtime, shows, column, &session.jobs);
+
     let within = ((inner.width * scale) as u32, (inner.height * scale) as u32);
     let deadline = std::time::Instant::now() + READ_DEADLINE;
     if shows == crate::previews::Shows::Archive {
