@@ -141,18 +141,28 @@ impl Fonts {
                 // cluster wins; a partial map is remembered in case nothing
                 // better appears. The primary face is tried first regardless of
                 // its position in the chain, so a bold run stays bold.
+                //
+                // **In two passes, by presentation**: first the faces of the kind
+                // the cluster asks for, then the others. So `™` alone comes from
+                // the text face and `™` with U+FE0F from the emoji face, and a
+                // pictograph only one kind of face has comes from that one.
+                let colour = wants_colour(segment_text.get(cluster.range().to_range()));
                 let mut chosen = primary;
-                let order = std::iter::once(primary).chain(0..faces.len());
-                for candidate in order {
-                    let Some(face) = faces.get(candidate) else { continue };
-                    let charmap = face.as_ref().charmap();
-                    match cluster.map(|character| charmap.map(character)) {
-                        Status::Complete => {
-                            chosen = candidate;
-                            break;
+                'search: for pass in [colour, !colour] {
+                    for candidate in std::iter::once(primary).chain(0..faces.len()) {
+                        let Some(face) = faces.get(candidate) else { continue };
+                        if face.colour != pass {
+                            continue;
                         }
-                        Status::Keep => chosen = candidate,
-                        Status::Discard => {}
+                        let charmap = face.as_ref().charmap();
+                        match cluster.map(|character| charmap.map(character)) {
+                            Status::Complete => {
+                                chosen = candidate;
+                                break 'search;
+                            }
+                            Status::Keep => chosen = candidate,
+                            Status::Discard => {}
+                        }
                     }
                 }
 
@@ -203,15 +213,13 @@ impl Fonts {
     ///
     /// **Asked of the glyphs**, as the face draws them, because whether a face
     /// honours a variation sequence or ligates an emoji sequence is the face's
-    /// business: `Brand™\u{FE0F}` and `Brand™` were the same pixels. One is kept
+    /// business: `Brand™\u{FE0E}` and `Brand™` are the same pixels. One is kept
     /// when taking it out changes the inked glyphs of the cluster it is in — a
-    /// variant, a family — or when cutting the cluster at it would, because the
-    /// face draws one glyph across the place it is in, as the FE0F inside a
-    /// rainbow flag. This shaper shapes a cluster at a time, so nothing outside
-    /// the cluster can depend on it.
+    /// variant, a family, a subdivision flag. This shaper shapes a cluster at a
+    /// time, so nothing outside the cluster can depend on it.
     ///
     /// Only a name holding such a code point pays, and only on a layout-cache miss:
-    /// four shapings of its cluster and a raster of the glyphs that differ, once
+    /// two shapings of its cluster and a raster of the glyphs that differ, once
     /// per cluster — the answer is kept, and a folder of names ending in the same
     /// emoji asks once.
     fn what_shows(&mut self, text: &str, px_size: f32, weight: Weight) -> Vec<usize> {
@@ -245,25 +253,10 @@ impl Fonts {
 
     /// Whether `character`, at `at` in `cluster`, changes what the cluster draws.
     fn decide(&mut self, cluster: &str, at: usize, character: char, size: (f32, Weight)) -> bool {
-        let (head, tail) = (&cluster[..at], &cluster[at + character.len_utf8()..]);
-        let bare = self.glyphs(&[head, tail].concat(), size);
+        let without = [&cluster[..at], &cluster[at + character.len_utf8()..]].concat();
+        let bare = self.glyphs(&without, size);
         let with = self.glyphs(cluster, size);
-        let mut cut = self.glyphs(head, size);
-        cut.extend(self.glyphs(tail, size));
-        let mut ink = std::collections::HashMap::new();
-        let px_size = size.0;
-        if self.differs((&with, &bare), px_size, &mut ink) {
-            return true;
-        }
-        // A selector at the end of its cluster cuts nothing, and asking whether
-        // the cluster has ink would rasterize an emoji to learn it.
-        if cut == bare {
-            return false;
-        }
-        // A cluster no face can draw — a subdivision flag here is one
-        // missing-glyph box — has no glyph across the code point to split.
-        let drawn = with.iter().any(|&glyph| self.has_ink(glyph, px_size, &mut ink));
-        drawn && self.differs((&cut, &bare), px_size, &mut ink)
+        self.differs((&with, &bare), size.0, &mut std::collections::HashMap::new())
     }
 
     /// The glyphs `text` shapes to as the font has it, in order.
@@ -335,6 +328,20 @@ type Glyphs = [(u16, u16)];
 
 /// Decisions [`Fonts::what_shows`] keeps before clearing them all.
 pub(crate) const SHOWS_CAP: usize = 1024;
+
+/// Whether a cluster asks for a colour face: U+FE0F asks for one and U+FE0E for
+/// a text face, and a cluster that asks neither is drawn as its first
+/// character's `Emoji_Presentation` says.
+fn wants_colour(cluster: Option<&str>) -> bool {
+    let Some(cluster) = cluster else { return false };
+    if cluster.contains('\u{FE0F}') {
+        return true;
+    }
+    if cluster.contains('\u{FE0E}') {
+        return false;
+    }
+    cluster.chars().next().is_some_and(crate::escape::emoji_presentation)
+}
 
 /// The byte range of the cluster `swash` would shape the code point at `at` in.
 ///
@@ -605,11 +612,10 @@ mod tests {
             ["Brand\u{2122}.png", "Brand\u{2122}\u{FE0E}.png", "Brand\u{2122}\u{FE0F}.png"],
             ["\u{2764}.txt", "\u{2764}\u{FE0E}.txt", "\u{2764}\u{FE0F}.txt"],
             ["\u{A9}.txt", "\u{A9}\u{FE0E}.txt", "\u{A9}\u{FE0F}.txt"],
-            ["\u{1F3D6}.jpeg", "\u{1F3D6}\u{FE0E}.jpeg", "\u{1F3D6}\u{FE0F}.jpeg"],
             ["\u{2192}.txt", "\u{2192}\u{FE0E}.txt", "\u{2192}\u{FE0F}.txt"],
             ["\u{8279}.txt", "\u{8279}\u{FE00}.txt", "\u{8279}\u{E0100}.txt"],
             ["\u{1820}.txt", "\u{1820}\u{180B}.txt", "\u{1820}\u{180C}.txt"],
-            ["\u{1F468}\u{1F469}", "\u{1F468}\u{200D}\u{1F469}", "\u{1F468}\u{FE0F}\u{1F469}"],
+            ["\u{1F468}\u{1F469}", "\u{1F468}\u{200D}\u{1F469}", "\u{1F468}\u{200C}\u{1F469}"],
         ] {
             let drawn: Vec<_> = names.iter().map(|name| pixels(&mut fonts, name)).collect();
             for first in 0..names.len() {
@@ -648,6 +654,56 @@ mod tests {
             }
             let run = fonts.shape(sequence, 13.0, Weight::Regular);
             assert!(run.glyphs.iter().all(|glyph| !glyph.escape), "{sequence:?} was cut");
+        }
+    }
+
+    /// **A presentation selector chooses the face**: `™` alone is the text face's,
+    /// `™` with U+FE0F the colour face's, and `™` with U+FE0E the text face's
+    /// again — so that one changes nothing and is escaped.
+    #[test]
+    fn a_presentation_selector_chooses_between_the_text_and_the_colour_face() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        let face_of = |fonts: &mut Fonts, text: &str| {
+            let run = fonts.shape(text, 13.0, Weight::Regular);
+            run.glyphs.first().map(|glyph| fonts.faces[usize::from(glyph.face)].colour)
+        };
+        let has_colour = fonts.faces.iter().any(|face| face.colour);
+        let has_text = fonts
+            .faces
+            .iter()
+            .any(|face| !face.colour && face.as_ref().charmap().map('\u{2122}') != 0);
+        if !(has_colour && has_text) {
+            return;
+        }
+        assert_eq!(face_of(&mut fonts, "\u{2122}"), Some(false));
+        assert_eq!(face_of(&mut fonts, "\u{2122}\u{FE0F}"), Some(true));
+        assert_eq!(face_of(&mut fonts, "\u{2122}\u{FE0E}"), Some(false));
+        let text = fonts.shape("\u{2122}\u{FE0E}", 13.0, Weight::Regular);
+        assert!(text.glyphs.iter().any(|glyph| glyph.escape), "U+FE0E after ™ changes nothing");
+        let emoji = fonts.shape("\u{2122}\u{FE0F}", 13.0, Weight::Regular);
+        assert!(emoji.glyphs.iter().all(|glyph| !glyph.escape), "U+FE0F after ™ is the emoji");
+    }
+
+    /// **A gap, recorded rather than promised.** U+FE0F after a pictograph is
+    /// never escaped, because it is how most emoji in real names are spelled —
+    /// but where the chain has the pictograph in one presentation only, the two
+    /// forms draw alike. `👨` is an emoji by its own property, so with and
+    /// without the selector it is the colour face's; `🏖` is text by default and
+    /// no text face on this chain has it. When a chain has both, the second half
+    /// of this fails for that pictograph, and the gap is closed there.
+    #[test]
+    fn a_pictograph_with_one_presentation_draws_alike_with_and_without_fe0f() {
+        let Ok(mut fonts) = Fonts::discover() else { return };
+        for base in ['\u{1F468}', '\u{1F3D6}'] {
+            let (bare, with) = (format!("{base}.jpeg"), format!("{base}\u{FE0F}.jpeg"));
+            assert!(fonts.shape(&with, 13.0, Weight::Regular).glyphs.iter().all(|g| !g.escape));
+            let text_face = fonts
+                .faces
+                .iter()
+                .any(|face| !face.colour && face.as_ref().charmap().map(base) != 0);
+            if !text_face {
+                assert_eq!(pixels(&mut fonts, &bare), pixels(&mut fonts, &with), "{base:?}");
+            }
         }
     }
 

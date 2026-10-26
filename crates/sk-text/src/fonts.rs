@@ -270,6 +270,9 @@ pub(crate) struct Face {
     /// machines can hold the same `NotoColorEmoji.ttf` from two font packages
     /// and shape the same string into different pixels.
     path: PathBuf,
+    /// Whether the face draws in colour — an emoji face — which is what a
+    /// presentation selector chooses between.
+    pub(crate) colour: bool,
 }
 
 impl Face {
@@ -278,7 +281,12 @@ impl Face {
         let font = FontRef::from_index(data.bytes(), 0)?;
         let (offset, key) = (font.offset, font.key);
         let name = path.file_name()?.to_string_lossy().into_owned();
-        Some(Self { data, offset, key, name, path: path.to_path_buf() })
+        // The four ways a face carries colour glyphs: layered outlines, PNG
+        // strikes from Google and from Apple, and SVG.
+        let colour = [b"COLR", b"CBDT", b"sbix", b"SVG "]
+            .iter()
+            .any(|tag| font.table(swash::tag_from_bytes(tag)).is_some());
+        Some(Self { data, offset, key, name, path: path.to_path_buf(), colour })
     }
 
     pub(crate) fn as_ref(&self) -> FontRef<'_> {

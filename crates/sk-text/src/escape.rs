@@ -79,10 +79,12 @@ pub enum Verdict {
 /// **A selector is kept only where it changes what is drawn,** and that is a
 /// question about the faces rather than about the text. Unicode registers
 /// hundreds of variation sequences — `Brand™\u{FE0F}` asks for an emoji — and
-/// this shaper honours almost none of them: 718 of the 742 emoji variation
-/// sequences and 237 standardized variants drew the same pixels as the bare base.
-/// So these are [`Verdict::Undecided`], and kept only where the shaped glyphs
-/// with the code point differ from those without it:
+/// before the shaper chose faces by presentation it honoured almost none: 718 of
+/// the 742 emoji variation sequences and 237 standardized variants drew the same
+/// pixels as the bare base. **U+FE0F after a pictograph is the exception, and is
+/// always drawn**: it is how most real names spell an emoji, and the shaper now
+/// draws it from the colour face. The rest are [`Verdict::Undecided`], and kept
+/// only where the shaped glyphs with the code point differ from those without:
 ///
 /// * a variation selector after a base `StandardizedVariants.txt` or
 ///   `emoji-variation-sequences.txt` lists, or after any Han ideograph — the
@@ -108,6 +110,12 @@ pub fn verdict(text: &str, at: usize) -> Verdict {
         |condition: bool| if condition { Verdict::Undecided } else { Verdict::Escaped };
     match character {
         '\u{200C}' | '\u{200D}' => joins(base_before(text, at), after),
+        // The emoji presentation of a pictograph, which the shaper honours by
+        // drawing it from the colour face: never escaped, even where that face
+        // is the only one with the pictograph and both forms draw alike.
+        '\u{FE0F}' if before.is_some_and(|base| base.properties().is_extended_pictographic()) => {
+            Verdict::Drawn
+        }
         '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}' => {
             undecided_if(before.is_some_and(|base| selects(base, character)))
         }
@@ -185,6 +193,13 @@ fn joins(before: Option<char>, after: Option<char>) -> Verdict {
     } else {
         Verdict::Escaped
     }
+}
+
+/// Whether `character` is drawn as an emoji when nothing asks otherwise —
+/// Unicode's `Emoji_Presentation`, which no ASCII character has.
+#[must_use]
+pub fn emoji_presentation(character: char) -> bool {
+    !character.is_ascii() && in_ranges(data::EMOJI_PRESENTATION, character)
 }
 
 /// Whether `selector` is registered for `base`.
@@ -492,9 +507,8 @@ mod tests {
     #[test]
     fn a_variation_selector_is_undecided_only_after_a_base_it_is_registered_for() {
         for registered in [
-            "\u{1F3D6}\u{FE0F}",
-            "\u{2122}\u{FE0F}",
             "\u{2764}\u{FE0E}",
+            "\u{2122}\u{FE0E}",
             "1\u{FE0F}\u{20E3}",
             // A standardized variant: ≩ with a vertical stroke.
             "\u{2269}\u{FE00}",
@@ -523,6 +537,28 @@ mod tests {
             assert_eq!(verdict_on(hidden), Verdict::Escaped, "{hidden:?}");
             assert_eq!(drawn(hidden), expected, "{hidden:?}");
         }
+    }
+
+    /// **The emoji presentation of a pictograph is never escaped.** The shaper
+    /// draws it from the colour face, which is the most common way a real name
+    /// spells an emoji; where that face is the only one with the pictograph, the
+    /// two forms draw alike, and that gap is recorded in the shaper's tests.
+    #[test]
+    fn an_emoji_presentation_selector_after_a_pictograph_is_drawn() {
+        for name in [
+            "holiday \u{1F3D6}\u{FE0F}.jpeg",
+            "Brand\u{2122}\u{FE0F}.png",
+            "\u{2764}\u{FE0F}",
+            "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
+            "\u{1F468}\u{FE0F}",
+        ] {
+            let selector = name.find('\u{FE0F}').unwrap();
+            assert_eq!(verdict(name, selector), Verdict::Drawn, "{name:?}");
+        }
+        // A digit is an emoji only as a keycap, and a pictograph only by its
+        // property, so a selector after either of these is still undecided.
+        assert_eq!(verdict("1\u{FE0F}\u{20E3}", 1), Verdict::Undecided);
+        assert_eq!(verdict("a\u{FE0F}", 1), Verdict::Escaped);
     }
 
     /// Scotland's flag is a black flag, five tag letters and a cancel tag, and
@@ -625,6 +661,7 @@ mod tests {
             "Scripts.txt",
             "StandardizedVariants.txt",
             "emoji/emoji-variation-sequences.txt",
+            "emoji/emoji-data.txt",
         ];
 
         fn lines(root: &Path, name: &str) -> Vec<Vec<String>> {
@@ -706,6 +743,13 @@ mod tests {
                 let base = fields[0].split_whitespace().next().unwrap();
                 emoji.insert(u32::from_str_radix(base, 16).unwrap());
             }
+            let mut presentation = BTreeSet::new();
+            for fields in lines(root, "emoji/emoji-data.txt") {
+                if fields[1] == "Emoji_Presentation" {
+                    let (start, end) = span(&fields[0]);
+                    presentation.extend(start..=end);
+                }
+            }
 
             let mut out = String::new();
             out.push_str(HEADER);
@@ -715,6 +759,9 @@ mod tests {
             out.push('\n');
             out.push_str(EMOJI_DOC);
             table(&mut out, "EMOJI_VARIATION_BASES", &ranges(&emoji));
+            out.push('\n');
+            out.push_str(PRESENTATION_DOC);
+            table(&mut out, "EMOJI_PRESENTATION", &ranges(&presentation));
             out.push('\n');
             out.push_str(STANDARDIZED_DOC);
             table(&mut out, "STANDARDIZED_VARIANTS", &standardized.into_iter().collect::<Vec<_>>());
@@ -739,6 +786,11 @@ mod tests {
         const EMOJI_DOC: &str = "\
 /// Every base of a sequence in `emoji/emoji-variation-sequences.txt`, which is
 /// what U+FE0E and U+FE0F can select, as sorted inclusive ranges.
+";
+
+        const PRESENTATION_DOC: &str = "\
+/// Every code point with `Emoji_Presentation` in `emoji/emoji-data.txt` — drawn
+/// as an emoji when nothing asks otherwise — as sorted inclusive ranges.
 ";
 
         const STANDARDIZED_DOC: &str = "\
