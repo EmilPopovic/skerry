@@ -27,6 +27,10 @@ mod fonts;
 mod gif;
 mod md5;
 
+#[cfg(test)]
+#[path = "../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
 use std::io::{BufReader, BufWriter, Write};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};

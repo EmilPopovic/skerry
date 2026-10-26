@@ -481,6 +481,11 @@ fn expand(
 fn deinterlace(indices: &[u8], size: (u32, u32)) -> Vec<u8> {
     let (width, height) = (size.0 as usize, size.1 as usize);
     let mut out = vec![0u8; width * height];
+    // A frame no pixels wide has no rows to reorder, and `chunks_exact` of
+    // zero panics rather than answering none.
+    if width == 0 {
+        return out;
+    }
     let mut source = indices.chunks_exact(width);
     for (start, step) in [(0, 8), (4, 8), (2, 4), (1, 2)] {
         let mut y = start;
@@ -679,6 +684,15 @@ mod tests {
     /// An interlaced frame's rows come back in order.
     #[test]
     fn an_interlaced_frame_is_put_back_in_order() {
+        let frames = decode(&interlaced(), 1).expect("a frame");
+        let rows: Vec<u8> =
+            frames.raster.pixels.as_chunks::<4>().0.iter().map(|it| it[0]).collect();
+        assert_eq!(rows, [0, 255, 0, 255, 0, 255, 0, 255], "every odd row is white");
+    }
+
+    /// One frame one pixel wide and eight tall, interlaced, whose odd rows are
+    /// white.
+    fn interlaced() -> Vec<u8> {
         // Eight rows of one pixel each, written in interlace order: rows 0, 4, 2,
         // 6, then 1, 3, 5, 7 — pass one is every eighth from 0, and with a height
         // of eight that is row 0 alone.
@@ -702,12 +716,7 @@ mod tests {
         writer.bytes.push(data.len() as u8);
         writer.bytes.extend_from_slice(&data);
         writer.bytes.push(0);
-        let bytes = writer.done();
-
-        let frames = decode(&bytes, 1).expect("a frame");
-        let rows: Vec<u8> =
-            frames.raster.pixels.as_chunks::<4>().0.iter().map(|it| it[0]).collect();
-        assert_eq!(rows, [0, 255, 0, 255, 0, 255, 0, 255], "every odd row is white");
+        writer.done()
     }
 
     /// Anything that is not a GIF is not one, and a truncated one refuses rather
@@ -732,5 +741,63 @@ mod tests {
         assert_eq!(frames.raster.size, (4, 4));
         assert_eq!(&frames.raster.pixels[0..4], [255, 255, 255, 255], "the four that arrived");
         assert_eq!(&frames.raster.pixels[60..64], [0, 0, 0, 255], "and index zero for the rest");
+    }
+
+    /// **An interlaced frame zero pixels wide is a picture, not a panic.** It has
+    /// no pixels, so the size check passes it, and putting its rows back in
+    /// order asked `chunks_exact` for chunks of none — which panics, and a panic
+    /// is the thumbnailer dying on whatever file was next in the batch. Found by
+    /// the campaign below at seed 380535, iteration 23,442.
+    #[test]
+    fn an_interlaced_frame_with_no_width_is_drawn_as_nothing() {
+        let bytes = include_bytes!("../../../tests/fuzz/gif-zero-width-interlaced.bin");
+        let frames = decode(bytes, 1).expect("the screen, with nothing on it");
+        assert_eq!(frames.raster.size, (1, 8));
+        assert!(frames.raster.pixels.iter().all(|it| *it == 0), "an empty frame drew something");
+    }
+
+    /// **A GIF is a file somebody else wrote** — ADR 0040's campaign over the
+    /// decoder every download directory feeds the thumbnailer. Seeded with this
+    /// module's own fixtures: a still, an animation with a delay, transparency
+    /// and both disposals, and an interlaced frame.
+    ///
+    /// Each input is asked for the first frame, a later one and one past
+    /// [`super::MOST_FRAMES`], because reaching frame *n* composes every frame
+    /// before it and the disposals only run between frames.
+    #[test]
+    fn parser_campaign_gif() {
+        let still = Writer::new((2, 2)).frame((0, 0), (2, 2), &[0, 1, 1, 0]).done();
+        let animated = Writer::new((2, 2))
+            .frame((0, 0), (2, 2), &[0, 0, 0, 0])
+            .control(5, 0, None)
+            .frame((1, 0), (1, 1), &[1])
+            .done();
+        let disposed = Writer::new((2, 1))
+            .frame((0, 0), (2, 1), &[1, 1])
+            .control(0, super::RESTORE_BACKGROUND, Some(0))
+            .frame((0, 0), (1, 1), &[0])
+            .control(0, super::RESTORE_PREVIOUS, None)
+            .frame((1, 0), (1, 1), &[1])
+            .frame((0, 0), (2, 1), &[0, 1])
+            .done();
+        let seeds: &[&[u8]] = &[
+            &still,
+            &animated,
+            &disposed,
+            &interlaced(),
+            include_bytes!("../../../tests/fuzz/gif-zero-width-interlaced.bin"),
+        ];
+        crate::fuzz_support::campaign("gif", seeds, |bytes| {
+            for wanted in [0, 1, 3, super::MOST_FRAMES + 1] {
+                let Ok(frames) = decode(bytes, wanted) else { continue };
+                let (width, height) = frames.raster.size;
+                assert_eq!(
+                    frames.raster.pixels.len(),
+                    width as usize * height as usize * 4,
+                    "a canvas that is not its own size"
+                );
+                assert!(frames.count <= super::MOST_FRAMES, "{} frames", frames.count);
+            }
+        });
     }
 }

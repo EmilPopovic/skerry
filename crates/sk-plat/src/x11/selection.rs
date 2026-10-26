@@ -1021,4 +1021,114 @@ mod tests {
         assert_eq!(TYPES.atom("text/plain;charset=utf-8"), Some(TYPES.utf8));
         assert_eq!(TYPES.atom("text/plain;charset=UTF-8"), Some(TYPES.utf8));
     }
+
+    /// What a reader of one conversion must end up with.
+    #[derive(Debug, PartialEq)]
+    enum Owed {
+        /// Still arriving: abandoned at its deadline, so the reader sees nothing.
+        Arriving(Vec<u8>),
+        /// Finished under the limit, and these are the bytes.
+        Whole(Vec<u8>),
+        /// Past the limit, which the reader is told rather than handed a prefix.
+        TooLarge,
+    }
+
+    /// A script for [`parser_campaign_selection`]: two limits less one, then a
+    /// byte per step — the conversion in bit 0, the server keeping bytes back
+    /// when bits 1 and 2 are both set, and the chunk's length above them.
+    fn script(limits: [u8; 2], steps: &[(u8, bool, &[u8])]) -> Vec<u8> {
+        let mut out = limits.to_vec();
+        for (which, beyond, chunk) in steps {
+            let length = u8::try_from(chunk.len()).unwrap();
+            out.push((length << 3) | (u8::from(*beyond) * 6) | (which & 1));
+            out.extend_from_slice(chunk);
+        }
+        out
+    }
+
+    /// **An `INCR` answer is sized and paced by the peer that owns the
+    /// selection** — ADR 0040's campaign over the collector, through the seam
+    /// the tests above drive it by, with no X server: two conversions in flight,
+    /// and chunks, terminators and held-back bytes in whatever order the input
+    /// says. Seeded with those tests' own transfers.
+    ///
+    /// A model says what each reader must end up with, and the pipe is read to
+    /// see that it did: every byte under the limit, a refusal past it, or nothing
+    /// once a conversion that never finished is abandoned. [`Incoming::words`]
+    /// is checked at every step against the room left, because asking for more
+    /// is a reply as large as the peer cares to make.
+    #[test]
+    fn parser_campaign_selection() {
+        let seeds = [
+            script([7, 7], &[(0, false, b"file"), (0, false, b"://a"), (0, false, b"")]),
+            script([7, 7], &[(0, false, b"file"), (0, false, b"://ab"), (0, false, b"")]),
+            script([7, 7], &[(0, true, b"file://a")]),
+            script(
+                [9, 255],
+                &[(0, false, b"abc"), (1, false, b"xyz"), (0, false, b"defghij"), (1, false, b"")],
+            ),
+        ];
+        let seeds: Vec<&[u8]> = seeds.iter().map(Vec::as_slice).collect();
+        crate::fuzz_support::campaign("selection", &seeds, |bytes| {
+            let (Some(&first), Some(&second)) = (bytes.first(), bytes.get(1)) else { return };
+            let limits = [usize::from(first) + 1, usize::from(second) + 1];
+            let mut selections = Selections::default();
+            let mut readers = Vec::new();
+            for (atom, limit) in [1, 2].into_iter().zip(limits) {
+                let (read, write) = selection_pipe().unwrap();
+                let mut incoming =
+                    Incoming::new(atom, TYPES.uri_list, Some(write), false, Instant::now());
+                incoming.limit = limit;
+                incoming.incremental = true;
+                selections.incoming.push_back((atom, incoming));
+                readers.push(read);
+            }
+            let mut owed = [Owed::Arriving(Vec::new()), Owed::Arriving(Vec::new())];
+            let mut transfers = Vec::new();
+            let mut rest = &bytes[2..];
+            while let Some((&step, after)) = rest.split_first() {
+                let which = usize::from(step & 1);
+                let beyond = u32::from(step & 6 == 6);
+                let (chunk, after) = after.split_at(usize::from(step >> 3).min(after.len()));
+                rest = after;
+                owed[which] = match std::mem::replace(&mut owed[which], Owed::TooLarge) {
+                    Owed::Arriving(_) if beyond > 0 => Owed::TooLarge,
+                    Owed::Arriving(so_far) if so_far.len() + chunk.len() > limits[which] => {
+                        Owed::TooLarge
+                    }
+                    Owed::Arriving(so_far) if chunk.is_empty() => Owed::Whole(so_far),
+                    Owed::Arriving(mut so_far) => {
+                        so_far.extend_from_slice(chunk);
+                        Owed::Arriving(so_far)
+                    }
+                    finished => finished,
+                };
+                let atom = u32::try_from(which + 1).unwrap();
+                if let Some(index) = selections
+                    .incoming
+                    .iter()
+                    .position(|(it, held)| *it == atom && held.incremental)
+                {
+                    selections.collect(index, chunk, beyond, &mut transfers);
+                }
+                for (_, incoming) in &selections.incoming {
+                    let room = incoming.limit - incoming.collected.len();
+                    assert_eq!(incoming.words() as usize, room.div_ceil(4), "asked past the room");
+                }
+            }
+            selections.expire(Instant::now() + Duration::from_secs(3600));
+            assert_eq!(selections.awaiting(), 0, "a conversion outlived its deadline");
+            assert!(transfers.is_empty(), "a write to a reader was left unfinished");
+            for ((reader, limit), owed) in readers.iter().zip(limits).zip(owed) {
+                let got = read(reader, limit);
+                match owed {
+                    Owed::Arriving(_) => assert_eq!(got.unwrap(), b""),
+                    Owed::Whole(bytes) => assert_eq!(got.unwrap(), bytes),
+                    Owed::TooLarge => {
+                        assert_eq!(got.unwrap_err().kind(), std::io::ErrorKind::FileTooLarge);
+                    }
+                }
+            }
+        });
+    }
 }

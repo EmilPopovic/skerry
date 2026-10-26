@@ -1255,24 +1255,34 @@ mod tests {
             ("12-measurement.md", include_str!("../../../docs/12-measurement.md")),
         ];
         for (name, text) in corpus {
-            let rendered: String = parse(text).iter().map(spoken).collect::<Vec<_>>().join("\n");
-            let mut have: std::collections::HashMap<char, i64> = std::collections::HashMap::new();
-            for letter in rendered.chars().filter(|it| it.is_alphanumeric()) {
-                *have.entry(letter).or_insert(0) += 1;
-            }
-            let mut lost = Vec::new();
-            for letter in readable(text).chars().filter(|it| it.is_alphanumeric()) {
-                let held = have.entry(letter).or_insert(0);
-                if *held <= 0 {
-                    lost.push(letter);
-                } else {
-                    *held -= 1;
-                }
-            }
-            // The `x` of a ticked box, which the marker replaces.
-            lost.retain(|letter| *letter != 'x' && *letter != 'X');
+            let lost = lost(text, &parse(text));
             assert!(lost.is_empty(), "{name} lost {lost:?}");
         }
+    }
+
+    /// Every alphanumeric character of `text` a reader is owed and no block
+    /// holds, counted with repeats.
+    ///
+    /// **Less the two things a renderer is meant to drop**: a link's destination,
+    /// which [`readable`] takes out first, and the `x` of a ticked box, which its
+    /// marker replaces.
+    fn lost(text: &str, blocks: &[Block]) -> Vec<char> {
+        let rendered: String = blocks.iter().map(spoken).collect::<Vec<_>>().join("\n");
+        let mut have: std::collections::HashMap<char, i64> = std::collections::HashMap::new();
+        for letter in rendered.chars().filter(|it| it.is_alphanumeric()) {
+            *have.entry(letter).or_insert(0) += 1;
+        }
+        let mut lost = Vec::new();
+        for letter in readable(text).chars().filter(|it| it.is_alphanumeric()) {
+            let held = have.entry(letter).or_insert(0);
+            if *held <= 0 {
+                lost.push(letter);
+            } else {
+                *held -= 1;
+            }
+        }
+        lost.retain(|letter| *letter != 'x' && *letter != 'X');
+        lost
     }
 
     /// The source with what a renderer is *meant* to drop taken out: a link's
@@ -1486,5 +1496,51 @@ mod tests {
             taken[taken.len() - 1],
         );
         println!("skerry-markdown load after {}", load().trim());
+    }
+
+    /// **A README is a file somebody else wrote** — ADR 0040's campaign over the
+    /// parser every markdown file in a download directory reaches with `Space`.
+    /// Seeded with the documents the tests above parse, and every construct the
+    /// module header lists.
+    ///
+    /// Three things are asked of every input. **It does not panic**, which is the
+    /// campaign's own question. **It finishes inside [`BOUND`]** — five seconds,
+    /// which the openers' test already gives four times as much text — and on a
+    /// thread of its own, so a parse that runs away fails at the bound with its
+    /// input kept rather than holding the campaign until its CPU limit kills it
+    /// with nothing kept. **It drops no word**, which is ADR 0029's rule and the
+    /// one [`lost`] makes checkable.
+    #[test]
+    fn parser_campaign_markdown() {
+        let seeds: &[&[u8]] = &[
+            b"# One\n\n### Three ###\n\nUnderlined\n===\n\nSecond\n---\n",
+            b"one\ntwo\n\nthree  \nfour\n",
+            b"before\n\n```rust\nfn main() {}\n  indented\n```\n\nafter\n\n\tlet x = 1;\n",
+            b"- one\n- two\n  - nested\n\n1. first\n2. second\n- [ ] owed\n- [x] done\n",
+            b"> quoted words\n> still quoted\n> > deeper\n\nplain\n",
+            b"| Name | Size |\n| :--- | ---: |\n| a.txt | 12 |\n| b.txt | 3 |\n",
+            b"A *b* **c** `d` [e](f) ![g](h) <http://i.j/k> ~~l~~ m  \nn \\* o\n",
+            b"Password: ****** and a ______ b and **bold**~~~~ [[x](u)](v)\n\n***\n",
+            b"<div>html</div>\n\n[^1]: a footnote\n\nTerm\n: definition\n",
+        ];
+        crate::fuzz_support::campaign("markdown", seeds, |bytes| {
+            let text = String::from_utf8_lossy(bytes).into_owned();
+            let (done, waiting) = std::sync::mpsc::channel();
+            let held = text.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(parse(&held));
+            });
+            let blocks = match waiting.recv_timeout(BOUND) {
+                Ok(blocks) => blocks,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("a parse of {} bytes took longer than {BOUND:?}", text.len())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the parse panicked")
+                }
+            };
+            let lost = lost(&text, &blocks);
+            assert!(lost.is_empty(), "{lost:?} was dropped");
+        });
     }
 }

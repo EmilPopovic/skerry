@@ -33,6 +33,10 @@
 // table in Cargo.toml, together with the few pedantic lints allowed there with a
 // reason. Repeating `warn(clippy::pedantic)` here would override those.
 
+#[cfg(test)]
+#[path = "../../../tools/fuzz-support.rs"]
+mod fuzz_support;
+
 pub mod clipboard;
 pub mod drag;
 pub mod event;

@@ -272,7 +272,8 @@ fn unescape(text: &str) -> String {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-    use super::{parse, unescape};
+    use super::{parse, parse_stext, unescape};
+    use sk_preview::wire::Words;
 
     /// Poppler's own output, as it comes off the pipe.
     ///
@@ -311,6 +312,25 @@ mod tests {
 </html>
 "#;
 
+    /// mupdf's structured text, as `mutool draw -F stext` wrote it here.
+    const STEXT: &str = r#"<?xml version="1.0"?>
+<document filename="x.pdf">
+<page id="page1" width="595" height="420">
+<block bbox="40 81.878 197.068 95.414" justify="unknown">
+<line bbox="40 81.878 197.068 95.414" wmode="0" dir="1 0" flags="0" text="Ro ta">
+<font name="Helvetica" size="18">
+<char quad="40 81.878 52.996 81.878 40 95 52.996 95" x="40" y="95" c="R"/>
+<char quad="52.996 85.298 63.004 85.298 52.996 95.414 63.004 95.414" x="52.996" y="95" c="o"/>
+<char quad="63.004 95 68.008 95 63.004 95 68.008 95" x="63.004" y="95" c=" "/>
+<char quad="68.008 85.298 78.016 85.298 68.008 95.414 78.016 95.414" x="68.008" y="95" c="t"/>
+<char quad="78.016 82.976 83.020 82.976 78.016 95.414 83.020 95.414" x="78.016" y="95" c="a"/>
+</font>
+</line>
+</block>
+</page>
+</document>
+"#;
+
     /// The page's size, every word's box, and the lines they belong to.
     #[test]
     fn a_page_of_poppler_becomes_words_with_boxes() {
@@ -344,24 +364,7 @@ mod tests {
     /// its characters'.
     #[test]
     fn mupdfs_characters_become_words_with_boxes() {
-        const STEXT: &str = r#"<?xml version="1.0"?>
-<document filename="x.pdf">
-<page id="page1" width="595" height="420">
-<block bbox="40 81.878 197.068 95.414" justify="unknown">
-<line bbox="40 81.878 197.068 95.414" wmode="0" dir="1 0" flags="0" text="Ro ta">
-<font name="Helvetica" size="18">
-<char quad="40 81.878 52.996 81.878 40 95 52.996 95" x="40" y="95" c="R"/>
-<char quad="52.996 85.298 63.004 85.298 52.996 95.414 63.004 95.414" x="52.996" y="95" c="o"/>
-<char quad="63.004 95 68.008 95 63.004 95 68.008 95" x="63.004" y="95" c=" "/>
-<char quad="68.008 85.298 78.016 85.298 68.008 95.414 78.016 95.414" x="68.008" y="95" c="t"/>
-<char quad="78.016 82.976 83.020 82.976 78.016 95.414 83.020 95.414" x="78.016" y="95" c="a"/>
-</font>
-</line>
-</block>
-</page>
-</document>
-"#;
-        let layer = super::parse_stext(STEXT).expect("a layer");
+        let layer = parse_stext(STEXT).expect("a layer");
         // **Already rotated**, which is the whole difference from poppler: the
         // page mupdf reports is the page it draws.
         assert_eq!(layer.page, (595.0, 420.0));
@@ -371,7 +374,7 @@ mod tests {
         assert!((first.at.0 - 40.0).abs() < 0.001, "{:?}", first.at);
         assert!((first.at.2 - 23.004).abs() < 0.01, "the box spans both characters");
         assert_eq!(layer.words[1].line, 0, "one line, so both words are on it");
-        assert!(super::parse_stext("").is_none());
+        assert!(parse_stext("").is_none());
     }
 
     /// A quarter turn swaps the page poppler reports, because its boxes are
@@ -425,5 +428,48 @@ mod tests {
         // A numeric reference is legal XML that poppler does not write, and
         // guessing at it would be worse than leaving it alone.
         assert_eq!(unescape("&#65;"), "&#65;");
+    }
+
+    /// One word as it crosses the pipe: its box as bits, its line, its text.
+    type Crossing<'a> = ([u32; 4], u32, &'a str);
+
+    /// The parts of a layer that cross the pipe, with the floats as bits so a
+    /// NaN compares equal to itself.
+    fn shape(layer: &Words) -> (u32, u32, Vec<Crossing<'_>>) {
+        let words = layer.words.iter().map(|word| {
+            let at = [word.at.0, word.at.1, word.at.2, word.at.3].map(f32::to_bits);
+            (at, word.line, word.text.as_str())
+        });
+        (layer.page.0.to_bits(), layer.page.1.to_bits(), words.collect())
+    }
+
+    /// **A PDF is a file somebody else wrote, and so is what a tool says about
+    /// it** — ADR 0040's campaign over both scanners, seeded with the real
+    /// samples above.
+    ///
+    /// Each layer is also packed and unpacked, because the flat records are what
+    /// the host reads from a child it does not trust, and the raw input goes to
+    /// `Words::unpack` as well: a layer is something the child sends and the host
+    /// parses, so both ends are a parser of the other's bytes.
+    #[test]
+    fn parser_campaign_words() {
+        let packed = parse(SAMPLE).expect("a layer").pack();
+        let seeds: &[&[u8]] = &[SAMPLE.as_bytes(), STEXT.as_bytes(), &packed];
+        crate::fuzz_support::campaign("words", seeds, |bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            for layer in [parse(&text), parse_stext(&text)].into_iter().flatten() {
+                assert!(layer.page.0 > 0.0 && layer.page.1 > 0.0, "{:?}", layer.page);
+                for word in &layer.words {
+                    assert!(!word.text.is_empty(), "an empty word");
+                    assert!(word.at.2 >= 0.0 && word.at.3 >= 0.0, "{:?}", word.at);
+                }
+                let back = Words::unpack(&layer.pack()).expect("a packed layer unpacks");
+                assert_eq!(shape(&back), shape(&layer), "the wire changed the layer");
+            }
+            if let Some(layer) = Words::unpack(bytes) {
+                let again = Words::unpack(&layer.pack()).expect("a packed layer unpacks");
+                assert_eq!(shape(&again), shape(&layer), "unpacking is not a fixed point");
+            }
+        });
     }
 }
