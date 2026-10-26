@@ -184,9 +184,12 @@ fn tell(
 /// "If marked up text is sent to a server that does not give this cap, the
 /// markup will show through as regular text" — and so would an escape, as a
 /// literal `&amp;` in the middle of a folder's name.
+///
+/// **A daemon that does not answer is taken to read it**: an escape shown
+/// literally in a rare case is a smaller fault than a name read as markup.
 fn reads_markup(bus: &mut Bus) -> bool {
     let asked = Message::call(SERVICE, OBJECT, SERVICE, "GetCapabilities", Vec::new());
-    bus.call(asked).is_some_and(|reply| {
+    bus.call(asked).is_none_or(|reply| {
         let capabilities = reply.body.first().map(Value::items).unwrap_or_default();
         capabilities.iter().any(|it| it.text() == Some("body-markup"))
     })
@@ -264,9 +267,11 @@ mod tests {
         );
     }
 
-    /// A daemon on the other end of a socket that says it can do `capabilities`,
-    /// and hands back the `Notify` it was sent.
-    fn daemon(capabilities: &'static [&'static str]) -> (Bus, std::thread::JoinHandle<Message>) {
+    /// A daemon on the other end of a socket that says it can do `capabilities`
+    /// — or refuses to say, for `None` — and hands back the `Notify` it was sent.
+    fn daemon(
+        capabilities: Option<&'static [&'static str]>,
+    ) -> (Bus, std::thread::JoinHandle<Message>) {
         let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
         for socket in [&ours, &theirs] {
             socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
@@ -275,8 +280,13 @@ mod tests {
             let mut daemon = Bus::over(theirs);
             let asked = daemon.receive().expect("no GetCapabilities");
             assert_eq!(asked.member.as_deref(), Some("GetCapabilities"));
-            let named = capabilities.iter().map(|it| Value::Str((*it).to_owned())).collect();
-            daemon.reply(&asked, vec![Value::Array(named)]).unwrap();
+            if let Some(named) = capabilities {
+                let named = named.iter().map(|it| Value::Str((*it).to_owned())).collect();
+                daemon.reply(&asked, vec![Value::Array(named)]).unwrap();
+            } else {
+                let refused = "org.freedesktop.DBus.Error.UnknownMethod";
+                daemon.refuse(&asked, refused, "no such method").unwrap();
+            }
             let notify = daemon.receive().expect("no Notify");
             daemon.reply(&notify, vec![Value::U32(1)]).unwrap();
             notify
@@ -285,6 +295,7 @@ mod tests {
     }
 
     const FOLDER: &str = "/home/tester/<b>Tom & Jerry</b> <img src=\"x\"/>";
+    const ESCAPED: &str = "/home/tester/&lt;b&gt;Tom &amp; Jerry&lt;/b&gt; &lt;img src=\"x\"/&gt;";
 
     /// **A path is text, so a daemon that reads markup gets it escaped.**
     ///
@@ -294,21 +305,27 @@ mod tests {
     /// was only meant to say where.
     #[test]
     fn a_daemon_that_reads_markup_is_sent_the_path_escaped() {
-        let (mut bus, serving) = daemon(&["body", "body-markup", "actions"]);
+        let (mut bus, serving) = daemon(Some(&["body", "body-markup", "actions"]));
         tell(&mut bus, "Skerry", "dev.skerry.Skerry", "dev.skerry.Skerry", "Copied", FOLDER)
             .unwrap();
-        let sent = serving.join().unwrap();
-        assert_eq!(
-            sent.body.get(4).and_then(Value::text),
-            Some("/home/tester/&lt;b&gt;Tom &amp; Jerry&lt;/b&gt; &lt;img src=\"x\"/&gt;")
-        );
+        assert_eq!(serving.join().unwrap().body.get(4).and_then(Value::text), Some(ESCAPED));
+    }
+
+    /// One that will not say is sent it escaped too: a literal `&amp;` in a
+    /// rare case is a smaller fault than a name read as markup.
+    #[test]
+    fn a_daemon_that_will_not_say_is_sent_the_path_escaped() {
+        let (mut bus, serving) = daemon(None);
+        tell(&mut bus, "Skerry", "dev.skerry.Skerry", "dev.skerry.Skerry", "Copied", FOLDER)
+            .unwrap();
+        assert_eq!(serving.join().unwrap().body.get(4).and_then(Value::text), Some(ESCAPED));
     }
 
     /// And one that does not is sent it as it is, because it would show an
     /// escape as the escape.
     #[test]
     fn a_daemon_that_does_not_read_markup_is_sent_the_path_as_it_is() {
-        let (mut bus, serving) = daemon(&["body", "actions"]);
+        let (mut bus, serving) = daemon(Some(&["body", "actions"]));
         tell(&mut bus, "Skerry", "dev.skerry.Skerry", "dev.skerry.Skerry", "Copied", FOLDER)
             .unwrap();
         assert_eq!(serving.join().unwrap().body.get(4).and_then(Value::text), Some(FOLDER));
