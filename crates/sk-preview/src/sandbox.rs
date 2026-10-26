@@ -797,6 +797,9 @@ mod tests {
                     "utimensat",
                     failed(libc::syscall(libc::SYS_utimensat, at, name.as_ptr(), null, 0)),
                 ),
+                // Answered EPERM by the filter on any kernel, and ENOSYS or
+                // EFAULT by one that has not got it or was given null.
+                ("file_setattr", failed(libc::syscall(469, at, name.as_ptr(), null, 0, 0))),
             ]
         };
         #[cfg(target_arch = "x86_64")]
@@ -1115,6 +1118,16 @@ mod tests {
             // the filter must return ENOSYS for the libc fallback.
             assert_eq!(unsafe { libc::syscall(libc::SYS_clone3, 0usize, 0usize) }, -1);
             assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ENOSYS));
+            // The rest of the mount API, with arguments a kernel would refuse.
+            let null = std::ptr::null::<u8>();
+            // SAFETY: null pointers and invalid descriptors, refused before use.
+            unsafe {
+                for (call, number) in [("fsconfig", 431), ("fspick", 433), ("open_tree_attr", 467)]
+                {
+                    let mounted = libc::syscall(number, -1, null, 0, null, 0);
+                    assert_eq!(failed(mounted), Some(libc::EPERM), "{call}");
+                }
+            }
             assert_eq!(std::thread::spawn(|| 42).join().unwrap(), 42);
             assert!(Command::new("true").status().unwrap().success());
             return;
@@ -1136,6 +1149,7 @@ mod tests {
     /// **No descriptor may name an owner to signal**: `F_SETOWN` and a pipe the
     /// helper writes is `kill` by another route, and below Landlock ABI 6 nothing
     /// else stops it — reproduced there killing a `sleep` outside the domain.
+    /// **Nor take a lease**, which holds up another process's open for writing.
     #[test]
     fn a_descriptor_may_name_no_owner_to_signal() {
         const MARKER: &str = "SKERRY_SECCOMP_OWNER";
@@ -1144,6 +1158,8 @@ mod tests {
             use std::os::fd::AsRawFd as _;
             let (read, _write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
             let fd = read.as_raw_fd();
+            let leasable = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+            let own_file = leasable.as_raw_fd();
             let parent = libc::c_long::from(std::os::unix::process::parent_id());
             let f_owner_ex = [1i32, i32::try_from(parent).unwrap()];
             assert!(super::no_new_privs());
@@ -1164,6 +1180,8 @@ mod tests {
                     Some(libc::EPERM)
                 );
                 assert!(libc::syscall(libc::SYS_fcntl, fd, libc::F_GETFL) >= 0, "F_GETFL");
+                let leased = libc::syscall(libc::SYS_fcntl, own_file, 1024, libc::F_RDLCK);
+                assert_eq!(failed(leased), Some(libc::EPERM), "F_SETLEASE");
             }
             return;
         }

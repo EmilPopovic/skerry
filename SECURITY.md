@@ -28,8 +28,9 @@ characters replaced, and requires resource limits (address space, CPU time and
 file size), no-new-privileges and a seccomp filter. The filter denies
 networking, signals and resource or scheduling changes aimed at other
 processes and descriptor owners that would signal them, changes to any file's
-mode, owner, extended attributes, inode flags and times, the kernel keyrings,
-leaving the helper's process group, and selected kernel interfaces; the
+mode, owner, extended attributes, inode flags and times, file leases, the
+kernel keyrings, leaving the helper's process group, and selected kernel
+interfaces; the
 thumbnailer may not start processes at all. This is a targeted deny filter, not
 a complete syscall allowlist.
 

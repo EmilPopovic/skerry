@@ -94,7 +94,8 @@ says it once per run; and the `F2` capability line carries `sandbox=landlock-N`,
 **What a confined helper may not do, beyond 0034's list**, in `sk_preview::seccomp`:
 
 - change any file's mode, owner or extended attributes — the `chmod`, `chown` and
-  `setxattr`/`removexattr` families, `fchmodat2` and the `*xattrat` calls included;
+  `setxattr`/`removexattr` families, `fchmodat2` and the `*xattrat` calls included —
+  or its inode attributes by path, through `file_setattr`;
 - change an inode through a descriptor opened only to read it: the `ioctl`s that
   set `chattr` flags, XFS-style attributes, a version or an encryption policy, and
   the one that enables verity, which makes a file permanently read-only;
@@ -115,6 +116,10 @@ says it once per run; and the `F2` capability line carries `sandbox=landlock-N`,
   `process_mrelease` at all — the first two because a zero target with
   `PRIO_USER` is every process the user has;
 - use the kernel keyrings: `keyctl`, `add_key`, `request_key`;
+- take a file lease, which on a descriptor opened to read holds up another
+  process's open for writing for `lease-break-time`; `flock` and POSIX locks stay,
+  because the tools a helper starts lock their own caches;
+- the rest of the mount API: `fsconfig`, `fspick` and `open_tree_attr`;
 - below Landlock ABI 3, or without Landlock: truncate — `truncate`, `ftruncate`,
   `creat`, and `O_TRUNC` in `open`/`openat` flags are denied, and `openat2`, whose
   flags are behind a pointer, answers `ENOSYS`;
@@ -193,6 +198,10 @@ not a reason to run a different binary.
   of the few such calls a helper makes.
 - Every denial is asserted by a test that confines a disposable child and tries it,
   in the shape 0034 set.
+- A deny-list is only as new as the kernel it was read against. `file_setattr`
+  arrived in 6.17 and set by path what the filter denied through a descriptor;
+  this list was read through number 471 on 7.0, and has to be read again past
+  that whenever the kernel floor or the development kernel moves.
 
 ## Revisit trigger
 

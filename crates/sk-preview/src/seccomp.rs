@@ -51,10 +51,22 @@ const fn argument(index: u32) -> u32 {
 }
 
 // Numbers 424 and above are shared by every architecture, and the `libc` crate
-// does not yet name these three on aarch64.
+// does not yet name these on aarch64, or at all.
+//
+// **The table grows with every kernel, and a deny-list does not.** Read through
+// 471, `rseq_slice_yield`, on 7.0: `file_setattr` arrived in 6.17 and set by path
+// what `FS_IOC_FSSETXATTR` is denied setting through a descriptor. When the kernel
+// floor or the development kernel moves, read the numbers past the last one this
+// list names for anything that changes metadata, mounts or reaches another
+// process. Left allowed on that reading: `file_getattr`, `getxattrat`,
+// `listxattrat`, `statmount`, `listmount` and `listns`, which only read;
+// `pidfd_open`, inert while every call that acts on a pidfd is denied; and the
+// futex, memory and LSM-self calls, which act on the helper alone.
 const FCHMODAT2: c_long = 452;
 const SETXATTRAT: c_long = 463;
 const REMOVEXATTRAT: c_long = 466;
+const OPEN_TREE_ATTR: c_long = 467;
+const FILE_SETATTR: c_long = 469;
 
 const CLONE_THREAD: u32 = 0x0001_0000;
 const CLONE_PARENT: u32 = 0x0000_8000;
@@ -64,6 +76,7 @@ const CLONE_PARENT: u32 = 0x0000_8000;
 const F_SETOWN: u32 = 8;
 const F_SETSIG: u32 = 10;
 const F_SETOWN_EX: u32 = 15;
+const F_SETLEASE: u32 = 1024;
 const FIOSETOWN: u32 = 0x8901;
 const SIOCSPGRP: u32 = 0x8902;
 /// Every `CLONE_NEW*` flag `clone` itself accepts.
@@ -134,8 +147,8 @@ pub(crate) fn install(policy: Policy) -> bool {
 }
 
 /// Networking, process inspection, kernel programming, mounts and namespaces —
-/// ADR 0034's list.
-const KERNEL_INTERFACES: [c_long; 31] = [
+/// ADR 0034's list, with the three calls of the new mount API it did not name.
+const KERNEL_INTERFACES: [c_long; 34] = [
     libc::SYS_socket,
     libc::SYS_socketpair,
     libc::SYS_connect,
@@ -154,8 +167,11 @@ const KERNEL_INTERFACES: [c_long; 31] = [
     libc::SYS_umount2,
     libc::SYS_move_mount,
     libc::SYS_fsopen,
+    libc::SYS_fsconfig,
     libc::SYS_fsmount,
+    libc::SYS_fspick,
     libc::SYS_open_tree,
+    OPEN_TREE_ATTR,
     libc::SYS_mount_setattr,
     libc::SYS_pivot_root,
     libc::SYS_chroot,
@@ -176,12 +192,16 @@ const KERNEL_INTERFACES: [c_long; 31] = [
 ///
 /// **`setpriority` and `ioprio_set` at all**, not only for another pid: a zero
 /// target with `PRIO_USER` or `IOPRIO_WHO_USER` is every process the user has.
-const PAST_ITS_FILES: [c_long; 24] = [
+///
+/// **`file_setattr`** is `FS_IOC_FSSETXATTR` by path — see [`INODE_IOCTLS`] —
+/// and reaches every file the user owns at every Landlock ABI.
+const PAST_ITS_FILES: [c_long; 25] = [
     libc::SYS_fchmod,
     libc::SYS_fchmodat,
     FCHMODAT2,
     libc::SYS_fchown,
     libc::SYS_fchownat,
+    FILE_SETATTR,
     libc::SYS_setxattr,
     libc::SYS_lsetxattr,
     libc::SYS_fsetxattr,
@@ -233,6 +253,7 @@ fn build(policy: Policy) -> Program {
     }
     signals(&mut program, policy);
     stays_in_its_group(&mut program);
+    no_leases(&mut program);
     if !policy.stamps {
         no_times(&mut program);
     }
@@ -326,6 +347,17 @@ fn signals(program: &mut Program, policy: Policy) {
     for request in [FIOSETOWN, SIOCSPGRP] {
         program.deny_where(libc::SYS_ioctl, 1, Test::Is(request));
     }
+}
+
+/// No lease on any file.
+///
+/// **A read lease needs only a descriptor opened to read**, and holds up every
+/// other process's open of that file for writing for `lease-break-time` — 45
+/// seconds by default — each time one tries. No helper needs one. `flock` and
+/// POSIX locks stay: fontconfig and the tools a helper starts lock their own
+/// caches, and a lock stops only another locker, never somebody's open.
+fn no_leases(program: &mut Program) {
+    program.deny_where(libc::SYS_fcntl, 1, Test::Is(F_SETLEASE));
 }
 
 /// No process the helper starts may leave the group [`crate::host::terminate`]
