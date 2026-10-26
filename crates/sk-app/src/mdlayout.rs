@@ -285,15 +285,17 @@ pub(crate) fn lay_out(
             }
             Kind::Code { lines, .. } => {
                 y += GAP * size * 0.6;
+                let cell = measure.width_of("0", Weight::Mono, size);
                 for source in lines {
-                    let width_of = measure.width_of(source, Weight::Mono, size);
+                    let shown = seen(source, room, cell);
+                    let width_of = measure.width_of(shown, Weight::Mono, size);
                     let height = size * 1.45;
                     out.lines.push(Line {
                         top: y,
                         height,
                         baseline: size * 1.1,
                         runs: vec![Placed {
-                            text: source.clone(),
+                            text: shown.to_owned(),
                             x: left + size * 0.6,
                             width: width_of,
                             weight: Weight::Mono,
@@ -385,6 +387,21 @@ fn item(
         );
     }
     y
+}
+
+/// The part of a code line a column `room` wide can show, in a face whose
+/// characters are `cell` wide.
+///
+/// **What is drawn, while the line's text stays whole** for a selection and a
+/// copy. A code line is never wrapped — ADR 0029 — so the panel's edge cuts it,
+/// and a run of the whole of it was a label the frame shaped: a 200 KiB line
+/// among 1,400 words, which push it out of a label cache of 256, was reshaped
+/// every frame, 41.6 ms of each (median of nine, release build, load 3.8).
+/// Twice what fits, and then some, because a tab and a combining mark take no
+/// room and the panel's edge is past the column's.
+fn seen(source: &str, room: f32, cell: f32) -> &str {
+    let fits = (room / cell.max(1.0)).ceil() as usize;
+    source.char_indices().nth(fits * 2 + 8).map_or(source, |(at, _)| &source[..at])
 }
 
 /// Everything the flow of one block needs that is not the runs themselves.
@@ -951,6 +968,22 @@ mod tests {
         for word in ["ARCH", "x86_64", "riscv_32", "besides"] {
             assert!(all.contains(word), "{word} is missing from {all:?}");
         }
+    }
+
+    /// **A code line longer than the column is drawn as what the column shows**,
+    /// and is still the whole line to a selection and a copy: a run is a label
+    /// the frame shapes, and the whole of a 200 KiB line was one.
+    #[test]
+    fn a_long_code_line_draws_what_fits_and_keeps_its_text() {
+        let long = "y".repeat(200 * 1024);
+        let out = laid(&format!("```\n{long}\nshort\n```\n"), 400.0);
+        let code: Vec<&super::Line> = out.lines.iter().filter(|line| line.code).collect();
+        assert_eq!(code.len(), 2, "a code line was wrapped");
+        assert_eq!(code[0].text, long, "the line lost its text");
+        let drawn: usize = code[0].runs.iter().map(|run| run.text.chars().count()).sum();
+        // Grid's characters are eight pixels wide, so fifty fit in 400.
+        assert!((50..=2 * 50 + 8).contains(&drawn), "{drawn} characters drawn of 200 KiB");
+        assert_eq!(code[1].runs[0].text, "short", "a line that fits is drawn whole");
     }
 
     /// A word wider than the column is cut rather than left to overrun it.

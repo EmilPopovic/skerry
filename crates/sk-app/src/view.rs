@@ -1882,7 +1882,8 @@ fn quick_look_text(
             painter.label(&number, mono(numbers), column, baseline);
         }
         let mut x = placed.text_x;
-        for span in text.spans.get(row.line).map_or(&[][..], Vec::as_slice) {
+        let spans = text.spans.get(row.line).map_or(&[][..], Vec::as_slice);
+        for span in crate::quicklook::on_row(spans, *row) {
             // The part of this run that is on this row, which is the whole of
             // what wrapping costs the highlighter: a span is still a slice of a
             // line, and a row is a window onto it.
