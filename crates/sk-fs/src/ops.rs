@@ -1641,11 +1641,16 @@ mod tests {
 
     /// A move between two real filesystems — `/dev/shm` and the temporary
     /// directory, which are two mounts on any Linux this runs on, and where they
-    /// are not it returns. What arrived during the copy stays, the move goes on
-    /// the stack with a note saying so, and its undo refuses rather than merge
-    /// what it brings back into what stayed.
+    /// are not it returns.
+    ///
+    /// A file written after the copy read it, and one that arrived meanwhile,
+    /// both stay, and the note counts them. The undo used to refuse at the
+    /// folder's name — "Something is already called …; choose another name",
+    /// with no name to choose and the history entry stuck. It merges back now:
+    /// what can come back does, the stale copy of the written file stays where
+    /// it landed beside the newer one, and the note says to compare them.
     #[test]
-    fn a_move_between_filesystems_notes_what_it_left_and_undo_does_not_merge_into_it() {
+    fn a_move_between_filesystems_notes_what_it_left_and_its_undo_merges_back_around_it() {
         let device =
             |path: &Path| rustix::fs::stat(path).map(|stat| stat.st_dev).unwrap_or_default();
         let here = scratch("across-filesystems");
@@ -1657,13 +1662,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&source);
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("copied.txt"), b"moved").unwrap();
+        std::fs::write(source.join("written.txt"), b"as copied").unwrap();
 
         let mut armed = true;
         let change =
             move_into(&source, &here, Conflict::Refuse, &sk_util::Cancel::new(), &mut |p| {
-                if armed && p.done == 1 {
+                if armed && p.done == 2 {
                     armed = false;
                     std::fs::write(source.join("arrived.txt"), b"new").unwrap();
+                    std::fs::write(source.join("written.txt"), b"written after").unwrap();
                 }
             })
             .expect("moved");
@@ -1671,17 +1678,23 @@ mod tests {
         assert_eq!(std::fs::read(landed.join("copied.txt")).unwrap(), b"moved");
         assert!(!source.join("copied.txt").exists());
         assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(source.join("written.txt")).unwrap(), b"written after");
         let Change::Noted { change: inner, note, retry: false, stranded: false } = &change else {
             panic!("{change:?}")
         };
         assert!(matches!(**inner, Change::Renamed { .. }), "{inner:?}");
-        assert!(note.contains("arrived.txt"), "{note}");
+        assert!(note.starts_with("2 items changed or appeared"), "{note}");
 
         let undo = super::replay(&change, true, &mut |leaf| super::revert_recorded(leaf));
-        assert_eq!(undo.problem.map(|problem| problem.kind()), Some(ProblemKind::NameTaken));
-        assert!(undo.completed.is_none(), "an undo that refused was recorded as done");
-        assert_eq!(std::fs::read(landed.join("copied.txt")).unwrap(), b"moved");
+        let Some(Change::Noted { note, .. }) = &undo.completed else {
+            panic!("the undo did not complete: {:?}", undo.problem)
+        };
+        assert!(note.contains("written.txt") && note.contains("already has its name"), "{note}");
+        assert_eq!(std::fs::read(source.join("copied.txt")).unwrap(), b"moved");
+        assert_eq!(std::fs::read(source.join("written.txt")).unwrap(), b"written after");
         assert_eq!(std::fs::read(source.join("arrived.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(landed.join("written.txt")).unwrap(), b"as copied");
+        assert!(!landed.join("copied.txt").exists(), "what came back is still in both places");
         std::fs::remove_dir_all(&source).unwrap();
         std::fs::remove_dir_all(&here).unwrap();
     }
