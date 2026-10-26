@@ -462,29 +462,34 @@ impl Text {
 /// a word longer than a whole row is cut, because the alternative is a row wider
 /// than the panel. `cells` of zero is a panel too narrow to have measured yet, and
 /// leaves the line whole.
+///
+/// **One pass over the line.** Each row used to count the characters of the
+/// whole rest of the line to learn whether it was the last, which over one
+/// 256 KiB line was 6.6 ms on the frame loop per width and per keystroke
+/// (median of five, release build, load 4).
 fn wrap_one(body: &str, cells: usize, line: usize, out: &mut Vec<Row>) {
-    if cells == 0 || body.chars().count() <= cells {
-        out.push(Row { line, from: 0, to: body.len() });
-        return;
-    }
     let mut from = 0;
-    while from < body.len() {
-        let rest = &body[from..];
-        if rest.chars().count() <= cells {
-            out.push(Row { line, from, to: body.len() });
-            return;
+    // How many characters the row from `from` holds so far, and the byte after
+    // its last space — the space is kept at the end of the row it broke, which
+    // is where a caret at the end of a wrapped row belongs.
+    let mut held = 0;
+    let mut space = None;
+    for (at, letter) in body.char_indices() {
+        if cells > 0 && held == cells {
+            let to = space.unwrap_or(at);
+            out.push(Row { line, from, to });
+            // What follows the space goes on into the next row, and is the only
+            // part of the line ever counted twice.
+            held = body[to..at].chars().count();
+            from = to;
+            space = None;
         }
-        let hard = from + rest.char_indices().nth(cells).map_or(rest.len(), |(index, _)| index);
-        // The space is kept at the end of the row it broke, which is where a
-        // caret at the end of a wrapped row belongs.
-        let to = body[from..hard]
-            .rfind(' ')
-            .map(|index| from + index + 1)
-            .filter(|breaking| *breaking > from)
-            .unwrap_or(hard);
-        out.push(Row { line, from, to });
-        from = to;
+        held += 1;
+        if letter == ' ' {
+            space = Some(at + 1);
+        }
     }
+    out.push(Row { line, from, to: body.len() });
 }
 
 /// What was last asked of a child: the box, and the page.
@@ -2919,5 +2924,29 @@ two
         assert!(look.drain(), "the dead job was not noticed on its own wake-up");
         assert_eq!(look.said(), Some("preview.failed"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A line is wrapped in one pass.** Each row used to count the rest of the
+    /// line to see whether it was the last, which made one long line quadratic in
+    /// its length. The count is std's, fast enough that four MiB in rows of 120
+    /// still finished inside the bound; eight MiB in rows of twenty does not.
+    #[test]
+    fn a_long_line_is_wrapped_in_one_pass() {
+        let body = "word ".repeat(32 * super::TEXT_LIMIT / 5);
+        let (done, waiting) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut rows = Vec::new();
+            super::wrap_one(&body, 20, 0, &mut rows);
+            let _ = done.send((body, rows));
+        });
+        let (body, rows) = waiting
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("wrapping one long line took longer than five seconds");
+        assert_eq!(rows.first().map(|it| it.from), Some(0));
+        assert_eq!(rows.last().map(|it| it.to), Some(body.len()));
+        for pair in rows.windows(2) {
+            assert_eq!(pair[0].to, pair[1].from, "a gap or an overlap between rows");
+        }
+        assert!(rows.iter().all(|it| body[it.from..it.to].chars().count() <= 20));
     }
 }
