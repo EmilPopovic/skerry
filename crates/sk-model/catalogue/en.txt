@@ -445,6 +445,10 @@ index.building_of[one] = Indexing… {0} of {1} entry
 index.building_of[other] = Indexing… {0} of {1} entries
 # Which filesystem of how many, while a queued build works through them.
 index.of_roots = filesystem {0} of {1}
+# A build past the size an index file may be is not saved: the window searches it
+# until the panel closes, and every search of that folder after it walks.
+notice.index_too_large[one]   = {0} entry makes an index larger than {1}, so it was not saved and later searches here will walk — index a folder inside it instead
+notice.index_too_large[other] = {0} entries make an index larger than {1}, so it was not saved and later searches here will walk — index a folder inside it instead
 action.search_everywhere = Search everywhere
 action.search = Find a file
 action.search_results = Show all results in this pane

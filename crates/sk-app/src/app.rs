@@ -943,6 +943,17 @@ fn refusal(error: &std::io::Error) -> Option<String> {
     }
 }
 
+/// What a build that came out too large to keep tells a person.
+///
+/// **Said, because what it costs is silent.** The index is searched until the
+/// panel closes and then never again: every later search of the root walks, and
+/// the line under the results would say so only as a slower answer.
+fn too_large(entries: usize) -> String {
+    let count = sk_ui::format::grouped(entries);
+    let ceiling = sk_ui::format::size(sk_index::store::LARGEST);
+    sk_model::tp!("notice.index_too_large", entries, count, ceiling)
+}
+
 /// The three channels a job answers the frame loop on.
 ///
 /// Together because they are three of the same thing with the same lifetime: a
@@ -8478,11 +8489,9 @@ scope_aim={scope_aim:?}",
             let built = sk_index::store::build(&root, cancel, &mut said);
             // Saved before it is delivered, so the window that asked for it and
             // the next window to open the folder get the same answer.
-            let held = built.map(|index| {
-                let _ = sk_index::store::save(&index);
-                std::sync::Arc::new(index)
-            });
-            if sender.send(crate::indexing::Note::Built(held)).is_ok() {
+            let unsaved = built.as_ref().and_then(|index| sk_index::store::save(index).err());
+            let held = built.map(std::sync::Arc::new);
+            if sender.send(crate::indexing::Note::Built(held, unsaved)).is_ok() {
                 wake.wake();
             }
         });
@@ -8546,6 +8555,13 @@ scope_aim={scope_aim:?}",
     /// Takes delivery of index reports.
     fn drain_index(&mut self) {
         while let Ok(note) = self.replies.index_rx.try_recv() {
+            if let crate::indexing::Note::Built(
+                Some(index),
+                Some(sk_index::store::Unsaved::TooLarge),
+            ) = &note
+            {
+                self.notice = Some((too_large(index.len()), Instant::now()));
+            }
             if self.indexes.arrived(note) {
                 self.dirty = true;
             }
@@ -14147,6 +14163,18 @@ frame_p50_us={} frame_p99_us={} frames={} over={} saves={} keys={} stats={}",
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    /// **An index too large to keep is said as a sentence, not a key**: how many
+    /// entries, the ceiling the load keeps, and what to do instead.
+    #[test]
+    fn an_index_too_large_to_keep_says_how_large_and_what_to_do() {
+        let said = super::too_large(45_000_000);
+        assert!(!said.starts_with("notice."), "{said}");
+        assert!(said.contains(&sk_ui::format::grouped(45_000_000)), "{said}");
+        assert!(said.contains(&sk_ui::format::size(sk_index::store::LARGEST)), "{said}");
+        assert!(said.contains("index a folder inside it"), "{said}");
+    }
+
     /// A queue is one run, timed from its first operation rather than its last.
     #[test]
     fn a_queue_is_one_run_from_its_first_operation() {

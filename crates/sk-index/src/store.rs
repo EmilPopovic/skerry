@@ -65,7 +65,27 @@ const PER_ENTRY: usize = 4 + 4 + 2 + 2 + 8 + 8;
 /// the machine that measured it, is 6.9 million entries and 342 MB, and this is
 /// nearly five times that. An index of a larger tree is refused and the search
 /// walks, which is what every other refusal here costs too.
-const LARGEST: u64 = 64 * 32 * 1024 * 1024;
+pub const LARGEST: u64 = 64 * 32 * 1024 * 1024;
+
+/// Whether a file of `bytes` is one [`load`] reads, under [`LARGEST`] as `ceiling`.
+///
+/// **One answer for both ends.** [`save`] asks it of the index it is about to
+/// write and [`load`] of the file it is about to read. While only the load asked,
+/// a root of about 43 million entries — 2 GiB at 49.6 bytes an entry — built an
+/// index, wrote all of it, and every later search of that root walked without a
+/// word about why.
+const fn fits(bytes: u64, ceiling: u64) -> bool {
+    bytes <= ceiling
+}
+
+/// Why [`save`] wrote nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unsaved {
+    /// Larger than [`LARGEST`], so [`load`] would refuse the file it wrote.
+    TooLarge,
+    /// The cache folder or the file in it could not be written.
+    Unwritable,
+}
 
 /// The parent of an entry that sits directly in the root.
 const NO_PARENT: u32 = u32::MAX;
@@ -490,9 +510,11 @@ fn count_one(directory: &Path, device: u64, seen: &mut usize, pending: &mut Vec<
 /// 0011](../../../docs/adr/0011-one-plain-text-state-file-written-atomically.md):
 /// a device flush is the expensive half of durability, and losing this file costs
 /// a walk.
-#[must_use]
-pub fn save(index: &Index) -> bool {
-    let Some(file) = path_for(&index.root) else { return false };
+///
+/// **Nothing past [`LARGEST`] is written**, because nothing past it is read: the
+/// file would be gigabytes of disk that no search ever uses.
+pub fn save(index: &Index) -> Result<(), Unsaved> {
+    let file = path_for(&index.root).ok_or(Unsaved::Unwritable)?;
     if let Some(folder) = file.parent() {
         seal(folder);
     }
@@ -507,12 +529,22 @@ pub fn save(index: &Index) -> bool {
 /// **0600, in folders made 0700.** An index of a home folder names everything
 /// beneath it, `~/.ssh`'s contents included, so an index anybody could read
 /// publishes what those folders' own modes keep private.
-#[must_use]
-pub fn save_to(index: &Index, file: &Path) -> bool {
+pub fn save_to(index: &Index, file: &Path) -> Result<(), Unsaved> {
+    save_within(index, file, LARGEST)
+}
+
+/// [`save_to`] under a ceiling a test can set, because an index past the real
+/// one is two gigabytes of fixture.
+fn save_within(index: &Index, file: &Path, ceiling: u64) -> Result<(), Unsaved> {
     use std::os::unix::fs::DirBuilderExt as _;
-    let (Some(directory), Some(name)) = (file.parent(), file.file_name()) else { return false };
+    if !fits(index.stored() as u64, ceiling) {
+        return Err(Unsaved::TooLarge);
+    }
+    let (Some(directory), Some(name)) = (file.parent(), file.file_name()) else {
+        return Err(Unsaved::Unwritable);
+    };
     if std::fs::DirBuilder::new().recursive(true).mode(0o700).create(directory).is_err() {
-        return false;
+        return Err(Unsaved::Unwritable);
     }
     let arena_len = index.columns_at - index.arena_at;
     let mut out = Vec::with_capacity(HEADER + index.bytes.len());
@@ -526,7 +558,7 @@ pub fn save_to(index: &Index, file: &Path) -> bool {
     out.extend_from_slice(&0u32.to_le_bytes());
     out.extend_from_slice(&hash(&index.bytes).to_le_bytes());
     out.extend_from_slice(&index.bytes);
-    publish(directory, name, &out).is_ok()
+    publish(directory, name, &out).map_err(|_| Unsaved::Unwritable)
 }
 
 /// How a folder this module writes into, or closes, is opened.
@@ -629,7 +661,7 @@ fn read_regular(file: &Path) -> std::io::Result<Vec<u8>> {
     if FileType::from_raw_mode(u32::from(stat.stx_mode)) != FileType::RegularFile {
         return Err(std::io::Error::other("not a regular file"));
     }
-    if stat.stx_size > LARGEST {
+    if !fits(stat.stx_size, LARGEST) {
         return Err(std::io::Error::other("larger than any index"));
     }
     // **Fallible, and bounded by the ceiling rather than the size.** An
@@ -939,8 +971,8 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
 
     use super::{
-        HEADER, Index, LARGEST, MOST, build, count, load_from, save_to, scan_by, seal, search,
-        shard_of, stage,
+        HEADER, Index, LARGEST, MOST, Unsaved, build, count, fits, load_from, save_to, save_within,
+        scan_by, seal, search, shard_of, stage,
     };
     use sk_util::{Cancel, Pool};
     use std::os::unix::fs::PermissionsExt as _;
@@ -1054,7 +1086,7 @@ mod tests {
         let root = fixture("roundtrip");
         let index = built(&root);
         let file = root.join("..").join(format!("{}-roundtrip.skix", std::process::id()));
-        assert!(save_to(&index, &file), "the index would not save");
+        assert_eq!(save_to(&index, &file), Ok(()), "the index would not save");
         let back = Arc::new(load_from(&file, &root).expect("the index would not load back"));
         assert_eq!(back.len(), index.len());
         assert_eq!(back.built(), index.built());
@@ -1097,7 +1129,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cache);
         let folder = cache.join("skerry").join("index");
         let file = folder.join("0123.skix");
-        assert!(save_to(&index, &file), "the index would not save");
+        assert_eq!(save_to(&index, &file), Ok(()), "the index would not save");
         assert_eq!(mode(&file), "600", "the index");
         for made in [&folder, &cache.join("skerry"), &cache] {
             assert_eq!(mode(made), "700", "{}", made.display());
@@ -1117,7 +1149,7 @@ mod tests {
         let folder = folder("leftover-cache");
         let (file, staging) = (folder.join("0123.skix"), folder.join(".0123.skix.new"));
         std::fs::write(&staging, vec![0u8; 4096]).unwrap();
-        assert!(save_to(&index, &file), "a leftover staging file stopped the save");
+        assert_eq!(save_to(&index, &file), Ok(()), "a leftover staging file stopped the save");
         assert!(staging.symlink_metadata().is_err(), "the leftover is still there");
         assert!(load_from(&file, &root).is_some(), "the index the save wrote does not load");
         std::fs::remove_dir_all(folder).unwrap();
@@ -1138,7 +1170,7 @@ mod tests {
         std::fs::write(&named, "unrelated").unwrap();
         std::os::unix::fs::symlink(&staged, folder.join(".0123.skix.new")).unwrap();
         std::os::unix::fs::symlink(&named, &file).unwrap();
-        assert!(save_to(&index, &file), "a planted link stopped the save");
+        assert_eq!(save_to(&index, &file), Ok(()), "a planted link stopped the save");
         assert_eq!(std::fs::read(&staged).unwrap(), b"unrelated", "the staging link");
         assert_eq!(std::fs::read(&named).unwrap(), b"unrelated", "the index's own name");
         assert_eq!(mode(&file), "600", "the index is not the file the save made");
@@ -1174,7 +1206,7 @@ mod tests {
         let index = built(&root);
         let folder = folder("planted-cache");
         let file = folder.join("0123.skix");
-        assert!(save_to(&index, &file));
+        assert_eq!(save_to(&index, &file), Ok(()));
         let linked = folder.join("linked.skix");
         std::os::unix::fs::symlink(&file, &linked).unwrap();
         assert!(load_from(&linked, &root).is_none(), "an index was read through a link");
@@ -1204,6 +1236,30 @@ mod tests {
             std::fs::remove_file(file).unwrap();
         }
         std::fs::remove_dir_all(folder).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// **An index the load would refuse is never written**, and nothing is made
+    /// on the way to refusing it — not the file, not its folder. Under a ceiling
+    /// one byte short of this fixture's index rather than the real one, which
+    /// would be two gigabytes of fixture; at exactly its size it writes and
+    /// reads back, so the boundary is the one [`load_from`] keeps.
+    #[test]
+    fn an_index_past_the_ceiling_is_not_written() {
+        let root = fixture("ceiling");
+        let index = built(&root);
+        let folder = folder("ceiling-cache").join("inner");
+        let file = folder.join("ceiling.skix");
+        let stored = index.stored() as u64;
+
+        assert_eq!(save_within(&index, &file, stored - 1), Err(Unsaved::TooLarge));
+        assert!(!folder.exists(), "a refused save made its folder");
+
+        assert_eq!(save_within(&index, &file, stored), Ok(()));
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), stored);
+        assert!(load_from(&file, &root).is_some(), "a save at the ceiling did not load");
+        assert!(fits(LARGEST, LARGEST) && !fits(LARGEST + 1, LARGEST));
+        std::fs::remove_dir_all(folder.parent().unwrap()).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1249,7 +1305,7 @@ mod tests {
         let root = fixture("damage");
         let index = built(&root);
         let file = root.join("..").join(format!("{}-damage.skix", std::process::id()));
-        assert!(save_to(&index, &file));
+        assert_eq!(save_to(&index, &file), Ok(()));
         let whole = std::fs::read(&file).unwrap();
 
         let cases: Vec<(&str, Vec<u8>)> = vec![
@@ -1425,7 +1481,7 @@ mod measure {
         assert_eq!(counted, entries, "the count and the build disagree");
 
         let at = Instant::now();
-        assert!(save_to(&index, &file), "the index would not save");
+        assert_eq!(save_to(&index, &file), Ok(()), "the index would not save");
         let saving = at.elapsed();
         let bytes = std::fs::metadata(&file).unwrap().len();
 

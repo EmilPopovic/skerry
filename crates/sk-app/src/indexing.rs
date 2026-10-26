@@ -32,8 +32,13 @@ pub(crate) enum Note {
     /// From the counting pass beside the build, which is where the progress bar's
     /// denominator comes from.
     Total(usize, bool),
-    /// A build finished, and this is what it produced.
-    Built(Option<Arc<sk_index::Index>>),
+    /// A build finished, and this is what it produced — with why it is not on
+    /// disk, where it is not.
+    ///
+    /// **An index too large to keep is still delivered.** It was built, and this
+    /// window searches it until the panel lets the bytes go; what it costs is
+    /// every later search of the root, which is why the window says so.
+    Built(Option<Arc<sk_index::Index>>, Option<sk_index::store::Unsaved>),
     /// A load finished, and this is what was on disk.
     Loaded(Option<Arc<sk_index::Index>>),
 }
@@ -220,7 +225,7 @@ impl Indexes {
                 self.total = (total, complete);
                 self.building.is_some()
             }
-            Note::Built(index) => {
+            Note::Built(index, _) => {
                 self.building = None;
                 self.cancel = None;
                 self.total = (0, false);
@@ -300,7 +305,7 @@ mod tests {
         assert_eq!(indexes.fraction(), Some(1.0));
 
         // And it goes away with the build rather than lingering over the strip.
-        indexes.arrived(Note::Built(None));
+        indexes.arrived(Note::Built(None, None));
         assert!(indexes.fraction().is_none());
     }
 
