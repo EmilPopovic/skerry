@@ -27,7 +27,7 @@ use crate::views::Layout;
 
 /// Every setting, in the order the panel lists them.
 ///
-/// **Seven.** Each is one the window already changes as it runs, which is what
+/// **Eight.** Each is one the window already changes as it runs, which is what
 /// makes the precedence rule testable: a setting the window cannot change has no
 /// second opinion to lose to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,10 +47,13 @@ pub(crate) enum Setting {
     /// Where a file's mark comes from — [ADR
     /// 0042](../../../docs/adr/0042-where-a-mark-comes-from-is-a-setting-and-an-icon-is-a-band-in-its-own-atlas.md).
     Icons,
+    /// Whether a helper may read a file where Landlock does not take — [ADR
+    /// 0046](../../../docs/adr/0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md).
+    DecodeWithoutLandlock,
 }
 
 /// Every setting, in panel order. See [`Setting`].
-pub(crate) const ALL: [Setting; 7] = [
+pub(crate) const ALL: [Setting; 8] = [
     Setting::Theme,
     Setting::Hidden,
     Setting::Sidebar,
@@ -58,6 +61,7 @@ pub(crate) const ALL: [Setting; 7] = [
     Setting::View,
     Setting::ConfirmTrash,
     Setting::Icons,
+    Setting::DecodeWithoutLandlock,
 ];
 
 /// How wide the sidebar moves per press of a step.
@@ -106,6 +110,7 @@ impl Setting {
             Self::View => "view",
             Self::ConfirmTrash => "confirm_trash",
             Self::Icons => "icons",
+            Self::DecodeWithoutLandlock => "decode_without_landlock",
         }
     }
 
@@ -119,6 +124,7 @@ impl Setting {
             Self::View => "settings.view",
             Self::ConfirmTrash => "settings.confirm_trash",
             Self::Icons => "settings.icons",
+            Self::DecodeWithoutLandlock => "settings.decode_without_landlock",
         }
     }
 
@@ -126,7 +132,7 @@ impl Setting {
     pub(crate) const fn kind(self) -> Kind {
         match self {
             Self::Theme => Kind::Either { yes: "settings.dark", no: "settings.light" },
-            Self::Hidden | Self::ConfirmTrash => {
+            Self::Hidden | Self::ConfirmTrash | Self::DecodeWithoutLandlock => {
                 Kind::Either { yes: "settings.on", no: "settings.off" }
             }
             Self::Sidebar => Kind::Either { yes: "settings.shown", no: "settings.hidden_word" },
@@ -194,7 +200,7 @@ impl Icons {
     }
 }
 
-/// What all seven are set to.
+/// What all eight are set to.
 ///
 /// **A struct rather than the window's own fields.** The config's values and the
 /// live ones are two different things that have to be compared — that comparison
@@ -202,7 +208,7 @@ impl Icons {
 /// type is a rule that can be unit tested without a window.
 ///
 /// **`Clone` rather than `Copy` since ADR 0042.** `icons` may be a theme's name,
-/// so one of the seven owns a `String`; every caller that used to take a copy
+/// so one of the eight owns a `String`; every caller that used to take a copy
 /// takes a reference, which is what keeps a panel open for a frame from
 /// allocating one.
 #[derive(Clone, PartialEq, Debug)]
@@ -221,6 +227,12 @@ pub struct Values {
     pub confirm_trash: bool,
     /// Where a file's mark comes from.
     pub icons: Icons,
+    /// Whether a helper may read a file where Landlock does not take.
+    ///
+    /// **Off unless somebody says otherwise**, because on a kernel without
+    /// Landlock a helper that decodes does so with every right the user has —
+    /// ADR 0046. Where Landlock takes, this changes nothing.
+    pub decode_without_landlock: bool,
 }
 
 impl Default for Values {
@@ -233,6 +245,7 @@ impl Default for Values {
             layout: Layout::Details,
             confirm_trash: false,
             icons: Icons::default(),
+            decode_without_landlock: false,
         }
     }
 }
@@ -250,6 +263,7 @@ impl Values {
             Setting::Sidebar => self.sidebar,
             Setting::View => self.layout == Layout::Grid,
             Setting::ConfirmTrash => self.confirm_trash,
+            Setting::DecodeWithoutLandlock => self.decode_without_landlock,
             Setting::SidebarWidth | Setting::Icons => false,
         }
     }
@@ -262,6 +276,7 @@ impl Values {
             Setting::Sidebar => self.sidebar = yes,
             Setting::View => self.layout = if yes { Layout::Grid } else { Layout::Details },
             Setting::ConfirmTrash => self.confirm_trash = yes,
+            Setting::DecodeWithoutLandlock => self.decode_without_landlock = yes,
             Setting::SidebarWidth | Setting::Icons => {}
         }
     }
@@ -450,13 +465,14 @@ const fn at(setting: Setting) -> usize {
         Setting::View => 4,
         Setting::ConfirmTrash => 5,
         Setting::Icons => 6,
+        Setting::DecodeWithoutLandlock => 7,
     }
 }
 
-/// The panel's rows: the seven settings, then the two things it can do.
+/// The panel's rows: the eight settings, then the two things it can do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Row {
-    /// One of the seven.
+    /// One of the eight.
     Of(Setting),
     /// Make this the desktop's handler for folders.
     Handler,
@@ -534,7 +550,7 @@ mod tests {
     use super::{ALL, Icons, Kind, Marks, Panel, Row, Setting, Source, Values, rows};
     use crate::views::Layout;
 
-    /// The round trip every one of the seven has to survive, because the file is
+    /// The round trip every one of the eight has to survive, because the file is
     /// written by us and read by us and a setting that cannot do this is a
     /// setting that silently resets.
     #[test]

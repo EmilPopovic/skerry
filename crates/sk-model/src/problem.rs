@@ -134,6 +134,13 @@ pub enum ProblemKind {
     /// at, which is [rule 3](../../../docs/03-principles.md#3-everything-is-reversible)'s
     /// failure test arriving as a sentence about the wrong thing.
     TrashEmptied,
+    /// The helper that reads the file would not run, because this kernel cannot
+    /// confine it and the setting that allows it anyway is off.
+    ///
+    /// Its own kind because the advice is a setting, which no other kind here
+    /// gives: [`Self::NoUnpacker`] would send somebody to install a program they
+    /// have, and the file is not damaged.
+    Unconfined,
 }
 
 impl ProblemKind {
@@ -164,6 +171,7 @@ impl ProblemKind {
             Self::NotUnpackable => "error.not_unpackable",
             Self::NotText => "error.not_text",
             Self::TrashEmptied => "error.trash_emptied",
+            Self::Unconfined => "error.unconfined",
         }
     }
 }

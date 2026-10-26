@@ -217,6 +217,8 @@ settings.sidebar_width = Width of that list
 settings.view = New folders open as
 settings.confirm_trash = Ask before moving to Trash
 settings.icons = Marks on files come from
+# ADR 0046. Off by default, and it only matters on a kernel without Landlock.
+settings.decode_without_landlock = Decode files without Landlock
 # The two words the icons row steps between, beside a theme's own name — which is
 # never translated, because it is what the directory it came from is called.
 settings.icons_marks = Skerry
@@ -746,6 +748,12 @@ archive.partial = Some entries could not be extracted. The partial output was ke
 error.unsupported_archive = {0} uses an unsupported archive variant. Use another archive tool. Any partial output was kept and can be undone.
 error.stalled = The archive helper stopped answering while unpacking {0} and was ended. What it wrote was kept and can be undone; try again.
 archive.unsupported = This archive uses a variant Skerry cannot read safely. Use another archive tool.
+# A helper that refused because this kernel cannot confine it — ADR 0046. Each
+# names the setting by its label, because that row is what turns it around.
+preview.unconfined = Not previewed: this kernel has no Landlock, so the helper would read this file with all your rights. "Decode files without Landlock" in Settings allows it.
+archive.unconfined = Not opened: this kernel has no Landlock, so the helper would read this archive with all your rights. "Decode files without Landlock" in Settings allows it.
+error.unconfined = {0} was not unpacked: this kernel has no Landlock, so the helper would read it with all your rights. "Decode files without Landlock" in Settings allows it.
+notice.helpers_unconfined = Thumbnails, previews and archives are off: this kernel has no Landlock to confine the helpers that read them. Settings can allow them anyway.
 
 error.trash_unavailable = Cannot use Trash for {0}. The file has been kept. Check the volume is mounted and its trash is writable, then try again.
 # What Ctrl+Z says about an entry whose way back an Empty Trash erased. It names

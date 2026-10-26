@@ -277,6 +277,10 @@ pub enum Refusal {
     /// killed for going silent, and the true thing to say is that. The host
     /// decides it; no honest child sends it.
     Stalled = 11,
+    /// The helper would not read it, because this kernel cannot confine it and
+    /// the setting that allows reading anyway is off — ADR 0046. Said by the
+    /// host, never by a child.
+    Unconfined = 12,
 }
 
 impl Refusal {
@@ -296,6 +300,7 @@ impl Refusal {
             9 => Self::Partial,
             10 => Self::Unsupported,
             11 => Self::Stalled,
+            12 => Self::Unconfined,
             _ => Self::Undecodable,
         }
     }
@@ -314,6 +319,7 @@ impl Refusal {
             Self::Elsewhere => Some("archive.elsewhere"),
             Self::Partial => Some("archive.partial"),
             Self::Unsupported => Some("archive.unsupported"),
+            Self::Unconfined => Some("archive.unconfined"),
             Self::NoRoom => Some("archive.no_room"),
             Self::Stopped => Some("archive.stopped"),
             Self::Interrupted => Some("archive.interrupted"),
@@ -611,8 +617,14 @@ type Reading = std::io::BufReader<Timed<ChildStdout>>;
 /// somebody can close — ADR 0032.
 #[must_use]
 pub fn list(archive: &Path, cancel: &sk_util::Cancel) -> Listing {
-    let Some(child) = spawn() else {
-        return Listing::refused(Refusal::NoUnpacker, "skerry-archive".to_owned());
+    let child = match spawn() {
+        Ok(child) => child,
+        Err(crate::host::Unstarted::Unconfined) => {
+            return Listing::refused(Refusal::Unconfined, String::new());
+        }
+        Err(crate::host::Unstarted::Missing) => {
+            return Listing::refused(Refusal::NoUnpacker, "skerry-archive".to_owned());
+        }
     };
     let request = Request {
         ask: Ask::List,
@@ -625,13 +637,16 @@ pub fn list(archive: &Path, cancel: &sk_util::Cancel) -> Listing {
 
 /// [`list`], from a child already started.
 fn listed(child: Child, request: &Request, cancel: &sk_util::Cancel, stall: Duration) -> Listing {
-    let mut running = Running(child);
-    let answer = ask(&mut running.0, request, cancel, stall, |output| {
+    let mut running = Running::new(child);
+    let answer = ask(&mut running.child, request, cancel, stall, |output| {
         if waited(output.get_ref().get_ref(), cancel) {
             return Listing::read_from(output);
         }
         Ok(Listing::refused(Refusal::Stopped, String::new()))
     });
+    if running.end() {
+        return Listing::refused(Refusal::Unconfined, String::new());
+    }
     answer.unwrap_or_else(|error| Listing::refused(cut_short(&error, cancel), String::new()))
 }
 
@@ -697,12 +712,17 @@ pub fn unpack(
     cancel: &sk_util::Cancel,
     watch: &mut dyn FnMut(Progress),
 ) -> Unpacked {
-    let Some(child) = spawn() else {
-        return Unpacked {
-            refusal: Refusal::Interrupted,
-            note: "skerry-archive".to_owned(),
-            progress: Progress::default(),
-        };
+    let unstarted = |refusal, note: &str| Unpacked {
+        refusal,
+        note: note.to_owned(),
+        progress: Progress::default(),
+    };
+    let child = match spawn() {
+        Ok(child) => child,
+        Err(crate::host::Unstarted::Unconfined) => return unstarted(Refusal::Unconfined, ""),
+        Err(crate::host::Unstarted::Missing) => {
+            return unstarted(Refusal::Interrupted, "skerry-archive");
+        }
     };
     let request = Request {
         ask: Ask::Unpack,
@@ -723,8 +743,8 @@ fn unpacked(
 ) -> Unpacked {
     let ending = |refusal, progress| Unpacked { refusal, note: String::new(), progress };
     let mut last = Progress::default();
-    let mut running = Running(child);
-    let answer = ask(&mut running.0, request, cancel, stall, |output| {
+    let mut running = Running::new(child);
+    let answer = ask(&mut running.child, request, cancel, stall, |output| {
         loop {
             // **Waited for rather than blocked on**, so a Stop lands inside the
             // hundred milliseconds rather than when the child next has something
@@ -755,6 +775,9 @@ fn unpacked(
             }
         }
     });
+    if running.end() {
+        return ending(Refusal::Unconfined, Progress::default());
+    }
     answer.unwrap_or_else(|error| ending(cut_short(&error, cancel), last))
 }
 
@@ -792,12 +815,32 @@ fn ask<T>(
 /// group rather than the pid, because a filter is the child's child, and one
 /// blocked reading its input never writes into the closed pipe that would
 /// otherwise end it.
-struct Running(Child);
+struct Running {
+    child: Child,
+    /// Whether [`Self::end`] has run, so the drop does not signal a pid that
+    /// `wait` has already given back to the kernel to reuse.
+    ended: bool,
+}
+
+impl Running {
+    const fn new(child: Child) -> Self {
+        Self { child, ended: false }
+    }
+
+    /// Ends the child and its group now, and says whether it had refused for
+    /// want of Landlock — ADR 0046 — which only its exit status can say.
+    fn end(&mut self) -> bool {
+        if self.ended {
+            return false;
+        }
+        self.ended = true;
+        crate::host::end(&mut self.child)
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
-        crate::host::terminate(&mut self.0);
-        let _ = self.0.wait();
+        self.end();
     }
 }
 
@@ -806,7 +849,7 @@ impl Drop for Running {
 /// **Beside first**, for the reason [`crate::host`] gives: a development build
 /// and an installed one are different binaries, and a version skew is a protocol
 /// error rather than something to survive.
-fn spawn() -> Option<Child> {
+fn spawn() -> Result<Child, crate::host::Unstarted> {
     crate::host::helper("skerry-archive", beside_us().as_deref())
 }
 

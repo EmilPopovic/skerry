@@ -148,6 +148,12 @@ pub enum Refusal {
     /// the last page, and a panel that answered that with a sentence would be
     /// scolding somebody for reaching the end. The host keeps the page it has.
     NoSuchPage = 6,
+    /// The helper would not decode, because this kernel cannot confine it and
+    /// the setting that allows decoding anyway is off — ADR 0046.
+    ///
+    /// **Said by the host, never by a child**: a helper that refuses exits
+    /// before it reads a request, so there is no reply to carry it.
+    Unconfined = 8,
 }
 
 impl Refusal {
@@ -163,6 +169,7 @@ impl Refusal {
             5 => Self::TooLarge,
             6 => Self::NoSuchPage,
             7 => Self::Interrupted,
+            8 => Self::Unconfined,
             _ => Self::Undecodable,
         }
     }
@@ -179,6 +186,7 @@ impl Refusal {
             Self::Undecodable => Some("preview.undecodable"),
             Self::NoRenderer => Some("preview.no_renderer"),
             Self::Interrupted => Some("preview.interrupted"),
+            Self::Unconfined => Some("preview.unconfined"),
             Self::TooLarge => Some("preview.too_large"),
         }
     }

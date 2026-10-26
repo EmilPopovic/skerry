@@ -657,9 +657,36 @@ fn the_child_that_unpacks_says_what_is_holding_it() {
     let said = String::from_utf8_lossy(&done.stderr);
     assert!(said.contains("no-new-privs"), "{said}");
     assert!(!said.contains("FAILED"), "a layer did not take: {said}");
-    // Where the kernel has no Landlock the line says so rather than staying
-    // quiet, which is ADR 0006's "reduced isolation is logged".
+    // Where the kernel has no Landlock the child refuses rather than unpacking —
+    // ADR 0046, which superseded 0006's "reduced isolation is logged" — and the
+    // line says why.
     assert!(said.contains("landlock"), "{said}");
-    assert!(into.join("only.txt").exists());
+    if said.contains("landlock ABSENT") {
+        let refused = sk_preview::sandbox::REFUSED_WITHOUT_LANDLOCK;
+        assert_eq!(done.status.code(), Some(refused), "{said}");
+    } else {
+        assert!(into.join("only.txt").exists());
+    }
     std::fs::remove_dir_all(&at).unwrap();
+}
+
+/// **A probe's report reaches a file**, which is how one reaches a bug report.
+///
+/// The served confinement's file ceiling is zero for a listing, so a probe under
+/// it ended at its first `println!` with a panic and status 101.
+#[test]
+fn a_probe_sent_to_a_file_says_everything() {
+    let at = scratch("probe");
+    let report = std::fs::File::create(at.join("probe.txt")).unwrap();
+    let probed = Command::new(env!("CARGO_BIN_EXE_skerry-archive"))
+        .arg("--probe")
+        .env(sk_preview::sandbox::WITHOUT_LANDLOCK, "allow")
+        .stdout(report)
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    let said = std::fs::read_to_string(at.join("probe.txt")).unwrap();
+    std::fs::remove_dir_all(&at).unwrap();
+    assert!(probed.success(), "{probed:?}: {said}");
+    assert!(said.contains("no-new-privs") && said.contains("xz:"), "{said}");
 }

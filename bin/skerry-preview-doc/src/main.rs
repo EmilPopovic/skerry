@@ -40,8 +40,10 @@ fn main() {
         // **The same confinement the served process gets**, or the probe answers
         // a question nobody asked: its first version granted no execute right, so
         // it reported `pages: None` on a machine where `pdfinfo` works perfectly
-        // — a diagnostic that lied about the thing it exists to diagnose.
-        confine();
+        // — a diagnostic that lied about the thing it exists to diagnose. All of
+        // it but the file ceiling, which would end the probe at its first line
+        // when somebody sends its report to a file.
+        confine(sk_preview::sandbox::confine_by_hand);
         println!("skerry-preview-doc: renderer: {:?}", renderer());
         if let (Some(tool), Some(path)) =
             (renderer(), std::env::args().skip(1).find(|it| it != "--probe"))
@@ -64,7 +66,7 @@ fn main() {
         }
         return;
     }
-    confine();
+    confine(sk_preview::sandbox::confine);
     serve();
 }
 
@@ -74,12 +76,11 @@ fn main() {
 /// cache: a document page is a preview, and ADR 0018 does not cache previews. The
 /// renderer it spawns inherits the restriction, which is the point of applying it
 /// here rather than around each spawn.
-fn confine() {
+fn confine(how: sk_preview::sandbox::Confine) {
     let root = [Path::new("/")];
     let tools = sk_preview::sandbox::executables(&["pdftoppm", "pdftotext", "pdfinfo", "mutool"]);
     let executable: Vec<_> = tools.iter().map(std::path::PathBuf::as_path).collect();
-    let report =
-        sk_preview::sandbox::confine(sk_preview::sandbox::Limits::PREVIEW, &root, &executable, &[]);
+    let report = how(sk_preview::sandbox::Role::Pages, &root, &executable, &[]);
     let _ = writeln!(std::io::stderr(), "skerry-preview-doc: {}", report.line());
 }
 

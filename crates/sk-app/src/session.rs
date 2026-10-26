@@ -162,6 +162,8 @@ pub struct Session {
     pub confirm_trash: bool,
     /// Where a file's mark came from — ADR 0042.
     pub icons: crate::settings::Icons,
+    /// Whether helpers may read a file where Landlock does not take — ADR 0046.
+    pub decode_without_landlock: bool,
     /// Which settings this window changed, and so may override the config file.
     ///
     /// **[ADR 0027](../../../docs/adr/0027-a-setting-is-a-line-in-the-config-and-the-session-remembers-what-the-window-changed.md).**
@@ -347,6 +349,11 @@ pub fn render(session: &Session) -> String {
     let _ = writeln!(out, "view {}", session.layout.token());
     out.push_str(if session.confirm_trash { "confirm on\n" } else { "confirm off\n" });
     let _ = writeln!(out, "icons {}", session.icons.token());
+    out.push_str(if session.decode_without_landlock {
+        "unconfined on\n"
+    } else {
+        "unconfined off\n"
+    });
     // **Written even when empty**, so a window that has un-touched nothing still
     // says so and the line is a fact rather than an absence to be inferred.
     let _ = writeln!(out, "touched {}", session.touched.names().join(" "));
@@ -458,6 +465,7 @@ pub fn parse(text: &str) -> Option<Session> {
         layout: crate::views::Layout::Details,
         confirm_trash: false,
         icons: crate::settings::Icons::default(),
+        decode_without_landlock: false,
         touched: crate::settings::Marks::default(),
         zoom: crate::app::ZOOM_DEFAULT,
         window: (1100, 720),
@@ -488,6 +496,7 @@ pub fn parse(text: &str) -> Option<Session> {
                 }
             }
             "confirm" => session.confirm_trash = value == "on",
+            "unconfined" => session.decode_without_landlock = value == "on",
             // A word this build does not know leaves the default, which is the
             // per-field tolerance the `columns` and `sidebar` lines already have.
             "icons" => {
@@ -733,6 +742,7 @@ mod tests {
             layout: crate::views::Layout::Details,
             confirm_trash: false,
             icons: crate::settings::Icons::Named("Adwaita".to_owned()),
+            decode_without_landlock: true,
             touched: crate::settings::Marks::default(),
             zoom: 4,
             window: (1440, 900),

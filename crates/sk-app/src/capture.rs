@@ -1085,6 +1085,7 @@ fn sample_settings() -> (crate::settings::Panel, crate::settings::Values, crate:
         layout: crate::views::Layout::Grid,
         confirm_trash: false,
         icons: crate::settings::Icons::Marks,
+        decode_without_landlock: false,
     };
     let mut marks = crate::settings::Marks::default();
     marks.name(Setting::Hidden);

@@ -40,7 +40,7 @@ portability contract, and each row has a test that forces the fallback path.
 | `FICLONE` | Attempt, `EOPNOTSUPP` → next | `copy_file_range`, then read/write |
 | `copy_file_range` | Attempt, `EXDEV`/`ENOSYS` → next | read/write loop |
 | `statx` | `ENOSYS` → fallback | `fstatat` |
-| Landlock, seccomp | Kernel version + `prctl` probe | Helper processes run unsandboxed **and log a warning**; never silently unsandboxed |
+| Landlock, seccomp | Landlock's version query, in the host before a spawn and in the helper before it reads a byte | Without Landlock a helper **refuses to decode**, and the window says so once and on the `F2` line; the `decode_without_landlock` setting lets it decode unsandboxed — [ADR 0046](adr/0046-a-helper-that-cannot-be-confined-refuses-and-a-confined-one-reaches-nothing-but-its-files.md). seccomp is mandatory |
 | `io_uring` | Probe, and only used if it measurably wins | Threaded syscalls, which is the default path anyway |
 | `fanotify` with FID | Requires privilege | inotify, which is the default path |
 | A notification daemon | `NameHasOwner`, then `ListActivatableNames`, on the session bus — asked once and cached, because `GetServerInformation` would *start* a daemon a probe has no business starting | The status line and nothing else. An operation that finished unfocused says so where it always did, and the log names the absent facility once |
