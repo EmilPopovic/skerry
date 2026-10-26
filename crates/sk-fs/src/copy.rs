@@ -280,7 +280,7 @@ fn copy_regular(
 
     let mut unpreserved = Vec::new();
     let theirs = foreign(&stat);
-    if fchmod(&into, carried_mode(&stat, theirs, &into)).is_err() {
+    if fchmod(&into, carried_mode(&source, &stat, theirs, &into)).is_err() {
         unpreserved.push("mode".to_owned());
     }
     if options.xattrs {
@@ -1027,7 +1027,7 @@ impl Walk<'_> {
         // writing a child moves the directory's modification time.
         let mut missing = Vec::new();
         let theirs = foreign(stat);
-        if fchmod(&into, carried_mode(stat, theirs, &into)).is_err() {
+        if fchmod(&into, carried_mode(&source, stat, theirs, &into)).is_err() {
             missing.push("mode".to_owned());
         }
         if self.options.xattrs {
@@ -1378,36 +1378,75 @@ const POSIX_ACLS: [&[u8]; 2] = [b"system.posix_acl_access", b"system.posix_acl_d
 
 /// Whether `source` belongs to somebody other than the person copying it.
 ///
-/// **A copy belongs to whoever made it**, because nothing here calls `chown`.
-/// So whatever on the source was a grant *by its owner* would arrive as a grant
-/// by the copier, who never made it: a setuid bit runs the program with the
-/// copier's rights, and an ACL naming `user:someone:rw-` — a default ACL on a
-/// directory most of all, which every file later put inside inherits — lets
-/// that person into the copy. Neither is carried from a file somebody else
-/// owns, which is what `cp -p` does when it cannot keep the owner.
+/// **A copy belongs to whoever made it**, because nothing here calls `chown`,
+/// so a grant its owner wrote onto the source would arrive as a grant by the
+/// copier, who never made it. Two are left behind when the source is somebody
+/// else's:
+///
+/// * Set-user-ID and set-group-ID, which would run the program with the
+///   copier's rights. `cp -p` drops these too when it cannot keep the owner.
+/// * Both POSIX ACLs. `cp -p` copies those whoever owns the file; this does
+///   not, because an entry naming `user:someone:rw-` — a default ACL on a
+///   directory most of all, which every file later put inside inherits — would
+///   let that person into what is now the copier's file.
 fn foreign(source: &Stat) -> bool {
     source.st_uid != rustix::process::geteuid().as_raw()
 }
 
-/// The mode a copy of `source` is given, once it exists as `copy`.
+/// The mode a copy of `source` (open as `from`) is given, once it exists as
+/// `copy`.
 ///
 /// Set-user-ID and set-group-ID are dropped where `theirs`, the source being
 /// [`foreign`], and set-group-ID from one's own file where the copy came out in
 /// a different group — `cp -p` keeps each bit only where it kept the owner or
-/// the group it is about. The sticky bit is kept: it grants nothing. On a directory it stops
-/// people removing each other's entries, so dropping it would turn a copied
-/// `1777` drop box into a `0777` one anybody can empty; on a file Linux ignores
-/// it.
-fn carried_mode(source: &Stat, theirs: bool, copy: &impl AsFd) -> Mode {
+/// the group it is about.
+///
+/// **Where `theirs` leaves the access ACL behind, the group bits come from its
+/// `group::` entry within its mask.** On a file with an ACL the mode's group
+/// bits *are* the mask — the union of every named grant — so carrying them
+/// gave the copy's owning group what only the named entries had: `group::---`
+/// with `user:0:rw-` arrived as `0660`.
+///
+/// The sticky bit is kept: it grants nothing. On a directory it stops people
+/// removing each other's entries, so dropping it would turn a copied `1777`
+/// drop box into a `0777` one anybody can empty; on a file Linux ignores it.
+fn carried_mode(from: &impl AsFd, source: &Stat, theirs: bool, copy: &impl AsFd) -> Mode {
     let mut mode = Mode::from_bits_truncate(source.st_mode & 0o7777);
     if theirs {
         mode.remove(Mode::SUID | Mode::SGID);
+        if let Some(group) = owning_group(from) {
+            mode = Mode::from_bits_truncate((mode.bits() & !0o070) | (group << 3));
+        }
     } else if mode.contains(Mode::SGID)
         && fstat(copy).map_or(true, |copy| copy.st_gid != source.st_gid)
     {
         mode.remove(Mode::SGID);
     }
     mode
+}
+
+/// The owning group's permission bits in `file`'s access ACL, within its mask —
+/// what the group may actually do — or `None` where it has no extended ACL.
+///
+/// The kernel's xattr form (`include/uapi/linux/posix_acl_xattr.h`): a 4-byte
+/// version, then 8-byte entries of tag, permission and id, little-endian.
+fn owning_group(file: &impl AsFd) -> Option<u32> {
+    const GROUP_OBJ: u16 = 0x04;
+    const MASK: u16 = 0x10;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let length = fs::fgetxattr(file, "system.posix_acl_access", &mut buffer[..]).ok()?;
+    let entries = buffer.get(4..length)?;
+    let (mut group, mut mask) = (None, None);
+    for entry in entries.chunks_exact(8) {
+        let tag = u16::from_le_bytes([entry[0], entry[1]]);
+        let permission = u32::from(u16::from_le_bytes([entry[2], entry[3]]) & 0o7);
+        match tag {
+            GROUP_OBJ => group = Some(permission),
+            MASK => mask = Some(permission),
+            _ => {}
+        }
+    }
+    Some(group? & mask.unwrap_or(0o7))
 }
 
 fn times_of(stat: &Stat) -> Timestamps {
@@ -2257,13 +2296,14 @@ mod tests {
     }
 
     /// An ACL with a named user in it, in the kernel's xattr encoding:
-    /// `user::rw-`, `user:65534:rw-`, `group::r--`, `mask::rw-`, `other::---`.
-    fn granting_acl() -> Vec<u8> {
+    /// `user::rw-`, `user:65534:rw-`, `group::` as `group`, `mask::rw-`,
+    /// `other::---`.
+    fn granting_acl(group: u16) -> Vec<u8> {
         let mut acl = 2u32.to_le_bytes().to_vec();
         for (tag, perm, id) in [
             (0x01u16, 6u16, u32::MAX),
             (0x02, 6, 65534),
-            (0x04, 4, u32::MAX),
+            (0x04, group, u32::MAX),
             (0x10, 6, u32::MAX),
             (0x20, 0, u32::MAX),
         ] {
@@ -2272,6 +2312,33 @@ mod tests {
             acl.extend(id.to_le_bytes());
         }
         acl
+    }
+
+    /// The auditor's reproduction: `group::---` beside `user:…:rw-` puts the
+    /// mask, `rw-`, in the mode's group bits. With the ACL left behind, the copy
+    /// of somebody else's file took `0660` — read and write for a group the
+    /// source shut out. The group bits now come from `group::` within the mask.
+    #[test]
+    fn a_foreign_acls_mask_does_not_become_the_copys_group_bits() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("acl-mask");
+        let source = std::fs::File::create(root.join("source")).unwrap();
+        std::fs::set_permissions(root.join("source"), std::fs::Permissions::from_mode(0o640))
+            .unwrap();
+        let acl = rustix::fs::fsetxattr(
+            &source,
+            "system.posix_acl_access",
+            &granting_acl(0),
+            rustix::fs::XattrFlags::empty(),
+        );
+        if acl.is_err() {
+            return;
+        }
+        let stat = rustix::fs::fstat(&source).unwrap();
+        assert_eq!(stat.st_mode & 0o777, 0o660, "the mask shows as the group bits");
+        let copy = std::fs::File::create(root.join("copy")).unwrap();
+        assert_eq!(super::carried_mode(&source, &stat, true, &copy).bits() & 0o777, 0o600);
+        assert_eq!(super::carried_mode(&source, &stat, false, &copy).bits() & 0o777, 0o660);
     }
 
     /// What a [`super::foreign`] source's ACL would do on the copy: let the
@@ -2283,7 +2350,7 @@ mod tests {
         let acl = rustix::fs::fsetxattr(
             &source,
             "system.posix_acl_access",
-            &granting_acl(),
+            &granting_acl(4),
             rustix::fs::XattrFlags::empty(),
         );
         let user =
