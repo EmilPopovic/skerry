@@ -876,6 +876,10 @@ const FCHMODAT2: libc::c_long = 452;
 /// `/proc/self/fd/N` is the descriptor's own magic link and `chmod` through it
 /// reaches the same inode; plain `fchmod` refuses an `O_PATH` descriptor with
 /// `EBADF`.
+///
+/// **`EPERM` falls back too.** A seccomp filter that predates the syscall —
+/// a snap's, a container runtime's — answers `EPERM` rather than `ENOSYS`,
+/// and a real `EPERM` costs one more refused `chmod` saying the same thing.
 fn chmod(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
     let flags = libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW;
     // SAFETY: the descriptor is open for the whole call, the path is a valid
@@ -887,14 +891,20 @@ fn chmod(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
         return Ok(());
     }
     match rustix::io::Errno::from_io_error(&std::io::Error::last_os_error()) {
-        Some(rustix::io::Errno::NOSYS) => chmod_through_proc(held, path, mode),
+        Some(rustix::io::Errno::NOSYS | rustix::io::Errno::PERM) => {
+            chmod_through_proc(held, path, mode)
+        }
         Some(error) => Err(problem(error, path)),
         None => Err(problem(rustix::io::Errno::IO, path)),
     }
 }
 
 /// [`chmod`] for a kernel without `fchmodat2`, through the descriptor's own link
-/// in `/proc`. A system with no `/proc` mounted gets `ENOENT`, and says so.
+/// in `/proc`.
+///
+/// `ENOENT` here means `/proc` is not mounted — the descriptor is open, so its
+/// link exists wherever `/proc` does — and says that, rather than that a file
+/// it is holding has gone.
 fn chmod_through_proc(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Problem> {
     let link = format!("/proc/self/fd/{}", held.as_raw_fd());
     rustix::fs::chmodat(
@@ -903,7 +913,18 @@ fn chmod_through_proc(held: &OwnedFd, path: &Path, mode: u16) -> Result<(), Prob
         Mode::from_bits_truncate(u32::from(mode)),
         AtFlags::empty(),
     )
-    .map_err(|error| problem(error, path))
+    .map_err(|error| proc_failure(error, path))
+}
+
+fn proc_failure(error: rustix::io::Errno, path: &Path) -> Problem {
+    match error {
+        rustix::io::Errno::NOENT => Problem::new(
+            ProblemKind::ModeUnchangeable,
+            path.display().to_string(),
+            "no fchmodat2, and /proc/self/fd is not there",
+        ),
+        error => problem(error, path),
+    }
 }
 
 /// Puts a recorded mode back, refusing if the file has moved on since.
@@ -1974,6 +1995,55 @@ mod tests {
             assert_eq!(mode_of(&root.join("moved")), 0o640, "{way} missed the held file");
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    /// A seccomp filter older than `fchmodat2` — a snap's, a container runtime's
+    /// — answers `EPERM` for it, not `ENOSYS`, and the change was refused with
+    /// a permission error about a file its owner may change. Installed here on
+    /// a thread of the test's own, which a filter does not outlive.
+    #[test]
+    fn a_filter_that_refuses_fchmodat2_with_eperm_still_gets_the_change() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = scratch("chmod-eperm");
+        let path = root.join("file");
+        std::fs::write(&path, b"contents").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let held = path.clone();
+        let changed = std::thread::spawn(move || {
+            let k = |code: u32, jt, jf, k| libc::sock_filter { code: code as u16, jt, jf, k };
+            let filter = [
+                k(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+                k(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 0, 1, super::FCHMODAT2 as u32),
+                k(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+                k(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW),
+            ];
+            let program = libc::sock_fprog { len: 4, filter: filter.as_ptr().cast_mut() };
+            // SAFETY: both calls take plain integers and, for the second, a
+            // pointer to a program that outlives the call; the filter binds only
+            // this thread, which ends with the test.
+            let installed = unsafe {
+                libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+                    && libc::prctl(
+                        libc::PR_SET_SECCOMP,
+                        libc::SECCOMP_MODE_FILTER,
+                        &raw const program,
+                    ) == 0
+            };
+            assert!(installed, "the seccomp filter was refused");
+            set_permissions(&held, 0o640).map(|_| mode_of(&held))
+        })
+        .join()
+        .unwrap();
+        assert_eq!(changed.expect("changed through /proc"), 0o640);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The fallback's `ENOENT` is `/proc` missing, not the file: it is held open.
+    #[test]
+    fn a_missing_proc_is_named_rather_than_the_file_called_gone() {
+        let refused = super::proc_failure(rustix::io::Errno::NOENT, Path::new("/a/f"));
+        assert_eq!(refused.kind(), ProblemKind::ModeUnchangeable);
+        assert!(refused.message().contains("/proc"), "{}", refused.message());
     }
 
     /// Why the descriptor is `O_PATH`: a mode is changed by its owner, who need
